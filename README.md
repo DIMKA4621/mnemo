@@ -34,10 +34,15 @@ Committed in this repo so it travels with the project:
 - `.mcp.json` — registers the `memory-poc` MCP server (Claude Code spawns
   `mem-index mcp` over stdio per session; not a daemon). Project root =
   cwd, so it searches *this* project's memory.
-- `.claude/settings.json` — `SessionStart` and `PostToolUse`
-  (Edit|Write|MultiEdit) hooks both run `mem-index ingest`: full
-  reconcile on session start, incremental on memory edits. Editing a
-  non-memory file is a ~0.7s no-op (no model load).
+- `.claude/settings.json` — three reindex triggers:
+  - `SessionStart` → `mem-index ingest` (full reconcile; catches
+    external changes like git pull);
+  - `PostToolUse` (Edit|Write|MultiEdit) → `mem-index hook-postedit`,
+    which reads the hook JSON and reconciles **only if the edited file
+    is under `.claude/memory` / `.claude/agent-memory`** — unrelated
+    edits never touch the DB (process just starts and exits);
+  - `SessionEnd` → `mem-index ingest` (final reconcile on close;
+    best-effort — SessionStart covers a missed one anyway).
 
 `$MEMORY_POC_ROOT` overrides the project root (used by the standalone
 `tests/test_mcp.py` client, which proves the MCP layer without touching

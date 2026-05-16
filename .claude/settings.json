@@ -17,7 +17,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "/home/dima/.claude/memory-poc/bin/mem-index ingest",
+            "command": "/home/dima/.claude/memory-poc/bin/mem-index hook-postedit",
             "timeout": 60
           }
         ]

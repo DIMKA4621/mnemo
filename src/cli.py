@@ -4,6 +4,7 @@
   ingest [--root]   reconcile a project's .md -> its index (hook target)
   search [--root]   semantic search over a project's memory
   mcp               run the stdio MCP server (agent-callable tools)
+  hook-postedit     PostToolUse target: reindex ONLY if a memory file changed
 
 `--root` defaults to the current directory, so the SessionStart hook
 indexes whatever project the session is in.
@@ -41,6 +42,42 @@ def _cmd_ingest(root: Path) -> int:
     return 0
 
 
+def _cmd_hook_postedit() -> int:
+    """PostToolUse target. Reads the hook JSON from stdin, and only runs a
+    reconcile if the edited file is inside this project's memory tree.
+    Anything else (code, README, ...) returns instantly — the engine is
+    never spawned-into-work for unrelated edits. Always exit 0: a
+    PostToolUse hook must never block the edit.
+    """
+    import json
+
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return 0  # no/invalid payload -> fail safe, do nothing
+
+    ti = payload.get("tool_input") or {}
+    raw = ti.get("file_path") or ti.get("path") or ti.get("notebook_path")
+    if not raw:
+        return 0
+
+    root = payload.get("cwd")  # project root at edit time
+    paths = resolve(root)
+    fp = Path(raw)
+    if not fp.is_absolute():
+        fp = Path(root or ".").joinpath(fp)
+    fp = fp.resolve()
+
+    mem = paths.project_memory.resolve()
+    agt = paths.agent_memory.resolve()
+    in_memory = fp.is_relative_to(mem) or fp.is_relative_to(agt)
+    if not in_memory:
+        return 0  # unrelated file -> instant no-op, DB never touched
+
+    reindex(root)
+    return 0
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
     hits = search(
         args.query,
@@ -72,6 +109,11 @@ def main(argv: list[str] | None = None) -> int:
 
     sub.add_parser("warmup", help="One-time explicit model download + check.")
     sub.add_parser("mcp", help="Run the stdio MCP server (agent tools).")
+    sub.add_parser(
+        "hook-postedit",
+        help="PostToolUse target: reads hook JSON on stdin, reconciles "
+        "only if the edited file is a memory file.",
+    )
 
     pi = sub.add_parser("ingest", help="Reconcile .md -> index (hash-diff + prune).")
     pi.add_argument("--root", default=None, help="Project root (default: cwd).")
@@ -90,6 +132,8 @@ def main(argv: list[str] | None = None) -> int:
         from .mcp_server import run
         run()
         return 0
+    if args.cmd == "hook-postedit":
+        return _cmd_hook_postedit()
     if args.cmd == "ingest":
         return _cmd_ingest(args.root)
     return _cmd_search(args)
