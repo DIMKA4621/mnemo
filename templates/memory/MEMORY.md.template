@@ -1,0 +1,21 @@
+# Memory Index — <PROJECT NAME>
+
+<!-- This is the thin INDEX of project memory. Keep it short: quick
+     facts + links to topic files. Detail lives in topic files, not here.
+     Day-by-day notes go under logs/YYYY-MM-DD.md. -->
+
+## Quick facts
+
+<!-- Durable facts a new session needs immediately. Examples: -->
+- Stack: <language / framework / datastore>
+- Deploy: <how this ships to production>
+- Conventions: <the few rules that bite if missed>
+
+## Topics
+
+<!-- One line per topic file: [Title](file.md) — one-line hook. -->
+- [Architecture](architecture.md) — services, data flow, module boundaries
+- [<Topic>](<topic>.md) — <what is in it>
+
+<!-- logs/ holds append-only day logs: what was done, decisions, commits.
+     Create logs/YYYY-MM-DD.md as work happens. -->

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mnemo": {
+      "command": "{{MNEMO_BIN}}",
+      "args": ["mcp"]
+    }
+  }
+}
