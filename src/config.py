@@ -42,8 +42,14 @@ class ProjectPaths:
 
 
 def resolve(root: Path | str | None) -> ProjectPaths:
-    """Resolve all paths for a project root (default: current directory)."""
-    root_path = Path(root).resolve() if root else Path.cwd().resolve()
+    """Resolve all paths for a project root.
+
+    Precedence: explicit arg > $MEMORY_POC_ROOT > current directory.
+    The env override lets an MCP server (spawned with an arbitrary cwd)
+    be pinned to the right project.
+    """
+    chosen = root or os.environ.get("MEMORY_POC_ROOT")
+    root_path = Path(chosen).resolve() if chosen else Path.cwd().resolve()
     claude = root_path / ".claude"
     proj_hash = hashlib.sha1(str(root_path).encode()).hexdigest()[:16]
     return ProjectPaths(

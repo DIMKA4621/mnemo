@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "memory-poc": {
+      "command": "/home/dima/.claude/memory-poc/bin/mem-index",
+      "args": ["mcp"]
+    }
+  }
+}

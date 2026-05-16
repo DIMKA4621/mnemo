@@ -3,6 +3,7 @@
   warmup            explicit one-time 2 GB model download + sanity check
   ingest [--root]   reconcile a project's .md -> its index (hook target)
   search [--root]   semantic search over a project's memory
+  mcp               run the stdio MCP server (agent-callable tools)
 
 `--root` defaults to the current directory, so the SessionStart hook
 indexes whatever project the session is in.
@@ -70,6 +71,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     sub.add_parser("warmup", help="One-time explicit model download + check.")
+    sub.add_parser("mcp", help="Run the stdio MCP server (agent tools).")
 
     pi = sub.add_parser("ingest", help="Reconcile .md -> index (hash-diff + prune).")
     pi.add_argument("--root", default=None, help="Project root (default: cwd).")
@@ -84,6 +86,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.cmd == "warmup":
         return _cmd_warmup()
+    if args.cmd == "mcp":
+        from .mcp_server import run
+        run()
+        return 0
     if args.cmd == "ingest":
         return _cmd_ingest(args.root)
     return _cmd_search(args)

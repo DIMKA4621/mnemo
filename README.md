@@ -24,7 +24,24 @@ source of truth (git); the index DB is disposable and rebuildable.
 mem-index warmup                 # one-time explicit ~2.2 GB model download + check
 mem-index ingest [--root DIR]    # reconcile a project's .md -> its index
 mem-index search "query" [--root DIR] [--scope project|agent] [--agent NAME]
+mem-index mcp                    # stdio MCP server: tools memory_search / memory_reindex
 ```
+
+## Project-level wiring (everything project-scoped)
+
+Committed in this repo so it travels with the project:
+
+- `.mcp.json` — registers the `memory-poc` MCP server (Claude Code spawns
+  `mem-index mcp` over stdio per session; not a daemon). Project root =
+  cwd, so it searches *this* project's memory.
+- `.claude/settings.json` — `SessionStart` and `PostToolUse`
+  (Edit|Write|MultiEdit) hooks both run `mem-index ingest`: full
+  reconcile on session start, incremental on memory edits. Editing a
+  non-memory file is a ~0.7s no-op (no model load).
+
+`$MEMORY_POC_ROOT` overrides the project root (used by the standalone
+`tests/test_mcp.py` client, which proves the MCP layer without touching
+live Claude Code config).
 
 `--root` defaults to the current directory, so the SessionStart hook
 indexes whatever project the session runs in. The model is **never**

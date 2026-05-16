@@ -1,0 +1,27 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/dima/.claude/memory-poc/bin/mem-index ingest",
+            "timeout": 60
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/dima/.claude/memory-poc/bin/mem-index ingest",
+            "timeout": 60
+          }
+        ]
+      }
+    ]
+  }
+}
