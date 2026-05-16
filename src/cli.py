@@ -33,8 +33,8 @@ def _cmd_ingest(root: Path) -> int:
     # model but it was never warmed up.
     if pending_embeddings(root) and not is_model_cached():
         print(
-            "memory-poc: changes detected but the model is not cached.\n"
-            "Run `mem-index warmup` once, then this will work.",
+            "mnemo: changes detected but the model is not cached.\n"
+            "Run `mnemo warmup` once, then this will work.",
             file=sys.stderr,
         )
         return 2
@@ -102,7 +102,7 @@ def _cmd_search(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="mem-index",
+        prog="mnemo",
         description="Project memory: .md -> chunk -> embed -> sqlite-vec -> search.",
     )
     sub = parser.add_subparsers(dest="cmd", required=True)

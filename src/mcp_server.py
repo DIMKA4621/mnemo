@@ -1,8 +1,8 @@
 """MCP face of the engine — the SAME code, exposed as agent-callable tools.
 
-Not a daemon: the client spawns `mem-index mcp` over stdio for the
+Not a daemon: the client spawns `mnemo mcp` over stdio for the
 session and kills it on exit. The project root comes from cwd (or
-$MEMORY_POC_ROOT), so a project-level .mcp.json scopes it to that
+$MNEMO_ROOT), so a project-level .mcp.json scopes it to that
 project's memory automatically.
 """
 from __future__ import annotations
@@ -12,7 +12,7 @@ from mcp.server.fastmcp import FastMCP
 from .index import reindex
 from .search import search
 
-server = FastMCP("memory-poc")
+server = FastMCP("mnemo")
 
 
 @server.tool()

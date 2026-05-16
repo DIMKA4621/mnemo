@@ -13,7 +13,7 @@ from pathlib import Path
 
 # User-scope home: installed once, shared by all projects.
 USER_HOME: Path = Path(
-    os.environ.get("MEMORY_POC_HOME", Path.home() / ".claude" / "memory-poc")
+    os.environ.get("MNEMO_HOME", Path.home() / ".claude" / "mnemo")
 )
 STATE_DIR: Path = USER_HOME / "state"        # one <projhash>.db per project
 MODEL_CACHE: Path = USER_HOME / "model-cache"  # e5-large, once for all projects
@@ -44,11 +44,11 @@ class ProjectPaths:
 def resolve(root: Path | str | None) -> ProjectPaths:
     """Resolve all paths for a project root.
 
-    Precedence: explicit arg > $MEMORY_POC_ROOT > current directory.
+    Precedence: explicit arg > $MNEMO_ROOT > current directory.
     The env override lets an MCP server (spawned with an arbitrary cwd)
     be pinned to the right project.
     """
-    chosen = root or os.environ.get("MEMORY_POC_ROOT")
+    chosen = root or os.environ.get("MNEMO_ROOT")
     root_path = Path(chosen).resolve() if chosen else Path.cwd().resolve()
     claude = root_path / ".claude"
     proj_hash = hashlib.sha1(str(root_path).encode()).hexdigest()[:16]

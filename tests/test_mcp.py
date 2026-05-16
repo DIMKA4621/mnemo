@@ -1,6 +1,6 @@
 """Standalone MCP test client — proves the agent-callable layer.
 
-Spawns `mem-index mcp` over stdio (exactly how a client would), lists
+Spawns `mnemo mcp` over stdio (exactly how a client would), lists
 tools, calls memory_search + memory_reindex, asserts. Touches NO live
 Claude Code config. Exit 0 = pass.
 
@@ -17,7 +17,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 REPO = str(Path(__file__).resolve().parent.parent)
-LAUNCHER = "/home/dima/.claude/memory-poc/bin/mem-index"
+LAUNCHER = "/home/dima/.claude/mnemo/bin/mnemo"
 
 _passed = _failed = 0
 
@@ -42,7 +42,7 @@ async def main() -> int:
     params = StdioServerParameters(
         command=LAUNCHER,
         args=["mcp"],
-        env={**os.environ, "MEMORY_POC_ROOT": REPO},
+        env={**os.environ, "MNEMO_ROOT": REPO},
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:

@@ -1,4 +1,4 @@
-# memory-poc
+# mnemo
 
 Proof-of-concept for the **shared project memory** (Memory-design-v2).
 
@@ -14,37 +14,37 @@ source of truth (git); the index DB is disposable and rebuildable.
 
 | Layer | Where |
 |---|---|
-| Engine + venv + model cache | `~/.claude/memory-poc/` (installed once) |
+| Engine + venv + model cache | `~/.claude/mnemo/` (installed once) |
 | `.md` source of truth | per-project `<root>/.claude/memory` + `agent-memory` (git) |
-| Index DB | `~/.claude/memory-poc/state/<projhash>.db` (per project, gitignored realm) |
+| Index DB | `~/.claude/mnemo/state/<projhash>.db` (per project, gitignored realm) |
 
-## Commands (`mem-index`)
+## Commands (`mnemo`)
 
 ```bash
-mem-index warmup                 # one-time explicit ~2.2 GB model download + check
-mem-index ingest [--root DIR]    # reconcile a project's .md -> its index
-mem-index search "query" [--root DIR] [--scope project|agent] [--agent NAME]
-mem-index mcp                    # stdio MCP server: tools memory_search / memory_reindex
+mnemo warmup                 # one-time explicit ~2.2 GB model download + check
+mnemo ingest [--root DIR]    # reconcile a project's .md -> its index
+mnemo search "query" [--root DIR] [--scope project|agent] [--agent NAME]
+mnemo mcp                    # stdio MCP server: tools memory_search / memory_reindex
 ```
 
 ## Project-level wiring (everything project-scoped)
 
 Committed in this repo so it travels with the project:
 
-- `.mcp.json` — registers the `memory-poc` MCP server (Claude Code spawns
-  `mem-index mcp` over stdio per session; not a daemon). Project root =
+- `.mcp.json` — registers the `mnemo` MCP server (Claude Code spawns
+  `mnemo mcp` over stdio per session; not a daemon). Project root =
   cwd, so it searches *this* project's memory.
 - `.claude/settings.json` — three reindex triggers:
-  - `SessionStart` → `mem-index ingest` (full reconcile; catches
+  - `SessionStart` → `mnemo ingest` (full reconcile; catches
     external changes like git pull);
-  - `PostToolUse` (Edit|Write|MultiEdit) → `mem-index hook-postedit`,
+  - `PostToolUse` (Edit|Write|MultiEdit) → `mnemo hook-postedit`,
     which reads the hook JSON and reconciles **only if the edited file
     is under `.claude/memory` / `.claude/agent-memory`** — unrelated
     edits never touch the DB (process just starts and exits);
-  - `SessionEnd` → `mem-index ingest` (final reconcile on close;
+  - `SessionEnd` → `mnemo ingest` (final reconcile on close;
     best-effort — SessionStart covers a missed one anyway).
 
-`$MEMORY_POC_ROOT` overrides the project root (used by the standalone
+`$MNEMO_ROOT` overrides the project root (used by the standalone
 `tests/test_mcp.py` client, which proves the MCP layer without touching
 live Claude Code config).
 
@@ -56,13 +56,13 @@ if changes need the model but `warmup` was never run.
 ## Dev repo vs install
 
 This repo is the **source**. The user-scope copy under
-`~/.claude/memory-poc/` is the **installed engine** (a packaging script
+`~/.claude/mnemo/` is the **installed engine** (a packaging script
 will automate the copy later). Tests run against the source:
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-mem-index warmup
+mnemo warmup
 python -m src.cli ingest --root .
 python tests/test_search.py        # labeled recall eval, exit 0 = pass
 ```

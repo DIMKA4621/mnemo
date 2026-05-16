@@ -1,7 +1,7 @@
 {
   "mcpServers": {
-    "memory-poc": {
-      "command": "/home/dima/.claude/memory-poc/bin/mem-index",
+    "mnemo": {
+      "command": "/home/dima/.claude/mnemo/bin/mnemo",
       "args": ["mcp"]
     }
   }
