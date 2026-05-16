@@ -1,0 +1,4 @@
+# Memory POC runtime deps — intentionally minimal (Memory-design-v2: light, git-clone-bootstrappable, no heavy infra).
+fastembed>=0.4.0
+sqlite-vec>=0.1.6
+semantic-text-splitter>=0.18.0

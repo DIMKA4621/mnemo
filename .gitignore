@@ -1,0 +1,14 @@
+# Disposable, rebuildable vector index — NEVER in git (Memory-design-v2 core principle).
+memory.db
+memory.db-shm
+memory.db-wal
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+
+# Local embedding model / ONNX cache
+.fastembed_cache/
+*.onnx
