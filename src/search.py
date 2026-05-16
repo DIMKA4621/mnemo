@@ -1,17 +1,18 @@
-"""Read path: query -> relevant sections.
+"""Read path: query -> relevant sections, scoped to a project root.
 
-Vector search is primary; FTS5/BM25 is the secondary lexical safety net.
-Results are blended with reciprocal rank fusion (RRF). Scope (project /
-agent) is filtered on the chunk metadata.
+Vector search is primary; FTS5/BM25 is the secondary lexical net.
+Results are blended with reciprocal rank fusion (RRF). Scope
+(project / agent) is filtered on chunk metadata.
 """
 from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass
+from pathlib import Path
 
 import sqlite_vec
 
-from .config import RRF_K, TOP_K
+from .config import RRF_K, TOP_K, resolve
 from .embedder import embed_query
 from .store import connect
 
@@ -28,12 +29,8 @@ class Hit:
 
 def _vector_ranked(conn: sqlite3.Connection, qvec: list[float], limit: int) -> list[int]:
     rows = conn.execute(
-        """
-        SELECT rowid
-        FROM vec_chunks
-        WHERE embedding MATCH ? AND k = ?
-        ORDER BY distance
-        """,
+        "SELECT rowid FROM vec_chunks "
+        "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
         (sqlite_vec.serialize_float32(qvec), limit),
     ).fetchall()
     return [r["rowid"] for r in rows]
@@ -46,13 +43,8 @@ def _fts_escape(query: str) -> str:
 
 def _fts_ranked(conn: sqlite3.Connection, query: str, limit: int) -> list[int]:
     rows = conn.execute(
-        """
-        SELECT rowid
-        FROM fts_chunks
-        WHERE fts_chunks MATCH ?
-        ORDER BY bm25(fts_chunks)
-        LIMIT ?
-        """,
+        "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ? "
+        "ORDER BY bm25(fts_chunks) LIMIT ?",
         (_fts_escape(query), limit),
     ).fetchall()
     return [r["rowid"] for r in rows]
@@ -69,19 +61,24 @@ def _rrf(*rankings: list[int]) -> dict[int, float]:
 
 def search(
     query: str,
+    *,
+    root: Path | str | None = None,
     scope: str | None = None,
     agent_name: str | None = None,
     top_k: int = TOP_K,
 ) -> list[Hit]:
     """Hybrid (vector-primary + FTS) search with optional scope filter."""
-    conn = connect()
+    db = resolve(root).db
+    if not db.exists():
+        return []
+    conn = connect(db)
     try:
         pool = max(top_k * 4, 20)
         vec_ids = _vector_ranked(conn, embed_query(query), pool)
         try:
             fts_ids = _fts_ranked(conn, query, pool)
         except sqlite3.OperationalError:
-            fts_ids = []  # FTS is only a safety net; never fail the search on it
+            fts_ids = []
         fused = _rrf(vec_ids, fts_ids)
         if not fused:
             return []

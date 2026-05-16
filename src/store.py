@@ -1,8 +1,8 @@
 """Single-file SQLite store: vectors (sqlite-vec) + FTS5 + change-state.
 
-One file holds everything — including the per-file sha256 hashes
-(Memory-design-v2 anti-pattern: NO separate hash manifest). The file is
-disposable and fully rebuildable from the .md.
+One file per project holds everything — including the per-file sha256
+hashes (Memory-design-v2 anti-pattern: NO separate hash manifest). The
+file is disposable and fully rebuildable from the .md.
 """
 from __future__ import annotations
 
@@ -11,11 +11,12 @@ from pathlib import Path
 
 import sqlite_vec
 
-from .config import DB_PATH, EMBEDDING_DIM
+from .config import EMBEDDING_DIM
 
 
-def connect(db_path: Path = DB_PATH) -> sqlite3.Connection:
-    """Open the DB with sqlite-vec loaded and the schema ensured."""
+def connect(db_path: Path) -> sqlite3.Connection:
+    """Open the per-project DB with sqlite-vec loaded and schema ensured."""
+    db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)

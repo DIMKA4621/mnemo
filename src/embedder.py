@@ -1,8 +1,12 @@
 """Local embeddings via fastembed (ONNX, no torch).
 
-Model: multilingual-e5-base. The e5 family requires input prefixes:
-documents are embedded as ``passage: ...``, queries as ``query: ...``.
-That convention is hidden here so callers never deal with it.
+Model: multilingual-e5-large, cached once at user scope (shared by all
+projects). The e5 family needs input prefixes: documents as
+``passage: ...``, queries as ``query: ...`` — hidden here.
+
+The 2 GB model download is NOT done implicitly by hooks. `warmup()` is an
+explicit, verbose, user-run step; `is_model_cached()` lets callers refuse
+to silently download.
 """
 from __future__ import annotations
 
@@ -11,30 +15,31 @@ from functools import lru_cache
 
 from fastembed import TextEmbedding
 
+from .config import EMBEDDING_MODEL, MODEL_CACHE
+
 # fastembed >=0.6 uses mean pooling for e5 (the canonical e5 behaviour);
 # its compatibility warning is noise for us — silence just that one.
 warnings.filterwarnings("ignore", message=".*mean pooling instead of CLS.*")
 
-from .config import EMBEDDING_MODEL
 
-
-def _assert_model_available(model: str) -> None:
-    """Fail early with a helpful message if fastembed lacks the model."""
-    supported = {m["model"] for m in TextEmbedding.list_supported_models()}
-    if model not in supported:
-        multilingual = sorted(s for s in supported if "multilingual" in s.lower())
-        raise SystemExit(
-            f"Embedding model {model!r} is not in this fastembed build.\n"
-            "Multilingual models available:\n  "
-            + "\n  ".join(multilingual or sorted(supported))
-            + "\nAdjust EMBEDDING_MODEL / EMBEDDING_DIM in src/config.py."
-        )
+def is_model_cached() -> bool:
+    """True if the model is already downloaded under the user-scope cache."""
+    if not MODEL_CACHE.exists():
+        return False
+    needle = EMBEDDING_MODEL.split("/")[-1].lower()
+    return any(needle in p.name.lower() for p in MODEL_CACHE.rglob("*"))
 
 
 @lru_cache(maxsize=1)
 def _model() -> TextEmbedding:
-    _assert_model_available(EMBEDDING_MODEL)
-    return TextEmbedding(model_name=EMBEDDING_MODEL)
+    MODEL_CACHE.mkdir(parents=True, exist_ok=True)
+    return TextEmbedding(model_name=EMBEDDING_MODEL, cache_dir=str(MODEL_CACHE))
+
+
+def warmup() -> int:
+    """Explicitly download + sanity-check the model. Returns vector dim."""
+    vec = embed_query("warmup probe — перевірка моделі")
+    return len(vec)
 
 
 def embed_passages(texts: list[str]) -> list[list[float]]:

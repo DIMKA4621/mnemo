@@ -1,7 +1,9 @@
-# Disposable, rebuildable vector index — NEVER in git (Memory-design-v2 core principle).
+# The index DB now lives at user scope (~/.claude/memory-poc/state/),
+# never inside the repo. These guards remain in case of a local --root run.
 memory.db
 memory.db-shm
 memory.db-wal
+*.db
 
 # Python
 .venv/
