@@ -4,8 +4,9 @@ Walk the project's memory tree, hash-diff against the DB, reindex only
 changed files, prune anything that disappeared. Idempotent and
 deterministic. The .md files are the single source of truth.
 
-The sha256 diff is computed BEFORE the model is touched, so a no-change
-SessionStart hook never loads the 2 GB model.
+The DB is created lazily: a session in a directory with no memory (and
+no existing index) creates nothing. The sha256 diff is computed BEFORE
+the model is touched, so a no-change SessionStart never loads the model.
 """
 from __future__ import annotations
 
@@ -40,41 +41,46 @@ def _discover(paths: ProjectPaths) -> list[tuple[Path, str, str | None]]:
     return found
 
 
-def _plan(paths: ProjectPaths) -> tuple[dict[str, tuple[Path, str, str | None]],
-                                        dict[str, str]]:
-    """(on-disk relpath -> (path,scope,agent), indexed relpath -> sha256)."""
-    disk = {
+def _disk(paths: ProjectPaths) -> dict[str, tuple[Path, str, str | None]]:
+    return {
         str(p.relative_to(paths.root)): (p, scope, agent)
         for p, scope, agent in _discover(paths)
     }
+
+
+def pending_embeddings(root: Path | str | None = None) -> int:
+    """How many files would need (re)embedding — WITHOUT loading the model
+    and WITHOUT creating the DB."""
+    paths = resolve(root)
+    disk = _disk(paths)
+    if not paths.db.exists():
+        return len(disk)  # nothing indexed yet -> all are new (0 if none)
     conn = connect(paths.db)
     try:
         indexed = get_indexed_hashes(conn)
     finally:
         conn.close()
-    return disk, indexed
-
-
-def pending_embeddings(root: Path | str | None = None) -> int:
-    """How many files would need (re)embedding — WITHOUT loading the model."""
-    paths = resolve(root)
-    disk, indexed = _plan(paths)
-    changed = 0
-    for relpath, (path, _s, _a) in disk.items():
-        if indexed.get(relpath) != _sha256(path):
-            changed += 1
-    return changed
+    return sum(
+        1 for rel, (p, _s, _a) in disk.items()
+        if indexed.get(rel) != _sha256(p)
+    )
 
 
 def reindex(root: Path | str | None = None, verbose: bool = True) -> None:
-    """Full reconcile for a project root: reindex changed, prune removed."""
+    """Full reconcile for a project root: reindex changed, prune removed.
+
+    Creates the DB only when there is real work (memory present) or an
+    index already exists — never for an empty/unrelated directory.
+    """
     paths = resolve(root)
-    conn = connect(paths.db)
+    disk = _disk(paths)
+    if not paths.db.exists() and not disk:
+        if verbose:
+            print(f"nothing to index [{paths.root}] (no memory, no DB)")
+        return
+
+    conn = connect(paths.db)  # only now is the DB file created
     try:
-        disk = {
-            str(p.relative_to(paths.root)): (p, scope, agent)
-            for p, scope, agent in _discover(paths)
-        }
         indexed = get_indexed_hashes(conn)
 
         for gone in sorted(set(indexed) - set(disk)):
