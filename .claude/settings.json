@@ -22,6 +22,17 @@
           }
         ]
       }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/dima/.claude/memory-poc/bin/mem-index ingest",
+            "timeout": 60
+          }
+        ]
+      }
     ]
   }
 }
