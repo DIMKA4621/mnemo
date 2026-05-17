@@ -2,261 +2,241 @@
 name: mnemo-adopt
 description: >
   Adopt mnemo (curated-markdown project memory + local rebuildable
-  vector index) into a project. Orchestrates the deterministic
-  primitives — `install.sh` (user-scope engine) and `mnemo init`
-  (git-tracked, additive, portable project wiring) — and handles every
-  judgement call with a shown diff and AskUserQuestion: weaving the
-  memory section into an existing CLAUDE.md, inspecting and wiring
-  subagents, resolving `mnemo init` conflicts, and migrating a
-  project's user-scope built-in Claude memory (project and per-agent)
-  into the git-tracked project memory. Never edits a human-authored
-  file blind. Never commits.
+  vector index) into a project, and set the project up to run as an
+  agent team. Orchestrates the deterministic primitives — `install.sh`
+  (user-scope engine) and `mnemo init` (git-tracked, additive, portable
+  wiring + a one-line memory anchor + the binding memory rule) — and
+  handles every judgement call with a shown diff and AskUserQuestion:
+  the mandatory team-lead section in CLAUDE.md, mandatory `memory:
+  project` on subagents, the experimental agent-team flag, per-agent
+  memory stubs, resolving `mnemo init` conflicts, and migrating a
+  project's user-scope built-in Claude memory. Never edits a
+  human-authored file blind. Never commits.
 
   Use when the user asks to: adopt/set up/init/bootstrap mnemo in a
-  project, add shared searchable memory to a project, wire mnemo hooks
-  and MCP, migrate built-in Claude memory into the project, give
-  subagents project memory. Triggers on: "adopt mnemo", "set up mnemo",
-  "init mnemo", "mnemo в проект", "підключи mnemo", "додай памʼять
-  проєкту", "перенеси памʼять у проект", "bootstrap project memory".
+  project, add shared searchable memory, wire mnemo hooks and MCP, set
+  the project up as an agent team / team lead, migrate built-in Claude
+  memory into the project. Triggers on: "adopt mnemo", "set up mnemo",
+  "init mnemo", "mnemo в проект", "підключи mnemo", "налаштуй команду
+  агентів", "team lead setup", "bootstrap project memory".
 ---
 
 # mnemo adopt
 
-Bring a project under **mnemo**: curated markdown in git is the single
-source of truth; a local, disposable, rebuildable vector index makes it
-searchable. This skill is the guided operator on top of two
-deterministic primitives — it inspects, asks, runs the primitives, then
-resolves everything they deliberately refuse to touch.
+Bring a project under **mnemo** and the **team-lead** working model:
+curated markdown in git is the single source of truth; a local,
+disposable, rebuildable index makes it searchable; the main session
+plans and delegates to a team of teammate agents.
 
 ## The hard boundary (do not cross it)
 
 - **Deterministic primitives do the safe, mechanical work.**
-  `install.sh` installs/reports the engine; `mnemo init` creates only
-  absent files and merges `.mcp.json` / `.claude/settings.json` strictly
-  additively, refusing on conflict. They never touch `CLAUDE.md`, never
-  overwrite curated memory, never resolve a conflict.
+  `install.sh` installs/reports the engine. `mnemo init` creates only
+  absent files (a one-line `.claude/memory/MEMORY.md` anchor and the
+  binding rule `.claude/rules/mnemo-memory.md`), merges `.mcp.json` /
+  `.claude/settings.json` strictly additively, and refuses on conflict.
+  They never touch `CLAUDE.md`, never overwrite a curated/authored
+  file, never resolve a conflict, never invent memory structure.
 - **This skill + you do every judgement call** — and only with a shown
-  diff and explicit confirmation: integrating the memory section into a
-  human-authored `CLAUDE.md`, resolving an `mnemo init` refusal,
-  enabling subagent memory, curating migrated memory. Never improvise a
-  file the primitive should have produced. **Never commit** — the user
-  reviews and commits.
+  diff and explicit confirmation. **Never commit** — the user reviews
+  and commits.
+- **Single source.** The memory rule text lives in `mnemo init` (it
+  writes `.claude/rules/mnemo-memory.md`). Do not author a variant — to
+  resolve a conflict, diff against exactly what `mnemo init` writes.
 
-## Mental model
+## Mental model (see `references/mnemo.md`)
 
-Two layers (see `references/mnemo.md`):
-
-- **Engine** — user scope, once per machine: `~/.claude/mnemo/`
-  (venv + embedding model cache + index state + launcher). Not in git.
-- **Wiring** — git-tracked, per project: `.mcp.json`,
-  `.claude/settings.json` hooks, `.claude/memory/` skeleton,
-  `.claude/agent-memory/`. Ships to everyone who clones.
-
-The git-tracked invocation is portable by construction (`mnemo init`
-writes a shell-wrapped `$HOME` form — no machine path lands in git).
-`mnemo` is never a human command; only hooks, the MCP registration and
-this skill call it.
+- **Engine** — user scope, once per machine, not in git.
+- **Wiring** — git-tracked per project: `.mcp.json`,
+  `.claude/settings.json` hooks, the one-line `MEMORY.md` anchor, the
+  binding rule.
+- **The binding memory rule** is `.claude/rules/mnemo-memory.md`. It
+  auto-loads for the team lead AND every subagent (subagents do not
+  inherit `CLAUDE.md`, but they do load `.claude/rules/`). This is why
+  the rule — not `CLAUDE.md` — carries the memory discipline.
+- **`CLAUDE.md`** carries the **team-lead role** (main session only):
+  plan and delegate, do not implement.
+- A subagent's `memory: project` is its *built-in* per-agent memory
+  (user scope). The git-shared curated layer is `.claude/agent-memory/
+  <role>/`, driven by the rule + instructions + the mnemo hook. Both
+  matter; do not conflate them.
 
 ## Workflow
 
 ### Step 1 — Inspect
 
-Establish engine state and project state. Do not change anything yet.
+Change nothing. Establish:
 
-**Engine** (user scope):
+**Engine** (`bash <mnemo-repo>/install.sh --check` if available, else
+inspect `~/.claude/mnemo/`): installed? model warmed?
 
-```bash
-ls -la ~/.claude/mnemo/bin/mnemo ~/.claude/mnemo/.venv 2>/dev/null
-ls -A ~/.claude/mnemo/model-cache 2>/dev/null | head -1
-```
-
-If the mnemo repo is available, prefer the precise report:
-`bash <mnemo-repo>/install.sh --check`. Conclude: engine **installed?**
-model **warmed?**
-
-**Project** (current directory = project root):
+**Project** (current dir = root):
 
 ```bash
 ls -la .mcp.json CLAUDE.md .claude 2>/dev/null
-ls -la .claude/memory .claude/agent-memory .claude/agents \
-       .claude/settings.json 2>/dev/null
+ls -la .claude/settings.json .claude/rules .claude/memory \
+       .claude/agent-memory .claude/agents 2>/dev/null
 ```
 
-Read each found file. Determine:
+Read what is found. Determine:
 
-- Is mnemo already wired (an `mnemo` server in `.mcp.json`; the three
-  hooks in `.claude/settings.json`)? In the **portable** form or an old
-  hardcoded path (→ a conflict `mnemo init` will refuse → Step 4)?
-- Does `.claude/memory/` already hold curated memory, or is it
-  empty/absent?
-- **Subagents**: for each `.claude/agents/*.md`, read the frontmatter
-  `memory:` field — is agent memory enabled, and at what scope? List
-  agents with memory **off** or **not project-scoped**.
-- **User-scope built-in memory for THIS project**: compute the slug and
-  inspect it per `references/memory-migration.md`. Note whether
-  project-level and/or per-agent built-in memory exists there.
+- Wiring: mnemo server + the three hooks present? portable form or an
+  old hardcoded path (→ a conflict `mnemo init` will refuse → Step 4)?
+- Is `.claude/rules/mnemo-memory.md` present? identical to what `mnemo
+  init` writes, or different (→ judgement)?
+- `CLAUDE.md`: present? does it already carry a team-lead section?
+- `.claude/memory/` — absent / one-line anchor / curated?
+- **Agents**: for each `.claude/agents/*.md`, read frontmatter
+  `memory:`. Note every agent whose memory is not `project`.
+- Team flag: is `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` set in any
+  `settings.json` `env`?
+- **User-scope built-in memory** for this project (slug — see
+  `references/memory-migration.md`): present (project / per-agent)?
 
-Build a findings block:
+Build a findings block (engine / wiring / rule / CLAUDE.md / memory /
+agents / team-flag / user-scope-memory).
 
-```
-ENGINE:    installed=<y/n>  model-warmed=<y/n>
-WIRING:    .mcp.json=<absent|portable|HARDCODED|foreign+mnemo?>
-           settings hooks=<absent|portable|HARDCODED>
-MEMORY:    project .claude/memory=<absent|empty|curated:N files>
-           user-scope built-in (<slug>)=<absent|present:N files>
-AGENTS:    <role> memory=<off|user|project>  (one line each)
-           user-scope agent memory=<none|present: roles…>
-```
+### Step 2 — Ask the user
 
-### Step 2 — Ask the user what to do
+**MANDATORY — use `AskUserQuestion`, never assume, never default.** Ask
+only what the findings make relevant. Some items are **not optional**
+and must be framed as required, not as a yes/no preference:
 
-**MANDATORY — never skip, never assume, never default.** Use
-`AskUserQuestion`. Ask only the questions that the findings make
-relevant; phrase each from the findings, not generically.
+- **Required (state plainly they are mandatory for mnemo to work):**
+  the team-lead section in `CLAUDE.md`; `memory: project` on every
+  subagent. You still show the diff before applying — the *content* is
+  confirmed, the *requirement* is not negotiable.
+- **Insist (strongly recommend, explain it is needed for the whole
+  team to work correctly, then take the decision):** enabling
+  `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` in the project
+  `.claude/settings.json` `env`.
+- **Genuinely optional (default = none, never pre-select):** migrating
+  user-scope built-in memory (project and per-agent) — present the file
+  list; which starter agents to add if none exist (default roster:
+  planner, developer, tester, reviewer).
+- Engine missing / model not warmed → run `install.sh` / `mnemo
+  warmup` now?
 
-Decisions to surface (skip any that does not apply):
-
-1. **Engine missing or model not warmed** — run `install.sh` now? run
-   `mnemo warmup` now (one-time ~2.2 GB, explicit)? yes/no each.
-2. **Wiring conflict found** (old hardcoded mnemo entry) — migrate it
-   to the portable form? (You will show the exact diff in Step 4.)
-3. **User-scope built-in project memory found** while project memory is
-   absent/thin — migrate it in? Present the **file list**; selection
-   default = **none**; never pre-select; the content will be curated
-   and shown before writing.
-4. **Subagents with memory off / non-project** — enable project memory
-   for them? Present the list by name (`multiSelect`), default none.
-5. **User-scope per-agent memory found** — pull it into
-   `.claude/agent-memory/<role>/`? List by role, default none.
-6. **No subagents at all** — offer starter agents (e.g. developer,
-   tester, reviewer) from `templates/agent.md.template`? yes/no/which.
-7. **CLAUDE.md present** — weave in the mnemo memory section? (Diff
-   shown in Step 4. If absent, one will be created.)
-
-**If `AskUserQuestion` is unavailable** (non-interactive): stop, print
-the findings block and the decisions, ask the user to re-run
-interactively. Do NOT proceed on assumptions.
+If `AskUserQuestion` is unavailable, stop, print the findings and the
+decisions, ask the user to re-run interactively. Do not assume.
 
 ### Step 3 — Run the deterministic primitives
 
-In order, only what the user approved:
+Only what was approved, in order:
 
 ```bash
-bash <mnemo-repo>/install.sh            # if engine missing
-~/.claude/mnemo/bin/mnemo warmup         # if approved (one-time)
+bash <mnemo-repo>/install.sh             # if engine missing
+~/.claude/mnemo/bin/mnemo warmup          # if approved (one-time)
 ~/.claude/mnemo/bin/mnemo init --root "$PWD"
 ```
 
-Capture `mnemo init` output verbatim. If it printed
-`mnemo init: refused — …` it wrote **nothing**: this is expected when an
-old hardcoded entry exists — carry the found/expected detail into Step 4.
-Re-run `mnemo init` after the conflict is resolved so the rest of the
-additive wiring is applied.
+Capture `mnemo init` output. A `refused — …` line means it wrote
+nothing (expected when an old hardcoded entry exists) — carry the
+found/expected detail to Step 4 and re-run `mnemo init` after the
+conflict is resolved.
 
 ### Step 4 — Judgement (always a shown diff, never blind)
 
-For each item, render the precise before/after, get explicit
-confirmation, then apply. Apply nothing the user did not confirm.
+1. **CLAUDE.md team-lead section (mandatory).** Use
+   `templates/CLAUDE.section.md`. No `CLAUDE.md` → create it with that
+   section. Exists → insert/reconcile a `## Team lead (mnemo project)`
+   section (do not duplicate; if a team-lead/role section exists,
+   reconcile). Show the diff; apply on confirmation of the content.
+2. **Wiring conflict resolution.** For what `mnemo init` refused, show
+   `found:` vs the portable `expected:` (copy expected from the refusal
+   report — do not hand-author it) and apply in `.mcp.json` /
+   `.claude/settings.json`. Re-run `mnemo init` afterwards.
+3. **`.claude/rules/mnemo-memory.md` conflict.** If it pre-existed and
+   differs from what `mnemo init` writes, show the diff and reconcile
+   toward the canonical text; never silently overwrite.
+4. **Subagent memory (mandatory `project`).** For every agent whose
+   `memory:` is not `project`, show the frontmatter edit (`memory:
+   project`) as a diff and apply — this is required, not optional;
+   never flip silently, but do not present it as declinable. If the
+   project has no agents, create the approved starter roster from
+   `templates/agents/{planner,developer,tester,reviewer}.md` (or the
+   generic `templates/agent.md.template` for extra roles). Generic
+   drafts are fine; adapt only what the user asks.
+5. **Team flag.** If approved, additively set
+   `{"env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}}` in the
+   project `.claude/settings.json` — merge into any existing `env`, do
+   not touch other keys; show the diff.
+6. **Memory migration.** Per `references/memory-migration.md`: curate
+   the chosen user-scope files into `.claude/memory/` (thin index +
+   topic files + `logs/`) and per-agent notes into
+   `.claude/agent-memory/<role>/`. Show the source→target mapping and
+   what is dropped (session state / noise) before writing.
 
-- **CLAUDE.md memory section.** Use `templates/CLAUDE.section.md`. If no
-  `CLAUDE.md`, create it with that section. If one exists: find a
-  natural insertion point (a new top-level `## Project memory (mnemo)`
-  section; if a memory/agent-instruction section already exists,
-  reconcile rather than duplicate). Show the diff. Subagents do **not**
-  inherit `CLAUDE.md` — agent-facing memory rules go in each agent file,
-  not only here.
-- **Wiring conflict resolution.** For the entry `mnemo init` refused,
-  show `found:` vs the portable `expected:` and apply the replacement
-  in `.mcp.json` / `.claude/settings.json`. The portable form is the
-  one `mnemo init` emits — copy it from the refusal report, do not
-  hand-author a variant. Re-run `mnemo init` afterwards.
-- **Subagent memory.** For each chosen agent, show the frontmatter edit
-  (`memory: project`) as a diff; create
-  `.claude/agent-memory/<role>/MEMORY.md` from
-  `templates/agent-memory.md.template`. For new starter agents, use
-  `templates/agent.md.template` (keep its memory section intact).
-- **Memory migration.** Per `references/memory-migration.md`: copy the
-  chosen user-scope files into `.claude/memory/` (and per-agent into
-  `.claude/agent-memory/<role>/`). Curate while copying — keep
-  `MEMORY.md` a thin index, move detail into topic files, day notes
-  under `logs/`. Show what goes where (and any content that looks like
-  noise/session-state, which you should drop) before writing. The
-  source is the user's accumulated built-in memory: treat it as a
-  bootstrap seed, not gospel.
+### Step 5 — Per-agent memory stubs (after the roster is fixed)
 
-### Step 5 — Verify
+Only now that the agent set is decided, create one-line stubs so agents
+do not fabricate structure later. For each agent `<role>`, if
+`.claude/agent-memory/<role>/MEMORY.md` is absent, create it from
+`templates/agent-memory.md.template` (a single `# <ROLE> agent memory`
+heading). Do not create empty `logs/` or other structure.
+
+### Step 6 — Verify
 
 ```bash
-~/.claude/mnemo/bin/mnemo ingest --root "$PWD"      # build/refresh index
+~/.claude/mnemo/bin/mnemo ingest --root "$PWD"
 python3 -m json.tool .mcp.json > /dev/null && echo "mcp JSON OK"
 python3 -m json.tool .claude/settings.json > /dev/null && echo "settings JSON OK"
 ~/.claude/mnemo/bin/mnemo search "architecture" --root "$PWD" | head
 ```
 
-Confirm: `mnemo` server present in portable form; the three hooks
-present; index built; a search returns curated content. If `mnemo
-ingest` reports the model is not warmed, that is expected when warmup
-was declined — say so plainly.
+Confirm: portable `mnemo` server + three hooks; `.claude/rules/
+mnemo-memory.md` present; CLAUDE.md team-lead section present; every
+agent `memory: project`; team flag set if approved; index built. If the
+model is not warmed, `mnemo ingest` will say so — report that plainly.
 
-### Step 6 — Tell the user the next steps (never commit)
-
-Print a tight summary:
+### Step 7 — Tell the user the next steps (never commit)
 
 ```
-✓ Engine:   <installed | already present>  model <warmed | not warmed>
-✓ Wiring:   .mcp.json + .claude/settings.json (portable) [+ conflicts resolved]
-✓ Memory:   .claude/memory/ skeleton [+ migrated N files]
-✓ Agents:   <role>… memory=project [+ migrated]
-✓ CLAUDE.md: mnemo section woven in
+✓ Engine:   <installed | present>  model <warmed | not warmed>
+✓ Wiring:   .mcp.json + .claude/settings.json (portable) [+conflicts resolved]
+✓ Rule:     .claude/rules/mnemo-memory.md (binding, all agents)
+✓ CLAUDE.md: team-lead section
+✓ Agents:   planner/developer/tester/reviewer — memory: project
+✓ Team:     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 (if approved)
+✓ Memory:   one-line anchor [+ migrated N files]
 
 Review the diffs above, then:
   git add .mcp.json .claude/ CLAUDE.md
   git commit        # your message, your call
-Then: trust the project in Claude Code when prompted (hooks + MCP),
-and restart the session so the hooks and the mnemo MCP server load.
+Then trust the project in Claude Code when prompted (hooks + MCP) and
+restart the session so hooks, MCP and the agent team load.
 ```
 
-Do **not** run `git add`/`git commit` yourself. State exactly what
-changed so the user reviews and commits.
+Do not run `git add`/`git commit` yourself.
 
 ## Edge cases
 
-- **Engine absent and mnemo repo not available**: explain the two-layer
-  model, point to where the engine must be installed (`~/.claude/mnemo/`
-  via `install.sh`), stop before wiring — wiring without an engine is
-  inert.
-- **`mnemo init` refuses on `.mcp.json` AND a hook**: it wrote nothing
-  for either; resolve both conflicts in Step 4, then a single re-run
-  applies all additive parts.
-- **Project already fully wired (portable)**: `mnemo init` is a no-op
-  (idempotent) — skip to memory/agent/CLAUDE.md judgement only.
-- **`.claude/memory/` already curated**: never overwrite it; migration
-  only adds files that are absent, and only with confirmation.
-- **Foreign MCP servers / hooks present**: `mnemo init` preserves them
-  untouched (additive). Do not reorder or rewrite them in Step 4 either.
-- **Subagent uses `memory: user` or a custom scope deliberately**: do
-  not flip it silently — surface it and let the user decide; the
-  default recommendation is `project` so the team shares it.
-- **No `CLAUDE.md` and the user declines creating one**: still wire and
-  migrate; warn that without the memory section the main session has no
-  standing instruction to use/maintain the memory (agents still do via
-  their own files).
-- **Slug ambiguity / no user-scope memory found**: state it plainly;
-  proceed with the empty skeleton `mnemo init` created.
+- **Engine absent and mnemo repo unavailable**: explain the two-layer
+  model, stop before wiring (wiring without an engine is inert).
+- **Already fully wired (portable) + rule present**: `mnemo init` is a
+  no-op; go straight to CLAUDE.md / agents / team-flag / migration.
+- **Agent deliberately non-project memory**: still required to be
+  `project` here — explain why (shared team memory); apply with the
+  diff. The requirement is firm; only the content is shown for review.
+- **Foreign MCP servers / hooks / settings keys**: `mnemo init` and the
+  team-flag merge are additive — never reorder or rewrite foreign
+  entries.
+- **No `CLAUDE.md` and the user resists**: the team-lead section is
+  mandatory; without it the main session has no standing instruction to
+  act as lead or to use the memory. Create it (with the diff shown).
+- **`AskUserQuestion` unavailable**: stop and request an interactive
+  re-run; never proceed on assumptions.
 
 ## Reference files
 
-- `references/mnemo.md` — how mnemo works: the two layers, the data
-  flow (`.md → chunks → embeddings → sqlite-vec+FTS5 → search`), the
-  portable invocation form, why the index is disposable.
-- `references/memory-migration.md` — the user-scope slug formula and
-  exact paths (project + per-agent built-in memory), how to read a
-  subagent's `memory:` frontmatter, and the curation rules when copying
-  migrated memory in.
-- `templates/CLAUDE.section.md` — the affirmative mnemo section to weave
-  into a project `CLAUDE.md`.
-- `templates/agent.md.template` — a subagent definition that uses mnemo
-  (memory section must stay intact; subagents don't inherit `CLAUDE.md`).
-- `templates/agent-memory.md.template` — a per-agent memory block.
-- `templates/MEMORY.md.template` — the thin index shape, used as the
-  target when curating migrated memory.
+- `references/mnemo.md` — the two layers, data flow, portable
+  invocation, the binding-rule mechanism, the team-lead model, the
+  team-flag.
+- `references/memory-migration.md` — user-scope slug + paths, reading a
+  subagent's `memory:`, curation rules when migrating memory in.
+- `templates/CLAUDE.section.md` — the mandatory team-lead section.
+- `templates/agents/{planner,developer,tester,reviewer}.md` — starter
+  teammates (each `memory: project`).
+- `templates/agent.md.template` — generic base for an extra teammate.
+- `templates/agent-memory.md.template` — the one-line per-agent stub
+  shape used in Step 5.

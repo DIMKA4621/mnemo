@@ -1,18 +1,1 @@
 # <ROLE> agent memory
-
-Per-agent memory block. Lives at `.claude/agent-memory/<role>/`. This is
-the agent's OWN scope; general project knowledge still goes to
-`.claude/memory/`. Keep entries durable, not session state.
-
-## Conventions
-
-- <a rule this agent must always follow in its domain>
-
-## Known pitfalls
-
-- <a mistake already made / a trap in this domain — write it once,
-  never hit it twice>
-
-## Decisions
-
-- <a domain decision> — <why, so it is not re-litigated>

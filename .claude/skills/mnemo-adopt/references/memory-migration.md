@@ -86,9 +86,17 @@ The target is mnemo's native shape — do not dump files verbatim:
   and why) before writing anything. The built-in memory is a seed to
   curate, not a transcript to preserve.
 
+## Not a migration target
+
+`.claude/rules/mnemo-memory.md` and the one-line `.claude/memory/
+MEMORY.md` anchor are written by `mnemo init`, not by migration. Never
+copy built-in memory into the rule file, and do not preserve a fat
+built-in `MEMORY.md` over the thin anchor — curate its content into
+topic files instead and keep `MEMORY.md` a thin index.
+
 ## After migration
 
-Let `mnemo ingest` rebuild the index from the new `.md` (Step 5 of the
-skill). The user-scope built-in memory is left in place — migration
+Let `mnemo ingest` rebuild the index from the new `.md` (the Verify
+step). The user-scope built-in memory is left in place — migration
 copies, it does not move or delete. The git-tracked `.claude/memory/`
 is now the source of truth going forward.

@@ -1,43 +1,28 @@
 ---
-# Claude Code subagent definition. Copy to .claude/agents/<role>.md and
-# fill the placeholders. Subagents do NOT inherit CLAUDE.md, so the
-# mnemo memory instructions MUST stay in this body.
+# Generic teammate base. Copy to .claude/agents/<role>.md and fill the
+# placeholders, or start from one of the concrete roles in
+# templates/agents/ (planner, developer, tester, reviewer).
 name: <role>
-description: <when to delegate to this agent — be specific; this is how the main session decides to call it>
-# memory: project -> persists this agent's own notes under
-#   .claude/agent-memory/<role>/ (git-shared). Recommended so the team
-#   shares the agent's accumulated knowledge.
+description: >
+  <when the team lead should delegate to this teammate — be specific;
+  this is how the lead decides to spawn it>
+# memory: project -> the team lead spawns this as a project teammate.
+# Required by the adopt skill; do not set a non-project scope.
 memory: project
-# tools: inherits all parent tools (incl. the `mnemo` MCP tool) by
+# tools: inherits the parent's tools (incl. the `mnemo` MCP tool) by
 #   default. Restrict with tools:/disallowedTools: only if needed.
 ---
 
-You are the **<role>** agent. Your domain: <one-line domain>.
+You are the **<role>** teammate. Your domain: <one-line domain>.
 
-## Use project memory (mnemo)
+Do: <what this role does — its responsibilities and outputs>.
 
-Before acting, search the shared memory for prior decisions,
-architecture and pitfalls — call the `mnemo` MCP tool `memory_search`:
+Do not: <its boundaries — what it must hand back to the lead instead of
+doing itself; never commit unless the user asked>.
 
-- scope `project` for shared knowledge;
-- your own agent scope (`agent` = `<role>`) for your domain notes.
-
-Do not re-investigate anything already recorded there.
-
-After completing work or making a domain decision, record it so it is
-not lost:
-
-- shared knowledge → `.claude/memory/` (thin `MEMORY.md` index + topic
-  files + `logs/`);
-- your domain knowledge → your `.claude/agent-memory/<role>/` block
-  (conventions, known pitfalls, decisions).
-
-Edit only `.md` files; never touch the index DB (it is rebuilt from the
-`.md`). If you need the index refreshed immediately, the `mnemo` tool
-`memory_reindex` is available.
-
-## Your task
-
-<describe what this agent does and its limits — responsibilities,
-boundaries, output format, what NOT to do. Keep the memory section
-above intact.>
+Before acting, search the project memory (`mnemo` tool `memory_search`,
+scope `project` and your `<role>` agent scope) for prior decisions,
+architecture and pitfalls — do not re-investigate what is recorded.
+After significant work or a domain decision, record it. The binding
+memory rule (`.claude/rules/mnemo-memory.md`) auto-loads for you and is
+mandatory.

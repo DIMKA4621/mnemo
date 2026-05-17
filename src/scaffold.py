@@ -1,8 +1,10 @@
 """`mnemo init` — deterministic, idempotent project wiring.
 
 This is a SAFE primitive, not a judgement call. It only ever:
-  * creates files/directories that are ABSENT (never overwrites curated
-    memory or any human-authored file);
+  * creates, only when ABSENT, the bare minimum: a one-line
+    `.claude/memory/MEMORY.md` anchor and the binding memory rule
+    `.claude/rules/mnemo-memory.md` (never invents memory structure,
+    never overwrites a curated or human-authored file);
   * merges strictly ADDITIVELY into `.mcp.json` / `.claude/settings.json`
     (adds only mnemo's own keys/hook groups, never touches or reorders
     foreign content);
@@ -64,22 +66,60 @@ _EVENT_SUBCMD = {
     "UserPromptSubmit": "hook-inject",
 }
 
-_MEMORY_SKELETON = """\
-# Memory Index — <PROJECT NAME>
+# The strict, universal project-memory rule. `.claude/rules/*.md`
+# auto-loads into the team lead AND every subagent (subagents do not
+# inherit CLAUDE.md), so this is the one place the discipline binds for
+# all. This text is the single source — the adopt skill references it
+# for conflict resolution rather than duplicating it.
+_MEMORY_RULE = """\
+# Project memory (mnemo) — binding rule
 
-This is the thin INDEX of project memory. Keep it short: quick facts +
-links to topic files. Detail lives in topic files; day notes go under
-`logs/YYYY-MM-DD.md`.
+This project uses **mnemo** for shared, searchable memory. This rule is
+mandatory and applies to everyone in the session — the team lead and
+every subagent. It replaces any default or built-in memory behavior.
 
-## Quick facts
+**Location — read carefully.** Memory lives in the **project's own
+`.claude/` directory at the repository root** (the project you are
+working in). This is NOT `~/.claude/` in your home directory and NOT
+any user-level Claude folder. Every path below is relative to the
+project root. The curated markdown there is the single source of truth
+and the only memory you write to.
 
-- Stack: <language / framework / datastore>
-- Deploy: <how this ships to production>
-- Conventions: <the few rules that bite if missed>
+## Before non-trivial work
 
-## Topics
+Search the project memory first — the `mnemo` MCP tool `memory_search`
+(scope `project`, and your agent scope when relevant). Do not
+re-investigate decisions, architecture or pitfalls already recorded.
 
-- [Architecture](architecture.md) — services, data flow, boundaries
+## After significant work or any decision
+
+Record it in the project tree so it is not lost:
+
+- shared project knowledge -> `<project>/.claude/memory/` — keep
+  `MEMORY.md` a thin index, put detail in topic files, append day notes
+  under `logs/YYYY-MM-DD.md`;
+- agent-specific knowledge -> `<project>/.claude/agent-memory/<role>/`.
+
+## Hard constraints
+
+- Edit only the `.md` files in the project's `.claude/`. Never edit the
+  index database — it is derived and rebuilt from the `.md`.
+- The `.md` in git is the source of truth; the index is disposable.
+- Never write shared knowledge to `~/.claude/` or any user-level,
+  session-local or built-in memory — only the project's git-tracked
+  `.claude/` counts.
+- Reindex is automatic (session start, on memory edit, and relevant
+  memory surfaced on each prompt). `memory_reindex` refreshes on demand.
+
+## Hygiene
+
+- `MEMORY.md` is an index, not a store — links + quick facts only;
+  detail belongs in topic files.
+- One concept per topic file; day-by-day notes in `logs/`.
+- No duplicates: check what is already recorded before adding.
+- No session state ("currently doing X") — only durable knowledge.
+- Remove outdated entries: stale memory is worse than none.
+- Do not record what the code, git history or CLAUDE.md already says.
 """
 
 
@@ -201,29 +241,34 @@ def _plan_settings(path: Path, log: list[str]) -> str | None:
 
 
 def _seed_tree(claude: Path, log: list[str]) -> None:
-    """Create only what is absent. Existing curated memory is untouched."""
-    mem = claude / "memory"
-    logs = mem / "logs"
-    agent = claude / "agent-memory"
+    """Seed the bare minimum, only when absent — never invent memory.
 
-    for d in (mem, logs, agent):
+    A one-line `MEMORY.md` anchor and the binding memory rule. No empty
+    `logs/`/`agent-memory/` structure: those appear when something is
+    actually written. Per-agent memory stubs are the adopt skill's job,
+    created after the agent roster is decided.
+    """
+    mem = claude / "memory"
+    rules = claude / "rules"
+    for d in (mem, rules):
         if not d.exists():
             d.mkdir(parents=True)
             log.append(f"  created              {d}")
 
     index = mem / "MEMORY.md"
     if not index.exists():
-        index.write_text(_MEMORY_SKELETON, encoding="utf-8")
-        log.append(f"  created              {index}")
+        index.write_text(f"# Memory Index — {claude.parent.name}\n",
+                          encoding="utf-8")
+        log.append(f"  created              {index} (one-line anchor)")
     else:
-        log.append(f"  kept                 {index} (already curated)")
+        log.append(f"  kept                 {index} (already present)")
 
-    # Keep empty dirs in git so the structure ships to teammates.
-    for d in (logs, agent):
-        keep = d / ".gitkeep"
-        if not any(d.iterdir()) and not keep.exists():
-            keep.write_text("", encoding="utf-8")
-            log.append(f"  created              {keep}")
+    rule = rules / "mnemo-memory.md"
+    if not rule.exists():
+        rule.write_text(_MEMORY_RULE, encoding="utf-8")
+        log.append(f"  created              {rule}")
+    else:
+        log.append(f"  kept                 {rule} (already present)")
 
 
 def init_project(root: str | None) -> int:
@@ -243,8 +288,8 @@ def init_project(root: str | None) -> int:
         print("mnemo init: NOTHING was written.")
         return 1
 
-    # Validation passed — apply atomically (dirs/skeleton first, then the
-    # additive JSON merges).
+    # Validation passed — apply atomically (minimal seed + rule first,
+    # then the additive JSON merges).
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     _seed_tree(proj / ".claude", log)
     if new_mcp is not None:
