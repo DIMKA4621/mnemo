@@ -7,11 +7,13 @@ description: >
   (user-scope engine) and `mnemo init` (git-tracked, additive, portable
   wiring + a one-line memory anchor + the binding memory rule) — and
   handles every judgement call with a shown diff and AskUserQuestion:
-  the mandatory team-lead section in CLAUDE.md, mandatory `memory:
-  project` on subagents, the experimental agent-team flag, per-agent
-  memory stubs, resolving `mnemo init` conflicts, and migrating a
-  project's user-scope built-in Claude memory. Never edits a
-  human-authored file blind. Never commits.
+  triaging an existing CLAUDE.md into four buckets (per-role behavior →
+  agents, universal rules → .claude/rules/, durable facts →
+  .claude/memory/, orchestration → a rewritten clean team-lead
+  CLAUDE.md), mandatory `memory: project` on subagents, the
+  experimental agent-team flag, per-agent memory stubs, resolving
+  `mnemo init` conflicts, and migrating a project's user-scope built-in
+  Claude memory. Never edits a human-authored file blind. Never commits.
 
   Use when the user asks to: adopt/set up/init/bootstrap mnemo in a
   project, add shared searchable memory, wire mnemo hooks and MCP, set
@@ -103,9 +105,11 @@ only what the findings make relevant. Some items are **not optional**
 and must be framed as required, not as a yes/no preference:
 
 - **Required (state plainly they are mandatory for mnemo to work):**
-  the team-lead section in `CLAUDE.md`; `memory: project` on every
-  subagent. You still show the diff before applying — the *content* is
-  confirmed, the *requirement* is not negotiable.
+  the clean team-lead `CLAUDE.md` (when one exists, its content is
+  triaged into 4 buckets and the file is rewritten — you show the
+  mapping table + full diff and let the user adjust per chunk, but the
+  end state is not negotiable); `memory: project` on every subagent.
+  The *content/mapping* is confirmed, the *requirement* is not.
 - **Insist (strongly recommend, explain it is needed for the whole
   team to work correctly, then take the decision):** enabling
   `CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS` in the project
@@ -137,11 +141,35 @@ conflict is resolved.
 
 ### Step 4 — Judgement (always a shown diff, never blind)
 
-1. **CLAUDE.md team-lead section (mandatory).** Use
-   `templates/CLAUDE.section.md`. No `CLAUDE.md` → create it with that
-   section. Exists → insert/reconcile a `## Team lead (mnemo project)`
-   section (do not duplicate; if a team-lead/role section exists,
-   reconcile). Show the diff; apply on confirmation of the content.
+1. **CLAUDE.md — triage, redistribute, rewrite (always when it
+   exists).** No `CLAUDE.md` → create it from
+   `templates/CLAUDE.section.md` (clean team-lead). If one exists, do
+   NOT merely append: its content is redistributed so nothing is lost
+   and the final `CLAUDE.md` becomes the clean team-lead role only.
+   - Split it into chunks; classify each into exactly one bucket:
+     - **per-role behavior** (how to code / test / review / plan) →
+       the matching agent (`developer`/`tester`/`reviewer`/`planner`);
+     - **universal rule** for everyone (git/commit/style/bans) →
+       `.claude/rules/<topic>.md`;
+     - **durable project fact** (stack, deploy, conventions) →
+       `.claude/memory/` topic files — curated, `MEMORY.md` stays a
+       thin index (same curation rules as
+       `references/memory-migration.md`);
+     - **orchestration / lead behavior** → the new `CLAUDE.md`
+       (`templates/CLAUDE.section.md`).
+   - If a target agent already exists, propose merging its chunks into
+     that agent's body — show the diff, confirm per chunk (add or
+     skip). If it does not exist, the chunk seeds the starter agent
+     created in item 4. An existing `.claude/rules/*` is additive,
+     shown, never clobbered.
+   - Present a **mapping table** (chunk → bucket → target) AND the full
+     `CLAUDE.md` before/after diff. Classification is judgement: let
+     the user adjust per chunk before anything is written. Apply only
+     on confirmation; then replace `CLAUDE.md` with the clean team-lead
+     template. The original is preserved in git history.
+   This runs whenever a `CLAUDE.md` exists — even if the project
+   already has agents (inspect them and offer the merges). The end
+   state is always a clean team-lead `CLAUDE.md`.
 2. **Wiring conflict resolution.** For what `mnemo init` refused, show
    `found:` vs the portable `expected:` (copy expected from the refusal
    report — do not hand-author it) and apply in `.mcp.json` /
@@ -156,7 +184,9 @@ conflict is resolved.
    project has no agents, create the approved starter roster from
    `templates/agents/{planner,developer,tester,reviewer}.md` (or the
    generic `templates/agent.md.template` for extra roles). Generic
-   drafts are fine; adapt only what the user asks.
+   drafts are fine; seed each with whatever chunks item 1 classified to
+   that role, otherwise leave the default. Adapt only what the user
+   asks.
 5. **Team flag.** If approved, additively set
    `{"env": {"CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"}}` in the
    project `.claude/settings.json` — merge into any existing `env`, do
@@ -185,9 +215,10 @@ python3 -m json.tool .claude/settings.json > /dev/null && echo "settings JSON OK
 ```
 
 Confirm: portable `mnemo` server + three hooks; `.claude/rules/
-mnemo-memory.md` present; CLAUDE.md team-lead section present; every
-agent `memory: project`; team flag set if approved; index built. If the
-model is not warmed, `mnemo ingest` will say so — report that plainly.
+mnemo-memory.md` present; `CLAUDE.md` is the clean team-lead role (its
+old content redistributed, nothing lost); every agent `memory:
+project`; team flag set if approved; index built. If the model is not
+warmed, `mnemo ingest` will say so — report that plainly.
 
 ### Step 7 — Tell the user the next steps (never commit)
 
@@ -195,7 +226,7 @@ model is not warmed, `mnemo ingest` will say so — report that plainly.
 ✓ Engine:   <installed | present>  model <warmed | not warmed>
 ✓ Wiring:   .mcp.json + .claude/settings.json (portable) [+conflicts resolved]
 ✓ Rule:     .claude/rules/mnemo-memory.md (binding, all agents)
-✓ CLAUDE.md: team-lead section
+✓ CLAUDE.md: clean team-lead (old content redistributed: agents/rules/memory)
 ✓ Agents:   planner/developer/tester/reviewer — memory: project
 ✓ Team:     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS=1 (if approved)
 ✓ Memory:   one-line anchor [+ migrated N files]
@@ -221,9 +252,17 @@ Do not run `git add`/`git commit` yourself.
 - **Foreign MCP servers / hooks / settings keys**: `mnemo init` and the
   team-flag merge are additive — never reorder or rewrite foreign
   entries.
-- **No `CLAUDE.md` and the user resists**: the team-lead section is
+- **No `CLAUDE.md` and the user resists**: the team-lead `CLAUDE.md` is
   mandatory; without it the main session has no standing instruction to
   act as lead or to use the memory. Create it (with the diff shown).
+- **Ambiguous / cross-cutting CLAUDE.md chunk**: a chunk that fits more
+  than one bucket (e.g. "always run the linters" = developer + tester)
+  — do not guess; surface it in the mapping table with your proposed
+  split and let the user decide. Never silently drop a chunk; if it
+  truly fits nowhere, ask rather than discard.
+- **Existing curated CLAUDE.md that is already lean**: still triage,
+  but the mapping may be mostly "→ team-lead"; keep the rewrite minimal
+  and show that little changed rather than forcing redistribution.
 - **`AskUserQuestion` unavailable**: stop and request an interactive
   re-run; never proceed on assumptions.
 

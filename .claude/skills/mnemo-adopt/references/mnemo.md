@@ -47,6 +47,23 @@ subagent**. Subagents do **not** inherit `CLAUDE.md`, but they do load
   but is the adopt skill's judgement (shown diff) — `mnemo init` never
   writes `CLAUDE.md`.
 
+When a project already has a `CLAUDE.md`, adoption does not append to
+it — it **triages** the old content into four destinations so nothing
+is lost and the file becomes a clean team-lead role:
+
+- per-role behavior → the matching agent (`developer`/`tester`/
+  `reviewer`/`planner`), merged into an existing agent with
+  confirmation;
+- a universal rule for everyone → `.claude/rules/<topic>.md`;
+- a durable project fact → `.claude/memory/` topic files (curated);
+- orchestration / lead behavior → the rewritten `CLAUDE.md`.
+
+This runs whenever a `CLAUDE.md` exists (even if agents already exist),
+always with a shown mapping table + full diff. Rationale: the common
+starting point is a single monolithic `CLAUDE.md` where the main
+session is also developer, tester and everything — the team-lead model
+needs that "doing" content moved to the roles that own it.
+
 ## Subagent memory — do not conflate
 
 A subagent's frontmatter `memory: project` enables its **built-in**
