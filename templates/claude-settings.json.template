@@ -23,13 +23,13 @@
         ]
       }
     ],
-    "SessionEnd": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "{{MNEMO_BIN}} ingest",
-            "timeout": 60
+            "command": "{{MNEMO_BIN}} hook-inject",
+            "timeout": 30
           }
         ]
       }

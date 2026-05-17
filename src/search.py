@@ -6,15 +6,16 @@ Results are blended with reciprocal rank fusion (RRF). Scope
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 
 import sqlite_vec
 
-from .config import RRF_K, TOP_K, resolve
+from .config import MIN_QUERY_CHARS, MIN_SIM, RRF_K, TOP_K, resolve
 from .embedder import embed_query
-from .store import connect
+from .store import connect, get_vectors
 
 
 @dataclass
@@ -50,6 +51,13 @@ def _fts_ranked(conn: sqlite3.Connection, query: str, limit: int) -> list[int]:
     return [r["rowid"] for r in rows]
 
 
+def _cosine(a: list[float], b: list[float]) -> float:
+    dot = sum(x * y for x, y in zip(a, b))
+    na = math.sqrt(sum(x * x for x in a))
+    nb = math.sqrt(sum(x * x for x in b))
+    return dot / (na * nb) if na and nb else 0.0
+
+
 def _rrf(*rankings: list[int]) -> dict[int, float]:
     """Reciprocal rank fusion: sum 1 / (RRF_K + rank)."""
     scores: dict[int, float] = {}
@@ -66,15 +74,29 @@ def search(
     scope: str | None = None,
     agent_name: str | None = None,
     top_k: int = TOP_K,
+    qvec: list[float] | None = None,
+    gate: bool = False,
+    min_sim: float | None = None,
 ) -> list[Hit]:
-    """Hybrid (vector-primary + FTS) search with optional scope filter."""
+    """Hybrid (vector-primary + FTS) search with optional scope filter.
+
+    ``qvec``: a precomputed query embedding (the auto-inject path passes the
+    one obtained from the warm helper, so the model is never loaded in this
+    process). ``gate``: drop empty/too-short queries and weak matches by a
+    cosine-similarity floor — used ONLY by auto-inject; manual MCP/CLI
+    search stays ungated (the agent judges relevance itself).
+    """
+    if gate and len(query.strip()) < MIN_QUERY_CHARS:
+        return []
     db = resolve(root).db
     if not db.exists():
         return []
     conn = connect(db)
     try:
+        if qvec is None:
+            qvec = embed_query(query)
         pool = max(top_k * 4, 20)
-        vec_ids = _vector_ranked(conn, embed_query(query), pool)
+        vec_ids = _vector_ranked(conn, qvec, pool)
         try:
             fts_ids = _fts_ranked(conn, query, pool)
         except sqlite3.OperationalError:
@@ -92,6 +114,9 @@ def search(
             )
         }
 
+        gate_min = (MIN_SIM if min_sim is None else min_sim) if gate else 0.0
+        gate_vecs = get_vectors(conn, ranked) if gate else {}
+
         hits: list[Hit] = []
         for cid in ranked:
             row = meta.get(cid)
@@ -101,6 +126,10 @@ def search(
                 continue
             if agent_name and row["agent_name"] != agent_name:
                 continue
+            if gate:
+                cv = gate_vecs.get(cid)
+                if cv is None or _cosine(qvec, cv) < gate_min:
+                    continue
             hits.append(
                 Hit(
                     path=row["path"],

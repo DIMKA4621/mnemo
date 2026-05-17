@@ -30,6 +30,25 @@ CHUNK_CAPACITY: tuple[int, int] = (200, 1200)
 TOP_K: int = 5
 RRF_K: int = 60
 
+# Auto-inject (UserPromptSubmit) — how many sections to surface.
+INJECT_TOP_N: int = 3
+# Weak-match gate (auto-inject path only; manual search is never gated).
+# Cosine-similarity floor on the vector leg + a minimum query length.
+# e5 has a high baseline similarity (anisotropy); measured on the test
+# corpus: relevant top hits ~0.84-0.87, junk/off-topic ~0.78-0.81. 0.83
+# keeps every relevant top-1 and cuts all junk — but the margin is narrow
+# (~0.03), so this is PROVISIONAL: recalibrate on real prompts at the pilot.
+MIN_SIM: float = 0.83
+MIN_QUERY_CHARS: int = 8
+
+# Warm embedding helper (resident model holder). Loopback TCP — NOT a unix
+# socket: CPython does not expose socket.AF_UNIX on Windows, and we need
+# Linux/macOS/Windows parity with zero OS-specific quirks.
+EMBED_HOST: str = "127.0.0.1"
+EMBED_PORT: int = int(os.environ.get("MNEMO_EMBED_PORT", "8917"))
+EMBED_TOKEN_FILE: Path = USER_HOME / "state" / "embed.token"
+EMBED_IDLE_TIMEOUT: int = 1800  # resident exits after 30 min idle
+
 
 @dataclass(frozen=True)
 class ProjectPaths:

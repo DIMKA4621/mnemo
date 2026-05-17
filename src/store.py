@@ -6,6 +6,7 @@ file is disposable and fully rebuildable from the .md.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -111,6 +112,27 @@ def set_file_hash(
         "agent_name = excluded.agent_name",
         (path, sha256, scope, agent_name),
     )
+
+
+def get_vectors(
+    conn: sqlite3.Connection, ids: list[int]
+) -> dict[int, list[float]]:
+    """Stored embeddings for the given chunk ids (for the weak-match gate).
+
+    Uses sqlite-vec's documented ``vec_to_json`` so we never depend on the
+    raw blob layout.
+    """
+    if not ids:
+        return {}
+    placeholders = ",".join("?" * len(ids))
+    return {
+        r["rowid"]: json.loads(r["j"])
+        for r in conn.execute(
+            f"SELECT rowid, vec_to_json(embedding) AS j "
+            f"FROM vec_chunks WHERE rowid IN ({placeholders})",
+            ids,
+        )
+    }
 
 
 def delete_file(conn: sqlite3.Connection, path: str) -> None:

@@ -23,13 +23,13 @@
         ]
       }
     ],
-    "SessionEnd": [
+    "UserPromptSubmit": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "/home/dima/.claude/mnemo/bin/mnemo ingest",
-            "timeout": 60
+            "command": "/home/dima/.claude/mnemo/bin/mnemo hook-inject",
+            "timeout": 30
           }
         ]
       }

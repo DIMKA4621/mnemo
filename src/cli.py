@@ -5,6 +5,8 @@
   search [--root]   semantic search over a project's memory
   mcp               run the stdio MCP server (agent-callable tools)
   hook-postedit     PostToolUse target: reindex ONLY if a memory file changed
+  hook-inject       UserPromptSubmit target: inject relevant memory
+  embed-server      resident embedding helper (auto-started, not run by hand)
 
 `--root` defaults to the current directory, so the SessionStart hook
 indexes whatever project the session is in.
@@ -78,6 +80,54 @@ def _cmd_hook_postedit() -> int:
     return 0
 
 
+def _cmd_hook_inject() -> int:
+    """UserPromptSubmit target. Reads hook JSON on stdin, embeds the prompt
+    via the warm resident, searches THIS project's memory (gated), and
+    prints relevant sections to stdout (Claude Code injects a
+    UserPromptSubmit hook's stdout into the context). Best-effort: on any
+    failure it skips with a one-line stderr note and never blocks.
+    """
+    import json
+
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return 0
+
+    prompt = (payload.get("prompt") or payload.get("user_prompt") or "").strip()
+    if not prompt:
+        return 0
+    root = payload.get("cwd")  # project root at prompt time
+
+    from .embed_server import embed_query_via_server
+
+    vec = embed_query_via_server(prompt)
+    if vec is None:
+        print(
+            "mnemo: embedding helper unavailable — memory injection skipped",
+            file=sys.stderr,
+        )
+        return 0  # never block the turn
+
+    from .config import INJECT_TOP_N
+
+    hits = search(
+        prompt, root=root, scope="project", qvec=vec, gate=True,
+        top_k=INJECT_TOP_N,
+    )
+    if not hits:
+        return 0  # nothing relevant -> inject nothing (no context noise)
+
+    out = ['<project-memory source="mnemo">',
+           "Curated project memory relevant to this prompt:"]
+    for h in hits:
+        snippet = " ".join(h.content.split())
+        out.append(f"\n### {h.path} · {h.heading or '(no heading)'}\n{snippet}")
+    out.append("</project-memory>")
+    print("\n".join(out))
+    return 0
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
     hits = search(
         args.query,
@@ -114,6 +164,16 @@ def main(argv: list[str] | None = None) -> int:
         help="PostToolUse target: reads hook JSON on stdin, reconciles "
         "only if the edited file is a memory file.",
     )
+    sub.add_parser(
+        "hook-inject",
+        help="UserPromptSubmit target: reads hook JSON on stdin, injects "
+        "relevant project memory via the warm helper.",
+    )
+    sub.add_parser(
+        "embed-server",
+        help="Resident embedding helper (loopback). Auto-started by "
+        "hook-inject; not meant to be run by hand.",
+    )
 
     pi = sub.add_parser("ingest", help="Reconcile .md -> index (hash-diff + prune).")
     pi.add_argument("--root", default=None, help="Project root (default: cwd).")
@@ -134,6 +194,12 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "hook-postedit":
         return _cmd_hook_postedit()
+    if args.cmd == "hook-inject":
+        return _cmd_hook_inject()
+    if args.cmd == "embed-server":
+        from .embed_server import serve
+        serve()
+        return 0
     if args.cmd == "ingest":
         return _cmd_ingest(args.root)
     return _cmd_search(args)
