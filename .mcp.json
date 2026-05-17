@@ -1,8 +1,8 @@
 {
   "mcpServers": {
     "mnemo": {
-      "command": "/home/dima/.claude/mnemo/bin/mnemo",
-      "args": ["mcp"]
+      "command": "/bin/sh",
+      "args": ["-c", "exec \"$HOME/.claude/mnemo/bin/mnemo\" mcp"]
     }
   }
 }

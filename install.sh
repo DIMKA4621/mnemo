@@ -123,7 +123,9 @@ cat > "$LAUNCHER" <<'LAUNCHER_EOF'
 set -euo pipefail
 HOME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 exec env PYTHONPATH="$HOME_DIR" MNEMO_HOME="$HOME_DIR" \
-	"$HOME_DIR/.venv/bin/python" -m src.cli "$@"
+	"$HOME_DIR/.venv/bin/python" \
+	-c 'import os,sys; sys.path.insert(0, os.environ["MNEMO_HOME"]); from src.cli import main; raise SystemExit(main())' \
+	"$@"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 say "launcher written: $LAUNCHER"

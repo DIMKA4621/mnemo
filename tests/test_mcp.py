@@ -17,7 +17,7 @@ from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
 REPO = str(Path(__file__).resolve().parent.parent)
-LAUNCHER = "/home/dima/.claude/mnemo/bin/mnemo"
+LAUNCHER = str(Path.home() / ".claude" / "mnemo" / "bin" / "mnemo")
 
 _passed = _failed = 0
 
