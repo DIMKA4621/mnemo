@@ -1,3 +1,4 @@
+.idea
 # The index DB now lives at user scope (~/.claude/mnemo/state/),
 # never inside the repo. These guards remain in case of a local --root run.
 memory.db

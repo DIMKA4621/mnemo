@@ -38,12 +38,17 @@ before planning — do not re-investigate what is already recorded there.
 - `src/index.py` — walk + sha256-diff + reindex changed + prune.
 - `src/search.py` — vector kNN + FTS5 + RRF + scope filter.
 - `src/mcp_server.py` — same engine exposed as MCP tools.
-- `src/cli.py` — `warmup | ingest | search | mcp | hook-postedit`.
+- `src/embed_server.py` — warm resident embedding helper (loopback TCP).
+- `src/scaffold.py` — `mnemo init`: additive, idempotent project wiring.
+- `src/cli.py` — `warmup | init | ingest | search | mcp |
+  hook-postedit | hook-inject | embed-server`.
+- `install.sh` — system-scope engine installer (`--check`/`--home`).
 - `tests/test_search.py` — labeled recall eval (regression floor).
 - `tests/test_mcp.py` — standalone MCP client check.
 - Installed engine: `~/.claude/mnemo/` (`bin/mnemo`, `.venv`,
   `model-cache`, `state/`). Project wiring: `.mcp.json`,
-  `.claude/settings.json`. Reusable templates: `templates/`.
+  `.claude/settings.json`. Adoption skill + its bundled templates:
+  `.claude/skills/mnemo-adopt/`.
 
 ## Commands
 
