@@ -1,6 +1,7 @@
 """CLI entry points — the single engine behind hooks and (later) MCP.
 
   warmup            explicit one-time 2 GB model download + sanity check
+  init [--root]     wire mnemo into a project (additive, idempotent)
   ingest [--root]   reconcile a project's .md -> its index (hook target)
   search [--root]   semantic search over a project's memory
   mcp               run the stdio MCP server (agent-callable tools)
@@ -175,6 +176,14 @@ def main(argv: list[str] | None = None) -> int:
         "hook-inject; not meant to be run by hand.",
     )
 
+    pn = sub.add_parser(
+        "init",
+        help="Wire mnemo into a project: create the memory skeleton and "
+        "additively merge .mcp.json / .claude/settings.json (idempotent, "
+        "refuses on conflict, never touches CLAUDE.md).",
+    )
+    pn.add_argument("--root", default=None, help="Project root (default: cwd).")
+
     pi = sub.add_parser("ingest", help="Reconcile .md -> index (hash-diff + prune).")
     pi.add_argument("--root", default=None, help="Project root (default: cwd).")
 
@@ -200,6 +209,9 @@ def main(argv: list[str] | None = None) -> int:
         from .embed_server import serve
         serve()
         return 0
+    if args.cmd == "init":
+        from .scaffold import init_project
+        return init_project(args.root)
     if args.cmd == "ingest":
         return _cmd_ingest(args.root)
     return _cmd_search(args)
