@@ -1,77 +1,91 @@
 # mnemo
 
-Proof-of-concept for the **shared project memory** (Memory-design-v2).
+Shared, searchable **project memory** for Claude Code and its agents.
 
 ```
-.md  →  chunks  →  embeddings  →  sqlite-vec  →  search
+.md  →  chunks  →  embeddings  →  sqlite-vec (+ FTS5)  →  search
 ```
 
-One engine, project-agnostic, installed once at **user scope** and used
-by every project. The `.md` under a project's `.claude/` is the single
-source of truth (git); the index DB is disposable and rebuildable.
+Curated markdown in git is the **single source of truth**. A local,
+disposable, rebuildable vector index makes it searchable. No server, no
+daemon, nothing in your repo but plain `.md` and a little wiring.
 
-## Layers
+## Quick start
 
-| Layer | Where |
-|---|---|
-| Engine + venv + model cache | `~/.claude/mnemo/` (installed once) |
-| `.md` source of truth | per-project `<root>/.claude/memory` + `agent-memory` (git) |
-| Index DB | `~/.claude/mnemo/state/<projhash>.db` (per project, gitignored realm) |
+Open the project in Claude Code and tell it:
 
-## Commands (`mnemo`)
+> adopt mnemo into this project
+
+The `mnemo-adopt` skill takes it from there — installing the engine,
+wiring the project, scaffolding the memory rule — showing a diff and
+asking before anything non-trivial. It never commits for you.
+
+That's the whole onboarding. From then on the project's memory is kept
+indexed and the relevant bits surface on their own.
+
+## How it works
+
+Two layers, cleanly separated:
+
+| Layer | Where | In git? |
+|---|---|---|
+| Engine (code, venv, model, index) | `~/.claude/mnemo/` — installed once, shared by every project | no |
+| Source of truth (`.md`) | `<project>/.claude/memory/` + `.claude/agent-memory/` | **yes** |
+| Index DB | `~/.claude/mnemo/state/<projhash>.db` — per project, rebuildable | no |
+
+Adoption commits a tiny bit of git-tracked wiring into the project so it
+travels with the repo:
+
+- **`.mcp.json`** — registers the `mnemo` MCP server. Claude Code spawns
+  `mnemo mcp` over stdio per session (not a daemon), scoped to this
+  project. Tools: `memory_search`, `memory_reindex`.
+- **`.claude/settings.json`** — three hooks:
+  - `SessionStart` → `mnemo ingest` — full reconcile (catches outside
+    changes like a `git pull`).
+  - `PostToolUse` (Edit/Write/MultiEdit) → `mnemo hook-postedit` —
+    reindexes **only when the edited file is under `.claude/memory` or
+    `.claude/agent-memory`**; any other edit is an instant no-op.
+  - `UserPromptSubmit` → `mnemo hook-inject` — embeds your prompt,
+    searches this project's memory, and surfaces the relevant sections
+    into the turn.
+- **`.claude/rules/mnemo-memory.md`** — the binding memory rule, loaded
+  for the main session and every subagent.
+
+Embedding is served by one warm, idle-exiting helper per machine
+(`embed-server`, loopback only) so hooks stay light and CPU stays
+bounded. The model is **never** downloaded implicitly — `warmup` is the
+only step that fetches it.
+
+The index is disposable: delete a project's `state/*.db`, run `mnemo
+ingest`, and you are back to an identical state. The `.md` in git is the
+only thing that matters.
+
+## Commands
 
 ```bash
-mnemo warmup                 # one-time explicit ~2.2 GB model download + check
-mnemo ingest [--root DIR]    # reconcile a project's .md -> its index
-mnemo search "query" [--root DIR] [--scope project|agent] [--agent NAME]
-mnemo mcp                    # stdio MCP server: tools memory_search / memory_reindex
+mnemo warmup                 # one-time model download + sanity check
+mnemo init [--root DIR]      # additive, idempotent project wiring
+mnemo ingest [--root DIR]    # reconcile .md -> index (hash-diff + prune)
+mnemo search "query" [--scope project|agent] [--agent NAME]
+mnemo mcp                    # stdio MCP server (agent tools)
 ```
 
-## Project-level wiring (everything project-scoped)
+`hook-postedit`, `hook-inject` and `embed-server` exist too but are
+invoked by the hooks, not by hand. `$MNEMO_ROOT` overrides the project
+root; `--root` defaults to the current directory.
 
-Committed in this repo so it travels with the project:
+## Develop
 
-- `.mcp.json` — registers the `mnemo` MCP server (Claude Code spawns
-  `mnemo mcp` over stdio per session; not a daemon). Project root =
-  cwd, so it searches *this* project's memory.
-- `.claude/settings.json` — three reindex triggers:
-  - `SessionStart` → `mnemo ingest` (full reconcile; catches
-    external changes like git pull);
-  - `PostToolUse` (Edit|Write|MultiEdit) → `mnemo hook-postedit`,
-    which reads the hook JSON and reconciles **only if the edited file
-    is under `.claude/memory` / `.claude/agent-memory`** — unrelated
-    edits never touch the DB (process just starts and exits);
-  - `SessionEnd` → `mnemo ingest` (final reconcile on close;
-    best-effort — SessionStart covers a missed one anyway).
-
-`$MNEMO_ROOT` overrides the project root (used by the standalone
-`tests/test_mcp.py` client, which proves the MCP layer without touching
-live Claude Code config).
-
-`--root` defaults to the current directory, so the SessionStart hook
-indexes whatever project the session runs in. The model is **never**
-downloaded implicitly by a hook: `ingest` refuses (with a clear message)
-if changes need the model but `warmup` was never run.
-
-## Dev repo vs install
-
-This repo is the **source**. The user-scope copy under
-`~/.claude/mnemo/` is the **installed engine** (a packaging script
-will automate the copy later). Tests run against the source:
+This repo **is** the system. `install.sh` mirrors `src/` into the
+engine home; tests run against the source:
 
 ```bash
-python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
-mnemo warmup
-python -m src.cli ingest --root .
-python tests/test_search.py        # labeled recall eval, exit 0 = pass
+python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
+.venv/bin/python tests/test_search.py   # labeled recall eval
+.venv/bin/python tests/test_mcp.py      # standalone MCP client check
 ```
 
-## Decisions
-
-- **Model:** `intfloat/multilingual-e5-large` (1024-dim) via `fastembed`
-  (ONNX, no torch). Documented fallback — fastembed 0.8.0 ships no
-  e5-base; same family, one-line swap later.
-- **Index is disposable:** delete the project's `state/*.db`, run
-  `ingest`, identical state. The `.md` is the only source of truth.
-- Vector search primary; FTS5/BM25 secondary; blended via RRF.
+Design source of truth: `docs/Memory-design-v2.md` (architecture) and
+`docs/Setup-design.md` (install model). Engine: `multilingual-e5-large`
+via `fastembed` (ONNX, no torch); vector search primary, FTS5/BM25
+secondary, blended with RRF.
