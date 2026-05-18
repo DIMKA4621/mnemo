@@ -4,7 +4,7 @@ No pytest / pytrec_eval dependency — a plain runnable script.
 Metrics: top-1 accuracy, recall@3, recall@5, plus scope-purity.
 Exit code 0 = metrics above the regression floor.
 
-Run from the repo root (after `python -m src.cli ingest`):
+Self-contained: reindexes the bundled fixture corpus, then evaluates.
     .venv/bin/python tests/test_search.py
 """
 from __future__ import annotations
@@ -15,8 +15,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.index import reindex  # noqa: E402
 from src.search import search  # noqa: E402
 
+# The labeled corpus is a bundled fixture (a synthetic "demo project"),
+# NOT this repo's own memory — mnemo is the framework, it keeps no
+# in-repo memory and wires no hooks into itself.
+FIXTURE = str(Path(__file__).resolve().parent / "fixtures")
 M = ".claude/memory/"
 A = ".claude/agent-memory/"
 
@@ -76,13 +81,15 @@ CASES: list[Case] = [
 
 
 def evaluate() -> int:
+    reindex(FIXTURE, verbose=False)  # self-contained: build the fixture index
     n = len(CASES)
     top1 = r3 = r5 = 0
     scope_checked = scope_pure = 0
     rows: list[str] = []
 
     for c in CASES:
-        hits = search(c.query, scope=c.scope, agent_name=c.agent, top_k=5)
+        hits = search(c.query, root=FIXTURE, scope=c.scope,
+                      agent_name=c.agent, top_k=5)
         paths = [h.path for h in hits]
         hit1 = bool(paths) and paths[0] in c.expected
         hit3 = any(p in c.expected for p in paths[:3])

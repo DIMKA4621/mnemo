@@ -16,7 +16,8 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
-REPO = str(Path(__file__).resolve().parent.parent)
+# Search the bundled fixture corpus (mnemo keeps no in-repo memory).
+FIXTURE = str(Path(__file__).resolve().parent / "fixtures")
 LAUNCHER = str(Path.home() / ".claude" / "mnemo" / "bin" / "mnemo")
 
 _passed = _failed = 0
@@ -42,7 +43,7 @@ async def main() -> int:
     params = StdioServerParameters(
         command=LAUNCHER,
         args=["mcp"],
-        env={**os.environ, "MNEMO_ROOT": REPO},
+        env={**os.environ, "MNEMO_ROOT": FIXTURE},
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -51,6 +52,12 @@ async def main() -> int:
             tools = {t.name for t in (await session.list_tools()).tools}
             check("tools exposed", {"memory_search", "memory_reindex"} <= tools,
                   detail=str(sorted(tools)))
+
+            # Build the fixture index first — no hooks wire mnemo into
+            # this repo, so the test reconciles explicitly.
+            r = await session.call_tool("memory_reindex", {})
+            txt = _text(r)
+            check("reindex tool runs", "reconcile done" in txt, detail=txt[:120])
 
             r = await session.call_tool(
                 "memory_search",
@@ -70,10 +77,6 @@ async def main() -> int:
             check("scoped search isolated to reviewer",
                   "agent-memory/reviewer/" in txt and "/developer/" not in txt,
                   detail=txt[:120])
-
-            r = await session.call_tool("memory_reindex", {})
-            txt = _text(r)
-            check("reindex tool runs", "reconcile done" in txt, detail=txt[:120])
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
