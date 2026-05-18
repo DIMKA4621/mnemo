@@ -110,6 +110,11 @@ Record it in the project tree so it is not lost:
   `.claude/` counts.
 - Reindex is automatic (session start, on memory edit, and relevant
   memory surfaced on each prompt). `memory_reindex` refreshes on demand.
+- Memory rides with the commit: when a memory `.md` change accompanies
+  a code change, `git add` it together and land both in the **same
+  commit**; refer to that commit by its **subject/scope, never by a
+  hash** (hashes break on force-push/rebase). Never leave memory
+  uncommitted trailing a code commit.
 
 ## Hygiene
 
