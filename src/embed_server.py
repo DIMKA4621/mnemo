@@ -103,6 +103,19 @@ def serve() -> None:
                 if req.get("token") != tok:
                     _send(conn, {"error": "unauthorized"})
                     continue
+                if req.get("kind") == "passages":
+                    texts = req.get("texts")
+                    if (
+                        not isinstance(texts, list)
+                        or not texts
+                        or not all(
+                            isinstance(t, str) and t.strip() for t in texts
+                        )
+                    ):
+                        _send(conn, {"error": "empty"})
+                        continue
+                    _send(conn, {"vecs": embed_passages(texts)})
+                    continue
                 text = (req.get("text") or "").strip()
                 if not text:
                     _send(conn, {"error": "empty"})
@@ -149,6 +162,25 @@ def _spawn_server() -> None:
         pass
 
 
+def _obtain_socket() -> socket.socket | None:
+    """Connect to the resident, spawning + waiting for it on a cold start.
+
+    Returns None if the resident cannot be reached — every caller must
+    treat that as "degrade gracefully", never as fatal.
+    """
+    sock = _connect(timeout=0.5)
+    if sock is not None:
+        return sock
+    _spawn_server()
+    deadline = time.time() + 5.0  # process bind is fast (no model yet)
+    while time.time() < deadline:
+        time.sleep(0.2)
+        sock = _connect(timeout=0.5)
+        if sock is not None:
+            return sock
+    return None
+
+
 def embed_query_via_server(text: str) -> list[float] | None:
     """Query embedding from the resident, starting it if needed.
 
@@ -162,15 +194,9 @@ def embed_query_via_server(text: str) -> list[float] | None:
     except OSError:
         return None
 
-    sock = _connect(timeout=0.5)
+    sock = _obtain_socket()
     if sock is None:
-        _spawn_server()
-        deadline = time.time() + 5.0  # process bind is fast (no model yet)
-        while sock is None and time.time() < deadline:
-            time.sleep(0.2)
-            sock = _connect(timeout=0.5)
-        if sock is None:
-            return None
+        return None
     try:
         with sock:
             _send(sock, {"token": tok, "text": text, "kind": "query"})
@@ -179,5 +205,41 @@ def embed_query_via_server(text: str) -> list[float] | None:
             resp = _recv(sock, timeout=20.0)
         vec = resp.get("vec")
         return vec if isinstance(vec, list) else None
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def embed_passages_via_server(texts: list[str]) -> list[list[float]] | None:
+    """Batch document embeddings from the resident, starting it if needed.
+
+    The indexing path (``reindex``) calls this so that neither the
+    short-lived PostToolUse hook nor the long-lived MCP process ever
+    loads the ~2.2 GB model itself — that in-process load was the cause
+    of both the per-edit CPU storm and the multi-GB MCP growth.
+
+    Returns None on ANY failure so the caller can fall back to an
+    in-process embed (keeps ``mnemo ingest`` / tests deterministic when
+    the resident is genuinely unavailable, e.g. offline / CI).
+    """
+    if not texts or not all(isinstance(t, str) and t.strip() for t in texts):
+        return None
+    try:
+        tok = _token()
+    except OSError:
+        return None
+
+    sock = _obtain_socket()
+    if sock is None:
+        return None
+    try:
+        with sock:
+            _send(sock, {"token": tok, "texts": texts, "kind": "passages"})
+            # Cold start loads the model (~3 s) then embeds the batch;
+            # steady state is milliseconds. Generous ceiling.
+            resp = _recv(sock, timeout=60.0)
+        vecs = resp.get("vecs")
+        if not isinstance(vecs, list) or len(vecs) != len(texts):
+            return None
+        return vecs
     except (OSError, ValueError, json.JSONDecodeError):
         return None

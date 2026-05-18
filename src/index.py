@@ -94,8 +94,18 @@ def reindex(root: Path | str | None = None, verbose: bool = True) -> None:
                 continue
             delete_file(conn, relpath)
             chunks = split_markdown(path.read_text(encoding="utf-8"))
-            from .embedder import embed_passages  # lazy: model only if changes
-            vectors = embed_passages([c.text for c in chunks])
+            texts = [c.text for c in chunks]
+            if not texts:
+                set_file_hash(conn, relpath, digest, scope, agent)
+                continue
+            # Embed via the warm resident so neither the PostToolUse hook
+            # nor the long-lived MCP process loads the model itself.
+            # Fall back in-process only if the resident is unreachable.
+            from .embed_server import embed_passages_via_server
+            vectors = embed_passages_via_server(texts)
+            if vectors is None:
+                from .embedder import embed_passages
+                vectors = embed_passages(texts)
             for chunk, vec in zip(chunks, vectors):
                 insert_chunk(conn, relpath, chunk.index, scope, agent,
                              chunk.heading, chunk.text, vec)
