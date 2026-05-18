@@ -49,6 +49,35 @@ EMBED_PORT: int = int(os.environ.get("MNEMO_EMBED_PORT", "8917"))
 EMBED_TOKEN_FILE: Path = USER_HOME / "state" / "embed.token"
 EMBED_IDLE_TIMEOUT: int = 1800  # resident exits after 30 min idle
 
+# Embedding CPU cap. ONNX Runtime defaults to ALL cores per embed call;
+# the serial resident under multi-agent load then pegs the whole machine.
+# Bound every embed (resident, in-process fallback, ingest, tests, warmup)
+# to a fraction of the *available* CPUs. sched_getaffinity honours
+# cgroup/taskset limits on Linux; cpu_count is the cross-platform fallback.
+# MNEMO_EMBED_THREADS overrides the computed value explicitly.
+EMBED_THREADS_DIVISOR: int = 3
+
+
+def _available_cpus() -> int:
+    try:
+        return len(os.sched_getaffinity(0))  # Linux: respects cgroup/taskset
+    except AttributeError:
+        return os.cpu_count() or 1           # Windows/macOS fallback
+
+
+def _embed_threads() -> int:
+    cpu = _available_cpus()
+    override = os.environ.get("MNEMO_EMBED_THREADS")
+    if override:
+        try:
+            return max(1, min(int(override), cpu))
+        except ValueError:
+            pass  # garbage env -> fall through to the computed default
+    return max(1, cpu // EMBED_THREADS_DIVISOR)
+
+
+EMBED_THREADS: int = _embed_threads()
+
 
 @dataclass(frozen=True)
 class ProjectPaths:

@@ -15,7 +15,7 @@ from functools import lru_cache
 
 from fastembed import TextEmbedding
 
-from .config import EMBEDDING_MODEL, MODEL_CACHE
+from .config import EMBED_THREADS, EMBEDDING_MODEL, MODEL_CACHE
 
 # fastembed >=0.6 uses mean pooling for e5 (the canonical e5 behaviour);
 # its compatibility warning is noise for us — silence just that one.
@@ -33,7 +33,14 @@ def is_model_cached() -> bool:
 @lru_cache(maxsize=1)
 def _model() -> TextEmbedding:
     MODEL_CACHE.mkdir(parents=True, exist_ok=True)
-    return TextEmbedding(model_name=EMBEDDING_MODEL, cache_dir=str(MODEL_CACHE))
+    # threads caps ONNX intra-op parallelism: without it every embed call
+    # fans out across ALL cores and the serial resident pegs the machine
+    # under multi-agent load. See config.EMBED_THREADS.
+    return TextEmbedding(
+        model_name=EMBEDDING_MODEL,
+        cache_dir=str(MODEL_CACHE),
+        threads=EMBED_THREADS,
+    )
 
 
 def warmup() -> int:
