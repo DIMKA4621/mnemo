@@ -87,8 +87,12 @@ def _cmd_hook_inject() -> int:
     prints relevant sections to stdout (Claude Code injects a
     UserPromptSubmit hook's stdout into the context). Best-effort: on any
     failure it skips with a one-line stderr note and never blocks.
+
+    Wall-clock bounded by ``INJECT_BUDGET_S`` — exits gracefully under
+    Claude Code's 30 s hook timeout instead of being SIGKILL-ed.
     """
     import json
+    import time
 
     try:
         payload = json.load(sys.stdin)
@@ -100,22 +104,34 @@ def _cmd_hook_inject() -> int:
         return 0
     root = payload.get("cwd")  # project root at prompt time
 
+    from .config import INJECT_BUDGET_S, INJECT_TOP_N
     from .embed_server import embed_query_via_server
 
-    vec = embed_query_via_server(prompt)
+    t0 = time.monotonic()
+
+    def remaining() -> float:
+        return INJECT_BUDGET_S - (time.monotonic() - t0)
+
+    vec = embed_query_via_server(prompt, budget_s=max(0.5, remaining()))
     if vec is None:
         print(
             "mnemo: embedding helper unavailable — memory injection skipped",
             file=sys.stderr,
         )
         return 0  # never block the turn
-
-    from .config import INJECT_TOP_N
+    if remaining() <= 0:
+        print("mnemo: inject budget exhausted after embed — skipped",
+              file=sys.stderr)
+        return 0
 
     hits = search(
         prompt, root=root, scope="project", qvec=vec, gate=True,
         top_k=INJECT_TOP_N,
     )
+    if remaining() <= 0:
+        print("mnemo: inject budget exhausted after search — skipped",
+              file=sys.stderr)
+        return 0
     if not hits:
         return 0  # nothing relevant -> inject nothing (no context noise)
 

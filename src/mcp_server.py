@@ -27,9 +27,16 @@ def memory_search(
     # Embed via the warm resident so this long-lived MCP process never
     # loads the ~2.2 GB model itself. qvec=None lets search() fall back
     # to an in-process embed if the resident is unreachable.
+    # Wall-clock bounded so a stuck resident never wedges an agent turn.
+    import time
+
+    from .config import INJECT_BUDGET_S
     from .embed_server import embed_query_via_server
 
-    qvec = embed_query_via_server(query)
+    t0 = time.monotonic()
+    qvec = embed_query_via_server(query, budget_s=INJECT_BUDGET_S)
+    if (time.monotonic() - t0) >= INJECT_BUDGET_S:
+        return "Search timed out."
     hits = search(query, scope=scope, agent_name=agent, top_k=top_k, qvec=qvec)
     if not hits:
         return "No relevant results."

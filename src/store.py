@@ -16,9 +16,19 @@ from .config import EMBEDDING_DIM
 
 
 def connect(db_path: Path) -> sqlite3.Connection:
-    """Open the per-project DB with sqlite-vec loaded and schema ensured."""
+    """Open the per-project DB with sqlite-vec loaded and schema ensured.
+
+    Concurrency: parallel Claude Code sessions, the MCP server, and the
+    PostToolUse / UserPromptSubmit hooks all open the same file. WAL lets
+    readers and a writer coexist; ``busy_timeout`` makes the rare DDL /
+    writer-vs-writer collision wait instead of failing with ``database is
+    locked``.
+    """
     db_path.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+    conn = sqlite3.connect(db_path, timeout=10.0)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
+    conn.execute("PRAGMA busy_timeout=5000")
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)

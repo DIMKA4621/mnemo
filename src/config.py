@@ -32,6 +32,10 @@ RRF_K: int = 60
 
 # Auto-inject (UserPromptSubmit) — how many sections to surface.
 INJECT_TOP_N: int = 3
+# Soft wall-clock budget for one inject / MCP search call (seconds).
+# Sits below Claude Code's 30 s hook timeout so we exit gracefully with a
+# log line instead of being SIGKILL-ed mid-step. Covers embed + search.
+INJECT_BUDGET_S: float = 20.0
 # Weak-match gate (auto-inject path only; manual search is never gated).
 # Cosine-similarity floor on the vector leg + a minimum query length.
 # e5 has a high baseline similarity (anisotropy); measured on the test

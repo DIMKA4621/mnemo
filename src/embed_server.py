@@ -181,8 +181,15 @@ def _obtain_socket() -> socket.socket | None:
     return None
 
 
-def embed_query_via_server(text: str) -> list[float] | None:
+def embed_query_via_server(
+    text: str, *, budget_s: float | None = None,
+) -> list[float] | None:
     """Query embedding from the resident, starting it if needed.
+
+    ``budget_s`` overrides the default recv timeout so callers with a
+    wall-clock budget (hook-inject, MCP memory_search) can bound this
+    step. ``None`` keeps the historical 20 s ceiling for batch / ingest
+    paths where cold start (~3 s) must comfortably fit.
 
     Returns None on ANY failure — the caller skips injection and never
     blocks the user's turn.
@@ -200,9 +207,9 @@ def embed_query_via_server(text: str) -> list[float] | None:
     try:
         with sock:
             _send(sock, {"token": tok, "text": text, "kind": "query"})
-            # Generous: the first request after a cold start loads the
+            # Generous default: first request after a cold start loads the
             # model (~3 s). Steady state is milliseconds.
-            resp = _recv(sock, timeout=20.0)
+            resp = _recv(sock, timeout=budget_s if budget_s is not None else 20.0)
         vec = resp.get("vec")
         return vec if isinstance(vec, list) else None
     except (OSError, ValueError, json.JSONDecodeError):
