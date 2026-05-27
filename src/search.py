@@ -13,7 +13,7 @@ from pathlib import Path
 
 import sqlite_vec
 
-from .config import MIN_QUERY_CHARS, MIN_SIM, RRF_K, TOP_K, resolve
+from .config import MIN_QUERY_CHARS, MIN_SIM, NEIGHBOR_WINDOW, RRF_K, TOP_K, resolve
 from .embedder import embed_query
 from .store import connect, get_vectors
 
@@ -27,6 +27,8 @@ class Hit:
     content: str
     score: float
     sim: float | None = None  # cosine sim vs query; set only on gated calls
+    chunk_index: int = -1     # position in file; -1 only for merged windows
+    span: tuple[int, int] | None = None  # (first, last) chunk_index after merge
 
 
 def _vector_ranked(conn: sqlite3.Connection, qvec: list[float], limit: int) -> list[int]:
@@ -68,6 +70,81 @@ def _rrf(*rankings: list[int]) -> dict[int, float]:
     return scores
 
 
+def _expand_neighbors(
+    conn: sqlite3.Connection, hits: list[Hit], window: int
+) -> list[Hit]:
+    """Widen each hit with ±window adjacent chunks from the same file and
+    merge overlapping windows into one block. Original ranking is
+    preserved: each merged block inherits the position of the best
+    original hit it contains; heading/score/sim also come from that hit.
+    Content is concatenated in chunk-order with a blank line between
+    consecutive chunks (already so in the source markdown).
+    """
+    if not hits or window <= 0:
+        return hits
+
+    # 1) Per-path: collect (chunk_index, original_hit) pairs in original order.
+    by_path: dict[str, list[Hit]] = {}
+    path_order: list[str] = []
+    for h in hits:
+        if h.path not in by_path:
+            path_order.append(h.path)
+            by_path[h.path] = []
+        by_path[h.path].append(h)
+
+    expanded: list[Hit] = []
+    for path in path_order:
+        path_hits = by_path[path]
+        # 2) Build windows and merge by sweeping over sorted indices.
+        windows = sorted(
+            (max(0, h.chunk_index - window), h.chunk_index + window, h)
+            for h in path_hits
+        )
+        intervals: list[tuple[int, int, list[Hit]]] = []
+        for lo, hi, h in windows:
+            if intervals and lo <= intervals[-1][1] + 1:
+                p_lo, p_hi, p_hits = intervals[-1]
+                intervals[-1] = (p_lo, max(p_hi, hi), p_hits + [h])
+            else:
+                intervals.append((lo, hi, [h]))
+
+        # 3) Fetch all chunks for each interval in one query per path.
+        rows = conn.execute(
+            "SELECT chunk_index, content, heading FROM chunks "
+            "WHERE path = ? AND chunk_index BETWEEN ? AND ? "
+            "ORDER BY chunk_index",
+            (path, intervals[0][0], intervals[-1][1]),
+        ).fetchall()
+        by_idx = {r["chunk_index"]: r for r in rows}
+
+        for lo, hi, members in intervals:
+            # Best original hit in this interval drives heading/score/sim/order.
+            best = max(members, key=lambda h: h.score)
+            ordered_idxs = sorted(
+                i for i in range(lo, hi + 1) if i in by_idx
+            )
+            if not ordered_idxs:
+                continue
+            content = "\n\n".join(by_idx[i]["content"] for i in ordered_idxs)
+            expanded.append(
+                Hit(
+                    path=path,
+                    heading=best.heading,
+                    scope=best.scope,
+                    agent_name=best.agent_name,
+                    content=content,
+                    score=best.score,
+                    sim=best.sim,
+                    chunk_index=best.chunk_index,
+                    span=(ordered_idxs[0], ordered_idxs[-1]),
+                )
+            )
+
+    # Restore the global ranking order: sort merged blocks by best-member score.
+    expanded.sort(key=lambda h: h.score, reverse=True)
+    return expanded
+
+
 def search(
     query: str,
     *,
@@ -78,6 +155,7 @@ def search(
     qvec: list[float] | None = None,
     gate: bool = False,
     min_sim: float | None = None,
+    expand_window: int | None = None,
 ) -> list[Hit]:
     """Hybrid (vector-primary + FTS) search with optional scope filter.
 
@@ -144,10 +222,12 @@ def search(
                     content=row["content"],
                     score=fused[cid],
                     sim=sim,
+                    chunk_index=row["chunk_index"],
                 )
             )
             if len(hits) >= top_k:
                 break
-        return hits
+        win = NEIGHBOR_WINDOW if expand_window is None else expand_window
+        return _expand_neighbors(conn, hits, win)
     finally:
         conn.close()

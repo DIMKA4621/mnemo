@@ -29,6 +29,11 @@ CHUNK_CAPACITY: tuple[int, int] = (200, 1200)
 # Search knobs.
 TOP_K: int = 5
 RRF_K: int = 60
+# Neighbor expansion: pull ±N adjacent chunks from the same file around
+# each hit and merge overlapping windows into one block. Wider context
+# helps both the auto-inject path (model has a head start) and agent /
+# CLI searches (one query returns a self-contained excerpt). 0 = off.
+NEIGHBOR_WINDOW: int = 1
 
 # Auto-inject (UserPromptSubmit) — how many sections to surface.
 INJECT_TOP_N: int = 3
