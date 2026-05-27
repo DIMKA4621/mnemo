@@ -26,6 +26,7 @@ class Hit:
     agent_name: str | None
     content: str
     score: float
+    sim: float | None = None  # cosine sim vs query; set only on gated calls
 
 
 def _vector_ranked(conn: sqlite3.Connection, qvec: list[float], limit: int) -> list[int]:
@@ -126,9 +127,13 @@ def search(
                 continue
             if agent_name and row["agent_name"] != agent_name:
                 continue
+            sim: float | None = None
             if gate:
                 cv = gate_vecs.get(cid)
-                if cv is None or _cosine(qvec, cv) < gate_min:
+                if cv is None:
+                    continue
+                sim = _cosine(qvec, cv)
+                if sim < gate_min:
                     continue
             hits.append(
                 Hit(
@@ -138,6 +143,7 @@ def search(
                     agent_name=row["agent_name"],
                     content=row["content"],
                     score=fused[cid],
+                    sim=sim,
                 )
             )
             if len(hits) >= top_k:

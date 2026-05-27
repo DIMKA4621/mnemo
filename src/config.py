@@ -36,6 +36,18 @@ INJECT_TOP_N: int = 3
 # Sits below Claude Code's 30 s hook timeout so we exit gracefully with a
 # log line instead of being SIGKILL-ed mid-step. Covers embed + search.
 INJECT_BUDGET_S: float = 20.0
+
+# Inject telemetry log — JSONL, user-scope, rotated, ONE FILE PER PROJECT.
+# Path: ``state/logs/<projhash>.log`` — same <projhash> as the project's
+# index DB so a log line and its index sit side by side. One line per
+# hook-inject call (ok / skipped / errored) so MIN_SIM / TOP_N / gate
+# behaviour is tunable from real data instead of guesswork. Lives outside
+# git on purpose: project-agnostic, machine-local. Orphan logs from
+# deleted projects can be pruned manually (files are tiny).
+INJECT_LOG_DIR: Path = USER_HOME / "state" / "logs"
+INJECT_LOG_MAX_BYTES: int = 5 * 1024 * 1024   # 5 MB per file
+INJECT_LOG_BACKUPS: int = 3                   # 3 rotated → ~20 MB cap per project
+INJECT_LOG_PROMPT_CHARS: int = 200            # truncate prompt in the log
 # Weak-match gate (auto-inject path only; manual search is never gated).
 # Cosine-similarity floor on the vector leg + a minimum query length.
 # e5 has a high baseline similarity (anisotropy); measured on the test

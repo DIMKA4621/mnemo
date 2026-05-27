@@ -8,6 +8,7 @@
   hook-postedit     PostToolUse target: reindex ONLY if a memory file changed
   hook-inject       UserPromptSubmit target: inject relevant memory
   embed-server      resident embedding helper (auto-started, not run by hand)
+  projects          list known projects (hash → cwd → last inject → log size)
 
 `--root` defaults to the current directory, so the SessionStart hook
 indexes whatever project the session is in.
@@ -90,49 +91,97 @@ def _cmd_hook_inject() -> int:
 
     Wall-clock bounded by ``INJECT_BUDGET_S`` — exits gracefully under
     Claude Code's 30 s hook timeout instead of being SIGKILL-ed.
+
+    Every exit writes one JSONL line via ``inject_log`` so MIN_SIM /
+    INJECT_TOP_N / gate behaviour can be tuned from real data.
     """
     import json
     import time
 
+    from .inject_log import log_inject
+
+    t0 = time.monotonic()
+
+    def elapsed_ms() -> float:
+        return (time.monotonic() - t0) * 1000.0
+
     try:
         payload = json.load(sys.stdin)
     except (json.JSONDecodeError, ValueError):
+        log_inject(
+            status="skipped_bad_payload", cwd=None, prompt="",
+            total_ms=elapsed_ms(), note="stdin was not valid JSON",
+        )
         return 0
 
     prompt = (payload.get("prompt") or payload.get("user_prompt") or "").strip()
+    root = payload.get("cwd")
     if not prompt:
+        log_inject(
+            status="skipped_empty_prompt", cwd=root, prompt="",
+            total_ms=elapsed_ms(),
+        )
         return 0
-    root = payload.get("cwd")  # project root at prompt time
 
     from .config import INJECT_BUDGET_S, INJECT_TOP_N
     from .embed_server import embed_query_via_server
 
-    t0 = time.monotonic()
-
     def remaining() -> float:
         return INJECT_BUDGET_S - (time.monotonic() - t0)
 
+    t_embed_start = time.monotonic()
     vec = embed_query_via_server(prompt, budget_s=max(0.5, remaining()))
+    embed_ms = (time.monotonic() - t_embed_start) * 1000.0
     if vec is None:
         print(
             "mnemo: embedding helper unavailable — memory injection skipped",
             file=sys.stderr,
         )
-        return 0  # never block the turn
+        log_inject(
+            status="skipped_embed_unavailable", cwd=root, prompt=prompt,
+            total_ms=elapsed_ms(), embed_ms=embed_ms,
+        )
+        return 0
     if remaining() <= 0:
         print("mnemo: inject budget exhausted after embed — skipped",
               file=sys.stderr)
+        log_inject(
+            status="skipped_budget_after_embed", cwd=root, prompt=prompt,
+            total_ms=elapsed_ms(), embed_ms=embed_ms,
+        )
         return 0
 
+    t_search_start = time.monotonic()
     hits = search(
         prompt, root=root, scope="project", qvec=vec, gate=True,
         top_k=INJECT_TOP_N,
     )
+    search_ms = (time.monotonic() - t_search_start) * 1000.0
+    hit_records = [
+        {
+            "path": h.path,
+            "heading": h.heading or None,
+            "score": round(h.score, 6),
+            "sim": None if h.sim is None else round(h.sim, 4),
+        }
+        for h in hits
+    ]
+
     if remaining() <= 0:
         print("mnemo: inject budget exhausted after search — skipped",
               file=sys.stderr)
+        log_inject(
+            status="skipped_budget_after_search", cwd=root, prompt=prompt,
+            total_ms=elapsed_ms(), embed_ms=embed_ms, search_ms=search_ms,
+            hits=hit_records,
+        )
         return 0
     if not hits:
+        log_inject(
+            status="ok_no_hits", cwd=root, prompt=prompt,
+            total_ms=elapsed_ms(), embed_ms=embed_ms, search_ms=search_ms,
+            hits=[],
+        )
         return 0  # nothing relevant -> inject nothing (no context noise)
 
     out = ['<project-memory source="mnemo">',
@@ -142,6 +191,58 @@ def _cmd_hook_inject() -> int:
         out.append(f"\n### {h.path} · {h.heading or '(no heading)'}\n{snippet}")
     out.append("</project-memory>")
     print("\n".join(out))
+    log_inject(
+        status="ok", cwd=root, prompt=prompt,
+        total_ms=elapsed_ms(), embed_ms=embed_ms, search_ms=search_ms,
+        hits=hit_records,
+    )
+    return 0
+
+
+def _cmd_projects() -> int:
+    """List known projects: hash → path → last activity → log size.
+
+    Derived from ``state/logs/*.log`` (every JSONL line carries cwd), so
+    no extra manifest is maintained. A project with an index DB but zero
+    inject history is listed as (no log entries yet).
+    """
+    import json
+    from .config import INJECT_LOG_DIR, STATE_DIR
+
+    rows: list[tuple[str, str, str, int]] = []
+    seen_hashes: set[str] = set()
+
+    if INJECT_LOG_DIR.is_dir():
+        for log in sorted(INJECT_LOG_DIR.glob("*.log")):
+            phash = log.stem
+            size = log.stat().st_size
+            cwd, ts = "(unknown)", "—"
+            try:
+                with log.open("rb") as fh:
+                    # Read last line cheaply (small files; logs are KB-sized).
+                    last = fh.read().splitlines()[-1] if size else b""
+                if last:
+                    rec = json.loads(last)
+                    cwd = rec.get("cwd") or "(unknown)"
+                    ts = rec.get("ts") or "—"
+            except (OSError, ValueError, IndexError):
+                pass
+            rows.append((phash, cwd, ts, size))
+            seen_hashes.add(phash)
+
+    if STATE_DIR.is_dir():
+        for db in sorted(STATE_DIR.glob("*.db")):
+            if db.stem not in seen_hashes:
+                rows.append((db.stem, "(no log entries yet)", "—", 0))
+
+    if not rows:
+        print("No mnemo projects found.")
+        return 0
+
+    print(f"{'HASH':<18} {'LAST':<26} {'LOG':>9}  CWD")
+    for phash, cwd, ts, size in rows:
+        size_h = f"{size/1024:.1f}K" if size else "—"
+        print(f"{phash:<18} {ts:<26} {size_h:>9}  {cwd}")
     return 0
 
 
@@ -191,6 +292,10 @@ def main(argv: list[str] | None = None) -> int:
         help="Resident embedding helper (loopback). Auto-started by "
         "hook-inject; not meant to be run by hand.",
     )
+    sub.add_parser(
+        "projects",
+        help="List known projects (hash, path, last activity, log size).",
+    )
 
     pn = sub.add_parser(
         "init",
@@ -225,6 +330,8 @@ def main(argv: list[str] | None = None) -> int:
         from .embed_server import serve
         serve()
         return 0
+    if args.cmd == "projects":
+        return _cmd_projects()
     if args.cmd == "init":
         from .scaffold import init_project
         return init_project(args.root)
