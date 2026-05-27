@@ -269,6 +269,13 @@ def _cmd_search(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Quiet SIGPIPE: `mnemo projects | head` should not traceback.
+    try:
+        import signal
+        signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+    except (AttributeError, ValueError):
+        pass  # Windows has no SIGPIPE; some embeds restrict signal calls.
+
     parser = argparse.ArgumentParser(
         prog="mnemo",
         description="Project memory: .md -> chunk -> embed -> sqlite-vec -> search.",
