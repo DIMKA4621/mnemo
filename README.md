@@ -74,6 +74,40 @@ mnemo mcp                    # stdio MCP server (agent tools)
 invoked by the hooks, not by hand. `$MNEMO_ROOT` overrides the project
 root; `--root` defaults to the current directory.
 
+## Run in a container
+
+Dev/worker containers reuse the **host engine read-only** and keep their own
+**ephemeral** index: mount the engine (code + venv + model), point
+`$MNEMO_STATE_DIR` at an in-container path, and mount the project's `.md`. The
+index lives inside the container and dies with it — no host garbage, no
+re-download, and the `.md` in git stays the only source of truth.
+
+```yaml
+# docker-compose.yml
+services:
+  worker:
+    image: your-image                 # needs python3.12 + libgomp1
+    volumes:
+      - ${HOME}/.claude/mnemo:/root/.claude/mnemo:ro   # engine + venv + model (read-only)
+      - ./project:/workspace/proj:rw                     # the .md memory
+    environment:
+      MNEMO_STATE_DIR: /tmp/mnemo   # ephemeral index — dies with the container
+      MNEMO_ROOT: /workspace/proj
+    # tmpfs:                        # optional: keep the index in RAM
+    #   - /tmp/mnemo
+```
+
+```bash
+docker compose run --rm worker \
+  /root/.claude/mnemo/bin/mnemo search "query" --root /workspace/proj
+```
+
+`MNEMO_STATE_DIR` is the whole trick: it relocates only the writable state
+(index + logs + token), so the engine and model-cache stay read-only and
+shared. Prerequisite: the host is warmed once (`mnemo warmup`); the base image
+needs the host venv's Python minor (`cp312`) at `/usr/bin/python3` plus
+`libgomp1`. Full recipe + an example compose file: [`docs/containers/`](docs/containers/README.md).
+
 ## Develop
 
 This repo **is** the system. `install.sh` mirrors `src/` into the
