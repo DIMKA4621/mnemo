@@ -15,7 +15,14 @@ from pathlib import Path
 USER_HOME: Path = Path(
     os.environ.get("MNEMO_HOME", Path.home() / ".claude" / "mnemo")
 )
-STATE_DIR: Path = USER_HOME / "state"        # one <projhash>.db per project
+# Per-project index DBs. $MNEMO_STATE_DIR relocates just the *writable* state
+# (index + logs + token) without moving the engine or model-cache: a container
+# mounts the engine + model-cache read-only from the host and points this at
+# its own ephemeral filesystem, so the index dies with the container and never
+# litters the host. Unset -> user-scope default, identical to before.
+STATE_DIR: Path = Path(
+    os.environ.get("MNEMO_STATE_DIR", USER_HOME / "state")
+)
 MODEL_CACHE: Path = USER_HOME / "model-cache"  # e5-large, once for all projects
 
 # Embedding model. Decision was multilingual-e5-base; fastembed 0.8.0 ships
@@ -49,7 +56,7 @@ INJECT_BUDGET_S: float = 20.0
 # behaviour is tunable from real data instead of guesswork. Lives outside
 # git on purpose: project-agnostic, machine-local. Orphan logs from
 # deleted projects can be pruned manually (files are tiny).
-INJECT_LOG_DIR: Path = USER_HOME / "state" / "logs"
+INJECT_LOG_DIR: Path = STATE_DIR / "logs"
 INJECT_LOG_MAX_BYTES: int = 5 * 1024 * 1024   # 5 MB per file
 INJECT_LOG_BACKUPS: int = 3                   # 3 rotated → ~20 MB cap per project
 INJECT_LOG_PROMPT_CHARS: int = 200            # truncate prompt in the log
@@ -67,7 +74,7 @@ MIN_QUERY_CHARS: int = 8
 # Linux/macOS/Windows parity with zero OS-specific quirks.
 EMBED_HOST: str = "127.0.0.1"
 EMBED_PORT: int = int(os.environ.get("MNEMO_EMBED_PORT", "8917"))
-EMBED_TOKEN_FILE: Path = USER_HOME / "state" / "embed.token"
+EMBED_TOKEN_FILE: Path = STATE_DIR / "embed.token"
 EMBED_IDLE_TIMEOUT: int = 1800  # resident exits after 30 min idle
 
 # Embedding CPU cap. ONNX Runtime defaults to ALL cores per embed call;

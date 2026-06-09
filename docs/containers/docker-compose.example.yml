@@ -1,0 +1,37 @@
+# Example: run mnemo inside a worker / dev container.
+#
+# The host engine (code + venv + model-cache) is mounted READ-ONLY and shared by
+# every container; each container keeps its own EPHEMERAL index under
+# MNEMO_STATE_DIR, which dies with the container. The .md under ./project is the
+# only source of truth.
+#
+# Prerequisite (host, once):
+#   ./install.sh
+#   ~/.claude/mnemo/bin/mnemo warmup      # populates model-cache (~2.2 GB)
+#
+# Base image must carry Python 3.12.x at /usr/bin/python3 (cp312 ABI) + libgomp1.
+#
+# One-off ingest / search:
+#   docker compose run --rm worker \
+#     /root/.claude/mnemo/bin/mnemo ingest --root /workspace/proj
+#   docker compose run --rm worker \
+#     /root/.claude/mnemo/bin/mnemo search "your query" --root /workspace/proj
+
+services:
+  worker:
+    image: your-worker-image            # must carry python3.12 + libgomp1
+    volumes:
+      # engine: code + venv + model-cache — read-only, shared by every container
+      - ${HOME}/.claude/mnemo:/root/.claude/mnemo:ro
+      # project memory: the .md files, the single source of truth (edit on host)
+      - ./project:/workspace/proj:rw
+    environment:
+      # the whole trick: relocate ONLY the writable state (index + logs + token)
+      # into the container, so the engine + model-cache stay read-only and shared
+      MNEMO_STATE_DIR: /tmp/mnemo
+      # pin the project root regardless of the process cwd
+      MNEMO_ROOT: /workspace/proj
+    tmpfs:
+      # Optional: back the ephemeral index with RAM (faster, zero disk writes).
+      # Ephemerality is unchanged either way — the index dies with the container.
+      - /tmp/mnemo
