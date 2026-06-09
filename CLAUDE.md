@@ -60,6 +60,38 @@ mnemo mcp                     stdio MCP server (memory_search / memory_reindex)
 mnemo hook-postedit           PostToolUse target (acts only on memory files)
 ```
 
+`mnemo` is the launcher at `~/.claude/mnemo/bin/mnemo` — it is NOT on
+PATH by default. Either call it by full path, or add `~/.claude/mnemo/bin`
+to PATH / make a shell alias. The git-tracked hooks and MCP always use
+the full path, so they work regardless.
+
+## Updating the engine (after pulling new code)
+
+The engine (`~/.claude/mnemo/`) is a mirror of this repo's `src/`, shared
+by every project on the machine. It is decoupled from the repo: editing
+`src/` here changes nothing until you re-run the installer. To roll out
+an update:
+
+```
+cd /home/dima/work_projects/other/mnemo   # the repo
+git pull                                  # if updating from a remote
+./install.sh                              # idempotent re-mirror + deps
+./install.sh --check                      # optional: verify engine state
+```
+
+`install.sh` is idempotent and safe to re-run: it re-mirrors `src/`
+(`rsync --delete`), reinstalls deps (pip), and rewrites the launcher. It
+**never** touches `state/` (per-project indexes) or `model-cache/`, so no
+re-warmup and no re-index are needed for a code-only update. No skill is
+required — this is a plain shell command, not a `mnemo` subcommand.
+
+Extra steps only when:
+- the embedding model changed in `src/config.py` → also run
+  `~/.claude/mnemo/bin/mnemo warmup` and let the index rebuild;
+- the wiring schema changed (hooks / `.mcp.json` shape) → re-run
+  `~/.claude/mnemo/bin/mnemo init` in each adopted project (additive,
+  idempotent — it only adds mnemo's own keys).
+
 ## Locked decisions (see Claude memory for full rationale)
 
 - Embedding: `multilingual-e5-large` via fastembed (documented fallback
