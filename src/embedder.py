@@ -40,11 +40,35 @@ def _model() -> TextEmbedding:
     # threads caps ONNX intra-op parallelism: without it every embed call
     # fans out across ALL cores and the serial resident pegs the machine
     # under multi-agent load. See config.EMBED_THREADS.
-    return TextEmbedding(
-        model_name=EMBEDDING_MODEL,
-        cache_dir=str(MODEL_CACHE),
-        threads=EMBED_THREADS,
-    )
+    #
+    # ONNX Runtime also busy-spins its intra-op threads between inferences
+    # (allow_spinning defaults to "1"). Harmless for the per-message CLI
+    # path, but the resident embed-server keeps the session alive, so those
+    # EMBED_THREADS workers never sleep and peg whole cores at idle (e.g.
+    # 4 threads -> ~350% CPU). fastembed exposes no hook for ORT session
+    # config entries, so wrap InferenceSession just while fastembed builds
+    # the session and disable spinning; the wrapper is restored immediately.
+    import onnxruntime as ort
+
+    _orig_session = ort.InferenceSession
+
+    def _no_spin_session(*args, **kwargs):
+        so = kwargs.get("sess_options")
+        if so is not None:
+            so.add_session_config_entry(
+                "session.intra_op.allow_spinning", "0"
+            )
+        return _orig_session(*args, **kwargs)
+
+    ort.InferenceSession = _no_spin_session
+    try:
+        return TextEmbedding(
+            model_name=EMBEDDING_MODEL,
+            cache_dir=str(MODEL_CACHE),
+            threads=EMBED_THREADS,
+        )
+    finally:
+        ort.InferenceSession = _orig_session
 
 
 def warmup() -> int:
