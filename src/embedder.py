@@ -58,6 +58,18 @@ def _model() -> TextEmbedding:
             so.add_session_config_entry(
                 "session.intra_op.allow_spinning", "0"
             )
+            # Bound the CPU memory arena. ONNX Runtime keeps a reusable
+            # allocation arena that grows to the largest single run's peak
+            # (a full batch of e5-large) and never returns it to the OS.
+            # A short-lived CLI process never notices, but the resident
+            # holds one session for its whole life: with idle-exit disabled
+            # (shared server), one cold ingest inflates it to ~5 GB+ and it
+            # stays there. Disabling the arena makes allocations transient —
+            # freed after each run — so RSS tracks live tensors (~model
+            # footprint) forever. Measured: peak 5407 MB -> 1563 MB, stable
+            # across batches; ~25% slower per big ingest batch (the query
+            # path embeds one text, so search latency is unaffected).
+            so.enable_cpu_mem_arena = False
         return _orig_session(*args, **kwargs)
 
     ort.InferenceSession = _no_spin_session
