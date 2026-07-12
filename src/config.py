@@ -69,13 +69,32 @@ INJECT_LOG_PROMPT_CHARS: int = 200            # truncate prompt in the log
 MIN_SIM: float = 0.83
 MIN_QUERY_CHARS: int = 8
 
-# Warm embedding helper (resident model holder). Loopback TCP — NOT a unix
-# socket: CPython does not expose socket.AF_UNIX on Windows, and we need
+# Warm embedding helper (resident model holder). TCP — NOT a unix socket:
+# CPython does not expose socket.AF_UNIX on Windows, and we need
 # Linux/macOS/Windows parity with zero OS-specific quirks.
-EMBED_HOST: str = "127.0.0.1"
+#
+# Two addresses, two roles: $MNEMO_EMBED_BIND is what the resident listens
+# on, $MNEMO_EMBED_HOST is what a client dials. Both default to loopback,
+# so the base mode is unchanged: one resident per machine, nothing on the
+# network. Widening the bind lets isolated environments on the same machine
+# (e.g. containers reaching the host over its bridge address) share a single
+# resident and a single copy of the model in RAM. Exposing the resident
+# beyond the machine is a deployment decision, guarded outside this process.
+EMBED_BIND: str = os.environ.get("MNEMO_EMBED_BIND", "127.0.0.1")
+EMBED_HOST: str = os.environ.get("MNEMO_EMBED_HOST", "127.0.0.1")
 EMBED_PORT: int = int(os.environ.get("MNEMO_EMBED_PORT", "8917"))
 EMBED_TOKEN_FILE: Path = STATE_DIR / "embed.token"
-EMBED_IDLE_TIMEOUT: int = 1800  # resident exits after 30 min idle
+
+# A client may only autostart a resident it can actually own: one reachable
+# on this machine's loopback. Pointed at a remote resident, the client uses
+# it as-is and degrades gracefully when it is down — spawning a shadow copy
+# of the model next to it would silently undo the whole point of sharing one.
+_LOOPBACK: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
+EMBED_HOST_IS_LOCAL: bool = EMBED_HOST in _LOOPBACK
+
+# Idle exit frees the ~1.6 GB the resident holds. 0 disables it: a machine
+# serving isolated environments keeps the model resident permanently.
+EMBED_IDLE_TIMEOUT: int = int(os.environ.get("MNEMO_EMBED_IDLE_TIMEOUT", "1800"))
 
 # Embedding CPU cap. ONNX Runtime defaults to ALL cores per embed call;
 # the serial resident under multi-agent load then pegs the whole machine.

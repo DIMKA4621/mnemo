@@ -5,15 +5,15 @@ user message; loading e5-large each time costs ~3 s + ~1.6 GB. This keeps
 one model resident per machine and answers query embeddings over loopback
 TCP in milliseconds.
 
-Sanctioned exception to the Memory-design-v2 "no daemon" anti-pattern:
-light, local, user-scoped, loopback-only, auto-started, idle-exiting,
-nothing in git, nothing to install. The model is still never downloaded
-implicitly — ``warmup`` stays explicit; the resident only holds an already
-downloaded model.
+Light, local, user-scoped, auto-started, idle-exiting; nothing in git,
+nothing to install. The model is still never downloaded implicitly —
+``warmup`` stays explicit; the resident only holds an already downloaded
+model. Base mode is loopback-only; the bind and dial addresses are
+configurable so isolated environments on one machine can share a single
+resident (see ``config.EMBED_BIND`` / ``EMBED_HOST``).
 
 NOT a unix socket: CPython does not expose ``socket.AF_UNIX`` on Windows.
-Loopback TCP (127.0.0.1) + a token file behaves identically on
-Linux / macOS / Windows.
+TCP + a token file behaves identically on Linux / macOS / Windows.
 """
 from __future__ import annotations
 
@@ -27,7 +27,9 @@ import time
 from pathlib import Path
 
 from .config import (
+    EMBED_BIND,
     EMBED_HOST,
+    EMBED_HOST_IS_LOCAL,
     EMBED_IDLE_TIMEOUT,
     EMBED_PORT,
     EMBED_TOKEN_FILE,
@@ -75,18 +77,28 @@ def _token() -> str:
 
 
 def serve() -> None:
-    """Resident model holder. Binds loopback, serves embeddings, exits on
-    idle. Singleton: if the port is already taken another instance won —
-    exit quietly."""
+    """Resident model holder. Binds $MNEMO_EMBED_BIND, serves embeddings,
+    exits on idle. Singleton: if the port is already held, this instance
+    steps aside — but says so on stderr, because a resident bound to a
+    narrower address (e.g. a loopback one that autostarted first) silently
+    shadows a wanted shared bind and cuts every remote client off."""
     tok = _token()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
-        srv.bind((EMBED_HOST, EMBED_PORT))
-    except OSError:
-        return  # another resident already owns the port
+        srv.bind((EMBED_BIND, EMBED_PORT))
+    except OSError as e:
+        print(
+            f"mnemo embed-server: cannot bind {EMBED_BIND}:{EMBED_PORT} "
+            f"({e.strerror or e}); another resident already holds the port — "
+            f"stepping aside. If you meant this one to serve remotely, stop "
+            f"the other resident first.",
+            file=sys.stderr,
+        )
+        return
     srv.listen(8)
-    srv.settimeout(EMBED_IDLE_TIMEOUT)
+    # 0 -> no idle exit: stay resident for the environments we serve.
+    srv.settimeout(EMBED_IDLE_TIMEOUT or None)
 
     # Lazy: the model loads on the first request (the documented ~3 s cost,
     # paid once per cold start, not per message).
@@ -165,12 +177,18 @@ def _spawn_server() -> None:
 def _obtain_socket() -> socket.socket | None:
     """Connect to the resident, spawning + waiting for it on a cold start.
 
+    Only a resident on this machine's loopback is ours to start. When
+    $MNEMO_EMBED_HOST names a remote one, we take it as-is: an unreachable
+    remote must not make us load a second copy of the model right next to it.
+
     Returns None if the resident cannot be reached — every caller must
     treat that as "degrade gracefully", never as fatal.
     """
     sock = _connect(timeout=0.5)
     if sock is not None:
         return sock
+    if not EMBED_HOST_IS_LOCAL:
+        return None
     _spawn_server()
     deadline = time.time() + 5.0  # process bind is fast (no model yet)
     while time.time() < deadline:
