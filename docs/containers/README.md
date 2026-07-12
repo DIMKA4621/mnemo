@@ -109,10 +109,100 @@ it with `install.sh`. (Note: application/worker images that do **not** run
 Claude Code don't need any of this; only the container where Claude Code and
 its hooks run needs the engine.)
 
+---
+
+# Persistent profile: reuse the host's index, share one resident
+
+The ephemeral profile above rebuilds the index inside every container. That
+first build is the whole cost of e5-large on CPU (~0.85 s/chunk, minutes for a
+real memory tree). When containers for the **same** project come and go on one
+host, a second profile avoids paying it every time: the container reads the
+index the **host** already built, and reuses one resident model for embedding.
+
+Two things make it work, both already in the engine.
+
+## 1. Same path → same index
+
+A project's index is keyed by `sha1(absolute project root path)`. So if the
+project is mounted **at the same absolute path it has on the host**, the
+container resolves the **same** `<projhash>.db`. Point
+`MNEMO_STATE_DIR` at the host's `state/` mounted **read-write**, and the
+container reads and updates the very file the host wrote.
+
+```
+HOST                                         CONTAINER
+~/.claude/mnemo             ──:ro──►  ~/.claude/mnemo            (engine + model)
+~/.claude/mnemo/state       ──:rw──►  ~/.claude/mnemo/state      (index — shared)
+/abs/path/to/project        ──:rw──►  /abs/path/to/project       (same path!)
+                                       └─ same sha1 → same <projhash>.db
+```
+
+The index lives on the host, so recreating the container never rebuilds it, and
+`SessionStart → ingest` inside the container only hash-diffs the changed files
+(seconds, well within the 60 s hook budget). `state` must be `:rw`, not `:ro`:
+opening the store runs `PRAGMA` + `CREATE TABLE IF NOT EXISTS` every time, so
+even a pure `search` writes.
+
+**You own path stability.** Same path across containers → shared index
+(concurrency-safe: the store uses WAL + `busy_timeout`, on a **local** fs — not
+NFS). Distinct paths → one index per container. Pick deliberately.
+
+## 2. One resident on the host, shared by containers
+
+Instead of each container loading its own ~1.6 GB copy of the model, run one
+resident on the host and let containers dial it:
+
+| Env | Role | For this profile |
+|-----|------|------------------|
+| `MNEMO_EMBED_BIND` | address the resident **listens** on | `0.0.0.0` on the host (so both host loopback and containers reach it) |
+| `MNEMO_EMBED_HOST` | address a client **dials** | `host.docker.internal` in the container |
+| `MNEMO_EMBED_IDLE_TIMEOUT` | idle seconds before exit | `0` on the host resident — stay resident |
+
+Defaults are `127.0.0.1` / `127.0.0.1` / `1800`, so nothing changes for the
+plain single-machine case. A client only autostarts a resident it can own (one
+on loopback); pointed at `host.docker.internal` it uses the host resident as-is
+and, if that resident is down, degrades gracefully (search still works, it just
+loads the model in-process that once) — it never spawns a hidden second copy.
+
+Run the host resident as a **persistent service**, not a session-transient
+process — a bare `systemd-run --user` unit tied to a shell gets reaped when that
+shell exits. A System unit, a `--user` unit with `loginctl enable-linger`, or a
+small container works:
+
+```
+[Unit]
+Description=mnemo shared embedding resident
+[Service]
+Environment=MNEMO_EMBED_BIND=0.0.0.0
+Environment=MNEMO_EMBED_IDLE_TIMEOUT=0
+ExecStart=%h/.claude/mnemo/.venv/bin/python -m src.cli embed-server
+WorkingDirectory=%h/.claude/mnemo
+Restart=on-failure
+[Install]
+WantedBy=default.target
+```
+
+Bind `0.0.0.0` exposes the port on every interface — the token in
+`state/embed.token` is a shared secret, not authentication, so keep the port off
+the public network (firewall, or bind the docker bridge address instead).
+
+A permanent resident never idle-exits, so ONNX's CPU memory arena — which is
+freed on each restart in the plain profile — would otherwise accumulate; the
+engine disables that arena (`perf(embedder): bound ONNX CPU memory arena`) so
+resident RSS stays at the model footprint indefinitely.
+
+A ready-to-adapt file lives next to this doc:
+[`docker-compose.persistent.example.yml`](docker-compose.persistent.example.yml).
+
 ## Verified
 
-Checked end to end — read-only engine + read-only `model-cache` + ephemeral
-in-container state, then `ingest` and `search` — on both a throwaway
-`ubuntu:24.04` container and a real `ccde:latest` dev image. Result:
-**`model-cache:ro` loads fine** (no write into the shared model is needed), so
-`:ro` is the right mount mode for fleets of workers.
+- **Ephemeral profile** — read-only engine + read-only `model-cache` + ephemeral
+  in-container state, then `ingest` and `search`, on a throwaway `ubuntu:24.04`
+  container and a real `ccde:latest` dev image. `model-cache:ro` loads fine, so
+  `:ro` is the right mount mode for fleets of workers.
+- **Persistent profile** — end to end on `ubuntu:24.04` against the host's real
+  voice-agent index: a container at the mirrored path resolved the same
+  `<projhash>.db` and searched it with **no re-index**; destroying and recreating
+  the container left the index intact; a matching-uid container wrote no
+  root-owned files; the shared host resident embedded a container query in
+  ~0.07 s.

@@ -1,0 +1,48 @@
+# Example: persistent profile — a container reuses the HOST's already-built
+# index and a single shared resident, instead of building its own.
+#
+# How it works (see README.md → "Persistent profile"):
+#   - the project is mounted at the SAME absolute path it has on the host, so
+#     sha1(path) resolves to the same <projhash>.db the host already wrote;
+#   - state/ is mounted READ-WRITE from the host, so that .db is literally shared
+#     (survives `docker rm`; recreating the container does not rebuild the index);
+#   - the container dials the host's resident (one copy of the model in RAM for
+#     the whole machine) instead of loading its own.
+#
+# Prerequisite (host):
+#   ./install.sh
+#   ~/.claude/mnemo/bin/mnemo warmup            # populates model-cache (~2.2 GB)
+#   run the shared resident as a PERSISTENT service with:
+#     MNEMO_EMBED_BIND=0.0.0.0  MNEMO_EMBED_IDLE_TIMEOUT=0
+#   (a systemd unit — see README.md; not a session-transient `systemd-run --user`)
+#
+# Base image must carry Python 3.12.x at /usr/bin/python3 (cp312 ABI) + libgomp1.
+#
+# ${HOST_HOME} is the host user's home; ${PROJECT_PATH} is the project's absolute
+# path on the host — it MUST be identical inside the container for the hash to
+# match. Set both in a .env file next to this compose, e.g.:
+#   HOST_HOME=/home/alice
+#   PROJECT_PATH=/home/alice/work/myproject
+
+services:
+  worker:
+    image: your-worker-image              # must carry python3.12 + libgomp1
+    user: "${HOST_UID:-1000}:${HOST_GID:-1000}"   # match host uid so state stays host-owned
+    working_dir: ${PROJECT_PATH}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # dial the host's resident; not a loopback name, so the client never
+      # autostarts a shadow copy of the model in here
+      MNEMO_EMBED_HOST: host.docker.internal
+      MNEMO_EMBED_PORT: "8917"
+      MNEMO_ROOT: ${PROJECT_PATH}
+      # engine lives at the host path, not the container's $HOME/.claude/mnemo
+      MNEMO_HOME: ${HOST_HOME}/.claude/mnemo
+    volumes:
+      # engine: code + venv + model-cache — read-only, shared
+      - ${HOST_HOME}/.claude/mnemo:${HOST_HOME}/.claude/mnemo:ro
+      # state: the index + logs + token — READ-WRITE, this is the shared .db
+      - ${HOST_HOME}/.claude/mnemo/state:${HOST_HOME}/.claude/mnemo/state:rw
+      # the project, mirrored at its host path — this is what makes sha1() match
+      - ${PROJECT_PATH}:${PROJECT_PATH}:rw
