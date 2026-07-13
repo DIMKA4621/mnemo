@@ -100,11 +100,20 @@ def reindex(root: Path | str | None = None, verbose: bool = True) -> None:
                 continue
             # Embed via the warm resident so neither the PostToolUse hook
             # nor the long-lived MCP process loads the model itself.
-            # Fall back in-process only if the resident is unreachable.
             from .embed_server import embed_passages_via_server
             vectors = embed_passages_via_server(texts)
             if vectors is None:
-                from .embedder import embed_passages
+                # Resident unreachable. Fall back to an in-process embed
+                # ONLY if the model is already cached — never trigger an
+                # implicit ~2 GB download (the whole point of a remote-
+                # resident deployment, e.g. a model-less container).
+                from .embedder import embed_passages, is_model_cached
+                if not is_model_cached():
+                    raise RuntimeError(
+                        f"cannot embed {relpath}: embedding resident "
+                        f"unreachable and no local model cached. Start the "
+                        f"resident (MNEMO_EMBED_HOST) or run `mnemo warmup`."
+                    )
                 vectors = embed_passages(texts)
             for chunk, vec in zip(chunks, vectors):
                 insert_chunk(conn, relpath, chunk.index, scope, agent,

@@ -20,6 +20,7 @@ import sys
 from pathlib import Path
 
 from .config import TOP_K, resolve
+from .embed_server import server_is_up
 from .embedder import is_model_cached, warmup
 from .index import pending_embeddings, reindex
 from .search import search
@@ -34,11 +35,19 @@ def _cmd_warmup() -> int:
 
 def _cmd_ingest(root: Path) -> int:
     # Never silently pull 2 GB inside a hook: refuse if work needs the
-    # model but it was never warmed up.
-    if pending_embeddings(root) and not is_model_cached():
+    # model but it was never warmed up AND no resident is reachable to
+    # embed remotely. A live resident (local or a shared/remote one via
+    # MNEMO_EMBED_HOST) means the model is never loaded here — proceed.
+    if (
+        pending_embeddings(root)
+        and not is_model_cached()
+        and not server_is_up()
+    ):
         print(
-            "mnemo: changes detected but the model is not cached.\n"
-            "Run `mnemo warmup` once, then this will work.",
+            "mnemo: changes detected, but the model is not cached and no "
+            "embedding resident is reachable.\n"
+            "Run `mnemo warmup` once, or start / point to a resident "
+            "(MNEMO_EMBED_HOST).",
             file=sys.stderr,
         )
         return 2

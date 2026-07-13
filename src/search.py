@@ -173,7 +173,18 @@ def search(
     conn = connect(db)
     try:
         if qvec is None:
-            qvec = embed_query(query)
+            # Prefer the resident so a container / model-less host offloads
+            # the query embedding to the shared model. Fall back in-process
+            # ONLY if a model is actually cached — a search must never
+            # trigger an implicit ~2 GB download; if it can't embed, it
+            # degrades to "no results".
+            from .embed_server import embed_query_via_server
+            qvec = embed_query_via_server(query)
+            if qvec is None:
+                from .embedder import is_model_cached
+                if not is_model_cached():
+                    return []
+                qvec = embed_query(query)
         pool = max(top_k * 4, 20)
         vec_ids = _vector_ranked(conn, qvec, pool)
         try:

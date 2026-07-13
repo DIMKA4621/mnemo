@@ -308,12 +308,13 @@ def init_project(root: str | None) -> int:
 
     # Best-effort first ingest: wiring is the deliverable; the model is
     # an explicit separate `warmup` step the adopt skill orchestrates.
+    from .embed_server import server_is_up
     from .embedder import is_model_cached
     from .index import pending_embeddings, reindex
 
-    if pending_embeddings(proj) and not is_model_cached():
-        print("  ingest               skipped — model not warmed "
-              "(run `mnemo warmup`, then ingest)")
+    if pending_embeddings(proj) and not is_model_cached() and not server_is_up():
+        print("  ingest               skipped — model not warmed and no "
+              "resident reachable (run `mnemo warmup`, then ingest)")
     else:
         reindex(proj)
         print("  ingest               index built")

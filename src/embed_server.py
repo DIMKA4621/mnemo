@@ -199,6 +199,21 @@ def _obtain_socket() -> socket.socket | None:
     return None
 
 
+def server_is_up() -> bool:
+    """True if a resident is currently reachable — a quick TCP probe.
+
+    Lets callers that would otherwise refuse for a missing *local* model
+    proceed when embeddings can be offloaded to a live resident (e.g. a
+    container that ships no model and dials a shared remote one). Does not
+    autostart anything — a pure liveness check on the configured address.
+    """
+    sock = _connect(timeout=0.5)
+    if sock is None:
+        return False
+    sock.close()
+    return True
+
+
 def embed_query_via_server(
     text: str, *, budget_s: float | None = None,
 ) -> list[float] | None:
