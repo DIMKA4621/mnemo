@@ -11,14 +11,22 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 # Search the bundled fixture corpus (mnemo keeps no in-repo memory).
 FIXTURE = str(Path(__file__).resolve().parent / "fixtures")
-LAUNCHER = str(Path.home() / ".claude" / "mnemo" / "bin" / "mnemo")
+_default_launcher = Path.home() / ".claude" / "mnemo" / "bin" / "mnemo"
+if os.name == "nt":
+    _default_launcher = _default_launcher.with_suffix(".exe")
+LAUNCHER = os.environ.get("MNEMO_TEST_LAUNCHER", str(_default_launcher))
 
 _passed = _failed = 0
 
@@ -40,10 +48,16 @@ def _text(result) -> str:
 
 
 async def main() -> int:
+    temporary_state = tempfile.TemporaryDirectory(prefix="mnemo-mcp-state-")
+    state_dir = os.environ.get("MNEMO_TEST_STATE_DIR", temporary_state.name)
     params = StdioServerParameters(
         command=LAUNCHER,
         args=["mcp"],
-        env={**os.environ, "MNEMO_ROOT": FIXTURE},
+        env={
+            **os.environ,
+            "MNEMO_ROOT": FIXTURE,
+            "MNEMO_STATE_DIR": state_dir,
+        },
     )
     async with stdio_client(params) as (read, write):
         async with ClientSession(read, write) as session:
@@ -78,6 +92,7 @@ async def main() -> int:
                   "agent-memory/reviewer/" in txt and "/developer/" not in txt,
                   detail=txt[:120])
 
+    temporary_state.cleanup()
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

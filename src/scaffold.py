@@ -13,9 +13,10 @@ This is a SAFE primitive, not a judgement call. It only ever:
     confirmation). It never edits CLAUDE.md.
 
 The git-tracked invocation is portable by construction: hooks use the
-shell form so `~` expands per-user at run time; the MCP `command` is a
-`/bin/sh -c` wrapper so `$HOME` expands there too. No machine-specific
-path is ever written into git.
+shell form so `~` expands per-user at run time; the MCP server directly
+executes the same logical launcher path after Claude Code expands
+`${HOME}`. Installers provide that contract as a script on POSIX and a
+real executable on Windows. No machine-specific path is written into git.
 """
 from __future__ import annotations
 
@@ -28,12 +29,13 @@ from .config import resolve
 # time — nothing machine-specific lands in git.
 _LAUNCHER = "~/.claude/mnemo/bin/mnemo"
 
-# `.mcp.json` cannot shell-expand `~`; only documented `${VAR}` works and
-# HOME is not guaranteed there. A `/bin/sh -c` wrapper expands $HOME
-# reliably and stays portable.
+# `.mcp.json` expands documented `${VAR}` placeholders before direct
+# process creation. The Windows installer establishes HOME when absent;
+# Windows resolves the extensionless path to mnemo.exe.
 _MCP_SERVER = {
-    "command": "/bin/sh",
-    "args": ["-c", 'exec "$HOME/.claude/mnemo/bin/mnemo" mcp'],
+    "type": "stdio",
+    "command": "${HOME}/.claude/mnemo/bin/mnemo",
+    "args": ["mcp"],
 }
 
 # One hook group per event. Shell form (a bare `command` string, no

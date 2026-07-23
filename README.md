@@ -33,6 +33,14 @@ Two layers, cleanly separated:
 | Source of truth (`.md`) | `<project>/.claude/memory/` + `.claude/agent-memory/` | **yes** |
 | Index DB | `~/.claude/mnemo/state/<projhash>.db` — per project, rebuildable | no |
 
+The engine installs on Linux, macOS and native Windows — `install.sh` on
+POSIX, `install.ps1` (built-in PowerShell 5.1+, 64-bit Python 3.10+, no
+WSL/PATH needed) on Windows. On Windows the installer sets the user
+`HOME` if absent and refuses a value that differs from `%USERPROFILE%`,
+so MCP and hooks resolve the same canonical path. After first creating
+`HOME`, close and reopen the launching terminal or IDE before restarting
+Claude Code. Everything below is identical across platforms.
+
 Adoption commits a tiny bit of git-tracked wiring into the project so it
 travels with the repo:
 
@@ -110,13 +118,21 @@ needs the host venv's Python minor (`cp312`) at `/usr/bin/python3` plus
 
 ## Develop
 
-This repo **is** the system. `install.sh` mirrors `src/` into the
-engine home; tests run against the source:
+This repo **is** the system. `install.sh` (POSIX) / `install.ps1`
+(Windows) mirrors `src/` into the engine home; tests run against the
+source:
 
 ```bash
+# Linux / macOS
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
 .venv/bin/python tests/test_search.py   # labeled recall eval
 .venv/bin/python tests/test_mcp.py      # standalone MCP client check
+```
+```powershell
+# native Windows (PowerShell 5.1+)
+py -3 -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
+.\.venv\Scripts\python tests\test_search.py   # labeled recall eval
+.\.venv\Scripts\python tests\test_mcp.py      # standalone MCP client check
 ```
 
 Design source of truth: `docs/Memory-design-v2.md` (architecture) and

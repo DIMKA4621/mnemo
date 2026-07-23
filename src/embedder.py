@@ -22,12 +22,49 @@ from .config import EMBED_THREADS, EMBEDDING_MODEL, MODEL_CACHE
 warnings.filterwarnings("ignore", message=".*mean pooling instead of CLS.*")
 
 
+def _model_cache_spec() -> tuple[str, set[str]] | None:
+    """Return the FastEmbed repository and required files for our model."""
+    for metadata in TextEmbedding.list_supported_models():
+        if metadata.get("model") != EMBEDDING_MODEL:
+            continue
+        sources = metadata.get("sources") or {}
+        repository = sources.get("hf")
+        model_file = metadata.get("model_file")
+        if not repository or not model_file:
+            return None
+        required = {
+            "config.json",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            str(model_file),
+        }
+        required.update(str(name) for name in metadata.get("additional_files", []))
+        return str(repository), required
+    return None
+
+
 def is_model_cached() -> bool:
-    """True if the model is already downloaded under the user-scope cache."""
+    """True only when our configured model has a complete local snapshot."""
     if not MODEL_CACHE.exists():
         return False
-    needle = EMBEDDING_MODEL.split("/")[-1].lower()
-    return any(needle in p.name.lower() for p in MODEL_CACHE.rglob("*"))
+    spec = _model_cache_spec()
+    if spec is None:
+        return False
+    repository, required = spec
+    expected_root = f"models--{repository.replace('/', '--')}".lower()
+    model_file = next(name for name in required if name.endswith(".onnx"))
+    for model_root in MODEL_CACHE.iterdir():
+        if not model_root.is_dir() or model_root.name.lower() != expected_root:
+            continue
+        for candidate in model_root.rglob(model_file):
+            snapshot = candidate.parent
+            if all(
+                (snapshot / name).is_file()
+                and (snapshot / name).stat().st_size > 0
+                for name in required
+            ):
+                return True
+    return False
 
 
 @lru_cache(maxsize=1)

@@ -25,12 +25,21 @@ it begins with `-`. Example (empirically confirmed):
 
 So: `slug = project_abs_path` with `/` → `-` and `_` → `-`.
 
-**Do not trust the formula blindly — confirm by listing.** Compute the
-candidate, then:
+**Do not trust the formula blindly — confirm by listing.** The slug rule
+is Claude Code's, not mnemo's, and differs by OS (Windows paths carry a
+drive letter and backslashes) — so match by listing, not by transforming
+the path. Compute the candidate, then, for the current OS:
 
 ```bash
+# Linux / macOS
 ls -1 ~/.claude/projects/ | grep -F "$(basename "$PWD")"
 ls -la ~/.claude/projects/<slug>/ 2>/dev/null
+```
+```powershell
+# native Windows (PowerShell 5.1+)
+Get-ChildItem "$HOME\.claude\projects\" -Name |
+  Select-String ([regex]::Escape((Split-Path -Leaf $PWD)))
+Get-ChildItem "$HOME\.claude\projects\<slug>\" -ErrorAction SilentlyContinue
 ```
 
 Match the directory whose name corresponds to the current project's

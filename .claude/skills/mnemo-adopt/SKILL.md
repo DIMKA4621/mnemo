@@ -69,8 +69,17 @@ plans and delegates to a team of teammate agents.
 
 Change nothing. Establish:
 
-**Engine** (`bash <mnemo-repo>/install.sh --check` if available, else
-inspect `~/.claude/mnemo/`): installed? model warmed?
+**Engine** — check with the installer for the current OS, else inspect
+`~/.claude/mnemo/`: installed? model warmed?
+
+```bash
+bash <mnemo-repo>/install.sh --check        # Linux / macOS
+```
+```powershell
+# native Windows
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "<mnemo-repo>\install.ps1" -Check
+```
 
 **Project** (current dir = root):
 
@@ -126,15 +135,27 @@ decisions, ask the user to re-run interactively. Do not assume.
 
 ### Step 3 — Run the deterministic primitives
 
-Only what was approved, in order:
+Only what was approved, in order. Use the block for the current OS:
 
 ```bash
-bash <mnemo-repo>/install.sh             # if engine missing
+# Linux / macOS
+bash <mnemo-repo>/install.sh              # if engine missing
 ~/.claude/mnemo/bin/mnemo warmup          # if approved (one-time)
 ~/.claude/mnemo/bin/mnemo init --root "$PWD"
 ```
+```powershell
+# native Windows (PowerShell 5.1+)
+powershell.exe -NoProfile -ExecutionPolicy Bypass `
+  -File "<mnemo-repo>\install.ps1"                   # if engine missing
+& "$HOME\.claude\mnemo\bin\mnemo.exe" warmup        # if approved (one-time)
+& "$HOME\.claude\mnemo\bin\mnemo.exe" init --root "$PWD"
+```
 
-Capture `mnemo init` output. A `refused — …` line means it wrote
+On a first Windows install `install.ps1` may set the user `HOME` (only
+if absent). Relay its instruction precisely: close and reopen the terminal
+or IDE that launches Claude Code, then restart Claude Code so it inherits
+`HOME`. If installer reports a mismatched existing `HOME`, stop rather than
+working around the canonical-path contract. Capture `mnemo init` output. A `refused — …` line means it wrote
 nothing (expected when an old hardcoded entry exists) — carry the
 found/expected detail to Step 4 and re-run `mnemo init` after the
 conflict is resolved.
@@ -208,10 +229,18 @@ heading). Do not create empty `logs/` or other structure.
 ### Step 6 — Verify
 
 ```bash
+# Linux / macOS
 ~/.claude/mnemo/bin/mnemo ingest --root "$PWD"
 python3 -m json.tool .mcp.json > /dev/null && echo "mcp JSON OK"
 python3 -m json.tool .claude/settings.json > /dev/null && echo "settings JSON OK"
 ~/.claude/mnemo/bin/mnemo search "architecture" --root "$PWD" | head
+```
+```powershell
+# native Windows (PowerShell 5.1+)
+& "$HOME\.claude\mnemo\bin\mnemo.exe" ingest --root "$PWD"
+Get-Content .mcp.json -Raw | ConvertFrom-Json > $null; "mcp JSON OK"
+Get-Content .claude\settings.json -Raw | ConvertFrom-Json > $null; "settings JSON OK"
+& "$HOME\.claude\mnemo\bin\mnemo.exe" search "architecture" --root "$PWD" | Select-Object -First 10
 ```
 
 Confirm: portable `mnemo` server + three hooks; `.claude/rules/
