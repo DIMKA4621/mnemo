@@ -246,6 +246,7 @@ function openGate(variant) {
   const copy = GATE_COPY[variant] || GATE_COPY.missing;
   state.gated = true;
   closeSocket();
+  syncTicker();          // nothing behind the gate needs a running clock
   hideBanner();
   setConnState('idle', 'не автентифіковано');
 
@@ -358,6 +359,9 @@ async function loadStatus() {
   state.service = data.service || null;
   state.queue = data.queue || null;
   renderService();
+  // A page opened mid-index learns here which task is in flight; `index_start`
+  // for it fired before this page existed.
+  if (reconcileProgress(state.queue)) renderBanks();
 }
 
 function bankById(id) {
@@ -393,12 +397,14 @@ function renderBanks() {
 
   if (!state.banks.length) {
     list.appendChild(el('p', { className: 'empty-hint', text: 'Жодного банку не зареєстровано.' }));
+    syncTicker();
     return;
   }
 
   for (const bank of state.banks) {
     list.appendChild(bankCard(bank));
   }
+  syncTicker();
 }
 
 function bankCard(bank) {
@@ -440,6 +446,7 @@ function bankCard(bank) {
 
   const card = el('div', {
     className: classes.join(' '),
+    attrs: { 'data-bank': bank.id },      // so the ticker can find this card
     on: { click: () => selectBank(bank.id) },
   }, [
     head,
@@ -484,6 +491,49 @@ function bankCard(bank) {
   return card;
 }
 
+// A task is not always a file: `bulk`/`rebuild` work on the whole bank and
+// carry no path at all, so they get named rather than left as a blank slot.
+const TASK_KIND_LABEL = {
+  file: 'файл',
+  bulk: 'звірка банку',
+  rebuild: 'повна перебудова',
+  prune: 'зняття з індексу',
+};
+
+function fmtDuration(seconds) {
+  if (seconds < 60) return seconds + ' с';
+  return Math.floor(seconds / 60) + ' хв ' + String(seconds % 60).padStart(2, '0') + ' с';
+}
+
+/**
+ * How long this task has been running.
+ *
+ * Exact in two cases: we watched it begin via `index_start`, or the snapshot
+ * told us when it began. `queue.current.started_at` is absolute epoch seconds
+ * (loopback, so the same clock) — when it is there the age is real even for a
+ * task adopted mid-flight.
+ *
+ * Without it, all we honestly know about an adopted task is how long we have
+ * been watching, which is a lower bound: rendered `≥`. Guessing a start would
+ * be inventing data the service never sent.
+ */
+function elapsedLabel(live) {
+  if (!live.since) return null;
+  const secs = Math.max(0, Math.round((Date.now() - live.since) / 1000));
+  return (live.approx ? '≥' : '') + fmtDuration(secs);
+}
+
+function progressText(live) {
+  const parts = [TASK_KIND_LABEL[live.kind] || live.kind || 'задача'];
+  if (live.path) parts.push(live.path);
+  if (live.batches > 0) parts.push('батч ' + live.batch + '/' + live.batches);
+  if (live.chunks_total) parts.push(live.chunks_done + '/' + live.chunks_total + ' чанків');
+  const age = elapsedLabel(live);
+  if (age) parts.push(age);
+  if (live.yielded) parts.push('витіснено');
+  return parts.join(' · ');
+}
+
 function progressBlock(live) {
   const known = live.batches > 0;
   const pct = known ? Math.min(100, Math.round((live.batch / live.batches) * 100)) : 0;
@@ -493,16 +543,43 @@ function progressBlock(live) {
   ]);
   if (known) bar.firstChild.style.width = pct + '%';
 
-  const parts = [live.kind || 'task'];
-  if (live.path) parts.push(live.path);
-  if (known) parts.push('батч ' + live.batch + '/' + live.batches);
-  if (live.chunks_total) parts.push(live.chunks_done + '/' + live.chunks_total + ' чанків');
-  if (live.yielded) parts.push('витіснено');
-
   return el('div', { className: 'bank-progress' }, [
     bar,
-    el('div', { className: 'progress-text', text: parts.join(' · ') }),
+    el('div', {
+      className: 'progress-text',
+      text: progressText(live),
+      title: live.approx
+        ? 'час відколи кабінет побачив цю задачу — вона почалася раніше'
+        : 'час від початку задачі',
+    }),
   ]);
+}
+
+/**
+ * Re-time the visible bars without rebuilding the bank list.
+ *
+ * The clock has to move every second, and the cards carry buttons — a full
+ * re-render on a timer would rebuild a button out from under a click. Only
+ * the one line that changes is touched.
+ */
+function tickProgress() {
+  for (const [bankId, live] of state.progress) {
+    const node = document.querySelector('.bank[data-bank="' + bankId + '"] .progress-text');
+    if (node) node.textContent = progressText(live);
+  }
+  syncTicker();
+}
+
+let tickTimer = null;
+
+function syncTicker() {
+  const wanted = state.progress.size > 0 && !state.gated;
+  if (wanted && !tickTimer) {
+    tickTimer = setInterval(tickProgress, 1000);
+  } else if (!wanted && tickTimer) {
+    clearInterval(tickTimer);
+    tickTimer = null;
+  }
 }
 
 /**
@@ -522,22 +599,51 @@ function clearProgress(bankId, taskId) {
 }
 
 /**
- * Drop bars the service says are not running.
+ * Make the bars agree with the queue snapshot, in both directions.
  *
- * The guard above is per-task and therefore only as good as the events that
- * reach us: a missed `index_done`, or a LOW task that yielded and never came
- * back, would leave a bar spinning under a file that finished long ago. The
- * queue snapshot is the backend's own account of what is in flight, so it
- * gets the last word — the same "authoritative state wins, the socket only
- * carries deltas" rule the rest of this page follows.
+ * `index_start` is a delta: it says a task began. A page loaded while a file
+ * was already being indexed never saw that event and so showed nothing until
+ * the *next* file started. `queue.current` is the service's own statement of
+ * what is running right now and rides on `/api/status`, on `hello` and on
+ * every queue event — the same "REST is authoritative for initial state, the
+ * socket carries deltas" rule as everywhere else on this page.
+ *
+ * So: adopt a `current` the bars do not know about, and retire a bar the
+ * snapshot does not account for. Keyed on `task_id`, so re-stating the same
+ * running task never disturbs the counters `index_progress` has been filling
+ * in — the snapshot seeds a bar, it does not overwrite a live one.
  */
 function reconcileProgress(queue) {
-  if (!queue || !state.progress.size) return false;
+  if (!queue) return false;
   const byBank = queue.by_bank || {};
-  const currentBank = queue.current ? queue.current.bank_id : null;
+  const current = queue.current || null;
   let changed = false;
+
+  if (current && current.bank_id) {
+    const live = state.progress.get(current.bank_id);
+    if (!live || live.task_id !== current.task_id) {
+      // Epoch seconds when the service started this task. Absent on older
+      // backends, in which case the clock can only run from now and says so.
+      const startedAt = Number(current.started_at) || 0;
+      state.progress.set(current.bank_id, {
+        task_id: current.task_id,
+        kind: current.kind || 'file',
+        path: current.path || null,
+        batch: current.batch || 0,
+        // Still "unknown" when 0 — seeding must not imply a percentage the
+        // service has not given us.
+        batches: current.batches || 0,
+        chunks_done: 0,
+        chunks_total: 0,
+        since: startedAt > 0 ? startedAt * 1000 : Date.now(),
+        approx: startedAt <= 0,
+      });
+      changed = true;
+    }
+  }
+
   for (const bankId of [...state.progress.keys()]) {
-    if (bankId === currentBank) continue;
+    if (current && bankId === current.bank_id) continue;
     const entry = byBank[bankId];
     if (entry && (entry.indexing || entry.depth > 0)) continue;
     state.progress.delete(bankId);
@@ -1068,7 +1174,11 @@ function handleEvent(envelope) {
 
   switch (type) {
     case 'hello':
-      if (data.queue) { state.queue = data.queue; renderService(); }
+      if (data.queue) {
+        state.queue = data.queue;
+        renderService();
+        if (reconcileProgress(data.queue)) renderBanks();
+      }
       if (helloSeen) resyncAll();
       helloSeen = true;
       break;
@@ -1086,19 +1196,26 @@ function handleEvent(envelope) {
       break;
 
     case 'index_start':
+      // We watched this one begin, so its age is exact — no `≥`.
       state.progress.set(bankId, {
         task_id: data.task_id, kind: data.kind, path: data.path,
         batch: 0, batches: data.batches || 0, chunks_done: 0, chunks_total: 0,
+        since: Date.now(), approx: false,
       });
       renderBanks();
       break;
 
     case 'index_progress': {
       const prev = state.progress.get(bankId) || {};
+      const same = prev.task_id === data.task_id;
       state.progress.set(bankId, {
         task_id: data.task_id, kind: prev.kind || 'file', path: data.path,
         batch: data.batch, batches: data.batches,
         chunks_done: data.chunks_done, chunks_total: data.chunks_total,
+        // Keep the clock running across progress events; if this is the first
+        // we have seen of the task, we joined it late and must say so.
+        since: same && prev.since ? prev.since : Date.now(),
+        approx: same ? !!prev.approx : true,
       });
       renderBanks();
       break;

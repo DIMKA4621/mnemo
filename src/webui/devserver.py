@@ -304,9 +304,12 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
 
         set_queue(depth=len(targets) - position, high=0,
                   normal=1 if path else 0, low=0 if path else len(targets) - position,
+                  # `queue.current.started_at` is absolute EPOCH SECONDS, not
+                  # an ISO string like the service's own `started_at` above —
+                  # the cabinet computes elapsed time from it at render time.
                   current={"task_id": task_id, "bank_id": bank_id, "kind": "file",
                            "path": rel, "batch": 0, "batches": batches,
-                           "started_at": now_iso()})
+                           "started_at": time.time()})
         broadcast("index_start", bank_id, {"task_id": task_id, "kind": "file",
                                            "path": rel, "batches": batches,
                                            "trigger": "ui"})
