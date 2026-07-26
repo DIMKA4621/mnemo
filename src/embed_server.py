@@ -26,12 +26,14 @@ import time
 from pathlib import Path
 
 from .config import (
+    EMBED_BATCH_TIMEOUT_FLOOR,
     EMBED_BIND,
     EMBED_HOST,
     EMBED_HOST_IS_LOCAL,
     EMBED_IDLE_TIMEOUT,
     EMBED_PORT,
     EMBED_PROBE_TIMEOUT,
+    EMBED_SECONDS_PER_CHUNK,
     EMBED_TOKEN_FILE,
     LEGACY_EMBED_TOKEN_FILE,
 )
@@ -373,16 +375,30 @@ def embed_passages_via_server(texts: list[str]) -> list[list[float]] | None:
     sock = _obtain_socket()
     if sock is None:
         return None
+    # Budget scales with the batch: this waits on a CPU-bound embed whose
+    # duration depends on batch size and machine load, so a fixed ceiling is
+    # the wrong shape. The old fixed 60 s was measured being crossed by a
+    # 16-chunk batch at 4 threads (61.7 s) — a coin flip under load.
+    budget = max(EMBED_BATCH_TIMEOUT_FLOOR, EMBED_SECONDS_PER_CHUNK * len(texts))
     try:
         with sock:
             _send(sock, {"token": tok, "texts": texts, "kind": "passages"})
-            # Cold start loads the model (~3 s) then embeds the batch;
-            # steady state is milliseconds. Generous ceiling.
-            resp = _recv(sock, timeout=60.0)
+            resp = _recv(sock, timeout=budget)
         _raise_if_unauthorized(resp)
         vecs = resp.get("vecs")
         if not isinstance(vecs, list) or len(vecs) != len(texts):
             return None
         return vecs
+    except TimeoutError:
+        # Giving up on a resident that is merely slow makes the caller load
+        # its own ~2.2 GB copy. That used to happen in silence; say it.
+        print(
+            f"mnemo: the embedding resident did not answer within {budget:.0f}s "
+            f"for a batch of {len(texts)} chunks. Falling back to an "
+            f"in-process model, which is much slower and holds ~2.2 GB here. "
+            f"Raise MNEMO_EMBED_SECONDS_PER_CHUNK if this recurs.",
+            file=sys.stderr,
+        )
+        return None
     except (OSError, ValueError, json.JSONDecodeError):
         return None

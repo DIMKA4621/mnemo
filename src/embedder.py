@@ -117,14 +117,35 @@ def _model() -> TextEmbedding:
             # Bound the CPU memory arena. ONNX Runtime keeps a reusable
             # allocation arena that grows to the largest single run's peak
             # (a full batch of e5-large) and never returns it to the OS.
-            # A short-lived CLI process never notices, but the resident
-            # holds one session for its whole life: with idle-exit disabled
-            # (shared server), one cold ingest inflates it to ~5 GB+ and it
-            # stays there. Disabling the arena makes allocations transient —
-            # freed after each run — so RSS tracks live tensors (~model
-            # footprint) forever. Measured: peak 5407 MB -> 1563 MB, stable
-            # across batches; ~25% slower per big ingest batch (the query
-            # path embeds one text, so search latency is unaffected).
+            # A short-lived CLI process never notices, but the resident holds
+            # one session for its whole life, and v3 gives it no idle exit —
+            # so an inflated arena now stays inflated until the user runs
+            # `mnemo service stop`. Disabling it makes allocations transient,
+            # freed after each run, so RSS tracks live tensors.
+            #
+            # Measured with the arena off, Windows working set, fresh
+            # resident per run, real chunks through the socket:
+            #     transient PEAK   ~2070 MB
+            #     steady           ~1530 MB, flat once the run ends
+            #
+            # The peak does NOT scale with the intra-op thread count, which
+            # is what everyone here assumed. A controlled A/B differing only
+            # in MNEMO_EMBED_THREADS: 9 threads -> 2067.4 MB peak, 4 threads
+            # -> 2066.4 MB. A 0.05% difference, stable across four runs
+            # (2066.4 / 2067.4 / 2068.6 / 2075.8). What the peak does track
+            # is the batch's token count, so a corpus of longer sections
+            # reads higher than one of shorter sections — a 226-chunk run of
+            # ~900-char sections peaked at 1716 MB on the same machine.
+            #
+            # Cost is ~25% per big ingest batch; the query path embeds one
+            # text, so search latency is unaffected.
+            #
+            # NFR-9's "~1.6 GB" describes the STEADY state, not the peak.
+            # Note the resident no longer idle-exits (EMBED_IDLE_TIMEOUT=0),
+            # so the steady figure is what the machine carries until
+            # `mnemo service stop`. The historical 5407 MB arena-on figure
+            # was almost certainly Linux RSS and has not been reproduced
+            # here; treat the cross-platform comparison as indicative only.
             so.enable_cpu_mem_arena = False
         return _orig_session(*args, **kwargs)
 

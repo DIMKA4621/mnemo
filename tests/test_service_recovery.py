@@ -35,8 +35,15 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 from src import autostart, service_ctl  # noqa: E402
+from src.config import EMBED_PORT  # noqa: E402
 
 _passed = _failed = 0
+
+# This suite indexes a real bank, so it starts the embedding resident. With
+# MNEMO_EMBED_IDLE_TIMEOUT defaulting to 0 it never exits on its own, so the
+# suite must reap it -- but only if it was not already running before we
+# began, in which case it is the user's and not ours to touch.
+_PREEXISTING_RESIDENT = service_ctl._listening_pid(EMBED_PORT) is not None
 
 TEST_TASK = "mnemo recovery rehearsal (delete me)"
 
@@ -304,6 +311,9 @@ def main() -> int:
             test_autostart_path_starts_the_service(work)
         finally:
             service_ctl.stop()
+            if not _PREEXISTING_RESIDENT:
+                if service_ctl.stop_resident() == service_ctl.RESIDENT_STOPPED:
+                    print("teardown: reaped the embedding resident this suite started")
 
     print(f"\n{_passed} passed, {_failed} failed")
     print(

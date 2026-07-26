@@ -351,17 +351,6 @@ def reconcile(
 # --------------------------------------------------------- bank-level API
 
 
-def _disk(paths: BankPaths) -> dict[str, Path]:
-    """Every indexable .md in the bank as POSIX relpath -> absolute path.
-
-    The path-only view of ``scan_bank``, for callers that just need to know
-    what is there (and for the platform test that pins relpath
-    normalisation). Anything that goes on to index wants ``scan_bank``, whose
-    ``FileStat`` already carries the hash and stat the plan needs.
-    """
-    return {rel: fs.abs_path for rel, fs in scan_bank(paths.root).items()}
-
-
 def _open_bank(paths: BankPaths, provider: EmbeddingProvider, verbose: bool):
     """Open the bank DB and bind it to the active provider.
 
@@ -410,7 +399,7 @@ def reindex(root: Path | str | None = None, verbose: bool = True) -> None:
     an index already exists — never for an empty/unrelated directory.
     """
     paths = resolve(root)
-    if not paths.db.exists() and not _disk(paths):
+    if not paths.db.exists() and not scan_bank(paths.root):
         if verbose:
             print(f"nothing to index [{paths.root}] (no .md, no DB)")
         return

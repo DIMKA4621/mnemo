@@ -8,8 +8,10 @@ so a detector that never fires cannot pass for a proof.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -25,8 +27,24 @@ _STATE = Path(tempfile.mkdtemp(prefix="mnemo service "))
 os.environ["MNEMO_STATE_DIR"] = str(_STATE)
 
 from src import service_ctl  # noqa: E402
+from src.config import EMBED_PORT  # noqa: E402
 
 _passed = _failed = 0
+
+# Since MNEMO_EMBED_IDLE_TIMEOUT defaults to 0, a resident started during a
+# test never exits by itself -- a suite that spawns one and walks away leaves
+# ~1.5 GB resident until reboot. Teardown reaps it, but ONLY if we created
+# it: a resident that was already running belongs to the user's own work and
+# is none of our business.
+_PREEXISTING_RESIDENT = service_ctl._listening_pid(EMBED_PORT) is not None
+
+
+def _reap_resident_we_created() -> None:
+    if _PREEXISTING_RESIDENT:
+        return
+    outcome = service_ctl.stop_resident()
+    if outcome == service_ctl.RESIDENT_STOPPED:
+        print("teardown: reaped the embedding resident this suite started")
 
 # A child that reports what it can see about its own console, then idles
 # until a stop file appears. With --alloc it first calls AllocConsole(),
@@ -440,6 +458,55 @@ def test_ps_fingerprint_contract() -> None:
     service_ctl.service_pid_file().unlink(missing_ok=True)
 
 
+def test_listening_pid_parser() -> None:
+    """The netstat table has traps; a wrong answer here costs 1.6 GB.
+
+    A false negative makes stop_resident report ABSENT and leave the model
+    resident. A false positive on a TIME_WAIT row would hand PID 0 to the
+    terminator. Both rows really do appear on the embed port -- this sample
+    is the shape observed on this machine, with the connection rows kept.
+    """
+    from unittest.mock import patch
+
+    table = (
+        "\r\nActive Connections\r\n\r\n"
+        "  Proto  Local Address          Foreign Address        State           PID\r\n"
+        "  TCP    0.0.0.0:135            0.0.0.0:0              LISTENING       1268\r\n"
+        "  TCP    127.0.0.1:8917         0.0.0.0:0              LISTENING       29888\r\n"
+        "  TCP    127.0.0.1:8917         127.0.0.1:52419        TIME_WAIT       0\r\n"
+        "  TCP    127.0.0.1:8918         0.0.0.0:0              LISTENING       777\r\n"
+    )
+
+    def fake_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, table, "")
+
+    with patch.object(service_ctl.subprocess, "run", fake_run):
+        check("the LISTENING owner is found", service_ctl._listening_pid(8917) == 29888,
+              detail=str(service_ctl._listening_pid(8917)))
+        check("a TIME_WAIT row never yields PID 0",
+              service_ctl._listening_pid(8917) != 0)
+        check("a neighbouring port is not confused for ours",
+              service_ctl._listening_pid(8918) == 777)
+        check("an unused port reports nothing",
+              service_ctl._listening_pid(9999) is None)
+
+    ipv6 = (
+        "  Proto  Local Address          Foreign Address        State           PID\r\n"
+        "  TCP    [::1]:8917             [::]:0                 LISTENING       4242\r\n"
+    )
+
+    def fake_ipv6(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, ipv6, "")
+
+    with patch.object(service_ctl.subprocess, "run", fake_ipv6):
+        check("an IPv6 listener is parsed too",
+              service_ctl._listening_pid(8917) == 4242,
+              detail=str(service_ctl._listening_pid(8917)))
+
+    # A PID of 0 must never reach the terminator even if one slipped through.
+    check("PID 0 is not a live process", service_ctl._pid_state(0) == service_ctl.GONE)
+
+
 def test_exit_code_259(work: Path) -> None:
     """259 is a legitimate exit code, not a synonym for "still running"."""
     script = work / "exit259.py"
@@ -544,6 +611,38 @@ def test_mnemow_refuses_stdio_faces() -> None:
         sys.argv = argv
 
 
+@contextlib.contextmanager
+def _embed_port_of_our_own():
+    """Run the resident tests on a private port.
+
+    They used to use the machine's real embed port and skip when it was
+    busy -- which meant the most important check in the file silently
+    skipped whenever anything earlier in the same run had warmed a resident.
+    Intermittent coverage of the reaper is worse than none, and it also put
+    the tests one bug away from reaping the user's own resident. A private
+    port removes both problems: nothing to skip for, nothing of theirs to
+    touch.
+    """
+    from unittest.mock import patch
+
+    import src.config as config
+
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        port = int(probe.getsockname()[1])
+
+    previous = os.environ.get("MNEMO_EMBED_PORT")
+    os.environ["MNEMO_EMBED_PORT"] = str(port)  # the child reads this
+    try:
+        with patch.object(config, "EMBED_PORT", port):
+            yield port
+    finally:
+        if previous is None:
+            os.environ.pop("MNEMO_EMBED_PORT", None)
+        else:
+            os.environ["MNEMO_EMBED_PORT"] = previous
+
+
 def test_stop_reaps_the_resident(work: Path) -> None:
     """`service stop` must release the ~1.6 GB, not just the backend.
 
@@ -553,89 +652,78 @@ def test_stop_reaps_the_resident(work: Path) -> None:
     identity proof that replaces a fingerprint: OS-reported socket owner +
     a reply to our authenticated protocol.
     """
-    from src.config import EMBED_PORT
+    with _embed_port_of_our_own() as port:
+        # Start one the way a hook would, then prove stop() reaches it.
+        started = service_ctl.spawn_detached(
+            [service_ctl.windowless_python(), "-m", "src.cli", "embed-server"],
+            cwd=REPO,
+        )
+        deadline = time.monotonic() + 120.0
+        pid = None
+        while time.monotonic() < deadline:
+            pid = service_ctl._listening_pid(port)
+            if pid is not None:
+                break
+            time.sleep(0.5)
 
-    if service_ctl._listening_pid(EMBED_PORT) is not None:
-        print("SKIP  resident reap (a resident is already running on this machine)")
-        return
+        if pid is None:
+            check("a resident could be started for the test", False,
+                  detail=f"nothing bound {port} (spawned {started})")
+            return
+        check("the resident is listening before stop", True)
+        check("the resident answers our authenticated protocol",
+              service_ctl._resident_answers_our_token("127.0.0.1", port))
 
-    # Start one the way a hook would, then prove stop() reaches it.
-    started = service_ctl.spawn_detached(
-        [service_ctl.windowless_python(), "-m", "src.cli", "embed-server"],
-        cwd=REPO,
-    )
-    deadline = time.monotonic() + 60.0
-    pid = None
-    while time.monotonic() < deadline:
-        pid = service_ctl._listening_pid(EMBED_PORT)
-        if pid is not None:
-            break
-        time.sleep(0.5)
+        outcome = service_ctl.stop_resident()
+        check("stop_resident reports it stopped one",
+              outcome == service_ctl.RESIDENT_STOPPED, detail=outcome)
+        check("NOTHING is listening on the embed port afterwards",
+              service_ctl._listening_pid(port) is None)
+        check("the resident process is gone (model released)",
+              service_ctl._pid_state(pid) != service_ctl.ALIVE)
 
-    if pid is None:
-        check("a resident could be started for the test", False,
-              detail=f"nothing bound {EMBED_PORT} (spawned {started})")
-        return
-    check("the resident is listening before stop", True)
-    check("the resident answers our authenticated protocol",
-          service_ctl._resident_answers_our_token("127.0.0.1", EMBED_PORT))
-
-    outcome = service_ctl.stop_resident()
-    check("stop_resident reports it stopped one", outcome == service_ctl.RESIDENT_STOPPED,
-          detail=outcome)
-    check("NOTHING is listening on the embed port afterwards",
-          service_ctl._listening_pid(EMBED_PORT) is None)
-    check("the resident process is gone (model released)",
-          service_ctl._pid_state(pid) != service_ctl.ALIVE)
-
-    check("stopping again is a harmless no-op",
-          service_ctl.stop_resident() == service_ctl.RESIDENT_ABSENT)
+        check("stopping again is a harmless no-op",
+              service_ctl.stop_resident() == service_ctl.RESIDENT_ABSENT)
 
 
 def test_resident_stop_spares_a_stranger(work: Path) -> None:
     """A listener that does not answer our token must not be killed."""
-    import socket as _socket
-
-    from src.config import EMBED_PORT
-
-    if service_ctl._listening_pid(EMBED_PORT) is not None:
-        print("SKIP  stranger-on-the-port (port already in use)")
-        return
-
-    # A plain listener that speaks nothing: same port, not our resident.
-    script = work / "stranger.py"
-    script.write_text(
-        "import socket, time\n"
-        "s = socket.socket()\n"
-        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
-        f"s.bind(('127.0.0.1', {EMBED_PORT}))\n"
-        "s.listen(5)\n"
-        "time.sleep(120)\n",
-        encoding="utf-8",
-    )
-    stranger = subprocess.Popen(
-        [sys.executable, str(script)],
-        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-    )
-    try:
-        deadline = time.monotonic() + 20.0
-        while time.monotonic() < deadline:
-            if service_ctl._listening_pid(EMBED_PORT) is not None:
-                break
-            time.sleep(0.25)
-
-        outcome = service_ctl.stop_resident()
-        check("a stranger on the embed port is reported foreign, not stopped",
-              outcome == service_ctl.RESIDENT_FOREIGN, detail=outcome)
-        time.sleep(0.4)
-        check("THE STRANGER ON THE EMBED PORT SURVIVED",
-              stranger.poll() is None, detail=f"exit={stranger.poll()}")
-    finally:
-        stranger.terminate()
+    with _embed_port_of_our_own() as port:
+        # A plain listener that speaks nothing: right port, not our resident.
+        script = work / "stranger.py"
+        script.write_text(
+            "import socket, time\n"
+            "s = socket.socket()\n"
+            "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+            f"s.bind(('127.0.0.1', {port}))\n"
+            "s.listen(5)\n"
+            "time.sleep(120)\n",
+            encoding="utf-8",
+        )
+        stranger = subprocess.Popen(
+            [sys.executable, str(script)],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
         try:
-            stranger.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            stranger.kill()
+            deadline = time.monotonic() + 20.0
+            while time.monotonic() < deadline:
+                if service_ctl._listening_pid(port) is not None:
+                    break
+                time.sleep(0.25)
+
+            outcome = service_ctl.stop_resident()
+            check("a stranger on the embed port is reported foreign, not stopped",
+                  outcome == service_ctl.RESIDENT_FOREIGN, detail=outcome)
+            time.sleep(0.4)
+            check("THE STRANGER ON THE EMBED PORT SURVIVED",
+                  stranger.poll() is None, detail=f"exit={stranger.poll()}")
+        finally:
+            stranger.terminate()
+            try:
+                stranger.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                stranger.kill()
 
 
 def free_port() -> int:
@@ -734,13 +822,19 @@ def main() -> int:
         test_never_kills_bystanders(work)
         test_state_dir_is_resolved_live()
         test_ps_fingerprint_contract()
+        test_listening_pid_parser()
         test_exit_code_259(work)
         test_clear_identity_spares_a_live_backend()
         test_start_is_serialised(work)
         test_mnemow_refuses_stdio_faces()
         test_resident_stop_spares_a_stranger(work)
         test_stop_reaps_the_resident(work)
-        test_real_backend()
+        try:
+            test_real_backend()
+        finally:
+            # The backend indexes on start, which spawns a resident on the
+            # real port. With idle exit off it would outlive the suite.
+            _reap_resident_we_created()
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

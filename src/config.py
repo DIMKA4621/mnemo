@@ -147,6 +147,23 @@ EMBED_PROBE_TIMEOUT: float = float(
     os.environ.get("MNEMO_EMBED_PROBE_TIMEOUT", "0.15")
 )
 
+# How long to wait for a BATCH of passages to come back. Scales with the
+# batch, because the wait is a CPU-bound embed whose duration depends on the
+# batch size and on how busy the machine is — a fixed ceiling is the wrong
+# shape for that, and the old fixed 60 s was measured being crossed: a
+# 16-chunk batch at 4 threads took 61.7 s. When it trips, the client gives up
+# on a resident that is merely slow and the caller loads its own ~2.2 GB copy
+# — so the cost of being too tight is far worse than the cost of waiting.
+#
+# Indexing is background work behind the queue; nothing blocks a session on
+# it, so a generous budget costs nothing real. The floor keeps small batches
+# from getting an absurdly short one. A ceiling still exists so a genuinely
+# wedged resident cannot pin a worker forever.
+EMBED_SECONDS_PER_CHUNK: float = float(
+    os.environ.get("MNEMO_EMBED_SECONDS_PER_CHUNK", "15")
+)
+EMBED_BATCH_TIMEOUT_FLOOR: float = 60.0
+
 # Idle exit for the resident. 0 = never exit on idle, which is the v3 default
 # (design §4: the model stays warm).
 #
