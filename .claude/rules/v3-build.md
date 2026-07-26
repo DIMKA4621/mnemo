@@ -55,8 +55,12 @@ decide it yourself.
 - Everything stays on **loopback** by default, guarded by the token; nothing is
   exposed outward without an explicit decision.
 - Nothing may block a Claude Code session: faces and hooks return immediately.
-- **No console windows** on Windows for any spawned process (`CREATE_NO_WINDOW`
-  / `pythonw`; `DETACHED_PROCESS` alone is not enough).
+- **No console windows** on Windows for any spawned process: `pythonw` (a
+  GUI-subsystem binary cannot own a console) plus `CREATE_NO_WINDOW`.
+  `DETACHED_PROCESS` alone is not enough — a child calling `AllocConsole()`
+  gets a real window — and it must **never be OR-ed with** `CREATE_NO_WINDOW`,
+  which Windows then ignores, silently turning the guard into a no-op. Every
+  spawn goes through `service_ctl.spawn_detached`, not hand-assembled flags.
 
 ## Conventions
 

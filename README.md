@@ -80,10 +80,14 @@ travels with the repo:
 > Nothing is asked of you yet — but do not hand-build wiring around the
 > current shape today.
 
-Embedding is served by one warm, idle-exiting helper per machine
-(`embed-server`, loopback only) so hooks stay light and CPU stays
-bounded. The model is **never** downloaded implicitly — `warmup` is the
-only step that fetches it.
+Embedding is served by one warm helper per machine (`embed-server`,
+loopback only) so hooks stay light and CPU stays bounded. It starts on
+first need and then stays resident — idle exit is off by default, because
+exiting after half an hour cost about 9 seconds on the next search. It
+holds **one** copy of the model: ~1.6 GB steady state, with a transient
+peak that depends on batch size and the longest chunk in a batch (~2.1 GB
+on Ukrainian markdown at the default batch of 16). The model is **never**
+downloaded implicitly — `warmup` is the only step that fetches it.
 
 The index is disposable: delete a bank's `state/*.db`, run `mnemo
 ingest`, and you are back to an identical state. The `.md` is the only
