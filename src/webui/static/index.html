@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="uk">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>mnemo — кабінет</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-name">mnemo</span>
+    <span class="brand-sub">локальний кабінет памʼяті</span>
+  </div>
+  <div class="service" id="service-info">
+    <span class="muted">зʼєднання…</span>
+  </div>
+  <div class="conn" id="conn-state" title="стан WebSocket">
+    <span class="dot"></span><span class="conn-label">…</span>
+  </div>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main class="layout">
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="pane pane-banks">
+    <div class="pane-head">
+      <h2>Банки</h2>
+      <button class="btn btn-ghost" id="banks-refresh" title="Оновити список">↻</button>
+    </div>
+    <div class="pane-body" id="banks-list"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="pane pane-tree">
+    <div class="pane-head">
+      <h2>Файли</h2>
+      <span class="pane-sub" id="tree-sub"></span>
+    </div>
+    <div class="pane-body" id="tree-body">
+      <p class="empty-hint">Оберіть банк ліворуч.</p>
+    </div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- -->
+  <section class="pane pane-file">
+    <div class="pane-head">
+      <h2 id="file-title">Вміст</h2>
+      <div class="pane-actions">
+        <label class="toggle" title="Показати межі чанків так, як вони лежать в індексі">
+          <input type="checkbox" id="chunkviz-toggle" checked>
+          <span>Межі чанків</span>
+        </label>
+        <button class="btn" id="file-reindex" disabled>Переіндексувати файл</button>
+      </div>
+    </div>
+    <div class="pane-body" id="file-body">
+      <p class="empty-hint">Оберіть файл у дереві.</p>
+    </div>
+  </section>
+
+</main>
+
+<!-- ------------------------------------------------------------------ -->
+<section class="pane pane-log">
+  <div class="pane-head">
+    <h2>Журнал</h2>
+    <div class="pane-actions">
+      <div class="segmented" id="log-kind">
+        <button class="seg is-active" data-kind="query">Запити</button>
+        <button class="seg" data-kind="index">Індексація</button>
+      </div>
+      <div class="segmented" id="log-scope">
+        <button class="seg is-active" data-scope="all">Усі банки</button>
+        <button class="seg" data-scope="bank">Обраний банк</button>
+      </div>
+      <button class="btn btn-ghost" id="log-refresh" title="Оновити журнал">↻</button>
+    </div>
+  </div>
+  <div class="pane-body" id="log-body"></div>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>

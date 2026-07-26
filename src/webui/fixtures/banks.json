@@ -1,0 +1,72 @@
+{
+  "banks": [
+    {
+      "id": "b1cfcadf81e9fe53",
+      "name": "mnemo",
+      "root": "E:/work_projects/other/mnemo/.claude",
+      "provider": "local",
+      "enabled": true,
+      "exists": true,
+      "git": true,
+      "files": 4,
+      "chunks": 11,
+      "db_bytes": 4718592,
+      "last_indexed": "2026-07-26T12:31:07+03:00",
+      "status": "ready",
+      "queued": 0,
+      "indexing": false,
+      "last_error": null
+    },
+    {
+      "id": "42c3326ed6e1a1b7",
+      "name": "notes",
+      "root": "E:/notes",
+      "provider": "local",
+      "enabled": true,
+      "exists": true,
+      "git": false,
+      "files": 0,
+      "chunks": 0,
+      "db_bytes": 20480,
+      "last_indexed": null,
+      "status": "indexing",
+      "queued": 7,
+      "indexing": true,
+      "last_error": null
+    },
+    {
+      "id": "09b7d876d501c789",
+      "name": "archive",
+      "root": "D:/archive/memory",
+      "provider": "local",
+      "enabled": true,
+      "exists": true,
+      "git": false,
+      "files": 0,
+      "chunks": 0,
+      "db_bytes": 20480,
+      "last_indexed": "2026-07-24T09:12:00+03:00",
+      "status": "empty",
+      "queued": 0,
+      "indexing": false,
+      "last_error": null
+    },
+    {
+      "id": "410d981426af108f",
+      "name": "legacy",
+      "root": "E:/gone/.claude",
+      "provider": null,
+      "enabled": false,
+      "exists": false,
+      "git": false,
+      "files": 0,
+      "chunks": 0,
+      "db_bytes": 0,
+      "last_indexed": "2026-06-01T10:00:00+03:00",
+      "status": "empty",
+      "queued": 0,
+      "indexing": false,
+      "last_error": "root not found: E:/gone/.claude"
+    }
+  ]
+}

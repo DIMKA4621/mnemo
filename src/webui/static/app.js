@@ -1,0 +1,940 @@
+/* mnemo web cabinet (FR-7, v1).
+ *
+ * Thin client over the v3 HTTP API (contract 9.5) and the WebSocket progress
+ * channel (contract 9.7). It renders what the backend reports and nothing
+ * else: no chunking, no indexing, no editing. Every derived number on screen
+ * comes from a response field.
+ */
+'use strict';
+
+// ---------------------------------------------------------------------------
+// token (contract 9.1)
+// ---------------------------------------------------------------------------
+
+/** Pull `?token=` out of the URL once, keep it in sessionStorage, scrub the bar. */
+function resolveToken() {
+  const url = new URL(window.location.href);
+  const fromUrl = url.searchParams.get('token');
+  if (fromUrl) {
+    sessionStorage.setItem('mnemo_token', fromUrl);
+    url.searchParams.delete('token');
+    history.replaceState(null, '', url.pathname + url.search + url.hash);
+    return fromUrl;
+  }
+  return sessionStorage.getItem('mnemo_token') || '';
+}
+
+const TOKEN = resolveToken();
+
+// ---------------------------------------------------------------------------
+// state
+// ---------------------------------------------------------------------------
+
+const state = {
+  banks: [],
+  selectedBankId: null,
+  tree: null,
+  expanded: new Set(),          // expanded dir paths of the current tree
+  file: null,                   // last /api/file response
+  filePath: null,
+  chunkViz: true,
+  service: null,
+  queue: null,
+  progress: new Map(),          // bank_id -> live index_progress snapshot
+  notes: new Map(),             // bank_id -> transient one-line note
+  logKind: 'query',
+  logScope: 'all',
+  logRows: [],
+  logTotal: 0,
+};
+
+const $ = (id) => document.getElementById(id);
+
+// ---------------------------------------------------------------------------
+// tiny DOM helper — everything goes through textContent, never innerHTML
+// ---------------------------------------------------------------------------
+
+function el(tag, opts, children) {
+  const node = document.createElement(tag);
+  if (opts) {
+    if (opts.className) node.className = opts.className;
+    if (opts.text != null) node.textContent = String(opts.text);
+    if (opts.title) node.title = opts.title;
+    if (opts.attrs) for (const [k, v] of Object.entries(opts.attrs)) node.setAttribute(k, v);
+    if (opts.on) for (const [k, v] of Object.entries(opts.on)) node.addEventListener(k, v);
+  }
+  for (const child of children || []) {
+    if (child) node.appendChild(child);
+  }
+  return node;
+}
+
+function clear(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+// ---------------------------------------------------------------------------
+// HTTP
+// ---------------------------------------------------------------------------
+
+class ApiError extends Error {
+  constructor(code, message, detail, httpStatus) {
+    super(message || code);
+    this.code = code;
+    this.detail = detail;
+    this.httpStatus = httpStatus;
+  }
+}
+
+async function api(path, options) {
+  const opts = options || {};
+  const headers = { 'Accept': 'application/json' };
+  if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
+  if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
+
+  let response;
+  try {
+    response = await fetch(path, {
+      method: opts.method || 'GET',
+      headers: headers,
+      body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
+    });
+  } catch (err) {
+    throw new ApiError('unreachable', 'бекенд недоступний: ' + err.message, null, 0);
+  }
+
+  const text = await response.text();
+  let payload = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch (err) {
+      throw new ApiError('internal', 'невалідний JSON у відповіді', text.slice(0, 200),
+                         response.status);
+    }
+  }
+
+  if (!response.ok) {
+    // Contract 9.2: a single error envelope for every endpoint.
+    const box = (payload && payload.error) || {};
+    throw new ApiError(box.code || 'internal', box.message || response.statusText,
+                       box.detail || null, response.status);
+  }
+  return payload;
+}
+
+function showBanner(message) {
+  const box = $('banner');
+  box.textContent = message;
+  box.hidden = false;
+}
+
+function hideBanner() {
+  $('banner').hidden = true;
+}
+
+function reportError(err) {
+  const where = err.httpStatus ? ' (HTTP ' + err.httpStatus + ')' : '';
+  showBanner('[' + err.code + ']' + where + ' ' + err.message);
+  console.error(err);
+}
+
+// ---------------------------------------------------------------------------
+// formatting
+// ---------------------------------------------------------------------------
+
+function fmtBytes(n) {
+  if (n == null) return '—';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(1) + ' KiB';
+  return (n / 1048576).toFixed(1) + ' MiB';
+}
+
+function fmtTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const p = (v) => String(v).padStart(2, '0');
+  return p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+}
+
+function fmtDateTime(iso) {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return String(iso);
+  const p = (v) => String(v).padStart(2, '0');
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+         ' ' + p(d.getHours()) + ':' + p(d.getMinutes());
+}
+
+function fmtMs(v) {
+  if (v == null) return '—';
+  return v >= 1000 ? (v / 1000).toFixed(2) + ' s' : v.toFixed(1) + ' ms';
+}
+
+const STATUS_LABEL = { ready: 'готово', indexing: 'індексується', empty: 'порожньо' };
+
+/**
+ * Second line under the status badge.
+ *
+ * Precedence is indexing > empty > ready (lead amendment), and BankInfo always
+ * carries both `queued` and `chunks` — so these four readings stay distinct
+ * instead of collapsing into one ambiguous "empty".
+ */
+function statusNote(bank) {
+  if (bank.status === 'indexing') {
+    return bank.chunks > 0
+      ? 'база є, свіжі зміни доїжджають'
+      : 'перший білд у процесі — ще порожньо';
+  }
+  if (bank.status === 'empty') {
+    return bank.queued > 0 ? 'порожньо, задачі в черзі' : 'справді порожньо, нічого не заплановано';
+  }
+  return 'індекс готовий';
+}
+
+// ---------------------------------------------------------------------------
+// banks
+// ---------------------------------------------------------------------------
+
+async function loadBanks() {
+  const data = await api('/api/banks');
+  state.banks = data.banks || [];
+  if (state.selectedBankId && !state.banks.some((b) => b.id === state.selectedBankId)) {
+    selectBank(null);
+  }
+  renderBanks();
+}
+
+async function loadStatus() {
+  const data = await api('/api/status');
+  state.service = data.service || null;
+  state.queue = data.queue || null;
+  renderService();
+}
+
+function bankById(id) {
+  return state.banks.find((b) => b.id === id) || null;
+}
+
+function renderService() {
+  const box = $('service-info');
+  clear(box);
+  const svc = state.service;
+  if (!svc) {
+    box.appendChild(el('span', { className: 'muted', text: 'сервіс невідомий' }));
+    return;
+  }
+  const q = state.queue || { depth: 0, high: 0, normal: 0, low: 0 };
+  const bit = (label, value) => el('span', {}, [
+    document.createTextNode(label + ' '),
+    el('b', { text: value }),
+  ]);
+  box.appendChild(bit('v', svc.version || '—'));
+  box.appendChild(bit('pid', svc.pid != null ? svc.pid : '—'));
+  box.appendChild(bit('порт', svc.port != null ? svc.port : '—'));
+  box.appendChild(bit('провайдер', svc.provider || '—'));
+  box.appendChild(bit('черга', q.depth + ' (H' + q.high + '/N' + q.normal + '/L' + q.low + ')'));
+  if (svc.embed) {
+    box.appendChild(bit('embed', svc.embed.reachable ? 'ok' : 'недоступний'));
+  }
+}
+
+function renderBanks() {
+  const list = $('banks-list');
+  clear(list);
+
+  if (!state.banks.length) {
+    list.appendChild(el('p', { className: 'empty-hint', text: 'Жодного банку не зареєстровано.' }));
+    return;
+  }
+
+  for (const bank of state.banks) {
+    list.appendChild(bankCard(bank));
+  }
+}
+
+function bankCard(bank) {
+  const selected = bank.id === state.selectedBankId;
+  const classes = ['bank'];
+  if (selected) classes.push('is-selected');
+  if (bank.enabled === false) classes.push('is-disabled');
+
+  const badges = [
+    el('span', {
+      className: 'badge badge-' + bank.status,
+      text: STATUS_LABEL[bank.status] || bank.status,
+      title: statusNote(bank),
+    }),
+    bank.git
+      ? el('span', { className: 'badge badge-git', text: 'git' })
+      : el('span', { className: 'badge badge-nogit', text: 'no git' }),
+  ];
+  if (bank.enabled === false) {
+    badges.push(el('span', { className: 'badge badge-off', text: 'вимкнено' }));
+  }
+  if (bank.exists === false) {
+    badges.push(el('span', { className: 'badge badge-off', text: 'нема кореня' }));
+  }
+
+  // Human-facing address is the name, never the hash (lead amendment); the id
+  // stays available as a tooltip for debugging.
+  const head = el('div', { className: 'bank-row' }, [
+    el('span', { className: 'bank-name', text: bank.name, title: 'id: ' + bank.id }),
+    ...badges,
+  ]);
+
+  const stats = el('div', { className: 'bank-stats' }, [
+    el('span', { text: 'файлів ' + bank.files }),
+    el('span', { text: 'чанків ' + bank.chunks }),
+    el('span', { text: 'у черзі ' + bank.queued }),
+    el('span', { text: fmtBytes(bank.db_bytes), title: 'розмір індексу' }),
+  ]);
+
+  const card = el('div', {
+    className: classes.join(' '),
+    on: { click: () => selectBank(bank.id) },
+  }, [
+    head,
+    el('span', { className: 'bank-root', text: bank.root }),
+    stats,
+    el('div', { className: 'bank-stats' }, [
+      el('span', { className: 'muted', text: statusNote(bank) }),
+    ]),
+    el('div', { className: 'bank-stats' }, [
+      el('span', { className: 'muted', text: 'востаннє: ' + fmtDateTime(bank.last_indexed) }),
+    ]),
+  ]);
+
+  const live = state.progress.get(bank.id);
+  if (live) card.appendChild(progressBlock(live));
+
+  const note = state.notes.get(bank.id);
+  if (note) {
+    card.appendChild(el('div', { className: 'progress-text', text: note }));
+  }
+
+  if (bank.last_error) {
+    card.appendChild(el('div', { className: 'bank-error', text: bank.last_error }));
+  }
+
+  const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
+  card.appendChild(el('div', { className: 'bank-actions' }, [
+    el('button', {
+      className: 'btn',
+      text: 'Реіндекс',
+      title: 'hash-diff реконсиляція банку (bulk, LOW)',
+      on: { click: stop(() => reindex(bank, { full: false })) },
+    }),
+    el('button', {
+      className: 'btn',
+      text: 'Повна перебудова',
+      title: 'reset_index + повний білд (rebuild, LOW)',
+      on: { click: stop(() => reindex(bank, { full: true })) },
+    }),
+  ]));
+
+  return card;
+}
+
+function progressBlock(live) {
+  const known = live.batches > 0;
+  const pct = known ? Math.min(100, Math.round((live.batch / live.batches) * 100)) : 0;
+
+  const bar = el('div', { className: 'bar' + (known ? '' : ' is-indeterminate') }, [
+    el('i'),
+  ]);
+  if (known) bar.firstChild.style.width = pct + '%';
+
+  const parts = [live.kind || 'task'];
+  if (live.path) parts.push(live.path);
+  if (known) parts.push('батч ' + live.batch + '/' + live.batches);
+  if (live.chunks_total) parts.push(live.chunks_done + '/' + live.chunks_total + ' чанків');
+  if (live.yielded) parts.push('витіснено');
+
+  return el('div', { className: 'bank-progress' }, [
+    bar,
+    el('div', { className: 'progress-text', text: parts.join(' · ') }),
+  ]);
+}
+
+function setNote(bankId, text) {
+  state.notes.set(bankId, text);
+  renderBanks();
+  setTimeout(() => {
+    if (state.notes.get(bankId) === text) {
+      state.notes.delete(bankId);
+      renderBanks();
+    }
+  }, 6000);
+}
+
+// ---------------------------------------------------------------------------
+// reindex (contract 9.5 POST /api/reindex)
+// ---------------------------------------------------------------------------
+
+async function reindex(bank, opts) {
+  const body = { bank: bank.name, path: opts.path || null, full: !!opts.full };
+  try {
+    const res = await api('/api/reindex', { method: 'POST', body: body });
+    hideBanner();
+    const what = opts.path ? opts.path : (opts.full ? 'повна перебудова' : 'реконсиляція');
+    setNote(bank.id, 'поставлено: ' + what + ' · у черзі ' + res.queued +
+                     ' · task ' + (res.task_ids || []).join(', '));
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// tree
+// ---------------------------------------------------------------------------
+
+function selectBank(bankId) {
+  if (state.selectedBankId === bankId) return;
+  state.selectedBankId = bankId;
+  state.tree = null;
+  state.file = null;
+  state.filePath = null;
+  state.expanded = new Set();
+  renderBanks();
+  renderFile();
+  renderTree();
+  if (bankId) loadTree().catch(reportError);
+  if (state.logScope === 'bank') loadLogs().catch(reportError);
+}
+
+async function loadTree() {
+  const bank = bankById(state.selectedBankId);
+  if (!bank) return;
+  const data = await api('/api/tree?bank=' + encodeURIComponent(bank.name) + '&links=false&depth=0');
+  state.tree = data;
+  // Open every directory by default — v1 banks are small and hiding files
+  // defeats the "видно, багато файлів чи ні" goal of design §7.
+  walkDirs(data.tree, (dir) => state.expanded.add(dir.path));
+  renderTree();
+}
+
+function walkDirs(node, fn) {
+  if (!node || node.type !== 'dir') return;
+  fn(node);
+  for (const child of node.children || []) walkDirs(child, fn);
+}
+
+function renderTree() {
+  const body = $('tree-body');
+  const sub = $('tree-sub');
+  clear(body);
+  clear(sub);
+
+  const bank = bankById(state.selectedBankId);
+  if (!bank) {
+    body.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть банк ліворуч.' }));
+    return;
+  }
+  if (!state.tree) {
+    body.appendChild(el('p', { className: 'empty-hint', text: 'Завантаження…' }));
+    return;
+  }
+
+  sub.textContent = state.tree.files + ' файлів · ' + state.tree.dirs + ' тек';
+
+  const root = state.tree.tree;
+  const children = (root && root.children) || [];
+  if (!children.length) {
+    body.appendChild(el('p', { className: 'empty-hint', text: 'У цьому банку немає .md файлів.' }));
+    return;
+  }
+
+  const box = el('div', { className: 'tree' });
+  for (const child of children) renderNode(child, 0, box);
+  body.appendChild(box);
+}
+
+function renderNode(node, depth, out) {
+  const pad = 12 + depth * 14;
+
+  if (node.type === 'dir') {
+    const open = state.expanded.has(node.path);
+    const row = el('div', {
+      className: 'tree-node tree-dir',
+      on: {
+        click: () => {
+          if (open) state.expanded.delete(node.path);
+          else state.expanded.add(node.path);
+          renderTree();
+        },
+      },
+    }, [
+      el('span', { className: 'tree-twisty', text: open ? '▾' : '▸' }),
+      el('span', { className: 'tree-label', text: node.name + '/' }),
+    ]);
+    row.style.paddingLeft = pad + 'px';
+    out.appendChild(row);
+    if (open) {
+      for (const child of node.children || []) renderNode(child, depth + 1, out);
+    }
+    return;
+  }
+
+  const classes = ['tree-node', 'is-file'];
+  if (node.path === state.filePath) classes.push('is-selected');
+  if (!node.indexed) classes.push('not-indexed');
+
+  const row = el('div', {
+    className: classes.join(' '),
+    title: (node.headings || []).join(' · ') || node.path,
+    on: { click: () => openFile(node.path) },
+  }, [
+    el('span', { className: 'tree-twisty' }),
+    el('span', { className: 'tree-label', text: node.name }),
+    el('span', {
+      className: 'tree-chunks',
+      text: node.indexed ? node.chunks + '×' : 'не в індексі',
+    }),
+  ]);
+  row.style.paddingLeft = pad + 'px';
+  out.appendChild(row);
+}
+
+// ---------------------------------------------------------------------------
+// file view + chunk visualisation
+// ---------------------------------------------------------------------------
+
+async function openFile(path) {
+  const bank = bankById(state.selectedBankId);
+  if (!bank) return;
+  state.filePath = path;
+  renderTree();
+  try {
+    state.file = await api('/api/file?bank=' + encodeURIComponent(bank.name) +
+                           '&path=' + encodeURIComponent(path));
+    hideBanner();
+  } catch (err) {
+    state.file = null;
+    reportError(err);
+  }
+  renderFile();
+}
+
+/**
+ * Map character (code point) offsets to JS string indices.
+ *
+ * `start_char`/`end_char` come from Python, which counts code points; a JS
+ * string counts UTF-16 units, so anything above the BMP (an emoji in a log
+ * file is enough) shifts every later offset. Returns null when the two agree,
+ * which is the common case and costs one regex.
+ */
+function buildCodePointIndex(text) {
+  if (!/[\uD800-\uDBFF]/.test(text)) return null;
+  const index = [];
+  for (let i = 0; i < text.length;) {
+    index.push(i);
+    i += text.codePointAt(i) > 0xFFFF ? 2 : 1;
+  }
+  index.push(text.length);
+  return index;
+}
+
+function makeSlicer(text) {
+  const index = buildCodePointIndex(text);
+  const total = index ? index.length - 1 : text.length;
+  return {
+    total: total,
+    slice(from, to) {
+      const a = Math.max(0, Math.min(total, from));
+      const b = Math.max(a, Math.min(total, to));
+      return index ? text.slice(index[a], index[b]) : text.slice(a, b);
+    },
+  };
+}
+
+function renderFile() {
+  const body = $('file-body');
+  const title = $('file-title');
+  const button = $('file-reindex');
+  clear(body);
+
+  const file = state.file;
+  if (!file) {
+    title.textContent = 'Вміст';
+    button.disabled = true;
+    body.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть файл у дереві.' }));
+    return;
+  }
+
+  title.textContent = file.path;
+  button.disabled = false;
+
+  const chunks = (file.chunks || []).slice().sort((a, b) => a.start_char - b.start_char);
+
+  body.appendChild(el('div', { className: 'file-meta' }, [
+    el('span', { text: fmtBytes(file.size) }),
+    el('span', { text: file.indexed ? 'в індексі' : 'не в індексі' }),
+    el('span', { text: chunks.length + ' чанків' }),
+    el('span', { text: 'sha256 ' + String(file.sha256 || '').slice(0, 12), title: file.sha256 }),
+  ]));
+
+  const doc = el('div', { className: 'doc' });
+  const text = file.text || '';
+
+  if (!state.chunkViz || !chunks.length) {
+    doc.appendChild(el('pre', { text: text }));
+    body.appendChild(doc);
+    return;
+  }
+
+  const cut = makeSlicer(text);
+  let cursor = 0;
+
+  for (const chunk of chunks) {
+    // Anything the index did not claim is shown plainly, with a marker — this
+    // only happens if the indexer left a gap, and hiding it would be a lie.
+    if (chunk.start_char > cursor) {
+      doc.appendChild(el('div', { className: 'gap-note', text: '· поза чанками ·' }));
+      doc.appendChild(el('pre', { className: 'chunk-body', text: cut.slice(cursor, chunk.start_char) }));
+    }
+    doc.appendChild(chunkDivider(chunk));
+    doc.appendChild(el('pre', {
+      className: 'chunk-body',
+      text: cut.slice(chunk.start_char, chunk.end_char),
+    }));
+    cursor = Math.max(cursor, chunk.end_char);
+  }
+
+  if (cursor < cut.total) {
+    doc.appendChild(el('div', { className: 'gap-note', text: '· поза чанками ·' }));
+    doc.appendChild(el('pre', { className: 'chunk-body', text: cut.slice(cursor, cut.total) }));
+  }
+
+  doc.appendChild(el('div', { className: 'chunk-divider is-end' }, [
+    el('span', { className: 'cd-label', text: 'кінець · ' + cut.total + ' символів' }),
+  ]));
+
+  body.appendChild(doc);
+}
+
+function chunkDivider(chunk) {
+  const label = '#' + chunk.chunk_index + (chunk.heading ? ' · ' + chunk.heading : '');
+  return el('div', { className: 'chunk-divider', title: 'chunk_uid ' + chunk.chunk_uid }, [
+    el('span', { className: 'cd-label', text: label }),
+    el('span', {
+      className: 'cd-range',
+      text: chunk.start_char + '–' + chunk.end_char,
+    }),
+  ]);
+}
+
+// ---------------------------------------------------------------------------
+// log (contract 9.5 GET /api/logs, 7.1 row shapes)
+// ---------------------------------------------------------------------------
+
+async function loadLogs() {
+  const params = new URLSearchParams({ kind: state.logKind, limit: '200', offset: '0' });
+  if (state.logScope === 'bank') {
+    const bank = bankById(state.selectedBankId);
+    if (!bank) {
+      state.logRows = [];
+      state.logTotal = 0;
+      renderLogs();
+      return;
+    }
+    params.set('bank', bank.name);
+  }
+  const data = await api('/api/logs?' + params.toString());
+  state.logRows = data.events || [];
+  state.logTotal = data.total || 0;
+  renderLogs();
+}
+
+const QUERY_COLUMNS = ['час', 'банк', 'обличчя', 'запит', 'префікс', 'статус', 'хітів', 'час, мс'];
+const INDEX_COLUMNS = ['час', 'банк', 'вид', 'тригер', 'шлях', 'результат',
+                       'файлів', 'чанків', 'знято', 'час, мс'];
+
+function bankLabel(bankId) {
+  const bank = bankById(bankId);
+  return bank ? bank.name : (bankId || '—');
+}
+
+function renderLogs() {
+  const body = $('log-body');
+  clear(body);
+
+  if (!state.logRows.length) {
+    body.appendChild(el('p', { className: 'empty-hint', text: 'Порожньо.' }));
+    return;
+  }
+
+  const columns = state.logKind === 'query' ? QUERY_COLUMNS : INDEX_COLUMNS;
+  const head = el('tr', {}, columns.map((c) => el('th', { text: c })));
+  const tbody = el('tbody');
+
+  for (const row of state.logRows) {
+    tbody.appendChild(state.logKind === 'query' ? queryRow(row) : indexRow(row));
+  }
+
+  body.appendChild(el('table', { className: 'log-table' }, [
+    el('thead', {}, [head]),
+    tbody,
+  ]));
+}
+
+function queryRow(ev) {
+  const hits = (ev.hits || []).map((h) => h.path + '#' + h.chunk_index).join(', ');
+  const tr = el('tr', { className: ev._live ? 'is-live' : '', title: hits }, [
+    el('td', { text: fmtTime(ev.ts) }),
+    el('td', { text: bankLabel(ev.bank_id) }),
+    el('td', { text: ev.face }),
+    el('td', { className: 'col-q', text: ev.query }),
+    el('td', { text: ev.path_prefix || '—' }),
+    el('td', { text: STATUS_LABEL[ev.status] || ev.status }),
+    el('td', { className: 'num', text: ev.n_hits }),
+    el('td', { className: 'num', text: fmtMs(ev.took_ms) }),
+  ]);
+  return tr;
+}
+
+function indexRow(ev) {
+  return el('tr', { className: ev._live ? 'is-live' : '', title: ev.error || '' }, [
+    el('td', { text: fmtTime(ev.ts) }),
+    el('td', { text: bankLabel(ev.bank_id) }),
+    el('td', { text: ev.kind }),
+    el('td', { text: ev.trigger }),
+    el('td', { className: 'col-q', text: ev.path || (ev.error ? ev.error : '—') }),
+    el('td', { className: 'res-' + ev.result, text: ev.result }),
+    el('td', { className: 'num', text: ev.files_indexed }),
+    el('td', { className: 'num', text: ev.chunks_indexed }),
+    el('td', { className: 'num', text: ev.files_pruned }),
+    el('td', { className: 'num', text: fmtMs(ev.took_ms) }),
+  ]);
+}
+
+/** A live WS event is prepended only when the current filter would include it. */
+function pushLiveLog(kind, row) {
+  if (state.logKind !== kind) return;
+  if (state.logScope === 'bank' && row.bank_id !== state.selectedBankId) return;
+  row._live = true;
+  state.logRows.unshift(row);
+  if (state.logRows.length > 200) state.logRows.pop();
+  state.logTotal += 1;
+  renderLogs();
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket (contract 9.7)
+// ---------------------------------------------------------------------------
+
+let socket = null;
+let retryDelay = 500;
+let banksReloadTimer = null;
+
+function setConnState(kind, label) {
+  const box = $('conn-state');
+  box.className = 'conn is-' + kind;
+  box.lastElementChild.textContent = label;
+}
+
+function scheduleBanksReload() {
+  if (banksReloadTimer) return;
+  banksReloadTimer = setTimeout(() => {
+    banksReloadTimer = null;
+    loadBanks().catch(reportError);
+    loadStatus().catch(() => {});
+  }, 350);
+}
+
+function connectSocket() {
+  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const url = scheme + '//' + window.location.host + '/ws' +
+              (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
+  setConnState('wait', 'підключення…');
+
+  socket = new WebSocket(url);
+
+  socket.onopen = () => {
+    retryDelay = 500;
+    setConnState('open', 'наживо');
+  };
+
+  socket.onclose = () => {
+    setConnState('error', 'розірвано');
+    socket = null;
+    setTimeout(connectSocket, retryDelay);
+    retryDelay = Math.min(retryDelay * 2, 10000);
+  };
+
+  socket.onerror = () => setConnState('error', 'помилка');
+
+  socket.onmessage = (event) => {
+    let envelope;
+    try {
+      envelope = JSON.parse(event.data);
+    } catch (err) {
+      return;
+    }
+    handleEvent(envelope);
+  };
+}
+
+function handleEvent(envelope) {
+  const type = envelope.type;
+  const data = envelope.data || {};
+  const bankId = envelope.bank_id;
+
+  switch (type) {
+    case 'hello':
+      if (data.queue) { state.queue = data.queue; renderService(); }
+      break;
+
+    case 'ping':
+      if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'pong' }));
+      }
+      break;
+
+    case 'queue':
+      state.queue = data;
+      renderService();
+      break;
+
+    case 'index_start':
+      state.progress.set(bankId, {
+        task_id: data.task_id, kind: data.kind, path: data.path,
+        batch: 0, batches: data.batches || 0, chunks_done: 0, chunks_total: 0,
+      });
+      renderBanks();
+      break;
+
+    case 'index_progress': {
+      const prev = state.progress.get(bankId) || {};
+      state.progress.set(bankId, {
+        task_id: data.task_id, kind: prev.kind || 'file', path: data.path,
+        batch: data.batch, batches: data.batches,
+        chunks_done: data.chunks_done, chunks_total: data.chunks_total,
+      });
+      renderBanks();
+      break;
+    }
+
+    case 'index_yield': {
+      const prev = state.progress.get(bankId);
+      if (prev) { prev.yielded = true; renderBanks(); }
+      break;
+    }
+
+    case 'index_done':
+      state.progress.delete(bankId);
+      setNote(bankId, 'готово: ' + (data.path || data.kind) + ' · ' +
+                      (data.chunks_indexed || 0) + ' чанків · ' + fmtMs(data.took_ms));
+      scheduleBanksReload();
+      // The open file may have been re-chunked — pull fresh boundaries.
+      if (bankId === state.selectedBankId && state.filePath &&
+          (!data.path || data.path === state.filePath)) {
+        openFile(state.filePath);
+      }
+      break;
+
+    case 'index_error':
+      state.progress.delete(bankId);
+      setNote(bankId, 'помилка: ' + (data.path || data.kind) + ' — ' + data.error);
+      scheduleBanksReload();
+      break;
+
+    case 'prune':
+      setNote(bankId, 'знято з індексу: ' + (data.count || 0));
+      scheduleBanksReload();
+      break;
+
+    case 'bank_added':
+    case 'bank_removed':
+      scheduleBanksReload();
+      break;
+
+    case 'bank_status':
+      if (data.bank) {
+        const i = state.banks.findIndex((b) => b.id === data.bank.id);
+        if (i >= 0) state.banks[i] = data.bank;
+        else state.banks.push(data.bank);
+        renderBanks();
+      }
+      break;
+
+    case 'query':
+      pushLiveLog('query', {
+        id: null, ts: envelope.ts, bank_id: bankId, face: data.face,
+        query: data.query, path_prefix: data.path_prefix || null,
+        status: data.status, n_hits: data.n_hits, took_ms: data.took_ms, hits: [],
+      });
+      break;
+
+    default:
+      // Contract 9.7: unknown types are ignored on purpose, so the backend can
+      // add events without breaking this page.
+      break;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// wiring
+// ---------------------------------------------------------------------------
+
+function bindControls() {
+  $('banks-refresh').addEventListener('click', () => {
+    loadBanks().catch(reportError);
+    loadStatus().catch(() => {});
+  });
+
+  $('log-refresh').addEventListener('click', () => loadLogs().catch(reportError));
+
+  $('chunkviz-toggle').addEventListener('change', (ev) => {
+    state.chunkViz = ev.target.checked;
+    renderFile();
+  });
+
+  $('file-reindex').addEventListener('click', () => {
+    const bank = bankById(state.selectedBankId);
+    if (bank && state.filePath) reindex(bank, { path: state.filePath });
+  });
+
+  for (const button of $('log-kind').querySelectorAll('.seg')) {
+    button.addEventListener('click', () => {
+      state.logKind = button.dataset.kind;
+      for (const b of $('log-kind').querySelectorAll('.seg')) {
+        b.classList.toggle('is-active', b === button);
+      }
+      loadLogs().catch(reportError);
+    });
+  }
+
+  for (const button of $('log-scope').querySelectorAll('.seg')) {
+    button.addEventListener('click', () => {
+      state.logScope = button.dataset.scope;
+      for (const b of $('log-scope').querySelectorAll('.seg')) {
+        b.classList.toggle('is-active', b === button);
+      }
+      loadLogs().catch(reportError);
+    });
+  }
+}
+
+async function boot() {
+  bindControls();
+  renderService();
+  try {
+    await loadBanks();
+    await loadStatus();
+    await loadLogs();
+    hideBanner();
+  } catch (err) {
+    reportError(err);
+    // Paint the empty states anyway — a blank pane next to an error banner
+    // reads as a broken page rather than an unreachable backend.
+    renderBanks();
+    renderTree();
+    renderFile();
+    renderLogs();
+  }
+  connectSocket();
+}
+
+boot();

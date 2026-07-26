@@ -1,0 +1,171 @@
+{
+  "query": [
+    {
+      "id": 1284,
+      "ts": "2026-07-26T12:31:07+03:00",
+      "bank_id": "b1cfcadf81e9fe53",
+      "face": "mcp",
+      "query": "як влаштована черга",
+      "path_prefix": null,
+      "status": "ready",
+      "n_hits": 3,
+      "took_ms": 41.2,
+      "hits": [
+        {
+          "chunk_uid": "79ce947e22dc4f62",
+          "path": "topics/queue.md",
+          "heading": "Пріоритети",
+          "chunk_index": 1,
+          "score": 0.0324,
+          "sim": 0.861
+        },
+        {
+          "chunk_uid": "df38b7b3569bf6ee",
+          "path": "topics/queue.md",
+          "heading": "Витіснення",
+          "chunk_index": 2,
+          "score": 0.0301,
+          "sim": 0.842
+        }
+      ]
+    },
+    {
+      "id": 1283,
+      "ts": "2026-07-26T12:22:44+03:00",
+      "bank_id": "b1cfcadf81e9fe53",
+      "face": "hook",
+      "query": "порт бекенда",
+      "path_prefix": null,
+      "status": "ready",
+      "n_hits": 1,
+      "took_ms": 28.7,
+      "hits": [
+        {
+          "chunk_uid": "04a0458b9deaa57e",
+          "path": "MEMORY.md",
+          "heading": "Quick facts",
+          "chunk_index": 1,
+          "score": 0.025,
+          "sim": null
+        }
+      ]
+    },
+    {
+      "id": 1282,
+      "ts": "2026-07-26T12:05:10+03:00",
+      "bank_id": "42c3326ed6e1a1b7",
+      "face": "cli",
+      "query": "рецепт",
+      "path_prefix": null,
+      "status": "indexing",
+      "n_hits": 0,
+      "took_ms": 6.1,
+      "hits": []
+    },
+    {
+      "id": 1281,
+      "ts": "2026-07-26T11:48:02+03:00",
+      "bank_id": "09b7d876d501c789",
+      "face": "http",
+      "query": "старі нотатки",
+      "path_prefix": null,
+      "status": "empty",
+      "n_hits": 0,
+      "took_ms": 2.4,
+      "hits": []
+    },
+    {
+      "id": 1280,
+      "ts": "2026-07-26T11:30:55+03:00",
+      "bank_id": "b1cfcadf81e9fe53",
+      "face": "ui",
+      "query": "chunk viz",
+      "path_prefix": "topics",
+      "status": "ready",
+      "n_hits": 2,
+      "took_ms": 55.9,
+      "hits": [
+        {
+          "chunk_uid": "8196e1d32c67afe1",
+          "path": "topics/queue.md",
+          "heading": "Priority queue",
+          "chunk_index": 0,
+          "score": 0.018,
+          "sim": null
+        }
+      ]
+    }
+  ],
+  "index": [
+    {
+      "id": 902,
+      "ts": "2026-07-26T12:31:02+03:00",
+      "bank_id": "b1cfcadf81e9fe53",
+      "kind": "file",
+      "trigger": "watcher",
+      "path": "logs/2026-07-26.md",
+      "result": "ok",
+      "files_indexed": 1,
+      "chunks_indexed": 3,
+      "files_pruned": 0,
+      "took_ms": 812.4,
+      "error": null
+    },
+    {
+      "id": 901,
+      "ts": "2026-07-26T12:30:40+03:00",
+      "bank_id": "b1cfcadf81e9fe53",
+      "kind": "bulk",
+      "trigger": "startup",
+      "path": null,
+      "result": "ok",
+      "files_indexed": 4,
+      "chunks_indexed": 11,
+      "files_pruned": 1,
+      "took_ms": 5321.0,
+      "error": null
+    },
+    {
+      "id": 900,
+      "ts": "2026-07-26T12:05:00+03:00",
+      "bank_id": "42c3326ed6e1a1b7",
+      "kind": "bulk",
+      "trigger": "api",
+      "path": null,
+      "result": "ok",
+      "files_indexed": 0,
+      "chunks_indexed": 0,
+      "files_pruned": 0,
+      "took_ms": 12.0,
+      "error": null
+    },
+    {
+      "id": 899,
+      "ts": "2026-07-26T11:59:31+03:00",
+      "bank_id": "410d981426af108f",
+      "kind": "bulk",
+      "trigger": "startup",
+      "path": null,
+      "result": "error",
+      "files_indexed": 0,
+      "chunks_indexed": 0,
+      "files_pruned": 0,
+      "took_ms": 3.0,
+      "error": "root not found: E:/gone/.claude"
+    },
+    {
+      "id": 898,
+      "ts": "2026-07-26T11:40:12+03:00",
+      "bank_id": "b1cfcadf81e9fe53",
+      "kind": "prune",
+      "trigger": "watcher",
+      "path": "topics/removed.md",
+      "result": "ok",
+      "files_indexed": 0,
+      "chunks_indexed": 0,
+      "files_pruned": 1,
+      "took_ms": 7.5,
+      "error": null
+    }
+  ]
+}
