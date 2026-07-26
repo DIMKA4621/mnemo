@@ -259,6 +259,41 @@ def _require_queue() -> Any:
 # ---------------------------------------------------------------- helpers
 
 
+def resolve_bank_ref(
+    *,
+    explicit: str | None = None,
+    header: str | None = None,
+    url_segment: str | None = None,
+) -> Bank:
+    """The one bank-addressing fallback, shared by REST and MCP (§10.3).
+
+    Precedence, highest first:
+
+    1. **explicit** — a tool's ``bank`` argument or a request body's ``bank``.
+       Always works, so a client whose wiring did not survive still has a way
+       through.
+    2. **URL segment** — ``/mcp/<name>``. The primary MCP path, because it
+       needs nothing forwarded.
+    3. **header** — ``X-Mnemo-Bank``. Supported, never depended on.
+    4. **the only bank** — if the registry holds exactly one, it is not
+       ambiguous and guessing is not guessing.
+
+    One function rather than one per face: a fallback chain written twice is
+    a fallback chain tested once. Raises ``BankNotFound`` when nothing
+    matches, so callers can turn it into a 404 or into helpful text.
+    """
+    for candidate in (explicit, url_segment, header):
+        if candidate and str(candidate).strip():
+            return registry.resolve(str(candidate).strip())
+    banks = [b for b in registry.load() if b.enabled]
+    if len(banks) == 1:
+        return banks[0]
+    raise BankNotFound(
+        "no bank specified and the registry holds "
+        f"{len(banks)} enabled banks — pass one explicitly"
+    )
+
+
 def _resolve_bank(ref: str, *, require_enabled: bool = True) -> Bank:
     try:
         bank = registry.resolve(ref)
@@ -720,23 +755,35 @@ async def lifespan(app: FastAPI):
     ping = asyncio.create_task(_ping_loop())
     _write_service_info()
     log.info("mnemo backend %s on %s:%s", SERVICE_VERSION, API_HOST, API_PORT)
-    try:
-        yield
-    finally:
-        ping.cancel()
-        with suppress(asyncio.CancelledError):
-            await ping
-        hub.bind(None)
-        if _watcher is not None:
-            with suppress(Exception):
-                _watcher.stop()
-        if q is not None:
-            with suppress(Exception):
-                q.stop()
-        servicelog.stop_pruner()
-        servicelog.close()
-        with suppress(OSError):
-            service_info_file().unlink()
+
+    # The MCP app is mounted, so FastAPI does not run its lifespan for us —
+    # its session manager has to be entered by hand or every /mcp request
+    # fails on a missing task group.
+    from .mcp_server import server as mcp_server  # noqa: PLC0415
+
+    async with mcp_server().session_manager.run():
+        try:
+            yield
+        finally:
+            await _shutdown(ping, q, _watcher)
+    return
+
+
+async def _shutdown(ping, q, watcher_mod) -> None:
+    ping.cancel()
+    with suppress(asyncio.CancelledError):
+        await ping
+    hub.bind(None)
+    if watcher_mod is not None:
+        with suppress(Exception):
+            watcher_mod.stop()
+    if q is not None:
+        with suppress(Exception):
+            q.stop()
+    servicelog.stop_pruner()
+    servicelog.close()
+    with suppress(OSError):
+        service_info_file().unlink()
 
 
 app = FastAPI(
@@ -760,9 +807,20 @@ async def auth_middleware(request: Request, call_next):
     if path.startswith(_GUARDED):
         header = request.headers.get("authorization", "")
         presented = (
-            header[7:] if header.lower().startswith("bearer ") else None
-        ) or request.headers.get("x-mnemo-token")
+            (header[7:] if header.lower().startswith("bearer ") else None)
+            or request.headers.get("x-mnemo-token")
+            # `/mcp/<bank>?token=…` — the MCP face carries its token in the
+            # URL precisely so it does not depend on a client forwarding
+            # headers. Accepted only there: an /api caller has no reason to
+            # put a secret somewhere it lands in shell history and logs.
+            or (request.query_params.get("token")
+                if path.startswith("/mcp") else None)
+        )
         if not _token_ok(presented):
+            # A plain 401 BEFORE the MCP handshake. Letting an unauthorised
+            # request reach the protocol layer makes Claude Code surface a
+            # transport error the user cannot act on, instead of "not
+            # authorised".
             return JSONResponse(
                 _envelope("unauthorized", "missing or invalid API token"),
                 status_code=401,
@@ -1318,6 +1376,16 @@ except ImportError:
     _STATIC_DIR = None
 if _STATIC_DIR is not None and _STATIC_DIR.is_dir():
     app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
+
+# MCP over HTTP, in this same process and this same uvicorn — nothing is
+# spawned for a Claude Code session (NFR-2). Mounted last so the /api routes
+# above are matched first. The bank travels as the path segment after /mcp.
+try:
+    from .mcp_server import build_app as _build_mcp
+except ImportError:  # pragma: no cover - the SDK is a hard dep, but be honest
+    _build_mcp = None
+if _build_mcp is not None:
+    app.mount("/mcp", _build_mcp(), name="mcp")
 
 
 def run(host: str | None = None, port: int | None = None) -> None:

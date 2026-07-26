@@ -1,295 +1,413 @@
-"""CLI entry points — the single engine behind hooks and (later) MCP.
+"""The CLI — a thin client of the backend, plus the few genuinely local ops.
 
-  warmup            explicit one-time 2 GB model download + sanity check
-  init [--root]     wire mnemo into a project (additive, idempotent)
-  ingest [--root]   reconcile a bank's .md -> its index (hook target)
-  search [--root]   semantic search over a bank
-  mcp               run the stdio MCP server (agent-callable tools)
-  hook-postedit     PostToolUse target: reindex ONLY if a bank .md changed
-  hook-inject       UserPromptSubmit target: inject relevant memory
-  embed-server      resident embedding helper (auto-started, not run by hand)
-  projects          list known projects (hash → cwd → last inject → log size)
-  serve             run the backend in the foreground (the service's target)
-  service …         start / stop / status / restart the background service
-  autostart …       enable / disable / status of per-OS start-at-login
+v3 splits the commands in two, and the split is the point (§11.1):
 
-`--root` is the **bank root** and defaults to the current directory: a bank
-is one folder, flat, and every `.md` under it belongs to the same index.
+* **local**: `warmup`, `init`, `service *`, `autostart *`, `serve`,
+  `embed-server`, `doctor`. These either set the machine up or *are* the
+  service, so they cannot go through it.
+* **everything else** talks HTTP to the backend via `client.py`. There is one
+  writer to an index and one search implementation, and this is a caller of
+  both — not a second copy.
+
+**Degradation is specified, not incidental.** Backend down → one line of
+explanation and **exit code 3**, so a script can tell "the service is not
+running" from "nothing was found" (exit 0) and from a real error (1). The
+hooks never propagate anything: they exit 0 whatever happens, because a hook
+that fails must not cost the user their turn.
 """
 from __future__ import annotations
 
 import argparse
+import json
+import os
 import sys
 from pathlib import Path
 
-from .config import TOP_K, resolve
-from .embedder import warmup
-from .index import pending_embeddings, reindex
-from .providers import get_provider
-from .search import search
+from .config import TOP_K
+
+EXIT_OK = 0
+EXIT_ERROR = 1
+EXIT_SERVICE_DOWN = 3
+
+
+# --------------------------------------------------------------- helpers
+
+
+def _client(timeout: float = 10.0):
+    from .client import Client
+
+    return Client(timeout=timeout)
+
+
+def _run_api(fn) -> int:
+    """Call the backend, turning its two failure modes into exit codes."""
+    from .client import ApiFailure, ServiceDown
+
+    try:
+        fn(_client())
+    except ServiceDown as exc:
+        print(f"mnemo: {exc}\n"
+              f"       start it with `mnemo service start`.", file=sys.stderr)
+        return EXIT_SERVICE_DOWN
+    except ApiFailure as exc:
+        print(f"mnemo: {exc.code}: {exc.message}", file=sys.stderr)
+        return EXIT_ERROR
+    return EXIT_OK
+
+
+def _bank_ref(explicit: str | None) -> str:
+    """What to send as `bank`. Defaults to cwd — the backend resolves a path
+    to the deepest bank containing it."""
+    return explicit or str(Path.cwd())
+
+
+# ------------------------------------------------------------ local commands
 
 
 def _cmd_warmup() -> int:
-    print(f"Downloading / loading model (one-time, ~2.2 GB) ...")
+    from .embedder import warmup
+
+    print("Downloading / loading model (one-time, ~2.2 GB) ...")
     dim = warmup()
     print(f"READY — model cached, test embedding dim = {dim}")
-    return 0
+    return EXIT_OK
 
 
-def _cmd_ingest(root: Path) -> int:
-    # Never silently pull 2 GB inside a hook: refuse if work needs the
-    # model but the provider cannot embed (no cached model AND no reachable
-    # resident). A live resident (local or a shared/remote one via
-    # MNEMO_EMBED_HOST) means the model is never loaded here — proceed.
-    if pending_embeddings(root) and not get_provider().health():
-        print(
-            "mnemo: changes detected, but the model is not cached and no "
-            "embedding resident is reachable.\n"
-            "Run `mnemo warmup` once, or start / point to a resident "
-            "(MNEMO_EMBED_HOST).",
-            file=sys.stderr,
-        )
-        return 2
-    reindex(root)
-    return 0
+def _cmd_doctor() -> int:
+    """One place that answers "why is memory not working" (§11.1)."""
+    from . import config, registry
+    from .client import ServiceDown
+    from .embed_server import server_is_up
+    from .embedder import is_model_cached
 
+    print(f"engine home      {config.USER_HOME}")
+    print(f"state dir        {config.STATE_DIR}")
+    print(f"python           {Path(sys.executable).as_posix()}")
+    print(f"model cached     {is_model_cached()}")
+    print(f"embed resident   {'up' if server_is_up() else 'down'} "
+          f"({config.EMBED_HOST}:{config.EMBED_PORT})")
 
-def _cmd_hook_postedit() -> int:
-    """PostToolUse target. Reads the hook JSON from stdin, and only runs a
-    reconcile if the edited file is a markdown file inside the bank.
-    Anything else (code, images, ...) returns instantly — the engine is
-    never spawned-into-work for unrelated edits. Always exit 0: a
-    PostToolUse hook must never block the edit.
-    """
-    import json
-
+    client = _client(timeout=3.0)
+    print(f"backend url      {client.base_url}")
+    print(f"api token        {'present' if client.token else 'MISSING'}")
     try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        return 0  # no/invalid payload -> fail safe, do nothing
-
-    ti = payload.get("tool_input") or {}
-    raw = ti.get("file_path") or ti.get("path") or ti.get("notebook_path")
-    if not raw:
-        return 0
-
-    root = payload.get("cwd")  # bank root at edit time
-    paths = resolve(root)
-    fp = Path(raw)
-    if not fp.is_absolute():
-        fp = Path(root or ".").joinpath(fp)
-    fp = fp.resolve()
-
-    if fp.suffix.lower() != ".md" or not fp.is_relative_to(paths.root):
-        return 0  # unrelated file -> instant no-op, DB never touched
-
-    reindex(root)
-    return 0
-
-
-def _cmd_hook_inject() -> int:
-    """UserPromptSubmit target. Reads hook JSON on stdin, embeds the prompt
-    via the warm resident, searches THIS project's memory (gated), and
-    prints relevant sections to stdout (Claude Code injects a
-    UserPromptSubmit hook's stdout into the context). Best-effort: on any
-    failure it skips with a one-line stderr note and never blocks.
-
-    Wall-clock bounded by ``INJECT_BUDGET_S`` — exits gracefully under
-    Claude Code's 30 s hook timeout instead of being SIGKILL-ed.
-
-    Every exit writes one JSONL line via ``inject_log`` so MIN_SIM /
-    INJECT_TOP_N / gate behaviour can be tuned from real data.
-    """
-    import json
-    import time
-
-    from .inject_log import log_inject
-
-    t0 = time.monotonic()
-
-    def elapsed_ms() -> float:
-        return (time.monotonic() - t0) * 1000.0
-
+        health = client.health()
+        print(f"backend          up (pid {health.get('pid')}, "
+              f"{health.get('banks')} banks, queue {health.get('queue_depth')})")
+    except ServiceDown as exc:
+        print(f"backend          DOWN — {exc}")
     try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        log_inject(
-            status="skipped_bad_payload", cwd=None, prompt="",
-            total_ms=elapsed_ms(), note="stdin was not valid JSON",
-        )
-        return 0
-
-    prompt = (payload.get("prompt") or payload.get("user_prompt") or "").strip()
-    root = payload.get("cwd")
-    if not prompt:
-        log_inject(
-            status="skipped_empty_prompt", cwd=root, prompt="",
-            total_ms=elapsed_ms(),
-        )
-        return 0
-
-    from .config import INJECT_BUDGET_S, INJECT_TOP_N
-    from .embed_server import embed_query_via_server
-
-    def remaining() -> float:
-        return INJECT_BUDGET_S - (time.monotonic() - t0)
-
-    t_embed_start = time.monotonic()
-    vec = embed_query_via_server(prompt, budget_s=max(0.5, remaining()))
-    embed_ms = (time.monotonic() - t_embed_start) * 1000.0
-    if vec is None:
-        print(
-            "mnemo: embedding helper unavailable — memory injection skipped",
-            file=sys.stderr,
-        )
-        log_inject(
-            status="skipped_embed_unavailable", cwd=root, prompt=prompt,
-            total_ms=elapsed_ms(), embed_ms=embed_ms,
-        )
-        return 0
-    if remaining() <= 0:
-        print("mnemo: inject budget exhausted after embed — skipped",
-              file=sys.stderr)
-        log_inject(
-            status="skipped_budget_after_embed", cwd=root, prompt=prompt,
-            total_ms=elapsed_ms(), embed_ms=embed_ms,
-        )
-        return 0
-
-    t_search_start = time.monotonic()
-    hits = _search_bank(root, prompt, qvec=vec, gate=True, top_k=INJECT_TOP_N)
-    search_ms = (time.monotonic() - t_search_start) * 1000.0
-    hit_records = [
-        {
-            "path": h.path,
-            "heading": h.heading or None,
-            "score": round(h.score, 6),
-            "sim": None if h.sim is None else round(h.sim, 4),
-        }
-        for h in hits
-    ]
-
-    if remaining() <= 0:
-        print("mnemo: inject budget exhausted after search — skipped",
-              file=sys.stderr)
-        log_inject(
-            status="skipped_budget_after_search", cwd=root, prompt=prompt,
-            total_ms=elapsed_ms(), embed_ms=embed_ms, search_ms=search_ms,
-            hits=hit_records,
-        )
-        return 0
-    if not hits:
-        log_inject(
-            status="ok_no_hits", cwd=root, prompt=prompt,
-            total_ms=elapsed_ms(), embed_ms=embed_ms, search_ms=search_ms,
-            hits=[],
-        )
-        return 0  # nothing relevant -> inject nothing (no context noise)
-
-    out = ['<project-memory source="mnemo">',
-           "Curated project memory relevant to this prompt:"]
-    for h in hits:
-        snippet = " ".join(h.content.split())
-        out.append(f"\n### {h.path} · {h.heading or '(no heading)'}\n{snippet}")
-    out.append("</project-memory>")
-    print("\n".join(out))
-    log_inject(
-        status="ok", cwd=root, prompt=prompt,
-        total_ms=elapsed_ms(), embed_ms=embed_ms, search_ms=search_ms,
-        hits=hit_records,
-    )
-    return 0
+        banks = registry.load()
+    except Exception as exc:  # noqa: BLE001
+        print(f"registry         UNREADABLE — {exc}")
+        return EXIT_ERROR
+    print(f"banks            {len(banks)}")
+    for bank in banks:
+        flags = []
+        if not bank.enabled:
+            flags.append("disabled")
+        if not bank.exists:
+            flags.append("ROOT MISSING")
+        suffix = f"  [{', '.join(flags)}]" if flags else ""
+        print(f"  {bank.name:<20} {bank.root.as_posix()}{suffix}")
+    return EXIT_OK
 
 
-def _cmd_projects() -> int:
-    """List known projects: hash → path → last activity → log size.
-
-    Derived from ``state/logs/*.log`` (every JSONL line carries cwd), so
-    no extra manifest is maintained. A project with an index DB but zero
-    inject history is listed as (no log entries yet).
-    """
-    import json
-    from .config import INJECT_LOG_DIR, STATE_DIR
-
-    rows: list[tuple[str, str, str, int]] = []
-    seen_hashes: set[str] = set()
-
-    if INJECT_LOG_DIR.is_dir():
-        for log in sorted(INJECT_LOG_DIR.glob("*.log")):
-            phash = log.stem
-            size = log.stat().st_size
-            cwd, ts = "(unknown)", "—"
-            try:
-                with log.open("rb") as fh:
-                    # Read last line cheaply (small files; logs are KB-sized).
-                    last = fh.read().splitlines()[-1] if size else b""
-                if last:
-                    rec = json.loads(last)
-                    cwd = rec.get("cwd") or "(unknown)"
-                    ts = rec.get("ts") or "—"
-            except (OSError, ValueError, IndexError):
-                pass
-            rows.append((phash, cwd, ts, size))
-            seen_hashes.add(phash)
-
-    if STATE_DIR.is_dir():
-        for db in sorted(STATE_DIR.glob("*.db")):
-            if db.stem not in seen_hashes:
-                rows.append((db.stem, "(no log entries yet)", "—", 0))
-
-    if not rows:
-        print("No mnemo projects found.")
-        return 0
-
-    print(f"{'HASH':<18} {'LAST':<26} {'LOG':>9}  CWD")
-    for phash, cwd, ts, size in rows:
-        size_h = f"{size/1024:.1f}K" if size else "—"
-        print(f"{phash:<18} {ts:<26} {size_h:>9}  {cwd}")
-    return 0
-
-
-def _search_bank(root, query: str, **kwargs):
-    """Open a bank read-only and search it.
-
-    `search()` is pure and takes an open connection, so the caller owns the
-    lifecycle. Read-only on purpose: a search must never create or migrate an
-    index — an absent one simply has nothing to say. Phase 4 replaces this
-    with an HTTP call to the backend.
-    """
-    from .store import connect
-
-    paths = resolve(root)
-    if not paths.db.exists():
-        return []
-    conn = connect(paths.db, ensure=False)
-    try:
-        return search(conn, query, **kwargs)
-    finally:
-        conn.close()
+# -------------------------------------------------------------- API commands
 
 
 def _cmd_search(args: argparse.Namespace) -> int:
-    hits = _search_bank(
-        args.root,
-        args.query,
-        path_prefix=args.path_prefix,
-        top_k=args.top_k,
-    )
-    if not hits:
-        print("No relevant results.")
-        return 0
-    for i, h in enumerate(hits, 1):
-        print(
-            f"\n[{i}] {h.path}  ·  {h.heading or '(no heading)'}  ·  "
-            f"score={h.score:.4f}"
+    from .client import ApiFailure, ServiceDown
+
+    try:
+        body = _client().search(
+            _bank_ref(args.bank), args.query,
+            top_k=args.top_k, path_prefix=args.path_prefix, face="cli",
         )
-        snippet = " ".join(h.content.split())
+    except ServiceDown as exc:
+        print(f"mnemo: {exc}\n       start it with `mnemo service start`.",
+              file=sys.stderr)
+        return EXIT_SERVICE_DOWN
+    except ApiFailure as exc:
+        print(f"mnemo: {exc.code}: {exc.message}", file=sys.stderr)
+        return EXIT_ERROR
+
+    # The status line first: "nothing indexed" and "no match" are different
+    # answers and a human deserves to see which one they got.
+    print(f"[{body['bank_name']} · {body['status']} · "
+          f"queued={body['queued']} · chunks={body['chunk_count']}]")
+    if body.get("degraded"):
+        print(f"  (degraded: {body['degraded']})", file=sys.stderr)
+    if not body["hits"]:
+        if body["status"] == "indexing" and body["chunk_count"] == 0:
+            print("Still building the first index — retry shortly.")
+        elif body["status"] == "empty":
+            print("Nothing indexed yet.")
+        else:
+            print("No relevant results.")
+        return EXIT_OK
+    for i, hit in enumerate(body["hits"], 1):
+        print(f"\n[{i}] {hit['path']}  ·  {hit['heading'] or '(no heading)'}"
+              f"  ·  score={hit['score']:.4f}")
+        snippet = " ".join((hit.get("content") or "").split())
         print(f"    {snippet[:300]}{'…' if len(snippet) > 300 else ''}")
-    return 0
+    return EXIT_OK
+
+
+def _cmd_reindex(args: argparse.Namespace) -> int:
+    def call(c):
+        body = c.reindex(_bank_ref(args.bank), path=args.path, full=args.full)
+        print(f"queued {len(body['task_ids'])} task(s); "
+              f"{body['queued']} waiting.")
+
+    return _run_api(call)
+
+
+def _cmd_banks(args: argparse.Namespace) -> int:
+    def call(c):
+        if args.action == "list":
+            banks = c.banks()
+            if not banks:
+                print("No banks registered.")
+                return
+            print(f"{'NAME':<20} {'STATUS':<9} {'FILES':>6} {'CHUNKS':>7}  ROOT")
+            for b in banks:
+                print(f"{b['name']:<20} {b['status']:<9} {b['files']:>6} "
+                      f"{b['chunks']:>7}  {b['root']}")
+        elif args.action == "add":
+            info = c.add_bank(str(Path(args.path).expanduser().resolve()),
+                              name=args.name, provider=args.provider)
+            print(f"registered {info['name']}  ({info['id']})  {info['root']}")
+        else:
+            banks = {b["name"]: b for b in c.banks()}
+            target = banks.get(args.path) or next(
+                (b for b in banks.values() if b["id"] == args.path), None
+            )
+            if target is None:
+                print(f"mnemo: no bank named {args.path!r}", file=sys.stderr)
+                raise SystemExit(EXIT_ERROR)
+            c.remove_bank(target["id"], drop_index=not args.keep_index)
+            print(f"removed {target['name']}"
+                  f"{' (index kept)' if args.keep_index else ''}")
+
+    return _run_api(call)
+
+
+def _cmd_tree(args: argparse.Namespace) -> int:
+    def call(c):
+        body = c.tree(_bank_ref(args.bank), depth=args.depth)
+        print(f"{body['root']}  ({body['files']} files, {body['dirs']} dirs)")
+
+        def walk(node, indent):
+            for child in node.get("children", []):
+                pad = "  " * indent
+                if child["type"] == "dir":
+                    print(f"{pad}{child['name']}/")
+                    walk(child, indent + 1)
+                else:
+                    heads = ", ".join(child.get("headings") or [])
+                    print(f"{pad}{child['name']}" + (f"  — {heads}" if heads else ""))
+
+        walk(body["tree"], 0)
+
+    return _run_api(call)
+
+
+def _cmd_status() -> int:
+    def call(c):
+        body = c.status()
+        svc, queue = body["service"], body["queue"]
+        print(f"mnemo {svc['version']}  pid={svc['pid']}  port={svc['port']}  "
+              f"up {svc['uptime_s']:.0f}s")
+        print(f"provider {svc['provider']}  embed "
+              f"{'reachable' if svc['embed'].get('reachable') else 'DOWN'}")
+        print(f"queue depth={queue['depth']} high={queue['high']} "
+              f"normal={queue['normal']} low={queue['low']}")
+        if queue.get("current"):
+            cur = queue["current"]
+            print(f"  current: {cur['kind']} {cur['path'] or ''} "
+                  f"batch {cur['batch']}/{cur['batches']}")
+        for b in body["banks"]:
+            print(f"  {b['name']:<20} {b['status']:<9} "
+                  f"{b['chunks']:>6} chunks  queued={b['queued']}")
+
+    return _run_api(call)
+
+
+def _cmd_logs(args: argparse.Namespace) -> int:
+    def call(c):
+        body = c.logs(args.kind, bank=args.bank, since=args.since,
+                      limit=args.n)
+        print(f"{body['total']} event(s); showing {len(body['events'])}")
+        for ev in body["events"]:
+            if args.kind == "query":
+                print(f"{ev['ts']}  {ev['face']:<5} {ev['status']:<9} "
+                      f"n={ev['n_hits']:<3} {ev['took_ms']:.0f}ms  "
+                      f"{ev['query'][:60]}")
+            else:
+                print(f"{ev['ts']}  {ev['kind']:<7} {ev['trigger']:<8} "
+                      f"{ev['result']:<8} {ev['path'] or ''}"
+                      f"{'  ' + ev['error'] if ev.get('error') else ''}")
+
+    return _run_api(call)
+
+
+def _cmd_ui() -> int:
+    """Open the cabinet, handing the token over in the URL once (§9.1)."""
+    import webbrowser
+
+    client = _client()
+    url = f"{client.base_url}/ui/?token={client.token}"
+    print(url)
+    webbrowser.open(url)
+    return EXIT_OK
+
+
+# ------------------------------------------------------------------- hooks
+
+
+def _cmd_hook_postedit() -> int:
+    """v2 shim. Always exit 0, immediately, doing nothing.
+
+    Reindexing on edit is the watcher's job now. This survives only because
+    already-adopted projects have `mnemo hook-postedit` in git-tracked
+    settings; removing the subcommand would break them at the next edit.
+    `mnemo init --migrate` drops the hook, and then this is unreachable.
+    """
+    return EXIT_OK
+
+
+def _cmd_hook_inject() -> int:
+    """UserPromptSubmit target: surface relevant memory, or get out of the way.
+
+    A thin HTTP call now — no model, no index, no embedding in this process.
+    Every failure path exits 0 in silence: a hook that blocks or errors costs
+    the user their turn, and no memory is strictly better than that.
+
+    **Sends `CLAUDE_PROJECT_DIR`, never `cwd`.** `registry.resolve()` maps a
+    path to the *deepest* bank containing it, so a session whose cwd is a
+    subdirectory would resolve to a plausible but wrong bank, silently — the
+    worst failure available here, because the answers look real.
+    """
+    from .config import INJECT_TOP_N
+
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return EXIT_OK
+
+    prompt = (payload.get("prompt") or payload.get("user_prompt") or "").strip()
+    if not prompt:
+        return EXIT_OK
+
+    root = (
+        os.environ.get("CLAUDE_PROJECT_DIR")
+        or payload.get("project_dir")
+        or payload.get("cwd")
+    )
+    if not root:
+        return EXIT_OK
+
+    try:
+        # Short timeout on purpose: this sits in front of a human waiting for
+        # a reply. Late memory is worse than none.
+        body = _client(timeout=5.0).search(
+            str(root), prompt, top_k=INJECT_TOP_N, face="hook",
+        )
+    except Exception:  # noqa: BLE001 - never let a hook surface anything
+        return EXIT_OK
+
+    hits = body.get("hits") or []
+    if not hits:
+        return EXIT_OK
+    out = ['<project-memory source="mnemo">',
+           "Curated project memory relevant to this prompt:"]
+    for hit in hits:
+        snippet = " ".join((hit.get("content") or "").split())
+        out.append(f"\n### {hit['path']} · {hit['heading'] or '(no heading)'}\n"
+                   f"{snippet}")
+    out.append("</project-memory>")
+    print("\n".join(out))
+    return EXIT_OK
+
+
+# -------------------------------------------------------------------- main
+
+
+def _build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="mnemo",
+        description="Project memory: .md -> chunk -> embed -> sqlite-vec -> search.",
+    )
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    # --- local ----------------------------------------------------------
+    sub.add_parser("warmup", help="One-time explicit model download + check.")
+    sub.add_parser("doctor", help="Diagnose venv, model, token, ports, banks.")
+    sub.add_parser("embed-server", help="Resident embedding helper (internal).")
+    sub.add_parser("hook-postedit", help="v2 shim: exits 0 (watcher reindexes).")
+    sub.add_parser("hook-inject", help="UserPromptSubmit target: inject memory.")
+
+    pn = sub.add_parser("init", help="Wire mnemo into a project (additive).")
+    pn.add_argument("--root", default=None, help="Project root (default: cwd).")
+    pn.add_argument(
+        "--migrate", action="store_true",
+        help="Also rewrite mnemo's OWN v2 wiring to the v3 form. Never "
+             "touches a key mnemo did not author.",
+    )
+
+    pv = sub.add_parser("serve", help="Run the backend in the foreground.")
+    pv.add_argument("--host", default=None)
+    pv.add_argument("--port", type=int, default=None)
+
+    psv = sub.add_parser("service", help="start | stop | status | restart.")
+    psv.add_argument("action", choices=("start", "stop", "status", "restart"))
+    psv.add_argument("--foreground", action="store_true")
+
+    pas = sub.add_parser("autostart", help="enable | disable | status.")
+    pas.add_argument("action", choices=("enable", "disable", "status"))
+
+    # --- API clients ----------------------------------------------------
+    ps = sub.add_parser("search", help="Semantic search over a bank.")
+    ps.add_argument("query")
+    ps.add_argument("--bank", default=None, help="Bank id, name or path.")
+    ps.add_argument("--path-prefix", default=None)
+    ps.add_argument("-k", "--top-k", type=int, default=TOP_K)
+
+    pr = sub.add_parser("reindex", help="Queue a reindex.")
+    pr.add_argument("--bank", default=None)
+    pr.add_argument("--path", default=None, help="One file, relative to root.")
+    pr.add_argument("--full", action="store_true", help="Rebuild from scratch.")
+
+    pb = sub.add_parser("banks", help="list | add | remove.")
+    pb.add_argument("action", choices=("list", "add", "remove"))
+    pb.add_argument("path", nargs="?", default=None,
+                    help="add: the root; remove: a name or id.")
+    pb.add_argument("--name", default=None)
+    pb.add_argument("--provider", default=None)
+    pb.add_argument("--keep-index", action="store_true")
+
+    pt = sub.add_parser("tree", help="Show a bank's memory tree.")
+    pt.add_argument("--bank", default=None)
+    pt.add_argument("--depth", type=int, default=0)
+
+    sub.add_parser("status", help="Service, queue and bank status.")
+    sub.add_parser("ui", help="Open the local web cabinet.")
+
+    pl = sub.add_parser("logs", help="Service journal.")
+    pl.add_argument("--kind", choices=("query", "index"), default="query")
+    pl.add_argument("--bank", default=None)
+    pl.add_argument("--since", default=None, help="ISO-8601 or epoch seconds.")
+    pl.add_argument("-n", type=int, default=50)
+
+    # --- deprecated -----------------------------------------------------
+    pi = sub.add_parser("ingest", help="Deprecated alias for `reindex`.")
+    pi.add_argument("--root", default=None)
+    return parser
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Quiet SIGPIPE: `mnemo projects | head` should not traceback.
+    # Quiet SIGPIPE: `mnemo logs | head` should not traceback.
     try:
         import signal
         signal.signal(signal.SIGPIPE, signal.SIG_DFL)
@@ -298,13 +416,9 @@ def main(argv: list[str] | None = None) -> int:
 
     # Memory is Ukrainian as often as English, and results are printed with
     # '·' / '…'. A default Windows console is cp1252, so writing a hit would
-    # die with UnicodeEncodeError. Force UTF-8 and replace anything the
-    # terminal genuinely cannot render — a mangled glyph beats a traceback.
-    #
-    # stdin matters just as much: the hooks are fed a JSON payload whose
-    # prompt is routinely Cyrillic. Decoded as cp1252 it arrives as mojibake
-    # with lone surrogates, which then poisons the search query and blows up
-    # the log writer downstream. All three streams, one rule.
+    # die with UnicodeEncodeError. stdin matters just as much: the hooks are
+    # fed a JSON payload whose prompt is routinely Cyrillic. All three
+    # streams, one rule.
     for stream in (sys.stdin, sys.stdout, sys.stderr):
         if hasattr(stream, "reconfigure"):
             try:
@@ -312,106 +426,29 @@ def main(argv: list[str] | None = None) -> int:
             except (OSError, ValueError):
                 pass  # redirected to something that cannot be reconfigured
 
-    parser = argparse.ArgumentParser(
-        prog="mnemo",
-        description="Project memory: .md -> chunk -> embed -> sqlite-vec -> search.",
-    )
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    args = _build_parser().parse_args(argv)
+    cmd = args.cmd
 
-    sub.add_parser("warmup", help="One-time explicit model download + check.")
-    sub.add_parser("mcp", help="Run the stdio MCP server (agent tools).")
-    sub.add_parser(
-        "hook-postedit",
-        help="PostToolUse target: reads hook JSON on stdin, reconciles "
-        "only if the edited file is a memory file.",
-    )
-    sub.add_parser(
-        "hook-inject",
-        help="UserPromptSubmit target: reads hook JSON on stdin, injects "
-        "relevant project memory via the warm helper.",
-    )
-    sub.add_parser(
-        "embed-server",
-        help="Resident embedding helper (loopback). Auto-started by "
-        "hook-inject; not meant to be run by hand.",
-    )
-    sub.add_parser(
-        "projects",
-        help="List known projects (hash, path, last activity, log size).",
-    )
-
-    pn = sub.add_parser(
-        "init",
-        help="Wire mnemo into a project: create the memory skeleton and "
-        "additively merge .mcp.json / .claude/settings.json (idempotent, "
-        "refuses on conflict, never touches CLAUDE.md).",
-    )
-    pn.add_argument("--root", default=None, help="Project root (default: cwd).")
-
-    # --- process lifecycle (block L, platform-dev) ---------------------
-    pv = sub.add_parser(
-        "serve",
-        help="Run the backend in the foreground (what `service start` "
-        "launches in a windowless child; not usually run by hand).",
-    )
-    pv.add_argument("--host", default=None, help="Bind address (default: loopback).")
-    pv.add_argument("--port", type=int, default=None, help="Port (default: 8918).")
-
-    psv = sub.add_parser(
-        "service",
-        help="Control the background service: start | stop | status | restart.",
-    )
-    psv.add_argument(
-        "action",
-        choices=("start", "stop", "status", "restart"),
-    )
-    psv.add_argument(
-        "--foreground",
-        action="store_true",
-        help="start only: run in this terminal instead of detaching.",
-    )
-
-    pas = sub.add_parser(
-        "autostart",
-        help="Start the service at login: enable | disable | status.",
-    )
-    pas.add_argument("action", choices=("enable", "disable", "status"))
-
-    pi = sub.add_parser("ingest", help="Reconcile .md -> index (hash-diff + prune).")
-    pi.add_argument("--root", default=None, help="Project root (default: cwd).")
-
-    ps = sub.add_parser("search", help="Semantic search over a bank.")
-    ps.add_argument("query")
-    ps.add_argument("--root", default=None, help="Bank root (default: cwd).")
-    ps.add_argument(
-        "--path-prefix",
-        default=None,
-        help="Narrow to a folder (or file) inside the bank, e.g. 'logs'.",
-    )
-    ps.add_argument("-k", "--top-k", type=int, default=TOP_K)
-
-    args = parser.parse_args(argv)
-    if args.cmd == "warmup":
+    if cmd == "warmup":
         return _cmd_warmup()
-    if args.cmd == "mcp":
-        from .mcp_server import run
-        run()
-        return 0
-    if args.cmd == "hook-postedit":
-        return _cmd_hook_postedit()
-    if args.cmd == "hook-inject":
-        return _cmd_hook_inject()
-    if args.cmd == "embed-server":
+    if cmd == "doctor":
+        return _cmd_doctor()
+    if cmd == "embed-server":
         from .embed_server import serve
         serve()
-        return 0
-    if args.cmd == "projects":
-        return _cmd_projects()
-    if args.cmd == "serve":
+        return EXIT_OK
+    if cmd == "hook-postedit":
+        return _cmd_hook_postedit()
+    if cmd == "hook-inject":
+        return _cmd_hook_inject()
+    if cmd == "init":
+        from .scaffold import init_project
+        return init_project(args.root, migrate=args.migrate)
+    if cmd == "serve":
         from .api import run
         run(host=args.host, port=args.port)
-        return 0
-    if args.cmd == "service":
+        return EXIT_OK
+    if cmd == "service":
         from . import service_ctl
         if args.action == "start":
             return service_ctl.start(foreground=args.foreground)
@@ -420,19 +457,37 @@ def main(argv: list[str] | None = None) -> int:
         if args.action == "restart":
             return service_ctl.restart()
         return service_ctl.status()
-    if args.cmd == "autostart":
+    if cmd == "autostart":
         from . import autostart
         if args.action == "enable":
             return autostart.enable()
         if args.action == "disable":
             return autostart.disable()
         return autostart.status()
-    if args.cmd == "init":
-        from .scaffold import init_project
-        return init_project(args.root)
-    if args.cmd == "ingest":
-        return _cmd_ingest(args.root)
-    return _cmd_search(args)
+
+    if cmd == "search":
+        return _cmd_search(args)
+    if cmd == "reindex":
+        return _cmd_reindex(args)
+    if cmd == "banks":
+        return _cmd_banks(args)
+    if cmd == "tree":
+        return _cmd_tree(args)
+    if cmd == "status":
+        return _cmd_status()
+    if cmd == "ui":
+        return _cmd_ui()
+    if cmd == "logs":
+        return _cmd_logs(args)
+    if cmd == "ingest":
+        # Deprecated: an already-adopted project's SessionStart hook still
+        # calls this. It now queues a reconcile through the service instead
+        # of indexing inline, so it can no longer block a session start.
+        print("mnemo: `ingest` is deprecated — use `mnemo reindex`.",
+              file=sys.stderr)
+        args.bank, args.path, args.full = args.root, None, False
+        return _cmd_reindex(args)
+    return EXIT_ERROR
 
 
 if __name__ == "__main__":
