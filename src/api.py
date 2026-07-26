@@ -384,6 +384,32 @@ def _status_from(state: tuple[int, bool], chunk_count: int) -> tuple[str, int]:
     return "ready", queued
 
 
+def _provider_identity(spec: str | None) -> tuple[dict, str | None]:
+    """Name / model / dim / key of the provider that would index a bank.
+
+    Returns ``(identity, error)``. Constructing the ``api`` provider raises
+    ``ValueError`` when its URL, model or dim are unset — deliberately, so a
+    misconfigured provider fails before a bulk index rather than half-way
+    through one. In a *status* path that is a state the user is actively
+    trying to get out of, so it is rendered, not raised.
+
+    ``provider.key`` is ``name:model:dim`` and holds no credential; nothing
+    derived from ``MNEMO_API_EMBED_KEY`` is ever exposed here.
+    """
+    try:
+        provider = get_provider(spec)
+    except ValueError as exc:
+        return {}, str(exc)
+    except Exception as exc:  # noqa: BLE001 - status must not fail on this
+        return {}, f"{type(exc).__name__}: {exc}"
+    return {
+        "name": provider.name,
+        "model": provider.model,
+        "dim": provider.dim,
+        "key": provider.key,
+    }, None
+
+
 def _bank_info(bank: Bank) -> dict:
     """The one bank shape the API returns (§9.5)."""
     # Queue state FIRST: reading chunk_count first leaves a window where a
@@ -397,10 +423,13 @@ def _bank_info(bank: Bank) -> dict:
             files = store.file_count(conn)
             chunks = store.chunk_count(conn)
             db_bytes = bank.db_path.stat().st_size
-            last_indexed = store.get_meta(conn).get("last_indexed_at")
+            meta = store.get_meta(conn)
+            last_indexed = meta.get("last_indexed_at")
+            index_provider_key = meta.get("provider_key")
     except Exception as exc:  # noqa: BLE001 - a broken index must still list
         log.warning("cannot read index of bank %s: %s", bank.name, exc)
     status, queued = _status_from(status_probe, chunks)
+    active, provider_error = _provider_identity(bank.provider)
     return {
         "id": bank.id,
         "name": bank.name,
@@ -417,6 +446,20 @@ def _bank_info(bank: Bank) -> dict:
         "queued": queued,
         "indexing": status == "indexing",
         "last_error": servicelog.last_index_error(bank.id),
+        # Which provider *would* index this bank now …
+        "provider_active": active.get("name"),
+        "provider_key": active.get("key"),
+        # … and which one actually built the vectors that are in there.
+        "index_provider_key": index_provider_key,
+        # They differ -> the next reconcile re-embeds the whole bank. Showing
+        # only the configured provider would leave a user watching 300 files
+        # rebuild with no idea why.
+        "rebuild_pending": bool(
+            index_provider_key
+            and active.get("key")
+            and index_provider_key != active.get("key")
+        ),
+        "provider_error": provider_error,
     }
 
 
@@ -891,16 +934,19 @@ class ReindexRequest(BaseModel):
 @app.get("/health")
 def health() -> dict:
     """Liveness — deliberately token-free (§9.1)."""
+    identity, provider_error = _provider_identity(None)
     try:
-        provider = get_provider()
         embed = {
-            "provider": provider.name,
-            "reachable": bool(provider.health()),
+            "provider": identity.get("name"),
+            "model": identity.get("model"),
+            "reachable": bool(get_provider().health()) if identity else False,
             "host": getattr(config, "EMBED_HOST", None),
             "port": getattr(config, "EMBED_PORT", None),
         }
     except Exception as exc:  # noqa: BLE001 - health never fails
         embed = {"provider": None, "reachable": False, "error": str(exc)}
+    if provider_error:
+        embed["error"] = provider_error
     try:
         banks = len(registry.load())
     except Exception:  # noqa: BLE001
@@ -1249,17 +1295,21 @@ def api_file(bank: str, path: str) -> dict:
 
 @app.get("/api/status")
 def api_status() -> dict:
+    identity, provider_error = _provider_identity(None)
     try:
-        provider = get_provider()
+        # health() is cheap and side-effect free by contract — for `api` it
+        # checks configuration and deliberately makes no request, so a status
+        # command never costs money or burns a rate limit.
+        reachable = bool(get_provider().health()) if identity else False
         embed = {
-            "reachable": bool(provider.health()),
+            "reachable": reachable,
             "host": getattr(config, "EMBED_HOST", None),
             "port": getattr(config, "EMBED_PORT", None),
         }
-        provider_name = provider.name
     except Exception as exc:  # noqa: BLE001
         embed = {"reachable": False, "error": str(exc)}
-        provider_name = None
+    if provider_error:
+        embed["error"] = provider_error
     return {
         "service": {
             "version": SERVICE_VERSION,
@@ -1267,7 +1317,11 @@ def api_status() -> dict:
             "port": API_PORT,
             "started_at": _started_iso,
             "uptime_s": round(time.time() - _started_at, 1),
-            "provider": provider_name,
+            "provider": identity.get("name"),
+            "provider_model": identity.get("model"),
+            "provider_dim": identity.get("dim"),
+            "provider_key": identity.get("key"),
+            "provider_error": provider_error,
             "priority_enabled": os.environ.get("MNEMO_QUEUE_PRIORITY", "1") != "0",
             "embed": embed,
         },

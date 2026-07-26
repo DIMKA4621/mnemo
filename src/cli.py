@@ -213,23 +213,56 @@ def _cmd_tree(args: argparse.Namespace) -> int:
     return _run_api(call)
 
 
+def _short_key(key: str | None) -> str:
+    """`local:intfloat/multilingual-e5-large:1024` -> `local:e5-large:1024`.
+
+    Enough to see at a glance that two keys differ, short enough to sit in a
+    table. Never a secret: the key is name:model:dim by construction.
+    """
+    if not key:
+        return "—"
+    parts = key.split(":")
+    if len(parts) < 3:
+        return key
+    model = parts[1].rsplit("/", 1)[-1]
+    return f"{parts[0]}:{model}:{parts[-1]}"
+
+
 def _cmd_status() -> int:
     def call(c):
         body = c.status()
         svc, queue = body["service"], body["queue"]
         print(f"mnemo {svc['version']}  pid={svc['pid']}  port={svc['port']}  "
               f"up {svc['uptime_s']:.0f}s")
-        print(f"provider {svc['provider']}  embed "
-              f"{'reachable' if svc['embed'].get('reachable') else 'DOWN'}")
+        provider = svc.get("provider") or "—"
+        model = svc.get("provider_model")
+        print(f"provider {provider}"
+              + (f" ({model}, dim {svc.get('provider_dim')})" if model else "")
+              + f"  embed "
+              + ("reachable" if svc["embed"].get("reachable") else "DOWN"))
+        if svc.get("provider_error"):
+            print(f"  provider NOT CONFIGURED: {svc['provider_error']}")
         print(f"queue depth={queue['depth']} high={queue['high']} "
               f"normal={queue['normal']} low={queue['low']}")
         if queue.get("current"):
             cur = queue["current"]
             print(f"  current: {cur['kind']} {cur['path'] or ''} "
                   f"batch {cur['batch']}/{cur['batches']}")
+        print()
+        print(f"  {'BANK':<20} {'PROVIDER':<9} {'INDEX BUILT BY':<32} "
+              f"{'STATUS':<9} {'CHUNKS':>7}")
         for b in body["banks"]:
-            print(f"  {b['name']:<20} {b['status']:<9} "
-                  f"{b['chunks']:>6} chunks  queued={b['queued']}")
+            # Both the provider that WOULD index this bank and the one that
+            # actually built the vectors in it. When they differ the next
+            # reconcile re-embeds everything, and that is the moment a user
+            # needs to be told why — not left watching 300 files rebuild.
+            flag = "  <- REBUILD PENDING" if b.get("rebuild_pending") else ""
+            if b.get("provider_error"):
+                flag = f"  <- {b['provider_error']}"
+            print(f"  {b['name']:<20} "
+                  f"{(b.get('provider_active') or '—'):<9} "
+                  f"{_short_key(b.get('index_provider_key')):<32} "
+                  f"{b['status']:<9} {b['chunks']:>7}{flag}")
 
     return _run_api(call)
 
