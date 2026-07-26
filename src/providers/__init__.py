@@ -27,4 +27,10 @@ def get_provider(spec: str | None = None) -> EmbeddingProvider:
         from .local import LocalProvider
 
         return LocalProvider()
-    raise ValueError(f"unknown embedding provider {chosen!r} (known: local)")
+    if chosen == "api":
+        # Only ever reached by being named. Nothing degrades into `api`:
+        # it is the one path that sends bank contents off the machine.
+        from .api import ApiProvider
+
+        return ApiProvider()
+    raise ValueError(f"unknown embedding provider {chosen!r} (known: local, api)")

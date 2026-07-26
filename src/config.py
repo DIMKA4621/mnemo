@@ -291,11 +291,25 @@ FILE_MAX_BYTES: int = int(os.environ.get("MNEMO_FILE_MAX_BYTES", str(2 * 1024 * 
 # --- providers (B) ------------------------------  engine-dev
 
 # Embedding provider (see src/providers/). `local` = the resident ONNX
-# e5-large; `api` = an external embeddings endpoint (added in a later phase).
+# e5-large; `api` = an external embeddings endpoint.
 # The provider key (name:model:dim) is recorded in each bank's index, so a
 # provider change is detected and the bank is rebuilt instead of mixing
 # vectors from two different models in one database.
 EMBED_PROVIDER: str = os.environ.get("MNEMO_PROVIDER", "local")
+
+# The `api` provider. Sending memory to a third party is a privacy decision,
+# so every one of these is opt-in and there is NO default endpoint: nothing
+# here can be reached by accident or by a fallback. `local` never degrades
+# into `api`; the only way onto this path is naming it explicitly, per
+# service (MNEMO_PROVIDER=api) or per bank (the registry's `provider` field).
+API_EMBED_URL: str = os.environ.get("MNEMO_API_EMBED_URL", "")
+API_EMBED_KEY: str = os.environ.get("MNEMO_API_EMBED_KEY", "")
+API_EMBED_MODEL: str = os.environ.get("MNEMO_API_EMBED_MODEL", "")
+# Mandatory, and deliberately not guessed: the sqlite-vec column is declared
+# with a fixed width, so a wrong dimensionality is not a slow degradation but
+# a corrupt index. Better to refuse at startup than to find out at query time.
+API_EMBED_DIM: int = int(os.environ.get("MNEMO_API_EMBED_DIM", "0"))
+API_EMBED_TIMEOUT: float = float(os.environ.get("MNEMO_API_EMBED_TIMEOUT", "60"))
 
 
 # --- registry & banks (G) -----------------------  service-dev
