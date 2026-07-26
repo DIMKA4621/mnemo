@@ -85,8 +85,7 @@ def token_file() -> Path:
     reading and writing the original directory. Every state path below is a
     function for that reason.
     """
-    return Path(getattr(config, "API_TOKEN_FILE", None)
-                or Path(config.STATE_DIR) / "api.token")
+    return Path(config.STATE_DIR) / "api.token"
 
 
 def service_info_file() -> Path:

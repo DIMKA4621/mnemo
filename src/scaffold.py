@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from urllib.parse import quote
 
 from . import config
 from .config import resolve
@@ -50,9 +51,14 @@ def _mcp_server(bank_name: str) -> dict:
     port = getattr(config, "API_PORT", None) or os.environ.get(
         "MNEMO_API_PORT", "8918"
     )
+    # The name is percent-encoded: it is a human label, and on this project's
+    # own machine those contain spaces and Cyrillic. A raw space makes the
+    # URL invalid outright, and a raw non-ASCII byte is not portable across
+    # clients. `safe=""` also encodes `/` and `+`, which would otherwise be
+    # read as a path separator and as a space respectively.
     return {
         "type": "http",
-        "url": f"http://127.0.0.1:{port}/mcp/{bank_name}"
+        "url": f"http://127.0.0.1:{port}/mcp/{quote(bank_name, safe='')}"
                f"?token=${{MNEMO_API_TOKEN}}",
         "headers": {
             "Authorization": "Bearer ${MNEMO_API_TOKEN}",

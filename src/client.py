@@ -16,6 +16,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -70,12 +72,89 @@ def default_token() -> str:
     env = os.environ.get("MNEMO_API_TOKEN")
     if env and env.strip():
         return env.strip()
-    path = Path(getattr(config, "API_TOKEN_FILE", None)
-                or Path(config.STATE_DIR) / "api.token")
+    path = Path(config.STATE_DIR) / "api.token"
     try:
         return path.read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+# Autostart is attempted at most once per process. A face that cannot reach
+# the backend and cannot start one must fail fast on every subsequent call,
+# not re-spawn on each retry.
+_autostart_tried = False
+
+
+def autostart_enabled() -> bool:
+    configured = getattr(config, "API_AUTOSTART", None)
+    if configured is not None:
+        return bool(configured)
+    return os.environ.get("MNEMO_API_AUTOSTART", "1") != "0"
+
+
+def autostart_wait_s() -> float:
+    configured = getattr(config, "API_AUTOSTART_WAIT_S", None)
+    if configured is not None:
+        return float(configured)
+    return float(os.environ.get("MNEMO_API_AUTOSTART_WAIT_S", "20"))
+
+
+def ensure_backend(*, wait: bool = True) -> bool:
+    """Start the backend if it is not running (design §6, implementation §6).
+
+    The user should not have to know a service exists: the first face that
+    needs one brings it up, windowless, and carries on. This also means a
+    freshly installed machine works before the reboot-triggered autostart has
+    ever fired.
+
+    Uses ``service_ctl.start()`` — platform-dev's tested primitive — rather
+    than a second spawn path, because "no console window on Windows" is a
+    property of *that* function and duplicating it would duplicate the bug
+    surface too.
+
+    ``wait=False`` starts it and returns immediately: for the auto-inject
+    hook, which must not make a human wait for a cold start. That prompt gets
+    no memory; the next one does.
+    """
+    global _autostart_tried
+    if _autostart_tried or not autostart_enabled():
+        return False
+    _autostart_tried = True
+    try:
+        from . import service_ctl
+    except ImportError:
+        return False
+    # `service_ctl.start()` narrates to stdout, which is correct for
+    # `mnemo service start` and wrong here: the user ran `mnemo banks list`,
+    # and a line of service chatter on stdout corrupts anything piping that
+    # command. Capture it and re-emit on stderr, where progress belongs.
+    import contextlib
+    import io
+
+    noise = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(noise):
+            started = service_ctl.start()
+    except Exception:  # noqa: BLE001 - a failed autostart is never fatal
+        return False
+    finally:
+        text = noise.getvalue().strip()
+        if text:
+            print(text, file=sys.stderr)
+    if started != 0:
+        return False
+    if not wait:
+        return True
+
+    deadline = time.monotonic() + autostart_wait_s()
+    probe = Client(autostart=False, timeout=2.0)
+    while time.monotonic() < deadline:
+        try:
+            probe.health()
+            return True
+        except ServiceDown:
+            time.sleep(0.3)
+    return False
 
 
 class Client:
@@ -86,10 +165,12 @@ class Client:
         base_url: str | None = None,
         token: str | None = None,
         timeout: float = 10.0,
+        autostart: bool = True,
     ) -> None:
         self.base_url = (base_url or default_base_url()).rstrip("/")
         self.token = token if token is not None else default_token()
         self.timeout = timeout
+        self.autostart = autostart
 
     # ------------------------------------------------------------ plumbing
 
@@ -99,21 +180,36 @@ class Client:
             "Content-Type": "application/json",
         }
 
+    def _send(self, method: str, path: str, **kw: Any):
+        return httpx.request(
+            method,
+            f"{self.base_url}{path}",
+            headers=self._headers(),
+            timeout=self.timeout,
+            **kw,
+        )
+
     def _request(self, method: str, path: str, **kw: Any) -> Any:
         try:
-            resp = httpx.request(
-                method,
-                f"{self.base_url}{path}",
-                headers=self._headers(),
-                timeout=self.timeout,
-                **kw,
-            )
+            resp = self._send(method, path, **kw)
         except httpx.RequestError as exc:
-            # Connection refused, DNS, timeout — all the same to a caller:
-            # there is no service to talk to right now.
-            raise ServiceDown(
-                f"mnemo backend not reachable at {self.base_url} ({exc})"
-            ) from exc
+            # Nothing listening. Start one and retry once — the user should
+            # not have to know a service exists (design §6).
+            if self.autostart and ensure_backend():
+                self.token = self.token or default_token()
+                try:
+                    resp = self._send(method, path, **kw)
+                except httpx.RequestError as exc2:
+                    raise ServiceDown(
+                        f"mnemo backend not reachable at {self.base_url} "
+                        f"({exc2})"
+                    ) from exc2
+            else:
+                # Connection refused, DNS, timeout — all the same to a
+                # caller: there is no service to talk to right now.
+                raise ServiceDown(
+                    f"mnemo backend not reachable at {self.base_url} ({exc})"
+                ) from exc
         if resp.status_code >= 400:
             code, message, detail = "internal", resp.text.strip(), None
             try:

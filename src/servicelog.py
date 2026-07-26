@@ -92,8 +92,7 @@ def db_path() -> Path:
     """Resolved per call, and through ``config`` rather than an import-time
     binding — otherwise moving ``config.STATE_DIR`` leaves the journal writing
     to the directory that was current when this module was first imported."""
-    configured = getattr(config, "SERVICE_DB", None)
-    return Path(configured) if configured else Path(config.STATE_DIR) / "service.db"
+    return Path(config.STATE_DIR) / "service.db"
 
 
 def default_retention_days() -> int:

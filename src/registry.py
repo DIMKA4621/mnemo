@@ -104,10 +104,9 @@ def state_dir() -> Path:
 
 def banks_file() -> Path:
     """Location of the registry document, resolved per call (see `state_dir`)."""
-    configured = getattr(config, "BANKS_FILE", None)
-    if configured:
-        return Path(configured)
-    override = os.environ.get("MNEMO_BANKS_FILE")
+    override = getattr(config, "BANKS_FILE_OVERRIDE", None) or os.environ.get(
+        "MNEMO_BANKS_FILE"
+    )
     return Path(override) if override else state_dir() / "banks.json"
 
 

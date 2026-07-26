@@ -266,6 +266,36 @@ def _cmd_ui() -> int:
 # ------------------------------------------------------------------- hooks
 
 
+def _cmd_ingest(args: argparse.Namespace) -> int:
+    """Deprecated alias for `reindex` — and **never** a non-zero exit.
+
+    A project adopted under v2 has `mnemo ingest` in its git-tracked
+    `SessionStart` hook. Anything wired into a hook must be incapable of
+    failing a session: exiting 3 because the backend happens to be down
+    would show the user an error at every single session start, which is how
+    a tool gets ripped out. So this reports and returns 0, exactly like
+    `hook-inject` and `hook-postedit`.
+
+    `mnemo init --migrate` removes the hook; until a project runs it, this
+    path stays and stays harmless.
+    """
+    from .client import ApiFailure, ServiceDown
+
+    print("mnemo: `ingest` is deprecated — use `mnemo reindex`.",
+          file=sys.stderr)
+    try:
+        body = _client().reindex(_bank_ref(args.root), path=None, full=False)
+    except ServiceDown as exc:
+        print(f"mnemo: backend unavailable, nothing queued ({exc}).",
+              file=sys.stderr)
+        return EXIT_OK
+    except ApiFailure as exc:
+        print(f"mnemo: {exc.code}: {exc.message}", file=sys.stderr)
+        return EXIT_OK
+    print(f"queued {len(body['task_ids'])} task(s); {body['queued']} waiting.")
+    return EXIT_OK
+
+
 def _cmd_hook_postedit() -> int:
     """v2 shim. Always exit 0, immediately, doing nothing.
 
@@ -308,13 +338,26 @@ def _cmd_hook_inject() -> int:
     if not root:
         return EXIT_OK
 
+    from .client import Client
+
     try:
         # Short timeout on purpose: this sits in front of a human waiting for
         # a reply. Late memory is worse than none.
-        body = _client(timeout=5.0).search(
+        #
+        # autostart=False here, unlike every other face: bringing a cold
+        # backend up takes seconds, and this prompt would spend all of them
+        # waiting. Instead kick a start off in the background and return
+        # empty — this turn gets no memory, the next one does.
+        body = Client(timeout=5.0, autostart=False).search(
             str(root), prompt, top_k=INJECT_TOP_N, face="hook",
         )
     except Exception:  # noqa: BLE001 - never let a hook surface anything
+        from .client import ensure_backend
+
+        try:
+            ensure_backend(wait=False)
+        except Exception:  # noqa: BLE001
+            pass
         return EXIT_OK
 
     hits = body.get("hits") or []
@@ -480,13 +523,7 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "logs":
         return _cmd_logs(args)
     if cmd == "ingest":
-        # Deprecated: an already-adopted project's SessionStart hook still
-        # calls this. It now queues a reconcile through the service instead
-        # of indexing inline, so it can no longer block a session start.
-        print("mnemo: `ingest` is deprecated — use `mnemo reindex`.",
-              file=sys.stderr)
-        args.bank, args.path, args.full = args.root, None, False
-        return _cmd_reindex(args)
+        return _cmd_ingest(args)
     return EXIT_ERROR
 
 
