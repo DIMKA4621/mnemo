@@ -135,7 +135,7 @@ EMBED_IDLE_TIMEOUT: int = int(os.environ.get("MNEMO_EMBED_IDLE_TIMEOUT", "1800")
 # v3 raises the ceiling from cpu/3 to cpu*3/4: indexing is the throughput
 # bottleneck and the old third-of-the-machine cap left most cores idle. ONNX
 # scales sub-linearly past the physical cores, so this is not a 2.25x win —
-# measured 1.51x on a 12-CPU machine (phase-0 notes).
+# ≈1.5x on a 12-CPU machine, small fixture; re-measure on a real bank.
 EMBED_THREADS_FRACTION: tuple[int, int] = (3, 4)
 
 

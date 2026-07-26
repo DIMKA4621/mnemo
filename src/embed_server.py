@@ -198,6 +198,13 @@ def _obtain_socket() -> socket.socket | None:
     $MNEMO_EMBED_HOST names a remote one, we take it as-is: an unreachable
     remote must not make us load a second copy of the model right next to it.
 
+    Nor do we spawn one that cannot serve. ``serve()`` refuses to start
+    without a cached model, so on a model-less machine every call would
+    otherwise launch a process, wait out the poll loop and still come back
+    empty — measured at 7-20 s per search, repeated for every search, for a
+    result that was never going to arrive. Checking the cache first turns
+    that into one refused connection (~0.5 s) and an honest "unavailable".
+
     Returns None if the resident cannot be reached — every caller must
     treat that as "degrade gracefully", never as fatal.
     """
@@ -206,6 +213,10 @@ def _obtain_socket() -> socket.socket | None:
         return sock
     if not EMBED_HOST_IS_LOCAL:
         return None
+    from .embedder import is_model_cached
+
+    if not is_model_cached():
+        return None  # nothing to serve; spawning would only burn wall clock
     _spawn_server()
     deadline = time.time() + 5.0  # process bind is fast (no model yet)
     while time.time() < deadline:

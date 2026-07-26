@@ -12,10 +12,19 @@ from __future__ import annotations
 
 import warnings
 from functools import lru_cache
-
-from fastembed import TextEmbedding
+from typing import TYPE_CHECKING
 
 from .config import EMBED_THREADS, EMBEDDING_MODEL, MODEL_CACHE
+
+if TYPE_CHECKING:  # `fastembed` is imported lazily — see below
+    from fastembed import TextEmbedding
+
+# fastembed costs ~1 s to import (9 s on a cold filesystem): it drags in
+# onnxruntime, tokenizers and its own model registry. Importing it at module
+# level made every `mnemo` invocation pay that, including the ones that never
+# embed anything — a no-op `ingest`, a `hook-postedit` on a .py file. Those
+# run per keystroke-ish in a live session, so the import happens where it is
+# actually needed instead.
 
 # fastembed >=0.6 uses mean pooling for e5 (the canonical e5 behaviour);
 # its compatibility warning is noise for us — silence just that one.
@@ -24,6 +33,8 @@ warnings.filterwarnings("ignore", message=".*mean pooling instead of CLS.*")
 
 def _model_cache_spec() -> tuple[str, set[str]] | None:
     """Return the FastEmbed repository and required files for our model."""
+    from fastembed import TextEmbedding
+
     for metadata in TextEmbedding.list_supported_models():
         if metadata.get("model") != EMBEDDING_MODEL:
             continue
@@ -44,8 +55,14 @@ def _model_cache_spec() -> tuple[str, set[str]] | None:
 
 
 def is_model_cached() -> bool:
-    """True only when our configured model has a complete local snapshot."""
-    if not MODEL_CACHE.exists():
+    """True only when our configured model has a complete local snapshot.
+
+    The cheap negative comes first: an absent or empty cache directory cannot
+    hold the model, and answering that needs no fastembed import. Callers ask
+    this on the degraded path — a search on a machine that was never warmed
+    up — where paying a one-second import to learn "no" is the wrong trade.
+    """
+    if not MODEL_CACHE.is_dir() or not any(MODEL_CACHE.iterdir()):
         return False
     spec = _model_cache_spec()
     if spec is None:
