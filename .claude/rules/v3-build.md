@@ -61,6 +61,15 @@ decide it yourself.
   gets a real window — and it must **never be OR-ed with** `CREATE_NO_WINDOW`,
   which Windows then ignores, silently turning the guard into a no-op. Every
   spawn goes through `service_ctl.spawn_detached`, not hand-assembled flags.
+- **Anything that terminates a process must identify it by something the running
+  process actually carries — never by what launched it.** On Windows the venv's
+  `python.exe`/`pythonw.exe` is a redirector stub: the PID you spawned is not
+  the PID doing the work, and the real child reports the *system* interpreter's
+  path. Executable path is not identity; "appeared since my snapshot" is not
+  ownership. Key on a fact checkable from outside — who holds the port, or a
+  spawn-time `(pid, creation-time)` fingerprint. This has already caused three
+  separate bugs, one of which killed the user's service twice
+  (`Memory-contracts-v3.md` §11.2.1).
 
 ## Conventions
 
