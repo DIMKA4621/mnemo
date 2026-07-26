@@ -26,16 +26,19 @@ sys.path.insert(0, str(REPO))
 _STATE = Path(tempfile.mkdtemp(prefix="mnemo service "))
 os.environ["MNEMO_STATE_DIR"] = str(_STATE)
 
+from _hygiene import ResidentGuard, claim_embed_port  # noqa: E402
+
+# Claim a private embed port BEFORE src.config is imported: config reads
+# MNEMO_EMBED_PORT at import, and everything the suite spawns inherits it.
+# That is what makes "ours" a checkable fact rather than a guess about
+# recency -- see the docstring in tests/_hygiene.py.
+_EMBED_PORT = claim_embed_port()
+
 from src import service_ctl  # noqa: E402
-from _hygiene import ResidentGuard  # noqa: E402
 
 _passed = _failed = 0
 
-# Reaping is by process identity, not by port: a resident stranded on a
-# non-default port is invisible to stop_resident(), which only inspects the
-# configured one. See tests/_hygiene.py.
-_RESIDENTS = ResidentGuard()
-_RESIDENTS.snapshot()
+_RESIDENTS = ResidentGuard(_EMBED_PORT)
 
 # A child that reports what it can see about its own console, then idles
 # until a stop file appears. With --alloc it first calls AllocConsole(),
@@ -604,44 +607,14 @@ def test_mnemow_refuses_stdio_faces() -> None:
 
 @contextlib.contextmanager
 def _embed_port_of_our_own():
-    """Run the resident tests on a private port.
+    """The suite already owns a private embed port (see the header).
 
-    They used to use the machine's real embed port and skip when it was
-    busy -- which meant the most important check in the file silently
-    skipped whenever anything earlier in the same run had warmed a resident.
-    Intermittent coverage of the reaper is worse than none, and it also put
-    the tests one bug away from reaping the user's own resident. A private
-    port removes both problems: nothing to skip for, nothing of theirs to
-    touch.
+    Kept as a context manager so the resident tests read the same as before,
+    but there is no per-test port juggling any more -- and crucially no
+    ephemeral port that nothing can find afterwards, because the teardown
+    knows exactly which port to look at.
     """
-    from unittest.mock import patch
-
-    import src.config as config
-
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        port = int(probe.getsockname()[1])
-
-    previous = os.environ.get("MNEMO_EMBED_PORT")
-    os.environ["MNEMO_EMBED_PORT"] = str(port)  # the child reads this
-    try:
-        with patch.object(config, "EMBED_PORT", port):
-            yield port
-    finally:
-        # Reap anything still on this port. An ephemeral port nobody else
-        # knows about makes this unambiguous: whatever is here is ours. It
-        # also matters more than it looks -- a resident stranded on a random
-        # port is invisible to `stop_resident`, which only ever inspects the
-        # configured one, so it would hold ~1.5 GB until reboot with no
-        # command able to find it. That happened; this is the fix.
-        stray = service_ctl._listening_pid(port)
-        if stray is not None:
-            service_ctl._terminate_tree(stray)
-            print(f"teardown: reaped a stray resident on private port {port}")
-        if previous is None:
-            os.environ.pop("MNEMO_EMBED_PORT", None)
-        else:
-            os.environ["MNEMO_EMBED_PORT"] = previous
+    yield _EMBED_PORT
 
 
 def test_stop_reaps_the_resident(work: Path) -> None:

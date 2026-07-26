@@ -34,15 +34,18 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
+from _hygiene import ResidentGuard, claim_embed_port  # noqa: E402
+
+# A private embed port, claimed before src.config is imported, so the
+# resident this suite causes is identifiable and no other agent's is ever
+# mistaken for it. See tests/_hygiene.py.
+_EMBED_PORT = claim_embed_port()
+
 from src import autostart, service_ctl  # noqa: E402
-from _hygiene import ResidentGuard  # noqa: E402
 
 _passed = _failed = 0
 
-# Indexing a real bank starts the resident, and idle exit is off, so it must
-# be reaped by identity at the end. See tests/_hygiene.py.
-_RESIDENTS = ResidentGuard()
-_RESIDENTS.snapshot()
+_RESIDENTS = ResidentGuard(_EMBED_PORT)
 
 TEST_TASK = "mnemo recovery rehearsal (delete me)"
 
@@ -52,6 +55,10 @@ import os, sys
 
 os.environ["MNEMO_STATE_DIR"] = {state!r}
 os.environ["MNEMO_API_PORT"] = {port!r}
+# A scheduled task inherits nothing from us, so the private embed port has
+# to be passed explicitly -- otherwise the resident it autostarts lands on
+# the machine's default port, where our teardown deliberately will not look.
+os.environ["MNEMO_EMBED_PORT"] = {embed_port!r}
 os.chdir({repo!r})
 sys.path.insert(0, {repo!r})
 
@@ -226,7 +233,8 @@ def test_autostart_path_starts_the_service(work: Path) -> None:
     port = free_port()
     wrapper = work / "scheduled launcher.py"
     wrapper.write_text(
-        WRAPPER.format(state=str(_STATE), port=str(port), repo=str(REPO)),
+        WRAPPER.format(state=str(_STATE), port=str(port), repo=str(REPO),
+                       embed_port=str(_EMBED_PORT)),
         encoding="utf-8",
     )
 
