@@ -428,12 +428,16 @@ h2 {
 .pane-log {
   flex: none;
   height: 240px;
+  min-width: 0;          /* without this the wide table stretches the page */
   border-top: 1px solid var(--line);
   border-right: none;
 }
 
+/* The log is the one genuinely wide thing here. It scrolls inside its own
+   pane; the page itself must never scroll sideways. */
 .log-table {
   width: 100%;
+  min-width: max-content;
   border-collapse: collapse;
   font-family: var(--mono);
   font-size: 11.5px;
@@ -459,7 +463,7 @@ h2 {
   vertical-align: top;
 }
 
-.log-table tr:hover td { background: var(--bg-hover); }
+.log-table tbody tr:hover td { background: var(--bg-hover); }
 .log-table td.col-q { color: var(--fg); word-break: break-word; }
 .log-table td.num { text-align: right; }
 .log-table .res-ok      { color: var(--ok); }
@@ -470,4 +474,39 @@ h2 {
 @keyframes flash {
   from { background: #2a3b2c; }
   to   { background: transparent; }
+}
+
+/* ---- narrow windows --------------------------------------------------- */
+
+/* Three fixed columns stop fitting well before they stop fitting at all —
+   the document pane is the one that must keep its width, so the two
+   navigation columns give theirs up first. */
+@media (max-width: 1200px) {
+  .layout { grid-template-columns: 260px 230px minmax(0, 1fr); }
+}
+
+/* Below this the columns are squeezing the document into a gutter, so stack
+   them and let the whole layout scroll vertically instead. */
+@media (max-width: 900px) {
+  .layout {
+    grid-template-columns: minmax(0, 1fr);
+    overflow-y: auto;
+  }
+
+  .pane {
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .pane-head { position: sticky; top: 0; z-index: 2; }
+
+  /* Explicit heights, not max-height: in a scrolling grid these panes have no
+     height pressure, so a flex:1 body would collapse to nothing. */
+  .pane-banks { height: 340px; }
+  .pane-tree  { height: 200px; }
+  .pane-file  { height: 70vh; }
+
+  .pane-log { height: 220px; }
+
+  .pane-head h2 { font-size: 11px; }
 }
