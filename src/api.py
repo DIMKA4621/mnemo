@@ -48,7 +48,7 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import config, registry, servicelog, store
-from .config import STATE_DIR, TOP_K
+from .config import TOP_K
 from .providers import EmbeddingUnavailable, get_provider
 from .registry import AmbiguousBankRef, Bank, BankExists, BankNotFound
 
@@ -75,17 +75,36 @@ def _cfg(name: str, env: str, default: Any, cast: Any = str) -> Any:
 SERVICE_VERSION: str = getattr(config, "SERVICE_VERSION", "3.0.0")
 API_HOST: str = _cfg("API_HOST", "MNEMO_API_HOST", "127.0.0.1")
 API_PORT: int = int(_cfg("API_PORT", "MNEMO_API_PORT", 8918, int))
-API_TOKEN_FILE: Path = Path(
-    getattr(config, "API_TOKEN_FILE", None) or STATE_DIR / "api.token"
-)
-SERVICE_INFO_FILE: Path = Path(
-    getattr(config, "SERVICE_INFO_FILE", None) or STATE_DIR / "service.json"
-)
+
+
+def token_file() -> Path:
+    """Resolved per call, through ``config`` — never bound at import.
+
+    ``from .config import STATE_DIR`` captures the Path object once, so a test
+    or container that repoints ``config.STATE_DIR`` afterwards would keep
+    reading and writing the original directory. Every state path below is a
+    function for that reason.
+    """
+    return Path(getattr(config, "API_TOKEN_FILE", None)
+                or Path(config.STATE_DIR) / "api.token")
+
+
+def service_info_file() -> Path:
+    """Derived live, deliberately NOT read from ``config.SERVICE_INFO_FILE``.
+
+    That constant is ``STATE_DIR / "service.json"`` evaluated at import, so it
+    carries the same frozen-path bug this function exists to avoid: relocate
+    ``config.STATE_DIR`` and the backend would announce itself in the old
+    directory while everything else moved. Same value, computed when asked.
+    (``config.SERVICE_PID_FILE`` has the identical shape — reported.)
+    """
+    return Path(config.STATE_DIR) / "service.json"
+
+
 FILE_MAX_BYTES: int = int(
     _cfg("FILE_MAX_BYTES", "MNEMO_FILE_MAX_BYTES", 2 * 1024 * 1024, int)
 )
 WS_PING_INTERVAL_S: float = float(getattr(config, "WS_PING_INTERVAL_S", 30.0))
-WEBUI_DIR: Path = Path(__file__).resolve().parent / "webui"
 
 _started_at = time.time()
 _started_iso = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
@@ -114,18 +133,28 @@ def api_token() -> str:
     if env and env.strip():
         _token = env.strip()
         return _token
+    path = token_file()
     try:
-        existing = API_TOKEN_FILE.read_text(encoding="utf-8").strip()
+        existing = path.read_text(encoding="utf-8").strip()
     except OSError:
         existing = ""
     if existing:
         _token = existing
         return _token
     _token = secrets.token_hex(24)  # 48 hex chars, same shape as embed.token
-    API_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    API_TOKEN_FILE.write_text(_token, encoding="utf-8")
+    # An unwritable state dir must not turn every request into a 500 from the
+    # auth middleware: keep the in-memory token and carry on degraded.
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_token, encoding="utf-8")
+    except OSError as exc:
+        log.error("cannot persist the API token to %s: %s", path, exc)
+        return _token
+    # POSIX-only in effect. On Windows this clears the read-only bit and
+    # nothing more — the real protection there is the user-profile ACL, which
+    # is adequate, but this line does not provide it.
     with suppress(OSError):
-        os.chmod(API_TOKEN_FILE, 0o600)
+        os.chmod(path, 0o600)
     return _token
 
 
@@ -244,26 +273,77 @@ def _resolve_bank(ref: str, *, require_enabled: bool = True) -> Bank:
     return bank
 
 
+# Read connections, cached per thread per bank.
+#
+# `store.connect()` runs `_ensure_schema` — CREATE TABLE and CREATE VIRTUAL
+# TABLE — on every call, so connecting per request meant DDL on every search
+# and every bank listing, competing with the single writer. Caching removes
+# that from the hot path.
+#
+# Per *thread* because a sqlite3 connection is not safe to share across
+# threads and FastAPI runs these sync endpoints in a bounded worker pool; a
+# shared connection would need a lock that reintroduces the serialisation.
+# `_generation` invalidates a cached handle when the file underneath is
+# replaced (rebuild, delete), which a long-lived connection would not notice.
+_bank_conns = threading.local()
+_generation: dict[str, int] = {}
+_generation_lock = threading.Lock()
+
+
+def invalidate_bank(bank_id: str) -> None:
+    """Drop cached readers for a bank whose database was replaced."""
+    with _generation_lock:
+        _generation[bank_id] = _generation.get(bank_id, 0) + 1
+
+
 def _open_bank(bank: Bank):
-    """Connection to a bank's index, or ``None`` when it has none yet.
+    """Cached read connection to a bank's index, or ``None`` when it has none.
 
     Never creates the file: listing banks must not leave an empty database
     behind for every root that was registered but never indexed.
     """
     if not bank.db_path.exists():
         return None
-    return store.connect(bank.db_path)
+    cache = getattr(_bank_conns, "cache", None)
+    if cache is None:
+        cache = _bank_conns.cache = {}
+    with _generation_lock:
+        generation = _generation.get(bank.id, 0)
+    entry = cache.get(bank.id)
+    if entry is not None:
+        gen, path, conn = entry
+        if gen == generation and path == bank.db_path:
+            return conn
+        with suppress(Exception):
+            conn.close()
+    # ensure=False: opening a bank to READ must never run DDL. A reader
+    # that takes the WAL writer lock contends with the indexer on every
+    # single search, which is exactly the hot path this cache exists for.
+    conn = store.connect(bank.db_path, ensure=False)
+    cache[bank.id] = (generation, bank.db_path, conn)
+    return conn
 
 
-def _status_for(bank: Bank, chunk_count: int) -> tuple[str, int]:
+def _queue_state(bank: Bank) -> tuple[int, bool]:
+    """This bank's queue depth and whether work for it is in flight.
+
+    Read **before** the chunk count, never after: between the two reads a
+    bank can finish its first build, and reading chunks first would then
+    report ``empty`` for a bank that is fully indexed — the one answer that
+    makes an agent give up on it.
+    """
+    return _queued(bank.id), _busy(bank.id)
+
+
+def _status_from(state: tuple[int, bool], chunk_count: int) -> tuple[str, int]:
     """``indexing`` > ``empty`` > ``ready`` (§5.2).
 
     ``indexing`` wins over ``empty`` on purpose: ``empty`` tells an agent the
     bank is pointless and it stops asking; ``indexing`` with ``chunk_count=0``
     tells it to come back.
     """
-    queued = _queued(bank.id)
-    if queued > 0 or _busy(bank.id):
+    queued, busy = state
+    if queued > 0 or busy:
         return "indexing", queued
     if chunk_count == 0:
         return "empty", queued
@@ -272,9 +352,11 @@ def _status_for(bank: Bank, chunk_count: int) -> tuple[str, int]:
 
 def _bank_info(bank: Bank) -> dict:
     """The one bank shape the API returns (§9.5)."""
+    # Queue state FIRST: reading chunk_count first leaves a window where a
+    # bank that finished indexing between the two reads reports `empty`.
+    status_probe = _queue_state(bank)
     files = chunks = db_bytes = 0
     last_indexed: str | None = None
-    conn = None
     try:
         conn = _open_bank(bank)
         if conn is not None:
@@ -284,10 +366,7 @@ def _bank_info(bank: Bank) -> dict:
             last_indexed = store.get_meta(conn).get("last_indexed_at")
     except Exception as exc:  # noqa: BLE001 - a broken index must still list
         log.warning("cannot read index of bank %s: %s", bank.name, exc)
-    finally:
-        if conn is not None:
-            conn.close()
-    status, queued = _status_for(bank, chunks)
+    status, queued = _status_from(status_probe, chunks)
     return {
         "id": bank.id,
         "name": bank.name,
@@ -438,14 +517,23 @@ class Hub:
                 for ws, filt in self._clients.items()
                 if filt is None or bank_id is None or filt == bank_id
             ]
-        dead: list[WebSocket] = []
-        for ws in targets:
+        if not targets:
+            return
+
+        async def deliver(ws: WebSocket) -> WebSocket | None:
             try:
-                await ws.send_json(envelope)
+                # A client that has stopped reading must not hold up the
+                # others — or the ping loop, which is what would notice it.
+                await asyncio.wait_for(ws.send_json(envelope), timeout=5.0)
+                return None
             except Exception:  # noqa: BLE001 - a dropped client is not an error
-                dead.append(ws)
-        for ws in dead:
-            self.disconnect(ws)
+                return ws
+
+        # Concurrent, not sequential: with N clients this is one round trip,
+        # and one stalled socket costs only its own timeout.
+        for dead in await asyncio.gather(*(deliver(ws) for ws in targets)):
+            if dead is not None:
+                self.disconnect(dead)
 
     def publish(self, type_: str, data: dict, bank_id: str | None = None) -> None:
         """Thread-safe entry point for producers outside the event loop."""
@@ -460,20 +548,29 @@ class Hub:
 hub = Hub()
 
 
+_EMPTY_QUEUE = {"depth": 0, "high": 0, "normal": 0, "low": 0,
+                "current": None, "by_bank": {}}
+
+
 def _queue_snapshot_json() -> dict:
     q = _queue()
     if q is None:
-        return {"depth": 0, "high": 0, "normal": 0, "low": 0, "current": None}
+        return dict(_EMPTY_QUEUE)
     try:
         snap = q.snapshot()
     except Exception:  # noqa: BLE001
-        return {"depth": 0, "high": 0, "normal": 0, "low": 0, "current": None}
+        return dict(_EMPTY_QUEUE)
     current = getattr(snap, "current", None)
     return {
         "depth": snap.depth,
         "high": snap.high,
         "normal": snap.normal,
         "low": snap.low,
+        # Service-wide totals cannot tell the cabinet which of 12 queued
+        # tasks belong to which bank — and a bank list is exactly that view.
+        # The worker already has the breakdown, so it travels with every
+        # queue event and is the single source for per-bank counters.
+        "by_bank": getattr(snap, "by_bank", {}) or {},
         "current": None
         if current is None
         else {
@@ -490,6 +587,60 @@ def _queue_snapshot_json() -> dict:
 # -------------------------------------------------------------- lifecycle
 
 
+# Whether a bank is currently in the "failed" state, so `bank_status` fires
+# on the transition rather than on every task.
+_bank_failed: dict[str, bool] = {}
+
+
+def _on_queue_event(ev: dict) -> None:
+    """The queue's single outlet, fanned out here.
+
+    ``workqueue`` knows about neither the socket nor the journal — it hands
+    over §9.7 envelopes and this decides what they mean. Terminal events are
+    the ones worth a journal row: a per-batch progress tick is live state,
+    not history, and writing 300 of them per file would bury the events that
+    answer "what did the service actually do".
+
+    ``bank_status`` is deliberately NOT sent per finished task. Counters live
+    in ``queue.by_bank``, which the worker already computes and which arrives
+    on every queue change; re-deriving a whole BankInfo per file would reopen
+    the index hundreds of times during a bulk to say what the counters
+    already said. This fires only on a *slow* change — here, a bank entering
+    or leaving the failed state.
+    """
+    type_ = ev.get("type", "queue")
+    data = ev.get("data", {}) or {}
+    bank_id = ev.get("bank_id")
+    hub.publish(type_, data, bank_id)
+
+    if type_ not in ("index_done", "index_error") or not bank_id:
+        return
+    servicelog.log_index(
+        bank_id=bank_id,
+        kind=data.get("kind", "file"),
+        trigger=data.get("trigger", "api"),
+        path=data.get("path"),
+        result="error" if type_ == "index_error" else data.get("result", "ok"),
+        files_indexed=int(data.get("files_indexed", 0)),
+        chunks_indexed=int(data.get("chunks_indexed", 0)),
+        files_pruned=int(data.get("files_pruned", 0)),
+        took_ms=data.get("took_ms"),
+        error=data.get("error"),
+    )
+
+    # A rebuild replaces the database file underneath any cached reader.
+    if data.get("kind") == "rebuild":
+        invalidate_bank(bank_id)
+
+    failed = type_ == "index_error"
+    if _bank_failed.get(bank_id, False) == failed:
+        return           # no transition — the badge already says the right thing
+    _bank_failed[bank_id] = failed
+    with suppress(Exception):
+        hub.publish("bank_status", {"bank": _bank_info(registry.get(bank_id))},
+                    bank_id)
+
+
 def _write_service_info() -> None:
     """``service.json`` — how ``service_ctl`` finds a running backend (§11.2)."""
     import sys
@@ -502,11 +653,10 @@ def _write_service_info() -> None:
         "version": SERVICE_VERSION,
         "python": Path(sys.executable).as_posix(),
     }
+    path = service_info_file()
     with suppress(OSError):
-        SERVICE_INFO_FILE.parent.mkdir(parents=True, exist_ok=True)
-        SERVICE_INFO_FILE.write_text(
-            json.dumps(info, indent=2) + "\n", encoding="utf-8"
-        )
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
 
 
 def _reconcile_on_start() -> None:
@@ -557,12 +707,7 @@ async def lifespan(app: FastAPI):
     q = _queue()
     if q is not None:
         with suppress(Exception):
-            q.start(
-                workers=int(os.environ.get("MNEMO_WORKERS", "1")),
-                on_event=lambda ev: hub.publish(
-                    ev.get("type", "queue"), ev.get("data", {}), ev.get("bank_id")
-                ),
-            )
+            q.start(on_event=_on_queue_event)
     try:
         from . import watcher as _watcher  # noqa: PLC0415
     except ImportError:
@@ -591,7 +736,7 @@ async def lifespan(app: FastAPI):
         servicelog.stop_pruner()
         servicelog.close()
         with suppress(OSError):
-            SERVICE_INFO_FILE.unlink()
+            service_info_file().unlink()
 
 
 app = FastAPI(
@@ -750,22 +895,21 @@ def api_search(req: SearchRequest) -> dict:
     degraded: str | None = None
     hits: list[Any] = []
     chunks = 0
-    try:
-        if conn is not None:
-            chunks = store.chunk_count(conn)
-        status, queued = _status_for(bank, chunks)
-        # No chunks means no possible match — never load a model to prove it.
-        if chunks:
-            try:
-                hits = _engine_search(conn, req, bank)
-            except EmbeddingUnavailable as exc:
-                # NFR-10: degrade, do not fail. The caller still learns the
-                # bank's real state and that the answer is incomplete.
-                degraded = "embed_unavailable"
-                log.warning("search degraded on bank %s: %s", bank.name, exc)
-    finally:
-        if conn is not None:
-            conn.close()
+    # Queue state before chunk count, so a bank that finishes mid-request
+    # cannot be reported as `empty` (see _status_from).
+    status_probe = _queue_state(bank)
+    if conn is not None:
+        chunks = store.chunk_count(conn)
+    status, queued = _status_from(status_probe, chunks)
+    # No chunks means no possible match — never load a model to prove it.
+    if chunks:
+        try:
+            hits = _engine_search(conn, req, bank)
+        except EmbeddingUnavailable as exc:
+            # NFR-10: degrade, do not fail. The caller still learns the
+            # bank's real state and that the answer is incomplete.
+            degraded = "embed_unavailable"
+            log.warning("search degraded on bank %s: %s", bank.name, exc)
     took_ms = (time.perf_counter() - started) * 1000
 
     servicelog.log_query(
@@ -836,6 +980,8 @@ def api_bank(bank_id: str) -> dict:
 def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
     bank = _resolve_bank(bank_id, require_enabled=False)
     registry.remove(bank.id, drop_index=drop_index)
+    invalidate_bank(bank.id)   # cached readers point at a file that is gone
+    _bank_failed.pop(bank.id, None)
     hub.publish("bank_removed", {"bank_id": bank.id}, bank.id)
     return {"ok": True}
 
@@ -880,21 +1026,21 @@ def api_tree(
 
     indexed: dict[str, dict] = {}
     conn = _open_bank(b)
-    try:
-        if conn is not None:
-            for row in conn.execute(
-                "SELECT path, heading FROM chunks ORDER BY path, chunk_index"
-            ):
-                entry = indexed.setdefault(
-                    row["path"], {"chunks": 0, "headings": []}
-                )
-                entry["chunks"] += 1
-                heading = row["heading"]
-                if heading and heading not in entry["headings"]:
-                    entry["headings"].append(heading)
-    finally:
-        if conn is not None:
-            conn.close()
+    if conn is not None:
+        # Counts come from an index-only GROUP BY; only rows that actually
+        # carry a heading are materialised, instead of every chunk in the bank.
+        for row in conn.execute(
+            "SELECT path, count(*) AS n FROM chunks GROUP BY path"
+        ):
+            indexed[row["path"]] = {"chunks": row["n"], "headings": []}
+        for row in conn.execute(
+            "SELECT path, heading FROM chunks "
+            "WHERE heading IS NOT NULL AND heading != '' "
+            "ORDER BY path, chunk_index"
+        ):
+            entry = indexed.get(row["path"])
+            if entry is not None and row["heading"] not in entry["headings"]:
+                entry["headings"].append(row["heading"])
 
     patterns = _compile_excludes(b.exclude)
     files = dirs = 0
@@ -1019,23 +1165,19 @@ def api_file(bank: str, path: str) -> dict:
     chunks: list[dict] = []
     indexed = False
     conn = _open_bank(b)
-    try:
-        if conn is not None:
-            rows = store.chunk_map(conn, rel)
-            indexed = store.get_file_row(conn, rel) is not None
-            chunks = [
-                {
-                    "chunk_uid": r["chunk_uid"],
-                    "chunk_index": r["chunk_index"],
-                    "heading": r["heading"],
-                    "start_char": r["start_char"],
-                    "end_char": r["end_char"],
-                }
-                for r in rows
-            ]
-    finally:
-        if conn is not None:
-            conn.close()
+    if conn is not None:
+        rows = store.chunk_map(conn, rel)
+        indexed = store.get_file_row(conn, rel) is not None
+        chunks = [
+            {
+                "chunk_uid": r["chunk_uid"],
+                "chunk_index": r["chunk_index"],
+                "heading": r["heading"],
+                "start_char": r["start_char"],
+                "end_char": r["end_char"],
+            }
+            for r in rows
+        ]
 
     return {
         "bank_id": b.id,
@@ -1131,12 +1273,18 @@ async def ws_endpoint(
         return
     await hub.connect(websocket, bank)
     try:
+        # Reconnect contract: `hello` means "refetch everything over REST".
+        # The socket carries deltas only and REST is authoritative for
+        # initial state, so a client that missed events while disconnected
+        # heals by re-reading — no sequence numbers, no server-side replay,
+        # and no way for a gap to persist unnoticed.
         await hub.send(
             websocket,
             hub.envelope(
                 "hello",
                 {
                     "version": SERVICE_VERSION,
+                    "refetch": True,
                     "banks": [b.id for b in registry.load()],
                     "queue": _queue_snapshot_json(),
                 },
@@ -1159,10 +1307,17 @@ async def ws_endpoint(
         hub.disconnect(websocket)
 
 
-# The cabinet's assets. Mounted only when ui-dev has shipped them, so the
-# backend runs headless until then.
-if WEBUI_DIR.is_dir():
-    app.mount("/ui", StaticFiles(directory=WEBUI_DIR, html=True), name="ui")
+# The cabinet's assets — `src.webui.STATIC_DIR` and nothing else from that
+# package. Mounting the package directory would put `devserver.py` (a
+# developer tool) on the request path; the static tree is the only thing the
+# service serves. Mounted only when ui-dev has shipped it, so the backend
+# runs headless until then.
+try:
+    from .webui import STATIC_DIR as _STATIC_DIR
+except ImportError:
+    _STATIC_DIR = None
+if _STATIC_DIR is not None and _STATIC_DIR.is_dir():
+    app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
 
 
 def run(host: str | None = None, port: int | None = None) -> None:

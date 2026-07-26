@@ -20,17 +20,23 @@ we own, so we carry it through instead of dropping it.
 """
 from __future__ import annotations
 
+import contextlib
+import errno
 import json
+import logging
 import os
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from . import config
-from .config import STATE_DIR, bank_id as derive_bank_id
+from .config import bank_id as derive_bank_id
+
+log = logging.getLogger("mnemo.registry")
 
 # Registry file format. Bumped only if the document shape changes; the bank
 # object itself grows by adding fields, which old readers preserve anyway.
@@ -84,17 +90,25 @@ def _default_exclude() -> list[str]:
     )
 
 
-def banks_file() -> Path:
-    """Location of the registry document.
+def state_dir() -> Path:
+    """The writable state directory, looked up **through the module**.
 
-    Resolved per call, not at import: tests and containers relocate it with
-    ``$MNEMO_BANKS_FILE`` / ``$MNEMO_STATE_DIR`` at runtime.
+    ``from .config import STATE_DIR`` would bind the ``Path`` object once at
+    import, so a test or a container that later points ``config.STATE_DIR``
+    somewhere else would keep writing to the original directory — which is
+    how empty databases leaked into the user's real state dir. Every path
+    below is derived from this call, never from an import-time binding.
     """
+    return Path(config.STATE_DIR)
+
+
+def banks_file() -> Path:
+    """Location of the registry document, resolved per call (see `state_dir`)."""
     configured = getattr(config, "BANKS_FILE", None)
     if configured:
         return Path(configured)
     override = os.environ.get("MNEMO_BANKS_FILE")
-    return Path(override) if override else STATE_DIR / "banks.json"
+    return Path(override) if override else state_dir() / "banks.json"
 
 
 def _now_iso() -> str:
@@ -149,7 +163,7 @@ class Bank:
 
     @property
     def db_path(self) -> Path:
-        return STATE_DIR / f"{self.id}.db"
+        return state_dir() / f"{self.id}.db"
 
     @property
     def exists(self) -> bool:
@@ -186,8 +200,22 @@ class Bank:
 
 def _from_json(obj: dict[str, Any]) -> Bank:
     root = Path(str(obj["root"])).expanduser()
+    # The id is a pure function of the root (§6.2), so the stored value is a
+    # cache, not an input — always re-derive it. Trusting the file instead
+    # would mean a hand-edited `root` keeps the old id and the bank then
+    # serves the NEW tree out of the OLD root's chunks, silently. banks.json
+    # is advertised as hand-editable, so this has to be safe by construction.
+    # The old <id>.db is simply orphaned; the index is disposable and the new
+    # id rebuilds from the .md.
+    derived = derive_bank_id(root)
+    stored = str(obj.get("id") or derived)
+    if stored != derived:
+        log.warning(
+            "bank %r: id %s does not match root %s — using the derived id %s",
+            obj.get("name"), stored, root.as_posix(), derived,
+        )
     return Bank(
-        id=str(obj.get("id") or derive_bank_id(root)),
+        id=derived,
         name=str(obj["name"]),
         root=root,
         provider=obj.get("provider"),
@@ -199,6 +227,54 @@ def _from_json(obj: dict[str, Any]) -> Bank:
 
 
 # -------------------------------------------------------------- load / save
+
+
+# `_lock` only serialises threads inside one process, but the CLI, the service
+# and a human with an editor all write this file. `os.replace` guarantees the
+# file is never torn — yet two concurrent read-modify-writes still lose one of
+# the two registrations, silently, which is worse than a visible error. So
+# every mutation takes a cross-process lock file for the whole cycle.
+_LOCK_TIMEOUT_S = 10.0
+_LOCK_STALE_S = 60.0
+
+
+@contextlib.contextmanager
+def _file_lock():
+    """Exclusive lock around a read-modify-write of banks.json."""
+    path = banks_file().with_name(banks_file().name + ".lock")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + _LOCK_TIMEOUT_S
+    handle = None
+    while True:
+        try:
+            handle = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR)
+            break
+        except FileExistsError:
+            # A crashed holder must not wedge the registry forever.
+            try:
+                if time.time() - path.stat().st_mtime > _LOCK_STALE_S:
+                    log.warning("breaking stale registry lock %s", path)
+                    path.unlink(missing_ok=True)
+                    continue
+            except OSError:
+                pass
+            if time.monotonic() > deadline:
+                raise TimeoutError(f"registry is locked by another process ({path})")
+            time.sleep(0.05)
+        except OSError as exc:
+            if exc.errno == errno.EACCES:      # transient on Windows
+                time.sleep(0.05)
+                continue
+            raise
+    try:
+        with contextlib.suppress(OSError):
+            os.write(handle, str(os.getpid()).encode())
+        yield
+    finally:
+        with contextlib.suppress(OSError):
+            os.close(handle)
+        with contextlib.suppress(OSError):
+            path.unlink()
 
 
 def _signature(path: Path) -> tuple[str, int | None, int | None]:
@@ -318,10 +394,18 @@ def resolve(ref: str) -> Bank:
 
     path = Path(ref).expanduser()
     if path.is_absolute():
+        # Disabled banks are invisible to the PATH form only. A path has to
+        # route somewhere useful: if a nested bank is switched off, the
+        # enclosing bank still holds that file's memory and must win, or
+        # disabling a child silently blinds the parent for that subtree.
+        # An explicit id or name still resolves a disabled bank — otherwise
+        # there would be no way to address one in order to re-enable it.
         target = _canonical(path)
         best: Bank | None = None
         best_len = -1
         for bank in banks:
+            if not bank.enabled:
+                continue
             root = _canonical(bank.root)
             if target == root:
                 return bank
@@ -344,11 +428,13 @@ def add(
 ) -> Bank:
     """Register a root. Returns the stored bank — read its ``name`` back,
     it may carry a uniqueness suffix."""
-    with _lock:
+    with _lock, _file_lock():
         resolved = Path(root).expanduser().resolve()
         if not resolved.is_dir():
             raise NotADirectoryError(f"{resolved} is not a directory")
-        banks = load()
+        # Re-read inside the lock: another process may have registered a bank
+        # since our cached copy, and appending to a stale list would drop it.
+        banks = load(force=True)
         bid = derive_bank_id(resolved)
         for bank in banks:
             if bank.id == bid:
@@ -372,14 +458,14 @@ def add(
 
 def remove(bank_id: str, *, drop_index: bool = True) -> None:
     """Unregister a bank. ``.md`` files are never touched — only the index."""
-    with _lock:
-        banks = load()
+    with _lock, _file_lock():
+        banks = load(force=True)
         keep = [b for b in banks if b.id != bank_id]
         if len(keep) == len(banks):
             raise BankNotFound(f"no bank with id {bank_id!r}")
         save(keep)
         if drop_index:
-            db = STATE_DIR / f"{bank_id}.db"
+            db = state_dir() / f"{bank_id}.db"
             for suffix in ("", "-wal", "-shm"):
                 candidate = db.with_name(db.name + suffix)
                 try:
@@ -394,8 +480,8 @@ def update(bank_id: str, **fields: Any) -> Bank:
     ``root`` is not updatable: the id is derived from it, so moving a root is
     a remove + add, not an edit that silently orphans a database.
     """
-    with _lock:
-        banks = load()
+    with _lock, _file_lock():
+        banks = load(force=True)
         idx = next((i for i, b in enumerate(banks) if b.id == bank_id), None)
         if idx is None:
             raise BankNotFound(f"no bank with id {bank_id!r}")

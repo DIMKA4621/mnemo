@@ -28,7 +28,6 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import config
-from .config import STATE_DIR
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS query_events (
@@ -81,15 +80,20 @@ _last_vacuum = 0.0
 
 _pruner: threading.Thread | None = None
 _pruner_stop = threading.Event()
+# Read connections live per thread so a long cabinet query never queues
+# behind — or in front of — the writer.
+_readers = threading.local()
 
 
 # --------------------------------------------------------------- settings
 
 
 def db_path() -> Path:
-    """Resolved per call so ``$MNEMO_STATE_DIR`` can move it in tests."""
+    """Resolved per call, and through ``config`` rather than an import-time
+    binding — otherwise moving ``config.STATE_DIR`` leaves the journal writing
+    to the directory that was current when this module was first imported."""
     configured = getattr(config, "SERVICE_DB", None)
-    return Path(configured) if configured else STATE_DIR / "service.db"
+    return Path(configured) if configured else Path(config.STATE_DIR) / "service.db"
 
 
 def default_retention_days() -> int:
@@ -153,6 +157,29 @@ def close() -> None:
         if _conn is not None:
             _conn.close()
         _conn, _conn_path = None, None
+
+
+def _reader() -> sqlite3.Connection:
+    """A per-thread read connection, separate from the writer's.
+
+    Reads used to share the writer's connection and therefore the writer's
+    lock, so one cabinet query for a thousand log rows serialised every
+    ``log_query`` behind it — and ``prune`` could hold that lock through a
+    ``VACUUM``. WAL lets readers run beside the writer, so the only thing
+    that was actually serialising them was us.
+    """
+    path = db_path()
+    cached = getattr(_readers, "conn", None)
+    if cached is not None and getattr(_readers, "path", None) == path:
+        return cached
+    if cached is not None:
+        cached.close()
+    connect()  # make sure the file and schema exist before reading
+    conn = sqlite3.connect(path, timeout=10.0)
+    conn.execute("PRAGMA busy_timeout=5000")
+    conn.row_factory = sqlite3.Row
+    _readers.conn, _readers.path = conn, path
+    return conn
 
 
 # ------------------------------------------------------------------ write
@@ -276,12 +303,11 @@ def read_queries(
 ) -> list[dict]:
     """Newest first. ``hits_json`` comes back unpacked as ``hits``."""
     where, args = _where(bank_id=bank_id, since=since, until=until)
-    with _lock:
-        rows = connect().execute(
-            f"SELECT * FROM query_events{where} "
-            f"ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
-            (*args, int(limit), int(offset)),
-        ).fetchall()
+    rows = _reader().execute(
+        f"SELECT * FROM query_events{where} "
+        f"ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
+        (*args, int(limit), int(offset)),
+    ).fetchall()
     events = []
     for row in rows:
         event = dict(row)
@@ -305,12 +331,11 @@ def read_index(
 ) -> list[dict]:
     """Newest first."""
     where, args = _where(bank_id=bank_id, since=since, until=until, kind=kind)
-    with _lock:
-        rows = connect().execute(
-            f"SELECT * FROM index_events{where} "
-            f"ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
-            (*args, int(limit), int(offset)),
-        ).fetchall()
+    rows = _reader().execute(
+        f"SELECT * FROM index_events{where} "
+        f"ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
+        (*args, int(limit), int(offset)),
+    ).fetchall()
     return [dict(r) for r in rows]
 
 
@@ -325,25 +350,29 @@ def count(table: str, **filters: Any) -> int:
         until=filters.get("until"),
         kind=filters.get("kind") if name == "index_events" else None,
     )
-    with _lock:
-        row = connect().execute(
-            f"SELECT count(*) AS n FROM {name}{where}", args
-        ).fetchone()
+    row = _reader().execute(
+        f"SELECT count(*) AS n FROM {name}{where}", args
+    ).fetchone()
     return int(row["n"])
 
 
 def last_index_error(bank_id: str) -> str | None:
     """Most recent failure for a bank — what ``BankInfo.last_error`` shows."""
     try:
-        with _lock:
-            row = connect().execute(
-                "SELECT error FROM index_events WHERE bank_id = ? "
-                "AND result = 'error' ORDER BY ts_epoch DESC LIMIT 1",
-                (bank_id,),
-            ).fetchone()
-        return row["error"] if row else None
+        row = _reader().execute(
+            "SELECT result, error FROM index_events WHERE bank_id = ? "
+            "AND kind != 'bulk' ORDER BY ts_epoch DESC, id DESC LIMIT 1",
+            (bank_id,),
+        ).fetchone()
     except Exception:  # noqa: BLE001
         return None
+    # Latest-event-wins, which IS the lifecycle: an error sets the field and
+    # the next successful index for that bank clears it. Reporting "the most
+    # recent error ever" instead would leave the cabinet's red badge lit
+    # forever, long after the cause was fixed.
+    if row is None or row["result"] != "error":
+        return None
+    return row["error"]
 
 
 # -------------------------------------------------------------- retention
