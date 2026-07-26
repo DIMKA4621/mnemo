@@ -1,5 +1,13 @@
-# Memory POC runtime deps — intentionally minimal (Memory-design-v2: light, git-clone-bootstrappable, no heavy infra).
+# mnemo runtime deps — intentionally minimal (Memory-design-v3: native, no heavy infra).
 fastembed>=0.4.0
 sqlite-vec>=0.1.6
 semantic-text-splitter>=0.18.0
+# The MCP SDK ships FastMCP (mcp.server.fastmcp) — the v3 HTTP face mounts that
+# app; the separate `fastmcp` distribution is deliberately NOT a dependency.
 mcp>=1.0.0
+
+# v3 service layer: loopback backend + WebSocket, watcher, HTTP clients.
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+watchdog>=4.0.0
+httpx>=0.27.0

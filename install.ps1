@@ -1,8 +1,16 @@
 # mnemo engine installer for native Windows (PowerShell 5.1+).
 # Installs or refreshes the user-scope engine without downloading the model.
+#
+#   .\install.ps1                install or refresh the engine
+#   .\install.ps1 -Check         report engine state, change nothing
+#   .\install.ps1 -DepsOnly      refresh venv packages only, leave src/ alone
+#   .\install.ps1 -InstallHome D install into D instead of the default
+#
+# state\ (per-project indexes) and model-cache\ are never touched.
 [CmdletBinding()]
 param(
     [switch]$Check,
+    [switch]$DepsOnly,
     [string]$InstallHome,
     [string]$Python
 )
@@ -121,7 +129,10 @@ function Show-CheckReport {
 
     $deps = "MISSING / incomplete"
     if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
-        & $VenvPython -c "import fastembed, sqlite_vec, semantic_text_splitter, mcp" 2>$null
+        # Every runtime dependency the engine imports (v2 core + v3 service layer).
+        $depProbe = "import fastembed, sqlite_vec, semantic_text_splitter, mcp; " +
+            "import fastapi, uvicorn, watchdog, httpx"
+        & $VenvPython -c $depProbe 2>$null
         if ($LASTEXITCODE -eq 0) {
             $deps = "present"
         }
@@ -225,6 +236,37 @@ function Invoke-Install {
 
     if ($Check) {
         Show-CheckReport $engineHome $venvPython $launcher
+        return
+    }
+
+    # Dependency-only refresh: update the venv packages and nothing else. The
+    # engine code mirror and the launcher are left exactly as they are, so this
+    # is safe to run while src/ is mid-refactor in the repository.
+    if ($DepsOnly) {
+        if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+            throw "-DepsOnly needs an installed engine at $engineHome; run install.ps1 without it first."
+        }
+        foreach ($file in @("requirements.txt", "pyproject.toml", "mnemo_bootstrap.py")) {
+            if (-not (Test-Path -LiteralPath (Join-Path $repoRoot $file) -PathType Leaf)) {
+                throw "Run install.ps1 from the mnemo repository ($file not found)."
+            }
+        }
+        Write-Status "engine home: $engineHome"
+        foreach ($file in @("requirements.txt", "pyproject.toml", "mnemo_bootstrap.py")) {
+            Copy-Item -LiteralPath (Join-Path $repoRoot $file) `
+                -Destination (Join-Path $engineHome $file) -Force
+        }
+        Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
+        Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $engineHome "requirements.txt")) "Failed to install Python dependencies"
+        # Refresh the launcher package's declared dependencies (they are read
+        # from requirements.txt at build time) so `pip check` stays honest.
+        # bin\mnemo.exe is deliberately not rewritten: it holds an absolute path
+        # into the venv and is unaffected by a metadata-only reinstall.
+        Invoke-Checked $venvPython @(
+            "-m", "pip", "install", "--quiet", "--no-deps",
+            "--force-reinstall", $engineHome
+        ) "Failed to refresh the launcher package metadata"
+        Write-Status "python deps installed (deps-only: engine code and launcher untouched)"
         return
     }
 

@@ -7,15 +7,16 @@
 # downloads the embedding model (that is the explicit `mnemo warmup`
 # step) and NEVER touches the per-project index state or the model cache.
 #
-#   ./install.sh            install or refresh the engine
-#   ./install.sh --check    report engine state, change nothing
-#   ./install.sh --home DIR  install into DIR instead of the default
+#   ./install.sh              install or refresh the engine
+#   ./install.sh --check      report engine state, change nothing
+#   ./install.sh --deps-only  refresh venv packages only, leave src/ alone
+#   ./install.sh --home DIR   install into DIR instead of the default
 #
 # Default location: $HOME/.claude/mnemo  (override with $MNEMO_HOME).
 set -euo pipefail
 
 usage() {
-	sed -n '2,13p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
+	sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
 }
 
 say() { printf 'install.sh: %s\n' "$1"; }
@@ -26,9 +27,11 @@ SRC_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # --- resolve the engine home and parse flags ---------------------------
 MNEMO_HOME="${MNEMO_HOME:-$HOME/.claude/mnemo}"
 CHECK_ONLY=0
+DEPS_ONLY=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--check) CHECK_ONLY=1 ;;
+		--deps-only) DEPS_ONLY=1 ;;
 		--home) shift; MNEMO_HOME="${1:?--home needs a directory}" ;;
 		--home=*) MNEMO_HOME="${1#--home=}" ;;
 		-h|--help) usage; exit 0 ;;
@@ -41,6 +44,10 @@ PY_BIN="$MNEMO_HOME/.venv/bin/python"
 LAUNCHER="$MNEMO_HOME/bin/mnemo"
 
 line() { printf 'install.sh:   %-13s %s\n' "$1" "$2"; }
+
+# Every runtime dependency the engine imports (v2 core + v3 service layer).
+DEP_PROBE='import fastembed, sqlite_vec, semantic_text_splitter, mcp
+import fastapi, uvicorn, watchdog, httpx'
 
 # report <test-flag> <path> <label> — kept inside `if` so a failing
 # test never trips `set -e`.
@@ -56,7 +63,7 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 	report -x "$PY_BIN"               "venv python"
 	report -x "$LAUNCHER"             "launcher"
 	if [ -x "$PY_BIN" ] \
-		&& "$PY_BIN" -c 'import fastembed, sqlite_vec, semantic_text_splitter, mcp' 2>/dev/null; then
+		&& "$PY_BIN" -c "$DEP_PROBE" 2>/dev/null; then
 		line "python deps" present
 	else
 		line "python deps" "MISSING / incomplete"
@@ -67,6 +74,21 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 	else
 		line "model cache" "empty (run: mnemo warmup)"
 	fi
+	exit 0
+fi
+
+# --- --deps-only: refresh venv packages, leave src/ and the launcher ----
+# Safe to run while the repo's src/ is mid-refactor.
+if [ "$DEPS_ONLY" -eq 1 ]; then
+	[ -x "$PY_BIN" ] \
+		|| { echo "install.sh: --deps-only needs an installed engine at $MNEMO_HOME" >&2; exit 1; }
+	[ -f "$SRC_REPO/requirements.txt" ] \
+		|| { echo "install.sh: run from the mnemo repo (requirements.txt not found)" >&2; exit 1; }
+	say "engine home: $MNEMO_HOME"
+	cp "$SRC_REPO/requirements.txt" "$MNEMO_HOME/requirements.txt"
+	"$PY_BIN" -m pip install --quiet --upgrade pip
+	"$PY_BIN" -m pip install --quiet -r "$MNEMO_HOME/requirements.txt"
+	say "python deps installed (deps-only: engine code and launcher untouched)"
 	exit 0
 fi
 

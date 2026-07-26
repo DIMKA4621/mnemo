@@ -129,7 +129,19 @@ def main() -> int:
         assert cache_sentinel.read_text(encoding="utf-8") == "cache"
         print("PASS  reinstall preserves state and model cache")
 
-    print("\n8 passed, 0 failed")
+        # -DepsOnly must refresh the venv without re-mirroring src/, so it is
+        # safe to run while the repository's engine code is mid-refactor.
+        in_flight = engine / "src" / "in flight.py"
+        in_flight.write_text("# uncommitted engine work\n", encoding="utf-8")
+        deps_only = run(install + ["-DepsOnly"])
+        assert "deps-only" in deps_only.stdout
+        assert in_flight.is_file(), "-DepsOnly re-mirrored src/"
+        assert state_sentinel.read_text(encoding="utf-8") == "state"
+        assert cache_sentinel.read_text(encoding="utf-8") == "cache"
+        run([str(launcher), "--help"])
+        print("PASS  -DepsOnly refreshes packages only")
+
+    print("\n9 passed, 0 failed")
     return 0
 
 
