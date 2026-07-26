@@ -12,10 +12,26 @@ is documented as **ignored** when combined with ``DETACHED_PROCESS`` or
 that quietly turns the guard into a no-op if got wrong. On POSIX the child is
 put in its own session with stdio on /dev/null.
 
-**A bare PID is not proof the process is ours.** PIDs are reused, so a stale
-``service.json`` naming a recycled PID would otherwise report a healthy
-service that is really someone else's process. Every liveness answer here is
-therefore (pid, creation-time) — a pair the OS cannot recycle.
+**A bare PID is never grounds to kill anything.** PIDs are reused, so a stale
+state file naming a recycled PID names somebody else's process — an editor,
+a build. Termination is gated on ``owned_process()``: the PID must come from
+``service.pid`` (the file only this module writes) *and* still carry the
+creation-time fingerprint recorded when we spawned it. The backend's
+``service.json`` has no fingerprint and another writer, so it is used for
+reporting and for noticing a backend we did not start — never as a licence to
+terminate. A service somebody else launched is refused, not killed.
+
+Two deliberate limits, stated rather than implied:
+
+* **Same user only.** The service runs as the logged-in user (Task Scheduler
+  registers it under that principal); cross-principal operation is not
+  supported. A PID we may not open is reported ``foreign`` and never touched.
+* **macOS is unverified.** ``_ps_fingerprint`` is written to the documented
+  ``ps`` behaviour but has not been run on a Mac — we have no machine.
+
+``start(foreground=True)`` writes no state file: it is a debugging mode, so
+the service is intentionally invisible to ``status``/``stop`` (Ctrl-C is the
+control).
 
 The module is deliberately usable before the backend exists: ``start`` takes
 an arbitrary target command, so the whole lifecycle is testable against a
@@ -29,6 +45,7 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -132,31 +149,92 @@ def process_fingerprint(pid: int) -> str | None:
     return _ps_fingerprint(pid)
 
 
-def _pid_alive(pid: int) -> bool:
-    """True when *some* process currently holds this PID."""
+# Liveness is tri-state on purpose. "Cannot inspect" is not "not running":
+# collapsing the two is how a live service gets reported as stopped and a
+# second one gets spawned on top of it.
+ALIVE = "alive"
+GONE = "gone"
+FOREIGN = "foreign"   # exists, but owned by another user / higher integrity
+
+
+def _pid_state(pid: int) -> str:
+    """ALIVE / GONE / FOREIGN for one PID.
+
+    Windows liveness is ``WaitForSingleObject(handle, 0)``, never the exit
+    code: ``GetExitCodeProcess`` reports STILL_ACTIVE (259) for a running
+    process *and* for one that genuinely exited with 259, so a backend
+    returning 259 would be "running" forever.
+    """
     if pid <= 0:
-        return False
+        return GONE
     if os.name == "nt":
         import ctypes
 
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        handle = kernel32.OpenProcess(0x1000, False, pid)
+        # SYNCHRONIZE (to wait) | PROCESS_QUERY_LIMITED_INFORMATION.
+        handle = kernel32.OpenProcess(0x00100000 | 0x1000, False, pid)
         if not handle:
-            return False
+            # 5 = ERROR_ACCESS_DENIED: the PID exists, we may not touch it.
+            return FOREIGN if ctypes.get_last_error() == 5 else GONE
         try:
-            code = ctypes.c_ulong()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return False
-            return code.value == _STILL_ACTIVE
+            # WAIT_TIMEOUT (258) = still running; WAIT_OBJECT_0 (0) = exited.
+            return ALIVE if kernel32.WaitForSingleObject(handle, 0) == 258 else GONE
         finally:
             kernel32.CloseHandle(handle)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
-        return False
+        return GONE
     except PermissionError:
-        return True  # exists, owned by someone else
-    return True
+        return FOREIGN
+    return ALIVE
+
+
+def _pid_alive(pid: int) -> bool:
+    """True when the PID is running and inspectable by us."""
+    return _pid_state(pid) == ALIVE
+
+
+def _terminate_tree(pid: int, *, force: bool = False) -> None:
+    """Stop a process we have already proven is ours, plus its children.
+
+    The tree matters because of the redirector: on Windows a venv launcher
+    spawns the real interpreter as a child, so signalling only the PID we
+    recorded can leave the server running and the port bound. The tree is
+    taken from the OS (parent -> child), never from a file, so it cannot
+    reach a process that merely reuses a number.
+
+    Callers must have gone through owned_process() first -- this function
+    does no verification of its own.
+    """
+    if pid <= 0:
+        return
+    if os.name == "nt":
+        # taskkill /T walks the child list for us. Windowless, like
+        # everything else we spawn.
+        subprocess.run(
+            ["taskkill", "/PID", str(pid), "/T", "/F"],
+            capture_output=True,
+            creationflags=_CREATE_NO_WINDOW,
+            timeout=30,
+            check=False,
+        )
+        return
+
+    sig = signal.SIGKILL if force else signal.SIGTERM
+    # We spawn with start_new_session, so our child leads its own process
+    # group and killpg reaches its children. If it is NOT the leader, the
+    # group belongs to somebody else and must not be signalled.
+    try:
+        if os.getpgid(pid) == pid:
+            os.killpg(pid, sig)
+            return
+    except OSError:
+        pass
+    try:
+        os.kill(pid, sig)
+    except OSError:
+        pass
 
 
 def _reap(pid: int) -> None:
@@ -207,12 +285,25 @@ def _write_identity(identity: dict[str, Any]) -> None:
 
 
 def _clear_identity() -> None:
-    """Drop our own file. ``service.json`` belongs to the backend — but a
-    force-killed backend cannot clean up after itself, so an orphan is
-    removed too (only ever when its process is verified gone)."""
-    for path in (SERVICE_PID_FILE, SERVICE_INFO_FILE):
+    """Drop our own state file, and only our own.
+
+    ``service.json`` belongs to the backend. It is removed only when the
+    process it names is verifiably gone -- otherwise clearing a stale entry
+    of ours would delete the state file of a healthy backend somebody else
+    started.
+    """
+    try:
+        SERVICE_PID_FILE.unlink()
+    except OSError:
+        pass
+
+    info = read_service_info()
+    info_pid = (info or {}).get("pid")
+    if info is not None and (
+        not isinstance(info_pid, int) or _pid_state(info_pid) == GONE
+    ):
         try:
-            path.unlink()
+            SERVICE_INFO_FILE.unlink()
         except OSError:
             pass
 
@@ -224,36 +315,78 @@ class ServiceState:
     running: bool
     info: dict | None = None
     pid: int | None = None
-    stale: bool = False   # a state file was present but its owner is gone
+    stale: bool = False          # a state file was present, its owner is gone
     healthy: bool | None = None  # None = no endpoint recorded yet
+    managed: bool = False        # we spawned it and can prove it is the same
+                                 # process -- the ONLY case we may terminate
+    foreign: bool = False        # exists but belongs to another principal
 
     @property
     def unhealthy(self) -> bool:
         return self.running and self.healthy is False
 
 
+def owned_process() -> tuple[int, str] | None:
+    """The PID we spawned, proven to still be that same process.
+
+    This is the single gate on termination. It reads ONLY ``service.pid`` --
+    the file service_ctl writes and nobody else touches -- and it requires a
+    fingerprint that still matches. Anything without a verified fingerprint
+    is, by construction, not something we are allowed to kill.
+    """
+    identity = read_identity()
+    if not identity:
+        return None
+    pid = identity.get("pid")
+    fingerprint = identity.get("fingerprint")
+    if not isinstance(pid, int) or not isinstance(fingerprint, str) or not fingerprint:
+        return None
+    _reap(pid)
+    if _pid_state(pid) != ALIVE:
+        return None
+    current = process_fingerprint(pid)
+    # A live PID whose creation time differs is a different process that
+    # merely inherited the number. Absence of a fingerprint is NOT a pass.
+    if current is None or current != fingerprint:
+        return None
+    return pid, fingerprint
+
+
 def probe() -> ServiceState:
-    """Resolve the real state: state file + live process + optional health."""
+    """Resolve the real state.
+
+    Liveness comes from ``service.pid`` alone. ``service.json`` is written by
+    the backend and carries no fingerprint, so it is used for *reporting*
+    (endpoint, version) and to notice a backend we did not start -- never as
+    a licence to terminate a PID.
+    """
+    identity = read_identity()
     info = read_service_info()
-    if info is None:
+    if identity is None and info is None:
         return ServiceState(running=False)
 
-    pid = info.get("pid")
-    if not isinstance(pid, int):
-        return ServiceState(running=False, info=info, stale=True)
+    owned = owned_process()
+    if owned is not None:
+        return ServiceState(
+            running=True, info=info, pid=owned[0], managed=True,
+            healthy=_health(info or {}),
+        )
 
-    _reap(pid)
-    recorded = info.get("fingerprint")
-    current = process_fingerprint(pid)
-    # Both halves must agree. A live PID whose creation time differs is a
-    # different process that merely inherited the number.
-    if current is None or not _pid_alive(pid):
-        return ServiceState(running=False, info=info, pid=pid, stale=True)
-    if recorded is not None and current != recorded:
-        return ServiceState(running=False, info=info, pid=pid, stale=True)
+    # Not ours (or not provably ours). Is something still serving?
+    info_pid = (info or {}).get("pid")
+    if isinstance(info_pid, int):
+        state = _pid_state(info_pid)
+        if state in (ALIVE, FOREIGN):
+            return ServiceState(
+                running=True, info=info, pid=info_pid, managed=False,
+                foreign=state == FOREIGN, healthy=_health(info or {}),
+            )
 
+    identity_pid = (identity or {}).get("pid")
     return ServiceState(
-        running=True, info=info, pid=pid, healthy=_health(info)
+        running=False, info=info,
+        pid=identity_pid if isinstance(identity_pid, int) else None,
+        stale=True,
     )
 
 
@@ -340,6 +473,50 @@ def _default_target() -> list[str]:
 # ------------------------------------------------------------- lifecycle
 
 
+def _start_lock() -> Path:
+    return STATE_DIR / "service.start.lock"
+
+
+@contextmanager
+def _exclusive_start():
+    """Serialise the whole of start(): probe -> spawn -> record.
+
+    Without it the window between spawning and writing service.pid (a full
+    SERVICE_START_GRACE) reads as "stopped", so a second start spawns a
+    second backend and only one of them is ever tracked.
+    """
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    lock = _start_lock()
+    handle = None
+    for _ in range(2):
+        try:
+            handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            # Break a lock whose owner died mid-start; never one still held.
+            holder = _read_json(lock) or {}
+            holder_pid = holder.get("pid")
+            if isinstance(holder_pid, int) and _pid_state(holder_pid) == ALIVE:
+                raise RuntimeError(
+                    f"another `mnemo service start` is running (pid {holder_pid})"
+                )
+            try:
+                lock.unlink()
+            except OSError:
+                pass
+    if handle is None:
+        raise RuntimeError("could not acquire the service start lock")
+    try:
+        os.write(handle, json.dumps({"pid": os.getpid()}).encode("utf-8"))
+        os.close(handle)
+        yield
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+
+
 def start(
     *,
     foreground: bool = False,
@@ -347,96 +524,113 @@ def start(
 ) -> int:
     """Start the service unless it is already running.
 
+    ``foreground=True`` runs the backend in this terminal and writes NO state
+    file: it is a debugging mode, deliberately invisible to ``status`` and
+    ``stop`` (there is nothing detached to manage -- Ctrl-C is the control).
+
     ``target`` is an additive convenience over the contract signature: it lets
-    the lifecycle be exercised against any long-running command before the
-    backend module exists.
+    the lifecycle be exercised against any long-running command.
     """
-    state = probe()
-    if state.running:
-        print(f"mnemo service: already running (pid {state.pid})")
-        return EXIT_OK
-    if state.stale:
-        # Contract §11.2: an orphaned state file is cleaned up by start.
-        _clear_service_info()
-        print("mnemo service: removed stale service.json")
-
     argv = list(target) if target is not None else _default_target()
-
     if foreground:
         return subprocess.call(argv)
 
-    engine_root = Path(__file__).resolve().parent.parent
-    pid = spawn_detached(argv, cwd=engine_root)
+    try:
+        with _exclusive_start():
+            state = probe()
+            if state.running:
+                owner = "" if state.managed else " (not started by us)"
+                print(f"mnemo service: already running (pid {state.pid}){owner}")
+                return EXIT_OK
+            if state.stale:
+                # Contract: an orphaned state file is cleaned up by start.
+                _clear_identity()
+                print("mnemo service: removed stale process-state files")
 
-    # A child that dies instantly (bad interpreter, import error) must not be
-    # recorded as a running service.
-    deadline = time.monotonic() + SERVICE_START_GRACE
-    while time.monotonic() < deadline:
-        if not _pid_alive(pid):
-            _reap(pid)
-            print("mnemo service: the process exited immediately after start")
-            return EXIT_DOWN
-        time.sleep(0.05)
+            engine_root = Path(__file__).resolve().parent.parent
+            pid = spawn_detached(argv, cwd=engine_root)
 
-    _write_service_info(
-        {
-            "pid": pid,
-            "fingerprint": process_fingerprint(pid),
-            "started_at": datetime.now(timezone.utc).astimezone().isoformat(),
-            "python": argv[0],
-            "argv": argv,
-        }
-    )
-    print(f"mnemo service: started (pid {pid})")
-    return EXIT_OK
+            # A child that dies instantly (bad interpreter, import error) must
+            # not be recorded as a running service.
+            deadline = time.monotonic() + SERVICE_START_GRACE
+            while time.monotonic() < deadline:
+                if _pid_state(pid) != ALIVE:
+                    _reap(pid)
+                    print("mnemo service: the process exited immediately after start")
+                    return EXIT_DOWN
+                time.sleep(0.05)
+
+            _write_identity(
+                {
+                    "pid": pid,
+                    "fingerprint": process_fingerprint(pid),
+                    "started_at": datetime.now(timezone.utc).astimezone().isoformat(),
+                    "python": argv[0],
+                    "argv": argv,
+                }
+            )
+            print(f"mnemo service: started (pid {pid})")
+            return EXIT_OK
+    except RuntimeError as exc:
+        print(f"mnemo service: {exc}")
+        return EXIT_UNHEALTHY
 
 
 def stop(*, timeout: float = SERVICE_STOP_TIMEOUT) -> int:
-    """Stop the service and verify the process is really gone."""
-    state = probe()
-    if not state.running:
+    """Stop the service we started, and verify the process is really gone.
+
+    Refuses to terminate anything it cannot prove is ours. A PID read from a
+    file is not proof: ``service.json`` is rewritten by the backend without a
+    fingerprint, PIDs are reused, and the file can be stale or hand-edited --
+    so a bare PID must never reach TerminateProcess.
+    """
+    owned = owned_process()
+    if owned is None:
+        state = probe()
+        if state.running:
+            # Something is serving, but it is not a process we can prove we
+            # started -- e.g. launched by systemd, Task Scheduler or by hand.
+            who = "another principal" if state.foreign else "another launcher"
+            print(f"mnemo service: refusing to stop pid {state.pid} - started by {who}")
+            print("mnemo service: stop it where it was started, or use its own shutdown")
+            return EXIT_UNHEALTHY
         if state.stale:
-            _clear_service_info()
-            print("mnemo service: not running (removed stale service.json)")
+            _clear_identity()
+            print("mnemo service: not running (removed stale process-state files)")
         else:
             print("mnemo service: not running")
         return EXIT_DOWN
 
-    pid = int(state.pid or 0)
-    fingerprint = (state.info or {}).get("fingerprint")
+    pid, fingerprint = owned
+    _terminate_tree(pid)
 
-    if os.name == "nt":
-        import ctypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        handle = kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
-        if handle:
-            kernel32.TerminateProcess(handle, 1)
-            kernel32.CloseHandle(handle)
-    else:
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            pass
+    # Wait for the published backend PID too, not just the one we spawned:
+    # the redirector can be gone while the server it fronted is still exiting,
+    # and returning then would let `status` report a service that is on its
+    # way out. Waiting on a bare PID is safe -- only *killing* one is not.
+    info_pid = (read_service_info() or {}).get("pid")
+    waiting = [pid]
+    if isinstance(info_pid, int) and info_pid != pid:
+        waiting.append(info_pid)
 
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         _reap(pid)
-        if not _pid_alive(pid) or process_fingerprint(pid) != fingerprint:
-            _clear_service_info()
+        ours_gone = (
+            _pid_state(pid) != ALIVE or process_fingerprint(pid) != fingerprint
+        )
+        if ours_gone and all(_pid_state(other) != ALIVE for other in waiting):
+            _clear_identity()
             print(f"mnemo service: stopped (pid {pid})")
             return EXIT_OK
         time.sleep(0.1)
 
-    if os.name != "nt":  # graceful window expired — escalate
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except OSError:
-            pass
+    if os.name != "nt":  # graceful window expired - escalate
+        _terminate_tree(pid, force=True)
         time.sleep(0.2)
         _reap(pid)
-        if not _pid_alive(pid):
-            _clear_service_info()
+        if _pid_state(pid) != ALIVE:
+            _clear_identity()
             print(f"mnemo service: killed (pid {pid})")
             return EXIT_OK
 
@@ -449,7 +643,7 @@ def status() -> int:
     state = probe()
     if not state.running:
         if state.stale:
-            print("mnemo service: stopped (stale service.json — process is gone)")
+            print("mnemo service: stopped (stale state file - process is gone)")
         else:
             print("mnemo service: stopped")
         return EXIT_DOWN
@@ -460,12 +654,16 @@ def status() -> int:
         if info.get("host") and info.get("port")
         else "no endpoint published"
     )
+    origin = "" if state.managed else ", not started by us"
     if state.unhealthy:
-        print(f"mnemo service: unhealthy (pid {state.pid}, {endpoint})")
+        print(f"mnemo service: unhealthy (pid {state.pid}, {endpoint}{origin})")
         return EXIT_UNHEALTHY
 
-    started = info.get("started_at", "?")
-    print(f"mnemo service: running (pid {state.pid}, {endpoint}, since {started})")
+    started = info.get("started_at") or (read_identity() or {}).get("started_at", "?")
+    print(
+        f"mnemo service: running (pid {state.pid}, {endpoint}, "
+        f"since {started}{origin})"
+    )
     return EXIT_OK
 
 

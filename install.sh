@@ -10,13 +10,14 @@
 #   ./install.sh              install or refresh the engine
 #   ./install.sh --check      report engine state, change nothing
 #   ./install.sh --deps-only  refresh venv packages only, leave src/ alone
+#   ./install.sh --no-autostart  skip the systemd --user registration
 #   ./install.sh --home DIR   install into DIR instead of the default
 #
 # Default location: $HOME/.claude/mnemo  (override with $MNEMO_HOME).
 set -euo pipefail
 
 usage() {
-	sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
+	sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
 }
 
 say() { printf 'install.sh: %s\n' "$1"; }
@@ -25,13 +26,16 @@ say() { printf 'install.sh: %s\n' "$1"; }
 SRC_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- resolve the engine home and parse flags ---------------------------
-MNEMO_HOME="${MNEMO_HOME:-$HOME/.claude/mnemo}"
+DEFAULT_HOME="$HOME/.claude/mnemo"
+MNEMO_HOME="${MNEMO_HOME:-$DEFAULT_HOME}"
 CHECK_ONLY=0
 DEPS_ONLY=0
+NO_AUTOSTART=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--check) CHECK_ONLY=1 ;;
 		--deps-only) DEPS_ONLY=1 ;;
+		--no-autostart) NO_AUTOSTART=1 ;;
 		--home) shift; MNEMO_HOME="${1:?--home needs a directory}" ;;
 		--home=*) MNEMO_HOME="${1#--home=}" ;;
 		-h|--help) usage; exit 0 ;;
@@ -55,6 +59,35 @@ report() {
 	if [ "$1" "$2" ]; then line "$3" present; else line "$3" MISSING; fi
 }
 
+# PID of a live service, empty when none. service.pid is written by
+# service_ctl, service.json by the backend — either identifies the process
+# that would hold the venv open during a refresh.
+live_service_pid() {
+	for name in service.pid service.json; do
+		file="$MNEMO_HOME/state/$name"
+		[ -f "$file" ] || continue
+		candidate="$(sed -n 's/.*"pid"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$file" | head -n1)"
+		[ -n "$candidate" ] || continue
+		if kill -0 "$candidate" 2>/dev/null; then
+			printf '%s' "$candidate"
+			return 0
+		fi
+	done
+	printf ''
+}
+
+service_endpoint() {
+	file="$MNEMO_HOME/state/service.json"
+	[ -f "$file" ] || { printf ''; return 0; }
+	host="$(sed -n 's/.*"host"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$file" | head -n1)"
+	port="$(sed -n 's/.*"port"[[:space:]]*:[[:space:]]*\([0-9]\{1,\}\).*/\1/p' "$file" | head -n1)"
+	if [ -n "$host" ] && [ -n "$port" ]; then
+		printf 'http://%s:%s' "$host" "$port"
+	else
+		printf ''
+	fi
+}
+
 # --- --check: report only, mutate nothing ------------------------------
 if [ "$CHECK_ONLY" -eq 1 ]; then
 	say "engine home: $MNEMO_HOME"
@@ -73,6 +106,55 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 		line "model cache" "present (warmed)"
 	else
 		line "model cache" "empty (run: mnemo warmup)"
+	fi
+
+	# v3 state: the service, its endpoint, the token and the bank registry.
+	# banks.json is NOT reconstructible from the .md, so it is reported
+	# explicitly rather than assumed.
+	service_pid="$(live_service_pid)"
+	if [ -n "$service_pid" ]; then
+		line "service" "running (pid $service_pid)"
+	else
+		line "service" stopped
+	fi
+
+	endpoint="$(service_endpoint)"
+	line "endpoint" "${endpoint:-not published}"
+
+	if [ -n "$service_pid" ] && [ -n "$endpoint" ] \
+		&& command -v curl >/dev/null 2>&1; then
+		if curl -fsS --max-time 3 "$endpoint/health" >/dev/null 2>&1; then
+			line "health" "ok (200)"
+		else
+			line "health" "UNREACHABLE (process alive, /health silent)"
+		fi
+	else
+		line "health" "not checked (service down)"
+	fi
+
+	if [ -f "$MNEMO_HOME/state/api.token" ]; then
+		line "api token" present
+	else
+		line "api token" "missing (created on first service start)"
+	fi
+
+	if [ -f "$MNEMO_HOME/state/banks.json" ]; then
+		if count="$("$PY_BIN" -c 'import json,sys
+data = json.load(open(sys.argv[1], encoding="utf-8"))
+banks = data.get("banks", data) if isinstance(data, dict) else data
+print(len(banks))' "$MNEMO_HOME/state/banks.json" 2>/dev/null)"; then
+			line "banks" "$count registered"
+		else
+			line "banks" "PRESENT BUT UNPARSEABLE — do not delete, fix by hand"
+		fi
+	else
+		line "banks" "none registered"
+	fi
+
+	if [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/mnemo.service" ]; then
+		line "autostart" "enabled (systemd --user)"
+	else
+		line "autostart" disabled
 	fi
 	exit 0
 fi
@@ -110,7 +192,27 @@ mkdir -p \
 	"$MNEMO_HOME/bin"
 say "engine home: $MNEMO_HOME"
 
-# --- 2. mirror the engine code (only ever touches src/) ----------------
+# --- 2. stop -> refresh -> start ---------------------------------------
+# A running backend holds the venv open; it must be down before the mirror,
+# and it comes back only if it was up to begin with.
+SERVICE_WAS_RUNNING=0
+service_pid="$(live_service_pid)"
+if [ -n "$service_pid" ]; then
+	SERVICE_WAS_RUNNING=1
+	[ -x "$LAUNCHER" ] && "$LAUNCHER" service stop >/dev/null 2>&1 || true
+	for _ in $(seq 20); do
+		kill -0 "$service_pid" 2>/dev/null || break
+		sleep 0.1
+	done
+	if kill -0 "$service_pid" 2>/dev/null; then
+		kill -9 "$service_pid" 2>/dev/null || true
+		say "service force-stopped for refresh (pid $service_pid)"
+	else
+		say "service stopped for refresh (pid $service_pid)"
+	fi
+fi
+
+# --- 3. mirror the engine code (only ever touches src/) ----------------
 if command -v rsync >/dev/null 2>&1; then
 	rsync -a --delete --exclude='__pycache__' "$SRC_REPO/src/" "$MNEMO_HOME/src/"
 else
@@ -152,6 +254,72 @@ LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 say "launcher written: $LAUNCHER"
 
-# --- 6. done (model is intentionally NOT downloaded) -------------------
+# --- 6. shell profile: export the token, register `mnemo` --------------
+# User-scope registrations belong to the real engine only: a custom --home is
+# an isolated/manual copy (and the test suite uses one), so it must never
+# reach out and edit the user's shell profile or systemd units.
+if [ "$MNEMO_HOME" != "$DEFAULT_HOME" ]; then
+	say "isolated home: skipped token export, profile and autostart"
+	say "done. The embedding model is NOT downloaded by install."
+	say "warm it once with:  $LAUNCHER warmup"
+	exit 0
+fi
+
+# A fenced block, so a re-run rewrites exactly this and nothing else. No
+# PATH mutation: `mnemo` becomes a function pointing at the full path.
+PROFILE_FILE="$HOME/.profile"
+[ -f "$PROFILE_FILE" ] || PROFILE_FILE="$HOME/.bashrc"
+BEGIN_MARK="# >>> mnemo >>>"
+END_MARK="# <<< mnemo <<<"
+
+API_TOKEN="$("$PY_BIN" -c 'import os,sys
+home = sys.argv[1]
+os.environ["MNEMO_HOME"] = home
+sys.path.insert(0, home)
+from src.api import api_token
+print(api_token())' "$MNEMO_HOME" 2>/dev/null || true)"
+
+{
+	printf '%s\n' "$BEGIN_MARK"
+	printf '# Added by install.sh — no PATH mutation, full paths only.\n'
+	printf 'mnemo() { "%s" "$@"; }\n' "$LAUNCHER"
+	if [ -n "$API_TOKEN" ]; then
+		# The git-tracked .mcp.json refers to ${MNEMO_API_TOKEN}; without it
+		# the placeholder never expands and MCP cannot connect.
+		printf 'export MNEMO_API_TOKEN="%s"\n' "$API_TOKEN"
+	fi
+	printf '%s\n' "$END_MARK"
+} > "$MNEMO_HOME/state/.profile-block"
+
+touch "$PROFILE_FILE"
+if grep -qF "$BEGIN_MARK" "$PROFILE_FILE" 2>/dev/null; then
+	# Replace the fenced block in place, leave everything else untouched.
+	awk -v begin="$BEGIN_MARK" -v end="$END_MARK" -v block="$MNEMO_HOME/state/.profile-block" '
+		$0 == begin { skip = 1; while ((getline line < block) > 0) print line; close(block); next }
+		$0 == end { skip = 0; next }
+		!skip { print }
+	' "$PROFILE_FILE" > "$PROFILE_FILE.mnemo-tmp"
+	mv "$PROFILE_FILE.mnemo-tmp" "$PROFILE_FILE"
+	say "shell profile: mnemo block refreshed ($PROFILE_FILE)"
+else
+	printf '\n' >> "$PROFILE_FILE"
+	cat "$MNEMO_HOME/state/.profile-block" >> "$PROFILE_FILE"
+	say "shell profile: mnemo registered ($PROFILE_FILE)"
+fi
+rm -f "$MNEMO_HOME/state/.profile-block"
+
+# --- 7. autostart (systemd --user + linger) ----------------------------
+if [ "$NO_AUTOSTART" -eq 0 ]; then
+	"$LAUNCHER" autostart enable || \
+		say "autostart registration failed (run: $LAUNCHER autostart enable)"
+fi
+
+# --- 8. bring the service back if it was running -----------------------
+if [ "$SERVICE_WAS_RUNNING" -eq 1 ]; then
+	"$LAUNCHER" service start || \
+		say "the service did not come back up; start it with: $LAUNCHER service start"
+fi
+
+# --- 9. done (model is intentionally NOT downloaded) -------------------
 say "done. The embedding model is NOT downloaded by install."
 say "warm it once with:  $LAUNCHER warmup"

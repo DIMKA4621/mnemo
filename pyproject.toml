@@ -14,13 +14,13 @@ dynamic = ["dependencies"]
 [project.scripts]
 mnemo = "mnemo_bootstrap:main"
 
-# Same entry point, GUI-subsystem launcher (pythonw-backed). Used only to
-# spawn background processes — Task Scheduler and shortcuts control no
-# creation flags, so "no console" has to be a property of the executable.
-# Never use it for a face that needs stdio (hook-inject writes the injected
-# context to stdout; under pythonw there is no stdout).
+# GUI-subsystem launcher (pythonw-backed) for background processes only:
+# Task Scheduler and shortcuts control no creation flags, so "no console" has
+# to be a property of the executable. It has its OWN entry point, which
+# refuses any subcommand needing stdio — under pythonw there is no stdout and
+# print() fails silently, so the guard has to be structural, not a comment.
 [project.gui-scripts]
-mnemow = "mnemo_bootstrap:main"
+mnemow = "mnemo_bootstrap:main_gui"
 
 [tool.setuptools]
 py-modules = ["mnemo_bootstrap"]

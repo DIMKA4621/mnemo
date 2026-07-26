@@ -1,12 +1,21 @@
 """Model-independent cross-platform regression checks.
 
-Exercises portable project wiring, project-root resolution, and normalized
-index identifiers without touching the user's real mnemo state.
+Exercises portable project wiring, bank-root resolution, and the flat
+markdown walk without touching the user's real mnemo state.
+
+Two rules for anything added here:
+
+* **Assert the shape, never the source.** Comparing a planned value against
+  the constant that produced it is green by construction — it survives any
+  change to that constant, including one that breaks the contract.
+* Assertions on a shape a later phase introduces go through ``xcheck``, so
+  they announce themselves as pending instead of passing vacuously today.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import tempfile
 from pathlib import Path
@@ -17,14 +26,19 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src import config, embedder  # noqa: E402
 from src.index import _disk  # noqa: E402
 from src.scaffold import (  # noqa: E402
-    _HOOK_GROUPS,
-    _MCP_SERVER,
     _Refuse,
     _plan_mcp,
     _plan_settings,
 )
 
-_passed = _failed = 0
+_passed = _failed = _xfailed = _xpassed = 0
+
+# A bank_id is sha1(root)[:16] — correct on exactly one machine with one
+# checkout path. It must never reach a git-tracked file.
+_BANK_ID_RE = re.compile(r"[0-9a-f]{16}")
+# Anything long and opaque enough to be a real credential. Documented
+# `${VAR}` placeholders stay well under this (MNEMO_API_TOKEN is 15 chars).
+_SECRET_RE = re.compile(r"[A-Za-z0-9_\-]{24,}")
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
@@ -35,6 +49,130 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     else:
         _failed += 1
         print(f"FAIL  {name}  {detail}")
+
+
+def xcheck(name: str, ok: bool, reason: str, detail: str = "") -> None:
+    """An assertion on a shape a LATER phase introduces.
+
+    Failing now is expected and does not fail the suite; passing means the
+    phase landed and the assertion has become a real regression guard.
+    Never counts as a silent pass — the outcome is always printed.
+    """
+    global _xfailed, _xpassed
+    if ok:
+        _xpassed += 1
+        print(f"XPASS {name}  ({reason} — now holds; promote to check())")
+    else:
+        _xfailed += 1
+        print(f"xfail {name}  ({reason})  {detail}")
+
+
+def _check_target_mcp_shape(entry: dict) -> None:
+    """Contracts §10.4 — the HTTP wiring phase 4 must produce.
+
+    Phase 4 has not landed: `scaffold._MCP_SERVER` is still the stdio form,
+    so every assertion here is expected to xfail until the switch. They are
+    written against the target so they turn green the moment it arrives.
+    """
+    why = "phase 4 switches MCP from stdio to HTTP"
+
+    xcheck("[target] MCP transport is http", entry.get("type") == "http", why,
+           detail=str(entry.get("type")))
+
+    url = entry.get("url")
+    xcheck(
+        "[target] MCP url is loopback",
+        isinstance(url, str)
+        and re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\]):\d+/\S*", url)
+        is not None,
+        why,
+        detail=str(url),
+    )
+
+    headers = entry.get("headers")
+    headers = headers if isinstance(headers, dict) else {}
+
+    auth = headers.get("Authorization")
+    xcheck(
+        "[target] Authorization is the ${MNEMO_API_TOKEN} placeholder",
+        auth == "Bearer ${MNEMO_API_TOKEN}",
+        why,
+        detail=str(auth),
+    )
+    # The placeholder must survive verbatim: a resolved token in a
+    # git-tracked file is the failure this whole block exists to prevent.
+    xcheck(
+        "[target] Authorization holds no literal token",
+        isinstance(auth, str)
+        and "${MNEMO_API_TOKEN}" in auth
+        and _SECRET_RE.search(auth) is None,
+        why,
+        detail=str(auth),
+    )
+
+    bank = headers.get("X-Mnemo-Bank")
+    xcheck(
+        "[target] X-Mnemo-Bank is present and non-empty",
+        isinstance(bank, str) and bool(bank.strip()),
+        why,
+        detail=str(bank),
+    )
+    # The one machine-readable guard against a machine-derived value in git:
+    # bank_id is sha1(abs path)[:16] and points nowhere after a clone.
+    xcheck(
+        "[target] X-Mnemo-Bank is a name, not a bank_id",
+        isinstance(bank, str)
+        and bool(bank.strip())
+        and _BANK_ID_RE.fullmatch(bank.strip()) is None,
+        why,
+        detail=str(bank),
+    )
+
+
+def _check_hook_wiring(settings: dict) -> None:
+    """Every event named explicitly — a hook group dropped from the source
+    must fail here, not vanish along with the loop that iterated it."""
+    expected = {
+        "SessionStart": ("ingest", None),
+        "PostToolUse": ("hook-postedit", "Edit|Write|MultiEdit"),
+        "UserPromptSubmit": ("hook-inject", None),
+    }
+    hooks = settings.get("hooks")
+    hooks = hooks if isinstance(hooks, dict) else {}
+
+    for event, (subcmd, matcher) in expected.items():
+        groups = [g for g in hooks.get(event, []) or [] if isinstance(g, dict)]
+        commands = [
+            h.get("command")
+            for g in groups
+            for h in g.get("hooks", []) or []
+            if isinstance(h, dict)
+        ]
+        ours = [
+            c for c in commands
+            if isinstance(c, str) and "mnemo" in c and c.split()[-1:] == [subcmd]
+        ]
+        check(
+            f"hook {event} runs mnemo {subcmd}",
+            len(ours) == 1,
+            detail=str(commands),
+        )
+        if matcher is not None:
+            check(
+                f"hook {event} matches {matcher}",
+                any(g.get("matcher") == matcher for g in groups),
+                detail=str([g.get("matcher") for g in groups]),
+            )
+        check(
+            f"hook {event} command carries no machine-specific path",
+            all(
+                str(Path.home()) not in c
+                and Path.home().as_posix() not in c
+                and re.search(r"[A-Za-z]:[\\/]", c) is None
+                for c in ours
+            ),
+            detail=str(ours),
+        )
 
 
 def test_scaffold() -> None:
@@ -59,11 +197,34 @@ def test_scaffold() -> None:
         mcp = json.loads(mcp_text or "{}")
         settings = json.loads(settings_text or "{}")
 
+        entry = mcp.get("mcpServers", {}).get("mnemo")
+        check("mnemo MCP server written", isinstance(entry, dict), detail=str(mcp))
+        entry_text = json.dumps(entry, ensure_ascii=False)
+
+        # Generation-agnostic invariants: true of the stdio form today and
+        # of the HTTP form after phase 4. Nothing machine-specific and no
+        # credential may ever land in this git-tracked file.
+        home = Path.home()
         check(
-            "portable MCP definition",
-            mcp.get("mcpServers", {}).get("mnemo") == _MCP_SERVER,
-            detail=str(mcp),
+            "MCP entry carries no machine-specific path",
+            str(home) not in entry_text
+            and home.as_posix() not in entry_text
+            and re.search(r"[A-Za-z]:[\\/]", entry_text) is None,
+            detail=entry_text,
         )
+        check(
+            "MCP entry carries no literal secret",
+            _SECRET_RE.search(entry_text) is None,
+            detail=str(_SECRET_RE.findall(entry_text)),
+        )
+        check(
+            "MCP entry carries no bank_id",
+            _BANK_ID_RE.search(entry_text) is None,
+            detail=entry_text,
+        )
+
+        _check_target_mcp_shape(entry if isinstance(entry, dict) else {})
+
         check(
             "foreign MCP server preserved",
             "foreign" in mcp.get("mcpServers", {}),
@@ -74,35 +235,46 @@ def test_scaffold() -> None:
             settings.get("permissions") == {"allow": ["Read"]},
             detail=str(settings),
         )
-        check(
-            "all hook groups added",
-            all(settings.get("hooks", {}).get(event) for event in _HOOK_GROUPS),
-            detail=str(settings.get("hooks")),
-        )
+        _check_hook_wiring(settings)
 
         mcp_path.write_text(mcp_text or "", encoding="utf-8")
         settings_path.write_text(settings_text or "", encoding="utf-8")
         check("MCP idempotent", _plan_mcp(mcp_path, []) is None)
         check("hooks idempotent", _plan_settings(settings_path, []) is None)
 
-        legacy = {
-            "mcpServers": {
-                "mnemo": {
-                    "command": "/bin/sh",
-                    "args": [
-                        "-c",
-                        'exec "$HOME/.claude/mnemo/bin/mnemo" mcp',
-                    ],
-                }
-            }
+        # Two legacy generations exist in the wild (contracts §15.2), and
+        # `mnemo init --migrate` must recognise BOTH in phase 4. Projects
+        # adopted before the windows branch carry L1, after it L2.
+        l1 = {
+            "command": "/bin/sh",
+            "args": ["-c", 'exec "$HOME/.claude/mnemo/bin/mnemo" mcp'],
         }
-        mcp_path.write_text(json.dumps(legacy), encoding="utf-8")
-        refused = False
-        try:
-            _plan_mcp(mcp_path, [])
-        except _Refuse:
-            refused = True
-        check("legacy MCP definition is an explicit conflict", refused)
+        l2 = {
+            "type": "stdio",
+            "command": "${HOME}/.claude/mnemo/bin/mnemo",
+            "args": ["mcp"],
+        }
+
+        def refuses(server: dict) -> bool:
+            mcp_path.write_text(
+                json.dumps({"mcpServers": {"mnemo": server}}), encoding="utf-8"
+            )
+            try:
+                _plan_mcp(mcp_path, [])
+            except _Refuse:
+                return True
+            return False
+
+        check("legacy L1 (/bin/sh wrapper) is an explicit conflict", refuses(l1))
+        # L2 is still the LIVE value today, so plain `init` correctly treats
+        # it as already-wired. It becomes a conflict only once phase 4 makes
+        # the HTTP form canonical.
+        xcheck(
+            "[target] legacy L2 (stdio ${HOME} launcher) is an explicit conflict",
+            refuses(l2),
+            "phase 4 switches MCP from stdio to HTTP; L2 is the current "
+            "_MCP_SERVER until then",
+        )
 
 
 def test_project_resolution() -> None:
@@ -144,28 +316,95 @@ def test_project_resolution() -> None:
 
 
 def test_index_paths() -> None:
+    """A bank is FLAT: every .md under the root, wherever it sits.
+
+    The fixture deliberately reaches outside `.claude/` — under the old
+    scope-based walk those files were invisible, so a walk that still
+    honoured scopes passes the identifier checks while indexing nothing.
+    """
     with tempfile.TemporaryDirectory(prefix="mnemo paths ") as raw:
         root = Path(raw) / "проєкт"
         memory = root / ".claude" / "memory" / "nested"
         agent = root / ".claude" / "agent-memory" / "reviewer"
-        memory.mkdir(parents=True)
-        agent.mkdir(parents=True)
+        docs = root / "docs" / "deep dive"
+        for d in (memory, agent, docs):
+            d.mkdir(parents=True)
         (memory / "topic.md").write_text("# Topic\n", encoding="utf-8")
         (agent / "MEMORY.md").write_text("# Reviewer\n", encoding="utf-8")
+        (root / "README.md").write_text("# Readme\n", encoding="utf-8")       # bank root
+        (docs / "нотатка.md").write_text("# Нотатка\n", encoding="utf-8")     # outside .claude/
+        (root / "notes.txt").write_text("not markdown\n", encoding="utf-8")
+        (docs / "diagram.markdown").write_text("not .md\n", encoding="utf-8")
 
-        identifiers = sorted(_disk(config.resolve(root)))
+        # A bank pointed at a project root must not drown in vendor docs
+        # (config.DEFAULT_EXCLUDE), at the root or nested — but the patterns
+        # name directories, so a file merely *starting* with "venv" stays.
+        vendored = [
+            ".venv/Lib/site-packages/pkg/README.md",
+            "venv/x.md",
+            "node_modules/a/readme.md",
+            "sub/node_modules/b/readme.md",
+            "__pycache__/c.md",
+            "sub/__pycache__/d.md",
+            ".git/e.md",
+        ]
+        kept = ["venv-notes.md", "docs/venv.md"]
+        for rel in vendored + kept:
+            p = root / rel
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text("# vendor\n", encoding="utf-8")
+
+        walk = _disk(config.resolve(root))
         check(
-            "stored identifiers use POSIX separators",
+            "vendor directories are excluded at any depth",
+            not [rel for rel in vendored if rel in walk],
+            detail=str([rel for rel in vendored if rel in walk]),
+        )
+        check(
+            "exclusion matches directory names, not name prefixes",
+            all(rel in walk for rel in kept),
+            detail=str([rel for rel in kept if rel not in walk]),
+        )
+        for rel in vendored + kept:
+            (root / rel).unlink()
+
+        # Back to just the curated fixture for the strict identifier list.
+        walk = _disk(config.resolve(root))
+        identifiers = sorted(walk)
+        check(
+            "flat walk takes every .md under the bank root",
             identifiers == [
                 ".claude/agent-memory/reviewer/MEMORY.md",
                 ".claude/memory/nested/topic.md",
+                "README.md",
+                "docs/deep dive/нотатка.md",
             ],
+            detail=str(identifiers),
+        )
+        check(
+            "flat walk takes only .md (not .txt, not .markdown)",
+            not any(not v.endswith(".md") for v in identifiers),
             detail=str(identifiers),
         )
         check(
             "stored identifiers contain no backslashes",
             all("\\" not in value for value in identifiers),
             detail=str(identifiers),
+        )
+        check(
+            "stored identifiers are relative to the bank root",
+            all(not Path(value).is_absolute() for value in identifiers)
+            and all(walk[v] == root / v for v in identifiers),
+            detail=str(identifiers),
+        )
+        # `_disk` sorts Path objects, so the key order is normcase-folded on
+        # Windows and byte-ordered on POSIX — the two platforms disagree.
+        # What the indexer actually relies on is that ONE machine repeats
+        # itself, so assert that, not a cross-platform order.
+        check(
+            "walk order is stable across calls",
+            list(_disk(config.resolve(root))) == list(walk),
+            detail=str(list(walk)),
         )
 
 
@@ -227,7 +466,10 @@ def main() -> int:
     test_project_resolution()
     test_index_paths()
     test_model_cache_validation()
-    print(f"\n{_passed} passed, {_failed} failed")
+    print(
+        f"\n{_passed} passed, {_failed} failed, "
+        f"{_xfailed} xfailed (awaiting a later phase), {_xpassed} xpassed"
+    )
     return 1 if _failed else 0
 
 

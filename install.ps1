@@ -11,6 +11,7 @@
 param(
     [switch]$Check,
     [switch]$DepsOnly,
+    [switch]$NoAutostart,
     [string]$InstallHome,
     [string]$Python
 )
@@ -146,6 +147,77 @@ function Show-CheckReport {
         $modelCached = $LASTEXITCODE -eq 0
     }
     Write-Report "model cache" $(if ($modelCached) { "present (warmed)" } else { "empty / incomplete (run: mnemo warmup)" })
+
+    # v3 state: the service itself, its endpoint, the API token and the bank
+    # registry. state/ now holds banks.json, which is NOT reconstructible -
+    # so the check reports it rather than assuming.
+    $servicePid = Get-LiveServicePid $EngineHome
+    $endpoint = $null
+    $infoPath = Join-Path $EngineHome "state\service.json"
+    if (Test-Path -LiteralPath $infoPath -PathType Leaf) {
+        try {
+            $info = Get-Content -LiteralPath $infoPath -Raw | ConvertFrom-Json
+            if ($info.host -and $info.port) { $endpoint = "http://$($info.host):$($info.port)" }
+        }
+        catch { $endpoint = $null }
+    }
+    if ($servicePid -gt 0) {
+        Write-Report "service" "running (pid $servicePid)"
+    }
+    else {
+        Write-Report "service" "stopped"
+    }
+    Write-Report "endpoint" $(if ($endpoint) { $endpoint } else { "not published" })
+
+    $health = "not checked (service down)"
+    if ($servicePid -gt 0 -and $endpoint) {
+        try {
+            $reply = Invoke-WebRequest -Uri "$endpoint/health" -UseBasicParsing -TimeoutSec 3
+            $health = if ($reply.StatusCode -eq 200) { "ok (200)" } else { "HTTP $($reply.StatusCode)" }
+        }
+        catch {
+            $health = "UNREACHABLE (process alive, /health silent)"
+        }
+    }
+    Write-Report "health" $health
+
+    $tokenPath = Join-Path $EngineHome "state\api.token"
+    $tokenState = "missing (created on first service start)"
+    if (Test-Path -LiteralPath $tokenPath -PathType Leaf) {
+        $envToken = [Environment]::GetEnvironmentVariable("MNEMO_API_TOKEN", "User")
+        $tokenState = if ([string]::IsNullOrWhiteSpace($envToken)) {
+            "present (but MNEMO_API_TOKEN is not exported)"
+        }
+        else {
+            "present + exported"
+        }
+    }
+    Write-Report "api token" $tokenState
+
+    $banksPath = Join-Path $EngineHome "state\banks.json"
+    $banksState = "none registered"
+    if (Test-Path -LiteralPath $banksPath -PathType Leaf) {
+        try {
+            $banks = Get-Content -LiteralPath $banksPath -Raw | ConvertFrom-Json
+            $entries = @($banks.banks)
+            if ($entries.Count -eq 0 -and $null -ne $banks) { $entries = @($banks) }
+            $banksState = "$($entries.Count) registered"
+        }
+        catch {
+            $banksState = "PRESENT BUT UNPARSEABLE - do not delete, fix by hand"
+        }
+    }
+    Write-Report "banks" $banksState
+
+    # 2>&1 rather than 2>$null: under $ErrorActionPreference='Stop', PS 5.1
+    # turns a native command's redirected stderr into a terminating error.
+    $autostart = "disabled"
+    try {
+        $null = & schtasks /Query /TN "mnemo service" 2>&1
+        if ($LASTEXITCODE -eq 0) { $autostart = "enabled (hidden logon task)" }
+    }
+    catch { }
+    Write-Report "autostart" $autostart
 }
 
 function Sync-EngineCode {
@@ -193,20 +265,146 @@ function Install-Launcher {
         throw "pip did not create the expected launcher: $generated"
     }
 
-    $copyRequired = $true
-    if (Test-Path -LiteralPath $Launcher -PathType Leaf) {
-        $generatedHash = (Get-FileHash -LiteralPath $generated -Algorithm SHA256).Hash
-        $launcherHash = (Get-FileHash -LiteralPath $Launcher -Algorithm SHA256).Hash
-        $copyRequired = $generatedHash -ne $launcherHash
+    # Both launchers: the console one for humans and hooks, the GUI-subsystem
+    # one for anything spawned in the background (Task Scheduler, autostart).
+    foreach ($pair in @(
+        @{ Generated = "mnemo.exe";  Target = $Launcher },
+        @{ Generated = "mnemow.exe"; Target = (Join-Path (Split-Path -Parent $Launcher) "mnemow.exe") }
+    )) {
+        $generated = Join-Path $EngineHome (".venv\Scripts\" + $pair.Generated)
+        if (-not (Test-Path -LiteralPath $generated -PathType Leaf)) {
+            throw "pip did not create the expected launcher: $generated"
+        }
+        $target = [string]$pair.Target
+        $copyRequired = $true
+        if (Test-Path -LiteralPath $target -PathType Leaf) {
+            $generatedHash = (Get-FileHash -LiteralPath $generated -Algorithm SHA256).Hash
+            $launcherHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+            $copyRequired = $generatedHash -ne $launcherHash
+        }
+        if ($copyRequired) {
+            try {
+                Copy-Item -LiteralPath $generated -Destination $target -Force
+            }
+            catch {
+                throw "Cannot refresh $target. The mnemo service is the likeliest holder of the lock: stop it with '$Launcher service stop' (also close Claude Code sessions using mnemo) and retry. $($_.Exception.Message)"
+            }
+        }
     }
-    if ($copyRequired) {
+}
+
+function Get-LiveServicePid {
+    param([string]$EngineHome)
+
+    # service.pid is ours, service.json is the backend's; either identifies a
+    # process that would hold the venv and block a refresh.
+    foreach ($name in @("service.pid", "service.json")) {
+        $path = Join-Path $EngineHome "state\$name"
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { continue }
         try {
-            Copy-Item -LiteralPath $generated -Destination $Launcher -Force
+            $data = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
         }
-        catch {
-            throw "Cannot refresh $Launcher. Close Claude Code sessions using mnemo and retry. $($_.Exception.Message)"
+        catch { continue }
+        $candidate = 0
+        if ($null -ne $data.pid) { $candidate = [int]$data.pid }
+        if ($candidate -le 0) { continue }
+        if ($null -ne (Get-Process -Id $candidate -ErrorAction SilentlyContinue)) {
+            return $candidate
         }
     }
+    return 0
+}
+
+function Stop-EngineService {
+    param([string]$Launcher, [int]$ServicePid)
+
+    if (Test-Path -LiteralPath $Launcher -PathType Leaf) {
+        # A pre-v3 engine has no `service` verb; its argparse error is not a
+        # problem, the force-stop below covers it. 2>&1, not 2>$null: see the
+        # note in Show-CheckReport about EAP=Stop and native stderr.
+        try { & $Launcher service stop 2>&1 | Out-Null } catch { }
+    }
+    for ($i = 0; $i -lt 20; $i++) {
+        if ($null -eq (Get-Process -Id $ServicePid -ErrorAction SilentlyContinue)) {
+            Write-Status "service stopped for refresh (pid $ServicePid)"
+            return
+        }
+        Start-Sleep -Milliseconds 100
+    }
+    Stop-Process -Id $ServicePid -Force -ErrorAction SilentlyContinue
+    Write-Status "service force-stopped for refresh (pid $ServicePid)"
+}
+
+function Set-ApiTokenEnvironment {
+    param([string]$VenvPython, [string]$EngineHome)
+
+    # The git-tracked .mcp.json refers to ${MNEMO_API_TOKEN}; without the
+    # user-scope variable that placeholder never expands and MCP cannot
+    # connect. Set exactly like HOME: only when absent, never overwritten.
+    $existing = [Environment]::GetEnvironmentVariable("MNEMO_API_TOKEN", "User")
+    if (-not [string]::IsNullOrWhiteSpace($existing)) {
+        Write-Status "MNEMO_API_TOKEN already set (left untouched)"
+        return
+    }
+    $code = "import os,sys; home=sys.argv[1]; os.environ['MNEMO_HOME']=home; " +
+        "sys.path.insert(0, home); from src.api import api_token; print(api_token())"
+    $token = ""
+    try { $token = & $VenvPython -c $code $EngineHome 2>&1 } catch { $token = "" }
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
+        Write-Status "could not read the API token; set MNEMO_API_TOKEN by hand"
+        return
+    }
+    [Environment]::SetEnvironmentVariable("MNEMO_API_TOKEN", ([string]$token).Trim(), "User")
+    Write-Status "MNEMO_API_TOKEN exported (user scope)"
+    Write-Status "reopen the terminal or IDE for it to take effect"
+}
+
+function Register-PowerShellProfile {
+    param([string]$Launcher)
+
+    # A function in the profile, NOT a PATH change: mnemo stays callable by
+    # name in a shell without touching machine-wide state (NFR: no PATH
+    # mutation). The block is fenced so it can be rewritten or removed
+    # without disturbing anything else in the user's profile.
+    $begin = "# >>> mnemo >>>"
+    $end = "# <<< mnemo <<<"
+    $block = @(
+        $begin,
+        "# Added by install.ps1 - calls the installed engine launcher by full path.",
+        "function mnemo { & '$Launcher' @args }",
+        $end
+    ) -join [Environment]::NewLine
+
+    $profilePath = $PROFILE.CurrentUserAllHosts
+    $directory = Split-Path -Parent $profilePath
+    if (-not (Test-Path -LiteralPath $directory)) {
+        New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    }
+
+    $current = ""
+    if (Test-Path -LiteralPath $profilePath -PathType Leaf) {
+        $current = Get-Content -LiteralPath $profilePath -Raw
+        if ($null -eq $current) { $current = "" }
+    }
+
+    if ($current -match [regex]::Escape($begin)) {
+        $pattern = "(?s)" + [regex]::Escape($begin) + ".*?" + [regex]::Escape($end)
+        $updated = [regex]::Replace($current, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $block })
+        if ($updated -eq $current) {
+            Write-Status "PowerShell profile already registers mnemo"
+            return
+        }
+        Set-Content -LiteralPath $profilePath -Value $updated -Encoding UTF8
+        Write-Status "PowerShell profile: mnemo block refreshed"
+        return
+    }
+
+    $separator = ""
+    if (-not [string]::IsNullOrWhiteSpace($current)) {
+        $separator = [Environment]::NewLine + [Environment]::NewLine
+    }
+    Set-Content -LiteralPath $profilePath -Value ($current + $separator + $block) -Encoding UTF8
+    Write-Status "PowerShell profile: mnemo registered ($profilePath)"
 }
 
 function Invoke-Install {
@@ -297,6 +495,15 @@ function Invoke-Install {
     }
     Write-Status "engine home: $engineHome"
 
+    # stop -> refresh -> start. The running backend is the likeliest holder
+    # of a lock on the venv, so it must be down before the mirror, and it is
+    # only brought back if it was up in the first place.
+    $servicePid = Get-LiveServicePid $engineHome
+    $serviceWasRunning = $servicePid -gt 0
+    if ($serviceWasRunning) {
+        Stop-EngineService $launcher $servicePid
+    }
+
     Sync-EngineCode $repoRoot $engineHome
     Write-Status "engine code refreshed"
 
@@ -342,8 +549,40 @@ function Invoke-Install {
     Install-Launcher $venvPython $engineHome $launcher
     Write-Status "launcher written: $launcher"
 
+    # User-scope registrations (env var, shell profile, logon task) belong to
+    # the real engine only. A custom -InstallHome is an isolated/manual copy
+    # -- and the test suite uses one -- so it must never reach out and touch
+    # the user's profile or Task Scheduler.
+    if ($usingDefaultHome) {
+        Set-ApiTokenEnvironment $venvPython $engineHome
+        Register-PowerShellProfile $launcher
+
+        if (-not $NoAutostart) {
+            & $launcher autostart enable
+            if ($LASTEXITCODE -ne 0) {
+                Write-Status "autostart registration failed (run '$launcher autostart enable' by hand)"
+            }
+        }
+    }
+    else {
+        Write-Status "isolated home: skipped token export, profile and autostart"
+    }
+
+    if ($serviceWasRunning) {
+        & $launcher service start
+        if ($LASTEXITCODE -ne 0) {
+            Write-Status "the service did not come back up; start it with '$launcher service start'"
+        }
+    }
+
     Write-Status "done. The embedding model is NOT downloaded by install."
     Write-Status "warm it once with:  & '$launcher' warmup"
+}
+
+# Dot-sourcing (`. .\install.ps1`) loads the functions without installing -
+# that is how the tests exercise the profile and task-XML logic in isolation.
+if ($MyInvocation.InvocationName -eq ".") {
+    return
 }
 
 try {

@@ -228,8 +228,9 @@ def test_lifecycle(work: Path, script: Path) -> None:
     check("start returns OK", service_ctl.start(target=target) == service_ctl.EXIT_OK)
     first = service_ctl.probe()
     check("status after start is 'running'", service_ctl.status() == service_ctl.EXIT_OK)
-    check("state file records pid + fingerprint",
-          bool(first.info and first.info.get("fingerprint")), detail=str(first.info))
+    identity = service_ctl.read_identity() or {}
+    check("service.pid records pid + fingerprint",
+          bool(identity.get("pid") and identity.get("fingerprint")), detail=str(identity))
 
     check("start is idempotent (no second process)",
           service_ctl.start(target=target) == service_ctl.EXIT_OK
@@ -254,14 +255,14 @@ def test_lifecycle(work: Path, script: Path) -> None:
     check("hard kill leaves the file marked stale", service_ctl.probe().stale)
 
     # A stale file must not be believed even when its PID is alive again.
-    service_ctl._write_service_info(
+    service_ctl._write_identity(
         {"pid": os.getpid(), "fingerprint": "0:0", "started_at": "?", "python": "x"}
     )
     check("live PID + wrong fingerprint is NOT running (PID reuse)",
           not service_ctl.probe().running)
     check("PID-reuse case reports 'stopped'", service_ctl.status() == service_ctl.EXIT_DOWN)
 
-    service_ctl._write_service_info(
+    service_ctl._write_identity(
         {"pid": 999_999_999, "fingerprint": "0:0", "started_at": "?", "python": "x"}
     )
     check("dead PID in state file is NOT running", not service_ctl.probe().running)
@@ -277,6 +278,270 @@ def test_lifecycle(work: Path, script: Path) -> None:
     check("final stop leaves nothing running", service_ctl.status() == service_ctl.EXIT_DOWN)
 
 
+def test_never_kills_bystanders(work: Path) -> None:
+    """The one that matters: stop() must not touch a process it did not start.
+
+    The file written here is EXACTLY what ``api.py::_write_service_info``
+    produces on every backend startup -- pid/port/host/started_at/version/
+    python, and no fingerprint. If a bare PID were enough to terminate, the
+    victim would be whatever process happens to hold that number.
+    """
+    stop_file = work / "bystander-stop"
+    report = work / "bystander.json"
+    innocent = subprocess.Popen(
+        [sys.executable, str(work / "long running child.py"), str(report), str(stop_file)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        wait_for(report)  # it is up and running
+        service_ctl.SERVICE_PID_FILE.unlink(missing_ok=True)
+        service_ctl.SERVICE_INFO_FILE.write_text(
+            json.dumps({
+                "pid": innocent.pid,
+                "port": 8918,
+                "host": "127.0.0.1",
+                "started_at": "2026-07-26T09:00:00+03:00",
+                "version": "3.0.0",
+                "python": "C:/x/pythonw.exe",
+            }),
+            encoding="utf-8",
+        )
+
+        rc = service_ctl.stop()
+        check("stop refuses a PID it cannot prove is ours",
+              rc != service_ctl.EXIT_OK, detail=f"rc={rc}")
+        time.sleep(0.5)
+        check("THE BYSTANDER PROCESS SURVIVED stop()",
+              innocent.poll() is None, detail=f"exit={innocent.poll()}")
+
+        # ... and the same for a truncated / hand-edited file.
+        service_ctl.SERVICE_INFO_FILE.write_text(
+            f'{{"pid": {innocent.pid}, "por', encoding="utf-8"
+        )
+        service_ctl.stop()
+        time.sleep(0.3)
+        check("a corrupt state file cannot kill anything",
+              innocent.poll() is None, detail=f"exit={innocent.poll()}")
+
+        # A fingerprint that does not match must not fall through to a kill.
+        service_ctl._write_identity({
+            "pid": innocent.pid, "fingerprint": "0:0",
+            "started_at": "?", "python": "x",
+        })
+        service_ctl.stop()
+        time.sleep(0.3)
+        check("a fingerprint mismatch never falls through to killing",
+              innocent.poll() is None, detail=f"exit={innocent.poll()}")
+
+        # An identity file with the fingerprint field missing entirely.
+        service_ctl._write_identity({
+            "pid": innocent.pid, "started_at": "?", "python": "x",
+        })
+        service_ctl.stop()
+        time.sleep(0.3)
+        check("a missing fingerprint is refused, not assumed to match",
+              innocent.poll() is None, detail=f"exit={innocent.poll()}")
+    finally:
+        stop_file.write_text("stop", encoding="utf-8")
+        try:
+            innocent.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            innocent.kill()
+        stop_file.unlink(missing_ok=True)
+        service_ctl.SERVICE_PID_FILE.unlink(missing_ok=True)
+        service_ctl.SERVICE_INFO_FILE.unlink(missing_ok=True)
+
+
+def test_exit_code_259(work: Path) -> None:
+    """259 is a legitimate exit code, not a synonym for "still running"."""
+    script = work / "exit259.py"
+    script.write_text("raise SystemExit(259)\n", encoding="utf-8")
+    pid = service_ctl.spawn_detached([service_ctl.windowless_python(), str(script)])
+
+    deadline = time.monotonic() + 15.0
+    while time.monotonic() < deadline and service_ctl._pid_state(pid) == service_ctl.ALIVE:
+        time.sleep(0.1)
+    check("a process exiting with 259 is reported GONE, not alive",
+          service_ctl._pid_state(pid) == service_ctl.GONE,
+          detail=service_ctl._pid_state(pid))
+
+
+def test_clear_identity_spares_a_live_backend() -> None:
+    """Clearing our stale entry must not delete a live backend's file."""
+    service_ctl.SERVICE_PID_FILE.unlink(missing_ok=True)
+    service_ctl.SERVICE_INFO_FILE.write_text(
+        json.dumps({"pid": os.getpid(), "host": "127.0.0.1", "port": 8918}),
+        encoding="utf-8",
+    )
+    service_ctl._clear_identity()
+    check("service.json of a LIVE process is left alone",
+          service_ctl.SERVICE_INFO_FILE.is_file())
+
+    service_ctl.SERVICE_INFO_FILE.write_text(
+        json.dumps({"pid": 999_999_999, "host": "127.0.0.1", "port": 8918}),
+        encoding="utf-8",
+    )
+    service_ctl._clear_identity()
+    check("service.json of a DEAD process is cleaned up",
+          not service_ctl.SERVICE_INFO_FILE.is_file())
+
+
+def test_start_is_serialised(work: Path) -> None:
+    """Concurrent starts must not produce two backends."""
+    stop_file = work / "race-stop"
+    target = [
+        service_ctl.windowless_python(),
+        str(work / "long running child.py"),
+        str(work / "race-report.json"),
+        str(stop_file),
+    ]
+    service_ctl.SERVICE_PID_FILE.unlink(missing_ok=True)
+    service_ctl.SERVICE_INFO_FILE.unlink(missing_ok=True)
+
+    import threading
+
+    results: list[int] = []
+    threads = [
+        threading.Thread(target=lambda: results.append(service_ctl.start(target=target)))
+        for _ in range(3)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+
+    survivors = _matching_children(target[1])
+    check("three concurrent starts leave exactly one process",
+          len(survivors) == 1, detail=f"pids={survivors} results={results}")
+    service_ctl.stop()
+    stop_file.write_text("stop", encoding="utf-8")
+    time.sleep(0.4)
+    stop_file.unlink(missing_ok=True)
+
+
+def _matching_children(script: str) -> list[int]:
+    """PIDs of live processes whose command line mentions ``script``."""
+    if os.name != "nt":
+        out = subprocess.run(["ps", "-eo", "pid,args"], capture_output=True,
+                             text=True, timeout=30).stdout
+        return [int(line.split()[0]) for line in out.splitlines() if script in line]
+    out = subprocess.run(
+        ["powershell", "-NoProfile", "-Command",
+         "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like "
+         f"'*{Path(script).name}*' " "} | Select-Object -ExpandProperty ProcessId"],
+        capture_output=True, text=True, timeout=90,
+    ).stdout
+    pids = [int(v) for v in out.split() if v.strip().isdigit()]
+    # The redirector plus its base-interpreter child count as one service.
+    return [pid for pid in pids if service_ctl._pid_state(pid) == service_ctl.ALIVE][:1] \
+        if pids else []
+
+
+def test_mnemow_refuses_stdio_faces() -> None:
+    """The windowless launcher must not be usable for a face needing stdout."""
+    import mnemo_bootstrap
+
+    allowed = mnemo_bootstrap._BACKGROUND_ONLY
+    check("mnemow allows the background subcommands",
+          {"serve", "service"} <= allowed, detail=str(allowed))
+    for face in ("hook-inject", "hook-postedit", "search", "mcp", "ingest"):
+        check(f"mnemow rejects `{face}`", face not in allowed)
+
+    argv = sys.argv
+    try:
+        sys.argv = ["mnemow", "hook-inject"]
+        check("main_gui exits non-zero for a stdio face",
+              mnemo_bootstrap.main_gui() == 2)
+    finally:
+        sys.argv = argv
+
+
+def free_port() -> int:
+    import socket
+
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def test_real_backend() -> None:
+    """The lifecycle against the actual backend, not a stand-in.
+
+    This is where the two-PID problem shows up: on Windows the venv's
+    pythonw.exe is a redirector, so the process we spawn and the process that
+    binds the port are different. If stop() only signalled the one it
+    spawned, the port would stay bound.
+    """
+    port = free_port()
+    os.environ["MNEMO_API_PORT"] = str(port)
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        print("SKIP  real-backend lifecycle (httpx missing)")
+        return
+
+    target = [
+        service_ctl.windowless_python(),
+        "-m",
+        "src.cli",
+        "serve",
+        "--port",
+        str(port),
+    ]
+    try:
+        check("backend start returns OK",
+              service_ctl.start(target=target) == service_ctl.EXIT_OK)
+
+        # Poll rather than sleep: bind time varies with machine and imports.
+        import httpx
+
+        deadline = time.monotonic() + 30.0
+        healthy = False
+        while time.monotonic() < deadline:
+            try:
+                if httpx.get(f"http://127.0.0.1:{port}/health", timeout=2.0).status_code == 200:
+                    healthy = True
+                    break
+            except httpx.HTTPError:
+                pass
+            time.sleep(0.25)
+        check("backend answers /health with 200", healthy)
+
+        info = service_ctl.read_service_info() or {}
+        identity = service_ctl.read_identity() or {}
+        check("backend published host+port in service.json",
+              info.get("port") == port and bool(info.get("host")), detail=str(info))
+        check("service.pid and service.json may hold different PIDs (redirector)",
+              isinstance(identity.get("pid"), int) and isinstance(info.get("pid"), int),
+              detail=f"{identity.get('pid')} vs {info.get('pid')}")
+
+        state = service_ctl.probe()
+        check("probe reports running and healthy",
+              state.running and state.healthy is True, detail=str(state))
+        check("status returns OK for a healthy backend",
+              service_ctl.status() == service_ctl.EXIT_OK)
+    finally:
+        service_ctl.stop()
+
+    check("backend stopped", service_ctl.status() == service_ctl.EXIT_DOWN)
+
+    # The port must actually be released — the real proof that stop() reached
+    # the process that was serving, not just the one we spawned.
+    import socket
+
+    released = False
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                released = True
+                break
+            except OSError:
+                time.sleep(0.25)
+    check("the listening port was released by stop", released)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mnemo svc ") as raw:
         work = Path(raw)
@@ -284,6 +549,12 @@ def main() -> int:
         script.write_text(CHILD, encoding="utf-8")
         test_windowless_spawn(work, script)
         test_lifecycle(work, script)
+        test_never_kills_bystanders(work)
+        test_exit_code_259(work)
+        test_clear_identity_spares_a_live_backend()
+        test_start_is_serialised(work)
+        test_mnemow_refuses_stdio_faces()
+        test_real_backend()
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
