@@ -23,6 +23,13 @@ from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+# A failure detail can hold Cyrillic (the scaffold fixture is a Ukrainian
+# path). On a cp1252 console print() then raises and the suite dies instead
+# of reporting — precisely when something has failed.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 from src import config, embedder  # noqa: E402
 from src.index import _disk  # noqa: E402
 from src.scaffold import (  # noqa: E402
@@ -36,6 +43,11 @@ _passed = _failed = _xfailed = _xpassed = 0
 # A bank_id is sha1(root)[:16] — correct on exactly one machine with one
 # checkout path. It must never reach a git-tracked file.
 _BANK_ID_RE = re.compile(r"[0-9a-f]{16}")
+# A Windows drive letter, and NOT a URL scheme: `http://` ends in `p:/`,
+# which a bare `[A-Za-z]:[\\/]` matches happily. The lookbehind requires the
+# letter to stand alone, so `C:\Users` and `"D:/x"` match while `http://`
+# and `file://` do not.
+_WIN_DRIVE_RE = re.compile(r"(?<![A-Za-z])[A-Za-z]:[\\/]")
 # Anything long and opaque enough to be a real credential. Documented
 # `${VAR}` placeholders stay well under this (MNEMO_API_TOKEN is 15 chars).
 _SECRET_RE = re.compile(r"[A-Za-z0-9_\-]{24,}")
@@ -67,25 +79,24 @@ def xcheck(name: str, ok: bool, reason: str, detail: str = "") -> None:
         print(f"xfail {name}  ({reason})  {detail}")
 
 
-def _check_target_mcp_shape(entry: dict) -> None:
-    """Contracts §10.4 — the HTTP wiring phase 4 must produce.
+def _check_mcp_shape(entry: dict) -> None:
+    """Contracts §10.4 — the HTTP wiring, now that phase 4 has landed.
 
-    Phase 4 has not landed: `scaffold._MCP_SERVER` is still the stdio form,
-    so every assertion here is expected to xfail until the switch. They are
-    written against the target so they turn green the moment it arrives.
+    These were written as xchecks against the target shape while MCP was
+    still stdio, and they turned green the moment the switch arrived. They
+    are promoted to real checks: a target that has been reached is a
+    regression guard, and leaving it marked "awaiting a later phase" makes
+    the suite lie about what it covers.
     """
-    why = "phase 4 switches MCP from stdio to HTTP"
-
-    xcheck("[target] MCP transport is http", entry.get("type") == "http", why,
-           detail=str(entry.get("type")))
+    check("MCP transport is http", entry.get("type") == "http",
+          detail=str(entry.get("type")))
 
     url = entry.get("url")
-    xcheck(
-        "[target] MCP url is loopback",
+    check(
+        "MCP url is loopback",
         isinstance(url, str)
         and re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\]):\d+/\S*", url)
         is not None,
-        why,
         detail=str(url),
     )
 
@@ -93,52 +104,72 @@ def _check_target_mcp_shape(entry: dict) -> None:
     headers = headers if isinstance(headers, dict) else {}
 
     auth = headers.get("Authorization")
-    xcheck(
-        "[target] Authorization is the ${MNEMO_API_TOKEN} placeholder",
+    check(
+        "Authorization is the ${MNEMO_API_TOKEN} placeholder",
         auth == "Bearer ${MNEMO_API_TOKEN}",
-        why,
         detail=str(auth),
     )
     # The placeholder must survive verbatim: a resolved token in a
     # git-tracked file is the failure this whole block exists to prevent.
-    xcheck(
-        "[target] Authorization holds no literal token",
+    check(
+        "Authorization holds no literal token",
         isinstance(auth, str)
         and "${MNEMO_API_TOKEN}" in auth
         and _SECRET_RE.search(auth) is None,
-        why,
         detail=str(auth),
     )
 
     bank = headers.get("X-Mnemo-Bank")
-    xcheck(
-        "[target] X-Mnemo-Bank is present and non-empty",
+    check(
+        "X-Mnemo-Bank is present and non-empty",
         isinstance(bank, str) and bool(bank.strip()),
-        why,
         detail=str(bank),
     )
     # The one machine-readable guard against a machine-derived value in git:
     # bank_id is sha1(abs path)[:16] and points nowhere after a clone.
-    xcheck(
-        "[target] X-Mnemo-Bank is a name, not a bank_id",
+    check(
+        "X-Mnemo-Bank is a name, not a bank_id",
         isinstance(bank, str)
         and bool(bank.strip())
         and _BANK_ID_RE.fullmatch(bank.strip()) is None,
-        why,
         detail=str(bank),
     )
 
 
 def _check_hook_wiring(settings: dict) -> None:
     """Every event named explicitly — a hook group dropped from the source
-    must fail here, not vanish along with the loop that iterated it."""
+    must fail here, not vanish along with the loop that iterated it.
+
+    v3 generates exactly ONE hook. `ingest` and `hook-postedit` were the v2
+    wiring and indexed inline, inside the user's session; phase 4 retired
+    them in favour of the watcher. Their absence is asserted below and is
+    the more valuable half of this function: it is what catches a
+    regression that quietly reintroduces synchronous indexing.
+    """
     expected = {
-        "SessionStart": ("ingest", None),
-        "PostToolUse": ("hook-postedit", "Edit|Write|MultiEdit"),
         "UserPromptSubmit": ("hook-inject", None),
+    }
+    retired = {
+        "SessionStart": "ingest",
+        "PostToolUse": "hook-postedit",
     }
     hooks = settings.get("hooks")
     hooks = hooks if isinstance(hooks, dict) else {}
+
+    for event, subcmd in retired.items():
+        commands = [
+            h.get("command")
+            for g in hooks.get(event, []) or [] if isinstance(g, dict)
+            for h in g.get("hooks", []) or [] if isinstance(h, dict)
+        ]
+        check(
+            f"retired hook {event} -> mnemo {subcmd} is NOT generated",
+            not any(
+                isinstance(c, str) and "mnemo" in c and c.split()[-1:] == [subcmd]
+                for c in commands
+            ),
+            detail=str(commands),
+        )
 
     for event, (subcmd, matcher) in expected.items():
         groups = [g for g in hooks.get(event, []) or [] if isinstance(g, dict)]
@@ -168,7 +199,7 @@ def _check_hook_wiring(settings: dict) -> None:
             all(
                 str(Path.home()) not in c
                 and Path.home().as_posix() not in c
-                and re.search(r"[A-Za-z]:[\\/]", c) is None
+                and _WIN_DRIVE_RE.search(c) is None
                 for c in ours
             ),
             detail=str(ours),
@@ -209,7 +240,7 @@ def test_scaffold() -> None:
             "MCP entry carries no machine-specific path",
             str(home) not in entry_text
             and home.as_posix() not in entry_text
-            and re.search(r"[A-Za-z]:[\\/]", entry_text) is None,
+            and _WIN_DRIVE_RE.search(entry_text) is None,
             detail=entry_text,
         )
         check(
@@ -223,7 +254,7 @@ def test_scaffold() -> None:
             detail=entry_text,
         )
 
-        _check_target_mcp_shape(entry if isinstance(entry, dict) else {})
+        _check_mcp_shape(entry if isinstance(entry, dict) else {})
 
         check(
             "foreign MCP server preserved",
@@ -269,11 +300,9 @@ def test_scaffold() -> None:
         # L2 is still the LIVE value today, so plain `init` correctly treats
         # it as already-wired. It becomes a conflict only once phase 4 makes
         # the HTTP form canonical.
-        xcheck(
-            "[target] legacy L2 (stdio ${HOME} launcher) is an explicit conflict",
+        check(
+            "legacy L2 (stdio ${HOME} launcher) is an explicit conflict",
             refuses(l2),
-            "phase 4 switches MCP from stdio to HTTP; L2 is the current "
-            "_MCP_SERVER until then",
         )
 
 
