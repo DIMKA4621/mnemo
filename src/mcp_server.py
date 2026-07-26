@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextvars
 import logging
 from typing import Any
+from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
 
@@ -213,16 +214,26 @@ class BankRoutingASGI:
         # the inner router subtracts the prefix from a path that no longer
         # has it and matches nothing. This cost a 404 that looked like a
         # broken handshake.
+        #
+        # The segment is taken from `raw_path`, which is still
+        # percent-encoded, and unquoted exactly once. `scope["path"]` is
+        # already decoded by the server, so reading the name from there would
+        # be wrong twice over: a name containing `/` would split into two
+        # segments (`%2F` having become a real separator), and unquoting it
+        # again would turn a name containing a literal `%20` into a space.
         path = scope.get("path", "/") or "/"
         root = scope.get("root_path", "") or ""
-        route_path = path[len(root):] if path.startswith(root) else path
+        raw = scope.get("raw_path")
+        raw_path = raw.decode("latin-1") if isinstance(raw, bytes) else path
+        source = raw_path if raw_path.startswith(root) else path
+        route_path = source[len(root):] if source.startswith(root) else source
 
         segment: str | None = None
         rest = "/"
         trimmed = route_path.lstrip("/")
         if trimmed:
             head, _, tail = trimmed.partition("/")
-            segment = head or None
+            segment = unquote(head) if head else None
             rest = "/" + tail if tail else "/"
 
         headers = {

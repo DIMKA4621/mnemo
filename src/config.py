@@ -147,20 +147,27 @@ EMBED_PROBE_TIMEOUT: float = float(
     os.environ.get("MNEMO_EMBED_PROBE_TIMEOUT", "0.15")
 )
 
-# Idle exit frees the ~1.6 GB the resident holds. 0 disables it: a machine
-# serving isolated environments keeps the model resident permanently.
+# Idle exit for the resident. 0 = never exit on idle, which is the v3 default
+# (design §4: the model stays warm).
 #
-# COST OF THE CURRENT DEFAULT, measured: once the resident has exited, the
-# next search pays ~9 s — 0.5 s failed probe + 2.3 s to spawn and bind +
-# 6.2 s to load the model. So with 1800 s, the first search after any
-# half-hour gap takes ~9 s, which sits badly against FR-3 ("пошук —
-# миттєвий").
+# `0` does NOT mean "always resident". The resident is still started on demand
+# by the next search or hook, and it is released by `mnemo service stop`,
+# which reaps it along with the backend. So the memory is recoverable by a
+# command the user already knows; it simply is not surrendered on a timer.
 #
-# It stays at 1800 anyway until phase 5, and deliberately: `0` means the
-# model is pinned in RAM with no supported way to release it until
-# `mnemo service stop` exists. Phase 5 owns both that command and the
-# always-on service that keeps the resident warm, and flips this to 0.
-EMBED_IDLE_TIMEOUT: int = int(os.environ.get("MNEMO_EMBED_IDLE_TIMEOUT", "1800"))
+# WHY THE TIMER LOST, measured: once the resident has exited, the next search
+# pays ~9 s — 0.5 s failed probe + 2.3 s to spawn and bind + 6.2 s to load
+# e5-large. With the old 1800 s, the first search after any half-hour gap
+# cost that, against FR-3's "пошук — миттєвий". Paying 9 s repeatedly to
+# reclaim 1.6 GB that a single command can reclaim on purpose is the wrong
+# trade on a developer machine.
+#
+# This default waited on `service stop` genuinely reaping the *resident* —
+# not just the backend, which is a different process holding no model.
+# Verified before flipping: a live resident at 1501 MB, `stop_resident()` ->
+# stopped in 0.5 s, nothing left listening on the port, process gone.
+# Set MNEMO_EMBED_IDLE_TIMEOUT=1800 to restore the old behaviour.
+EMBED_IDLE_TIMEOUT: int = int(os.environ.get("MNEMO_EMBED_IDLE_TIMEOUT", "0"))
 
 # Embedding CPU cap. ONNX Runtime defaults to ALL cores per embed call;
 # the serial resident under multi-agent load then pegs the whole machine.
