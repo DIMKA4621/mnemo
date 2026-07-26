@@ -24,7 +24,7 @@ function resolveToken() {
   return sessionStorage.getItem('mnemo_token') || '';
 }
 
-const TOKEN = resolveToken();
+let token = resolveToken();
 
 // ---------------------------------------------------------------------------
 // state
@@ -46,6 +46,7 @@ const state = {
   logScope: 'all',
   logRows: [],
   logTotal: 0,
+  gated: false,                 // token gate is up: no requests, no socket
 };
 
 const $ = (id) => document.getElementById(id);
@@ -89,7 +90,7 @@ class ApiError extends Error {
 async function api(path, options) {
   const opts = options || {};
   const headers = { 'Accept': 'application/json' };
-  if (TOKEN) headers['Authorization'] = 'Bearer ' + TOKEN;
+  if (token) headers['Authorization'] = 'Bearer ' + token;
   if (opts.body !== undefined) headers['Content-Type'] = 'application/json';
 
   let response;
@@ -134,9 +135,136 @@ function hideBanner() {
 }
 
 function reportError(err) {
+  // An auth failure is not a banner-worthy backend error: the service is fine,
+  // we simply cannot talk to it. Route it to the gate instead, quietly.
+  if (isAuthError(err)) {
+    openGate('rejected');
+    return;
+  }
   const where = err.httpStatus ? ' (HTTP ' + err.httpStatus + ')' : '';
   showBanner('[' + err.code + ']' + where + ' ' + err.message);
   console.error(err);
+}
+
+// ---------------------------------------------------------------------------
+// token gate
+// ---------------------------------------------------------------------------
+
+const GATE_COPY = {
+  missing: {
+    title: 'Потрібен токен доступу',
+    text: 'Кабінет слухає лише локальний інтерфейс і захищений токеном. ' +
+          'Це не помилка: сервіс працює, просто ця вкладка ще не автентифікована.',
+    note: null,
+  },
+  rejected: {
+    title: 'Токен не підійшов',
+    text: 'Сервіс відхилив наданий токен (HTTP 401). Найімовірніше він застарілий ' +
+          'або скопійований не повністю — актуальний токен видає сама команда.',
+    note: 'Токен відхилено сервісом.',
+  },
+};
+
+function isAuthError(err) {
+  return err instanceof ApiError && (err.httpStatus === 401 || err.code === 'unauthorized');
+}
+
+/**
+ * The gate is built here rather than in index.html on purpose.
+ *
+ * `/ui/` is served from disk with an ETag and no `Cache-Control`, so a browser
+ * may hand back a cached document while fetching a fresh `app.js`. Markup this
+ * script depends on would then be missing and the whole page would die on load.
+ * Building it means the script depends on nothing but `<body>`.
+ */
+const gate = {};
+
+function buildGate() {
+  gate.title = el('h1', { className: 'gate-title' });
+  gate.text = el('p', { className: 'gate-text' });
+  gate.note = el('p', { className: 'gate-note', attrs: { hidden: '' } });
+  gate.input = el('input', {
+    className: 'gate-input',
+    attrs: {
+      id: 'gate-token', name: 'gate-token',
+      type: 'text', autocomplete: 'off', spellcheck: 'false',
+      placeholder: '48 шістнадцяткових символів',
+    },
+  });
+
+  const form = el('form', { className: 'gate-form', on: { submit: submitGate } }, [
+    el('label', {
+      className: 'gate-label',
+      text: 'Або вставте токен вручну:',
+      attrs: { for: 'gate-token' },
+    }),
+    el('div', { className: 'gate-row' }, [
+      gate.input,
+      el('button', { className: 'btn', text: 'Увійти', attrs: { type: 'submit' } }),
+    ]),
+    gate.note,
+  ]);
+
+  gate.card = el('div', { className: 'gate-card' }, [
+    el('div', { className: 'gate-brand', text: 'mnemo' }),
+    gate.title,
+    gate.text,
+    el('p', {
+      className: 'gate-lead',
+      text: 'Команда друкує готове посилання з чинним токеном і відкриває його:',
+    }),
+    el('code', { className: 'gate-cmd', text: 'mnemo ui' }),
+    form,
+  ]);
+
+  gate.root = el('div', { className: 'gate', attrs: { hidden: '' } }, [gate.card]);
+  document.body.appendChild(gate.root);
+}
+
+/**
+ * Take over the page until we have a token the service accepts.
+ *
+ * Raises `state.gated` first: everything else in the page checks it before
+ * issuing a request or reopening the socket, so a gated page is silent — no
+ * doomed fetches in the console, no 401s in the service log.
+ */
+function openGate(variant) {
+  const copy = GATE_COPY[variant] || GATE_COPY.missing;
+  state.gated = true;
+  closeSocket();
+  hideBanner();
+  setConnState('idle', 'не автентифіковано');
+
+  gate.card.classList.toggle('is-error', variant === 'rejected');
+  gate.title.textContent = copy.title;
+  gate.text.textContent = copy.text;
+  gateNote(copy.note);
+  gate.root.hidden = false;
+  gate.input.focus();
+}
+
+function closeGate() {
+  state.gated = false;
+  gate.root.hidden = true;
+  gateNote(null);
+}
+
+function gateNote(text) {
+  gate.note.textContent = text || '';
+  gate.note.hidden = !text;
+}
+
+async function submitGate(event) {
+  event.preventDefault();
+  const value = gate.input.value.trim();
+  if (!value) {
+    gateNote('Введіть токен.');
+    return;
+  }
+  token = value;
+  sessionStorage.setItem('mnemo_token', value);
+  closeGate();
+  await start();
 }
 
 // ---------------------------------------------------------------------------
@@ -743,18 +871,33 @@ function setConnState(kind, label) {
 }
 
 function scheduleBanksReload() {
-  if (banksReloadTimer) return;
+  if (banksReloadTimer || state.gated) return;
   banksReloadTimer = setTimeout(() => {
     banksReloadTimer = null;
+    if (state.gated) return;
     loadBanks().catch(reportError);
     loadStatus().catch(() => {});
   }, 350);
 }
 
+/** Drop the socket without arming the reconnect timer. */
+function closeSocket() {
+  if (!socket) return;
+  const dead = socket;
+  socket = null;
+  dead.onclose = null;
+  dead.onerror = null;
+  dead.close();
+}
+
 function connectSocket() {
+  // Without a token the handshake can only be refused, and a refused socket
+  // would reconnect forever behind the gate.
+  if (state.gated || !token) return;
+
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = scheme + '//' + window.location.host + '/ws' +
-              (TOKEN ? '?token=' + encodeURIComponent(TOKEN) : '');
+              '?token=' + encodeURIComponent(token);
   setConnState('wait', 'підключення…');
 
   socket = new WebSocket(url);
@@ -765,13 +908,16 @@ function connectSocket() {
   };
 
   socket.onclose = () => {
-    setConnState('error', 'розірвано');
     socket = null;
+    if (state.gated) return;
+    setConnState('error', 'розірвано');
     setTimeout(connectSocket, retryDelay);
     retryDelay = Math.min(retryDelay * 2, 10000);
   };
 
-  socket.onerror = () => setConnState('error', 'помилка');
+  socket.onerror = () => {
+    if (!state.gated) setConnState('error', 'помилка');
+  };
 
   socket.onmessage = (event) => {
     let envelope;
@@ -925,15 +1071,19 @@ function bindControls() {
   }
 }
 
-async function boot() {
-  bindControls();
-  renderService();
+/** First load of everything, then the live channel. Re-runnable after the gate. */
+async function start() {
   try {
     await loadBanks();
     await loadStatus();
     await loadLogs();
     hideBanner();
   } catch (err) {
+    if (isAuthError(err)) {
+      // The one request it takes to learn the token is stale; nothing follows.
+      openGate('rejected');
+      return;
+    }
     reportError(err);
     // Paint the empty states anyway — a blank pane next to an error banner
     // reads as a broken page rather than an unreachable backend.
@@ -943,6 +1093,18 @@ async function boot() {
     renderLogs();
   }
   connectSocket();
+}
+
+async function boot() {
+  bindControls();
+  buildGate();
+  renderService();
+  if (!token) {
+    // First run: nothing has been rejected, so ask before knocking.
+    openGate('missing');
+    return;
+  }
+  await start();
 }
 
 boot();
