@@ -6,24 +6,42 @@ uses it).
 
 ## What mnemo is
 
-Curated markdown in git is the **single source of truth**; a local,
-disposable, rebuildable vector index makes it searchable.
+Curated markdown is the **single source of truth**; a local, disposable,
+rebuildable vector index makes it searchable.
 
 ```
 .md  →  chunks  →  embeddings  →  sqlite-vec (+ FTS5)  →  search
 ```
 
-- Source of truth: per-project `.claude/memory/` (thin `MEMORY.md` index
-  + `logs/` + topic files) and `.claude/agent-memory/<agent>/`.
-- Index: one SQLite file per project at `~/.claude/mnemo/state/<projhash>.db`
+- Source of truth: **banks** — arbitrary root folders anywhere on disk,
+  each with freely nested `.md`. A bank is **flat**: no internal scopes,
+  the whole folder is one index. Need isolation (e.g. per agent) → a
+  separate bank + its own MCP connection. `path_prefix` narrows a search
+  to a subfolder, but it is navigation, not an access boundary.
+- Index: one SQLite file per bank at `~/.claude/mnemo/state/<bankhash>.db`
   — gitignored realm, deletable, fully rebuildable from the `.md`.
-- Access: `mnemo` CLI (also the MCP face) + git-tracked project-level
-  hooks. No server, no daemon.
+- Access: **one persistent local service** owns the registry, the index
+  and the watcher; CLI, MCP, hooks and the web cabinet are thin clients
+  of its loopback HTTP API. v3 deliberately reverses v2's "no server, no
+  daemon" — the daemon is the point.
 
 ## Design source of truth
 
-`docs/Memory-design-v2.md` is the authoritative design. **Read it before
-changing architecture.** `docs/Memory-design-v1.md` is historical only.
+The v3 set, all four authoritative and mutually consistent:
+
+- `docs/Memory-design-v3.md` — *what and why*; section 13 is the
+  decision list. **Read it before changing architecture.**
+- `docs/Memory-requirements-v3.md` — *what must hold* (FR/NFR =
+  acceptance criteria).
+- `docs/Memory-implementation-v3.md` — *how and in what order* (stack,
+  blocks A–L, phases 0–7, each with a `✅ Перевірка`).
+- `docs/Memory-contracts-v3.md` — module ownership plus the exact HTTP /
+  MCP / CLI / registry / store shapes.
+
+`.claude/rules/v3-build.md` carries the binding build rules — it loads
+for every subagent (they do not inherit this file). `docs/Memory-design-v2.md`
+and `-v1.md` are historical only; `docs/Setup-design.md` covers the
+install model and is mid-transition (see its header).
 
 Project decision history, research and rationale live in Claude Code's
 memory for this project (loaded each session as `MEMORY.md`). Read it
@@ -31,22 +49,58 @@ before planning — do not re-investigate what is already recorded there.
 
 ## Architecture map
 
-- `src/config.py` — paths, model, knobs; per-project resolution.
-- `src/chunker.py` — heading-aware markdown splitting.
+One file, one owner — `docs/Memory-contracts-v3.md` §1 is the normative
+table; do not edit a module you do not own.
+
+Engine (the `.md → vectors` pipeline):
+
+- `src/config.py` — paths, model, knobs. **Sectional ownership** (§1.1):
+  edit only your section.
+- `src/chunker.py` — heading-aware splitting; `start_char`/`end_char`.
 - `src/embedder.py` — fastembed (ONNX), `multilingual-e5-large`.
-- `src/store.py` — sqlite-vec + FTS5 + change-state (hashes in the DB).
+- `src/providers/` — `base.py` embedding-provider interface, `local.py`
+  over the resident daemon (`api.py` arrives at phase 7).
+- `src/embed_server.py` — warm resident model daemon (loopback TCP).
+- `src/store.py` — sqlite-vec + FTS5 + hashes + `meta`; flat schema, no
+  `scope`/`agent_name`; an incompatible schema is dropped and rebuilt.
 - `src/index.py` — walk + sha256-diff + reindex changed + prune.
-- `src/search.py` — vector kNN + FTS5 + RRF + scope filter.
-- `src/mcp_server.py` — same engine exposed as MCP tools.
-- `src/embed_server.py` — warm resident embedding helper (loopback TCP).
-- `src/scaffold.py` — `mnemo init`: additive, idempotent project wiring.
-- `src/cli.py` — `warmup | init | ingest | search | mcp |
-  hook-postedit | hook-inject | embed-server`.
-- `install.sh` — system-scope engine installer, POSIX (`--check`/`--home`).
-- `install.ps1` — same installer for native Windows (`-Check`/
-  `-InstallHome`/`-Python`; PowerShell 5.1+, 64-bit Python 3.10+).
-- `tests/test_search.py` — labeled recall eval (regression floor).
-- `tests/test_mcp.py` — standalone MCP client check.
+- `src/search.py` — vector kNN + FTS5 + RRF + optional `path_prefix`.
+
+Service (the persistent backend):
+
+- `src/registry.py` — banks registry (`state/banks.json`); resolve by
+  id, name or nested path.
+- `src/servicelog.py` — `service.db`: query + index events, retention.
+- `src/api.py` — FastAPI/uvicorn loopback API (`/search`, `/reindex`,
+  `/tree`, `/status`, `/banks`, `/logs`), Bearer token, search status.
+- `src/workqueue.py`, `src/watcher.py` — priority queue + worker and the
+  watchdog→debounce→enqueue path (**phase 3, in flight**).
+- `src/service_ctl.py` — `mnemo service …`, windowless spawn, PID/port
+  state (**phase 5, in flight**).
+- `src/webui/` — the local cabinet served by the backend; `devserver.py`
+  answers contract shapes from fixtures and is a dev tool only.
+
+Faces still in their v2 shape until phase 4:
+
+- `src/mcp_server.py` — stdio MCP today; becomes an HTTP face mounted in
+  `api.py`. Tools already flat: `memory_search(query, path_prefix, top_k)`.
+- `src/cli.py` — still talks to the engine directly; becomes a thin
+  client of the API (`src/client.py`).
+- `src/scaffold.py` — `mnemo init`: additive, idempotent, refuses on
+  conflict. Its `.mcp.json` shape and memory-rule text are rewritten at
+  phase 4.
+- `src/inject_log.py` — v2 JSONL telemetry behind `hook-inject`;
+  superseded by `servicelog`.
+
+Around it:
+
+- `install.sh` — engine installer, POSIX (`--check`/`--home`).
+- `install.ps1` — same for native Windows (`-Check`/`-InstallHome`/
+  `-Python`/`-DepsOnly`; PowerShell 5.1+, 64-bit Python 3.10+).
+- `tests/test_search.py` — labeled recall eval (regression floor);
+  `tests/test_platform.py`, `tests/test_install_windows.py` — wiring and
+  installer; `tests/test_mcp.py` — MCP client check (stdio, dies at
+  phase 4).
 - Installed engine: `~/.claude/mnemo/` (`bin/mnemo`, a real `bin\mnemo.exe`
   on Windows, `.venv`, `model-cache`, `state/`). Project wiring: `.mcp.json`,
   `.claude/settings.json`. Adoption skill + its bundled templates:
@@ -54,13 +108,23 @@ before planning — do not re-investigate what is already recorded there.
 
 ## Commands
 
+Landed and working today:
+
 ```
-mnemo warmup                  one-time explicit ~2.2 GB model download + check
-mnemo ingest [--root DIR]     reconcile .md -> index (hash-diff + prune)
-mnemo search "q" [--scope …]  hybrid search over project memory
-mnemo mcp                     stdio MCP server (memory_search / memory_reindex)
-mnemo hook-postedit           PostToolUse target (acts only on memory files)
+mnemo warmup                        one-time explicit ~2.2 GB model download + check
+mnemo init [--root DIR]             additive, idempotent project wiring
+mnemo ingest [--root DIR]           reconcile .md -> index (hash-diff + prune)
+mnemo search "q" [--path-prefix P]  hybrid search over a bank
+mnemo mcp                           stdio MCP server (goes away at phase 4)
+mnemo hook-inject | hook-postedit   hook targets, not typed by hand
+mnemo embed-server                  resident model daemon (auto-started)
 ```
+
+Service control (`mnemo serve`, `mnemo service start|stop|status|restart`,
+`mnemo autostart enable|disable|status`) is **phase 5, in flight** — the
+subcommands exist before the lifecycle is verified. The API-client command
+set (`banks`, `reindex`, `tree`, `status`, `logs`, `ui`, `doctor`) arrives
+with phase 4; `docs/Memory-contracts-v3.md` §11.1 is the full target list.
 
 `mnemo` is the launcher at `~/.claude/mnemo/bin/mnemo` (`bin\mnemo.exe` on
 Windows) — it is NOT on PATH by default. Either call it by full path, or
@@ -104,14 +168,38 @@ Extra steps only when:
   `~/.claude/mnemo/bin/mnemo init` in each adopted project (additive,
   idempotent — it only adds mnemo's own keys).
 
-## Locked decisions (see Claude memory for full rationale)
+**While v3 is being built, re-mirroring is not a free action.** The
+engine is shared by every project on this machine, and the v3 store
+schema is incompatible: the first v3 run drops and rebuilds an index it
+opens, and indexes keyed by a *project* root are simply orphaned — never
+opened, never auto-deleted (a later `mnemo doctor` will list them for
+explicit cleanup; until then they just sit there).
+Refresh dependencies alone with `install.ps1 -DepsOnly`. From phase 5 the
+order becomes **stop → refresh → start**, because the running backend
+holds the venv's `python.exe`.
 
-- Embedding: `multilingual-e5-large` via fastembed (documented fallback
-  from e5-base — one-line swap in `src/config.py`).
+## Locked decisions (see the v3 docs for full rationale)
+
+- Memory is organised into **flat banks**; isolation is a separate bank,
+  never a scope inside one (design decision #13).
+- The `.md` are the source of truth **in place**; git-tracking is a
+  property of the location, not a mode (#1).
+- Native, no Docker, in v1; Docker is a later Linux/server option (#2).
+- Two long-lived processes: the backend (registry + index + watcher +
+  API) and the model daemon holding the model warm (#4).
+- `memory_write` is not built — memory is edited only with native file
+  tools (#6).
+- Search never blocks: current index + status `indexing` / `empty` /
+  `ready`, where `empty` (no index) ≠ no matches (#11).
+- Hooks no longer reindex — the watcher does; hooks remain as optional
+  auto-inject examples (#15).
+- Embedding: `multilingual-e5-large` via fastembed, behind a pluggable
+  provider interface.
 - Vector search primary; FTS5/BM25 secondary; blended with RRF.
 - The index is disposable and rebuilds deterministically from `.md`.
-- Hooks live in git-tracked project settings; the model is never
-  downloaded implicitly by a hook (explicit `warmup` only).
+- The model is never downloaded implicitly — explicit `warmup` only.
+- Everything on loopback, behind a token; nothing exposed outward
+  without an explicit decision.
 
 ## Working rules
 

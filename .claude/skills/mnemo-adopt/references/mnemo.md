@@ -15,12 +15,26 @@ derived, disposable cache.
 The `.md` is authored/reviewed by humans and agents and committed. The
 index is rebuilt from it deterministically and never edited by hand.
 
+## Banks are flat (v3, already landed)
+
+A **bank** is one root folder of `.md`, anywhere on disk; everything
+`*.md` below it is a single index (minus `.git`, `.venv`,
+`node_modules`, `__pycache__`). There are **no internal scopes** — the
+v2 `project` / `agent` split is gone from the schema, the walk, the CLI
+and the MCP tool. `memory_search(query, path_prefix, top_k)` and `mnemo
+search --path-prefix` narrow a search to a subfolder at any depth, which
+is a **navigation** convenience; the only real isolation boundary is a
+**separate bank** with its own MCP connection. Which is why
+`.claude/agent-memory/<role>/` still organises per-role notes but no
+longer walls them off.
+
 ## Two layers
 
 **Engine — user scope, once per machine, NOT in git**
 `~/.claude/mnemo/`: `.venv`, `model-cache` (~2.2 GB, only via an
-explicit `warmup`), `state/<projhash>.db` (the disposable index),
-`bin/mnemo` (self-locating launcher; a real `bin\mnemo.exe` on Windows).
+explicit `warmup`), `state/<bankhash>.db` (the disposable index — one
+file per **bank root**, keyed by `sha1` of that path), `bin/mnemo`
+(self-locating launcher; a real `bin\mnemo.exe` on Windows).
 Installed by `install.sh` on POSIX and `install.ps1` on native Windows
 (PowerShell 5.1+, 64-bit Python 3.10+ — no WSL, PowerShell 7 or PATH
 entry required); idempotent; never deletes `state/` or `model-cache/`.
@@ -107,11 +121,18 @@ additively, after insisting it is needed for the model to work.
 - **SessionStart → `mnemo ingest`** — full reconcile (hash-diff +
   prune).
 - **PostToolUse (Edit|Write|MultiEdit) → `mnemo hook-postedit`** —
-  reconciles only when the edited file is inside the memory tree;
-  instant no-op otherwise. Also captures teammates' memory writes.
+  reconciles when the edited file is an `.md` inside the bank; instant
+  no-op otherwise. Also captures teammates' memory writes.
 - **UserPromptSubmit → `mnemo hook-inject`** — embeds the prompt via a
   warm resident helper, gated search, injects the few most relevant
   curated sections. Best-effort; never blocks. No SessionEnd hook.
+
+**At v3 phase 4 the first two disappear.** A file watcher inside the
+service reindexes on its own, so nothing needs to be triggered from a
+session; `hook-postedit` degrades to an exit-0 shim and `ingest` to a
+deprecated alias, so already-adopted projects keep working until their
+owner re-runs `mnemo init --migrate`. The auto-inject hook survives and
+becomes a thin HTTP call to the service's search endpoint.
 
 ## Portable invocation (cross-platform)
 
@@ -122,7 +143,11 @@ git — identical on Linux, macOS and native Windows:
   shell expands `~` per user at run time.
 - **`.mcp.json`** `command` is `${HOME}/.claude/mnemo/bin/mnemo` with
   `args: ["mcp"]` — Claude Code substitutes each teammate's own `$HOME`
-  at spawn time.
+  at spawn time. **This form is replaced at v3 phase 4** by an HTTP
+  entry (`type: "http"`, a loopback URL, `Authorization: Bearer
+  ${MNEMO_API_TOKEN}`, and the bank addressed by **name** in a header).
+  The rule it obeys does not change — no machine-dependent value ever
+  goes into a git-tracked file — only what gets substituted.
 
 The one logical path resolves to the platform's real launcher:
 `~/.claude/mnemo/bin/mnemo` (extensionless Bash script) on Linux/macOS,
@@ -144,3 +169,7 @@ report.
 Nobody types `mnemo`. It is called only by the git-tracked hooks, the
 MCP registration, and this skill (`install.sh --check`, `mnemo init`,
 `warmup`, `ingest`, `search` for verification). Not on `PATH`.
+
+v3 softens this in one direction only: the service commands
+(`service start|stop|status|restart`), `doctor` and `ui` are meant for a
+person. The memory commands stay machine-driven.

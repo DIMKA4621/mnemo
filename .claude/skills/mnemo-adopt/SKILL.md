@@ -30,6 +30,42 @@ curated markdown in git is the single source of truth; a local,
 disposable, rebuildable index makes it searchable; the main session
 plans and delegates to a team of teammate agents.
 
+## Status — mnemo is mid-transition to v3 (read before adopting)
+
+The wiring this skill installs is the **current, working** shape and is
+what you should install today. Two parts of it are already known to move
+at **v3 phase 4** — say so to the user instead of promising permanence:
+
+- MCP moves from a per-session **stdio spawn** to **HTTP** against a
+  running local service. `mnemo init --migrate` will rewrite the wiring;
+  a hand-built variant will not be recognised, so do not hand-author one.
+- The `SessionStart` and `PostToolUse` reindexing hooks **go away** — a
+  file watcher takes over. Only the `UserPromptSubmit` auto-inject hook
+  survives.
+
+**Already true today** (v3 phase 0 has landed — this is not a forecast):
+
+- **Banks are flat. Scopes are gone.** `memory_search(query,
+  path_prefix, top_k)` takes no `scope`/`agent`, and `mnemo search` has
+  `--path-prefix` instead of `--scope`/`--agent`. Everything `*.md` under
+  a bank root is **one index**; `path_prefix` narrows a search but is
+  navigation, not isolation. Real isolation = a **separate bank**.
+- `.claude/agent-memory/<role>/` remains a useful **folder convention**
+  for per-role notes, and the memory rule still directs agents there —
+  but it is no longer an access boundary.
+- **A bank root indexes everything below it.** `mnemo ingest --root
+  <project>` now walks the whole project tree for `*.md` (minus `.git`,
+  `.venv`, `node_modules`, `__pycache__`), not just `.claude/memory` and
+  `.claude/agent-memory`. Tell the user plainly if their repo carries a
+  lot of unrelated markdown.
+- The index schema changed: the first run under the new engine rebuilds
+  from the `.md`. Nothing is lost, but a large project's first build is
+  not instant.
+
+**How an adopted project is laid out into banks** — one bank for
+`.claude/`, or one per agent — is a **phase-4 decision for the user and
+the team lead**. Do not decide it here and do not pre-build for it.
+
 ## The hard boundary (do not cross it)
 
 - **Deterministic primitives do the safe, mechanical work.**
@@ -61,7 +97,8 @@ plans and delegates to a team of teammate agents.
 - A subagent's `memory: project` is its *built-in* per-agent memory
   (user scope). The git-shared curated layer is `.claude/agent-memory/
   <role>/`, driven by the rule + instructions + the mnemo hook. Both
-  matter; do not conflate them.
+  matter; do not conflate them. Note the folder is a **convention**, not
+  a search scope — see the status section above.
 
 ## Workflow
 

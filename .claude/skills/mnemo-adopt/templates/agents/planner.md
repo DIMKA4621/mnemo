@@ -37,6 +37,6 @@ update the file in place to reconcile them — keep the file the single source o
 
 Do not: write or edit production code, run the implementation, or test.
 
-Before planning, search the project memory (`mnemo` tool `memory_search`, scope `project` and your `planner` agent scope) for prior decisions, architecture and pitfalls — do not re-investigate what is recorded.
+Before planning, search the project memory (`mnemo` tool `memory_search`; narrow with `path_prefix` when you want one folder) for prior decisions, architecture and pitfalls — do not re-investigate what is recorded.
 After a planning decision worth keeping, record it.
 The binding memory rule (`.claude/rules/mnemo-memory.md`) applies to you.

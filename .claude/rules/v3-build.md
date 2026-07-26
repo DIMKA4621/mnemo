@@ -15,8 +15,12 @@ Read before acting; do not re-investigate or re-litigate what is already settled
   acceptance criteria.
 - **`docs/Memory-implementation-v3.md`** — *how and in what order*. Stack,
   blocks A–L, phases 0–7, each with a `✅ Перевірка` checklist.
+- **`docs/Memory-contracts-v3.md`** — *the exact shapes*. Module ownership (§1 —
+  one file, one owner), the store schema, registry, HTTP/WS API, MCP tools, the
+  CLI surface and every env var; §14 records the lead's decisions on it, §15 the
+  windows-native merge legacy, §16 the phase 2→3→4 seam.
 
-The three docs must agree with each other and with the code. If they do not, or
+The four docs must agree with each other and with the code. If they do not, or
 if something material is missing, **stop and report to the team lead** — do not
 decide it yourself.
 
@@ -57,7 +61,9 @@ decide it yourself.
 ## Conventions
 
 - Code, comments, docstrings, commit messages and English-language docs: **English**.
-  The three v3 design docs stay **Ukrainian**.
+  The v3 docs (`docs/Memory-{design,requirements,implementation,contracts}-v3.md`
+  and `docs/Setup-design.md`) stay **Ukrainian**; `CLAUDE.md`, `README.md` and the
+  `mnemo-adopt` skill stay **English**.
 - Python: PEP 8, type hints. Match the surrounding code's style and comment density.
 - **The local machine is Windows.** Any local shell command must be written in
   **PowerShell** syntax — never bash. (Remote Linux hosts use their own shell.)
