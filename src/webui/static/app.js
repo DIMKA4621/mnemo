@@ -486,6 +486,47 @@ function progressBlock(live) {
   ]);
 }
 
+/**
+ * Retire the live bar only for the task that owns it.
+ *
+ * Progress is tracked per bank, but several tasks share a bank: a bulk scan
+ * finishes and reports `index_done` while the per-file tasks it just spawned
+ * are still running. Deleting on any `index_done` therefore blanked the bar
+ * of a file that was still indexing, and it only came back when the next
+ * file emitted progress — which is exactly "the bar stalls, then jumps".
+ */
+function clearProgress(bankId, taskId) {
+  const live = state.progress.get(bankId);
+  if (!live) return;
+  if (taskId && live.task_id && live.task_id !== taskId) return;
+  state.progress.delete(bankId);
+}
+
+/**
+ * Drop bars the service says are not running.
+ *
+ * The guard above is per-task and therefore only as good as the events that
+ * reach us: a missed `index_done`, or a LOW task that yielded and never came
+ * back, would leave a bar spinning under a file that finished long ago. The
+ * queue snapshot is the backend's own account of what is in flight, so it
+ * gets the last word — the same "authoritative state wins, the socket only
+ * carries deltas" rule the rest of this page follows.
+ */
+function reconcileProgress(queue) {
+  if (!queue || !state.progress.size) return false;
+  const byBank = queue.by_bank || {};
+  const currentBank = queue.current ? queue.current.bank_id : null;
+  let changed = false;
+  for (const bankId of [...state.progress.keys()]) {
+    if (bankId === currentBank) continue;
+    const entry = byBank[bankId];
+    if (entry && (entry.indexing || entry.depth > 0)) continue;
+    state.progress.delete(bankId);
+    changed = true;
+  }
+  return changed;
+}
+
 function setNote(bankId, text) {
   state.notes.set(bankId, text);
   renderBanks();
@@ -528,18 +569,30 @@ function selectBank(bankId) {
   renderBanks();
   renderFile();
   renderTree();
-  if (bankId) loadTree().catch(reportError);
+  if (bankId) loadTree({ expandAll: true }).catch(reportError);
   if (state.logScope === 'bank') loadLogs().catch(reportError);
 }
 
-async function loadTree() {
+/**
+ * Refetch the tree.
+ *
+ * `expandAll` belongs to the first load of a bank only. A live refresh must
+ * not re-open directories the user has since collapsed, and must not fight
+ * them for the scroll position while a rebuild streams in.
+ */
+async function loadTree(opts) {
   const bank = bankById(state.selectedBankId);
   if (!bank) return;
   const data = await api('/api/tree?bank=' + encodeURIComponent(bank.name) + '&links=false&depth=0');
+  // The selection can move while the request is in flight; a late response
+  // for the previous bank must not overwrite the current one's tree.
+  if (bank.id !== state.selectedBankId) return;
   state.tree = data;
-  // Open every directory by default — v1 banks are small and hiding files
-  // defeats the "видно, багато файлів чи ні" goal of design §7.
-  walkDirs(data.tree, (dir) => state.expanded.add(dir.path));
+  if (opts && opts.expandAll) {
+    // Open every directory by default — v1 banks are small and hiding files
+    // defeats the "видно, багато файлів чи ні" goal of design §7.
+    walkDirs(data.tree, (dir) => state.expanded.add(dir.path));
+  }
   renderTree();
 }
 
@@ -552,6 +605,10 @@ function walkDirs(node, fn) {
 function renderTree() {
   const body = $('tree-body');
   const sub = $('tree-sub');
+  // This now re-runs on every live index_done, so the pane must not jump back
+  // to the top under someone who is reading halfway down it.
+  const keepTop = body.scrollTop;
+  const keepLeft = body.scrollLeft;
   clear(body);
   clear(sub);
 
@@ -577,6 +634,8 @@ function renderTree() {
   const box = el('div', { className: 'tree' });
   for (const child of children) renderNode(child, 0, box);
   body.appendChild(box);
+  body.scrollTop = keepTop;
+  body.scrollLeft = keepLeft;
 }
 
 function renderNode(node, depth, out) {
@@ -863,6 +922,10 @@ function pushLiveLog(kind, row) {
 let socket = null;
 let retryDelay = 500;
 let banksReloadTimer = null;
+let treeRefreshTimer = null;
+// The first `hello` follows the load boot() just did, so there is nothing to
+// resync. Every later one means the socket dropped and deltas were missed.
+let helloSeen = false;
 
 function setConnState(kind, label) {
   const box = $('conn-state');
@@ -878,6 +941,38 @@ function scheduleBanksReload() {
     loadBanks().catch(reportError);
     loadStatus().catch(() => {});
   }, 350);
+}
+
+/**
+ * Pull the tree again after indexing changed something in it.
+ *
+ * Throttled rather than debounced: a bulk rebuild emits a steady stream of
+ * `index_done`, and a debounce that keeps getting reset would never fire
+ * until the very end. This fires at most once per window and the last event
+ * in a burst still gets its own trailing refresh, so the tree converges.
+ */
+function scheduleTreeRefresh() {
+  if (treeRefreshTimer || state.gated || !state.selectedBankId) return;
+  treeRefreshTimer = setTimeout(() => {
+    treeRefreshTimer = null;
+    if (state.gated || !state.selectedBankId) return;
+    loadTree().catch(() => {});
+  }, 700);
+}
+
+/**
+ * Re-read everything over REST.
+ *
+ * Contract 9.7: the socket carries deltas only and `hello` means "refetch" —
+ * REST is authoritative for initial state. Anything missed while the socket
+ * was down heals here, which is the only reason a gap cannot persist.
+ */
+function resyncAll() {
+  state.progress.clear();
+  loadBanks().catch(reportError);
+  loadStatus().catch(() => {});
+  loadLogs().catch(() => {});
+  if (state.selectedBankId) loadTree().catch(() => {});
 }
 
 /** Drop the socket without arming the reconnect timer. */
@@ -938,6 +1033,8 @@ function handleEvent(envelope) {
   switch (type) {
     case 'hello':
       if (data.queue) { state.queue = data.queue; renderService(); }
+      if (helloSeen) resyncAll();
+      helloSeen = true;
       break;
 
     case 'ping':
@@ -949,6 +1046,7 @@ function handleEvent(envelope) {
     case 'queue':
       state.queue = data;
       renderService();
+      if (reconcileProgress(data)) renderBanks();
       break;
 
     case 'index_start':
@@ -972,15 +1070,18 @@ function handleEvent(envelope) {
 
     case 'index_yield': {
       const prev = state.progress.get(bankId);
-      if (prev) { prev.yielded = true; renderBanks(); }
+      if (prev && prev.task_id === data.task_id) { prev.yielded = true; renderBanks(); }
       break;
     }
 
     case 'index_done':
-      state.progress.delete(bankId);
+      clearProgress(bankId, data.task_id);
       setNote(bankId, 'готово: ' + (data.path || data.kind) + ' · ' +
                       (data.chunks_indexed || 0) + ' чанків · ' + fmtMs(data.took_ms));
       scheduleBanksReload();
+      // A file just changed its indexed/chunk state — that is what the tree
+      // shows, so it has to be pulled again or it stays stale until a reload.
+      if (bankId === state.selectedBankId) scheduleTreeRefresh();
       // The open file may have been re-chunked — pull fresh boundaries.
       if (bankId === state.selectedBankId && state.filePath &&
           (!data.path || data.path === state.filePath)) {
@@ -989,7 +1090,7 @@ function handleEvent(envelope) {
       break;
 
     case 'index_error':
-      state.progress.delete(bankId);
+      clearProgress(bankId, data.task_id);
       setNote(bankId, 'помилка: ' + (data.path || data.kind) + ' — ' + data.error);
       scheduleBanksReload();
       break;
@@ -997,6 +1098,7 @@ function handleEvent(envelope) {
     case 'prune':
       setNote(bankId, 'знято з індексу: ' + (data.count || 0));
       scheduleBanksReload();
+      if (bankId === state.selectedBankId) scheduleTreeRefresh();
       break;
 
     case 'bank_added':
@@ -1073,6 +1175,8 @@ function bindControls() {
 
 /** First load of everything, then the live channel. Re-runnable after the gate. */
 async function start() {
+  // This IS a full REST load, so the `hello` that follows has nothing to heal.
+  helloSeen = false;
   try {
     await loadBanks();
     await loadStatus();

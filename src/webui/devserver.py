@@ -222,11 +222,56 @@ def bank_info(bank: dict) -> dict:
         return dict(bank)
 
 
+def _find_tree_node(node: dict, rel: str) -> dict | None:
+    """Locate a file node in a tree fixture by its bank-relative path."""
+    if node.get("type") == "file" and node.get("path") == rel:
+        return node
+    for child in node.get("children", []):
+        found = _find_tree_node(child, rel)
+        if found is not None:
+            return found
+    return None
+
+
+def mark_indexed(bank_id: str, rel: str) -> int:
+    """Move a file into the index, fixture-side.
+
+    The real backend flips `indexed` and the chunk count the moment a file
+    task commits, and `/api/tree` reports it on the next read. A simulator
+    that never changes state cannot show whether the cabinet keeps up, so it
+    changes state here too. A file that had no chunks gets one covering the
+    whole text, which is coherent for both the tree and the file view.
+    """
+    with _lock:
+        record = FILES.get(bank_id, {}).get(rel)
+        if record is None:
+            return 0
+        if not record["chunks"]:
+            record["chunks"] = [{
+                "chunk_uid": f"{abs(hash(rel)) & 0xffffffffffff:012x}",
+                "chunk_index": 0,
+                "heading": None,
+                "start_char": 0,
+                "end_char": len(record.get("text", "")),
+            }]
+        record["indexed"] = True
+        count = len(record["chunks"])
+        tree = TREES.get(bank_id)
+        node = _find_tree_node(tree["tree"], rel) if tree else None
+        if node is not None:
+            node["indexed"] = True
+            node["chunks"] = count
+        return count
+
+
 def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> None:
     """Walk one reindex through the WS event sequence of contract 9.7."""
     bank_id = bank["id"]
     files = FILES.get(bank_id, {})
-    targets = [path] if path else [p for p, rec in files.items() if rec["indexed"]]
+    # Every `.md` in the bank, not just the ones already in the index — that
+    # is what a real bulk covers, and a file joining the index is precisely
+    # the transition the tree has to keep up with.
+    targets = [path] if path else list(files)
     started = time.time()
 
     with _lock:
@@ -238,10 +283,22 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
     set_queue(depth=len(targets), high=0, normal=1 if path else 0,
               low=0 if path else len(targets), current=None)
 
+    # A bulk finishes when its *scan* finishes, not when the file tasks it
+    # spawned do — `_scan_bank_streaming` reports `index_done` and leaves the
+    # per-file work behind it in the queue. Emitting it here rather than at
+    # the end is what the real backend does, and the ordering matters: a
+    # client that keys progress by bank alone sees this land mid-file.
+    if not path:
+        broadcast("index_done", bank_id,
+                  {"task_id": _task_id(), "kind": kind, "path": None,
+                   "chunks_indexed": 0, "files_indexed": 0,
+                   "planned_files": len(targets), "planned_prunes": 0,
+                   "took_ms": (time.time() - started) * 1000.0})
+
     total_chunks = 0
     for position, rel in enumerate(targets):
         record = files.get(rel)
-        chunk_total = len(record["chunks"]) if record else 3
+        chunk_total = len(record["chunks"]) if record and record["chunks"] else 1
         batches = max(1, (chunk_total + 1) // 2)
         task_id = _task_id()
 
@@ -262,6 +319,7 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
                        "batches": batches, "chunks_done": done,
                        "chunks_total": chunk_total})
 
+        chunk_total = mark_indexed(bank_id, rel) or chunk_total
         total_chunks += chunk_total
         took = (time.time() - started) * 1000.0
         broadcast("index_done", bank_id,
@@ -287,13 +345,11 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
     broadcast("bank_status", bank_id, {"bank": bank_info(bank)})
 
     if not path:
+        # The bulk's own `index_done` already went out when the scan ended;
+        # only the journal row is owed here.
         _log_index(bank_id, kind=kind, trigger="ui", path=None, result="ok",
                    files_indexed=len(targets), chunks_indexed=total_chunks,
                    took_ms=took)
-        broadcast("index_done", bank_id,
-                  {"task_id": _task_id(), "kind": kind, "path": None,
-                   "chunks_indexed": total_chunks, "files_indexed": len(targets),
-                   "took_ms": took})
 
 
 # --------------------------------------------------------------------------

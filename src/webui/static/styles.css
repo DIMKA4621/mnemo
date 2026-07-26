@@ -224,7 +224,7 @@ h2 {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 320px 300px minmax(0, 1fr);
+  grid-template-columns: 320px 450px minmax(0, 1fr);
 }
 
 .pane {
@@ -464,9 +464,20 @@ h2 {
 .tree-node.is-selected { background: #232c3a; color: #cfe1ff; }
 
 .tree-dir { color: var(--fg-dim); }
-.tree-twisty { width: 10px; display: inline-block; color: var(--fg-mute); }
-.tree-chunks { color: var(--fg-mute); font-size: 11px; }
-.tree-node.not-indexed .tree-label { color: var(--fg-mute); font-style: italic; }
+
+/* `flex: none` is load-bearing, not decoration. These are flex items in a
+   nowrap row: a span with text cannot shrink below its min-content width, but
+   the twisty is empty, so its min-content is 0 and flex happily collapses it
+   the moment a long filename overflows the pane. The label then slides 10px
+   left on exactly those rows, which reads as ragged indentation. */
+.tree-twisty { flex: none; width: 10px; color: var(--fg-mute); }
+.tree-chunks { flex: none; color: var(--fg-mute); font-size: 11px; }
+
+/* Muted colour plus the literal "не в індексі" beside it already say this.
+   A font-style change must not: a synthesised oblique has different metrics
+   from the upright face and would cost the column alignment that is the whole
+   point of a monospace list. Any third signal here has to be metric-neutral. */
+.tree-node.not-indexed .tree-label { color: var(--fg-mute); }
 
 /* ---- file view -------------------------------------------------------- */
 
@@ -586,14 +597,20 @@ h2 {
 
 /* Three fixed columns stop fitting well before they stop fitting at all —
    the document pane is the one that must keep its width, so the two
-   navigation columns give theirs up first. */
-@media (max-width: 1200px) {
-  .layout { grid-template-columns: 260px 230px minmax(0, 1fr); }
+   navigation columns give theirs up first.
+
+   These two thresholds moved with the file column (300 -> 450, 230 -> 345):
+   at the old 1200px cut a 1210px-wide window left the document 440px, which
+   is narrower than the file list beside it — the exact inversion this rule
+   exists to prevent. The widths are what the user asked for; the point at
+   which the narrower pair takes over is what has to move to pay for them. */
+@media (max-width: 1400px) {
+  .layout { grid-template-columns: 260px 345px minmax(0, 1fr); }
 }
 
 /* Below this the columns are squeezing the document into a gutter, so stack
    them and let the whole layout scroll vertically instead. */
-@media (max-width: 900px) {
+@media (max-width: 1000px) {
   .layout {
     grid-template-columns: minmax(0, 1fr);
     overflow-y: auto;
