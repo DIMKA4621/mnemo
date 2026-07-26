@@ -1,7 +1,7 @@
 """Labeled recall evaluation (Memory-design-v2: versioned top-k checks).
 
 No pytest / pytrec_eval dependency — a plain runnable script.
-Metrics: top-1 accuracy, recall@3, recall@5, plus scope-purity.
+Metrics: top-1 accuracy, recall@3, recall@5, plus path_prefix purity.
 Exit code 0 = metrics above the regression floor.
 
 Self-contained: reindexes the bundled fixture corpus, then evaluates.
@@ -34,8 +34,7 @@ A = ".claude/agent-memory/"
 class Case:
     query: str
     expected: set[str]                 # any of these in top-k counts as a hit
-    scope: str | None = None
-    agent: str | None = None
+    prefix: str | None = None          # v3: path_prefix replaces scope/agent
     note: str = ""
 
 
@@ -74,13 +73,13 @@ CASES: list[Case] = [
     Case("Готую реліз із міграцією бази. Який порядок дій, щоб не покласти "
          "прод?", {M + "database.md", M + "deployment-notes.md",
                    M + "logs/2026-05-12.md"}, note="paragraph -> db/deploy"),
-    # --- scoped (also checked for scope purity) ---
+    # --- narrowed by path_prefix (also checked for prefix purity) ---
     Case("стратегія тестування і flaky тести", {A + "tester/MEMORY.md"},
-         scope="agent", agent="tester"),
+         prefix=A + "tester"),
     Case("що рев'ювер завжди вимагає", {A + "reviewer/MEMORY.md"},
-         scope="agent", agent="reviewer"),
+         prefix=A + "reviewer"),
     Case("coding conventions та підводні камені", {A + "developer/MEMORY.md"},
-         scope="agent", agent="developer"),
+         prefix=A + "developer"),
 ]
 
 
@@ -88,12 +87,11 @@ def evaluate() -> int:
     reindex(FIXTURE, verbose=False)  # self-contained: build the fixture index
     n = len(CASES)
     top1 = r3 = r5 = 0
-    scope_checked = scope_pure = 0
+    prefix_checked = prefix_pure = 0
     rows: list[str] = []
 
     for c in CASES:
-        hits = search(c.query, root=FIXTURE, scope=c.scope,
-                      agent_name=c.agent, top_k=5)
+        hits = search(c.query, root=FIXTURE, path_prefix=c.prefix, top_k=5)
         paths = [h.path for h in hits]
         hit1 = bool(paths) and paths[0] in c.expected
         hit3 = any(p in c.expected for p in paths[:3])
@@ -103,13 +101,11 @@ def evaluate() -> int:
         r5 += hit5
 
         purity = ""
-        if c.scope:
-            scope_checked += 1
-            ok = all(h.scope == c.scope for h in hits) and (
-                c.agent is None or all(h.agent_name == c.agent for h in hits)
-            )
-            scope_pure += ok
-            purity = " scope:OK" if ok else " scope:LEAK"
+        if c.prefix:
+            prefix_checked += 1
+            ok = all(h.path.startswith(c.prefix + "/") for h in hits)
+            prefix_pure += ok
+            purity = " path:OK" if ok else " path:LEAK"
 
         mark = "OK " if hit1 else ("~3 " if hit3 else ("~5 " if hit5 else "MISS"))
         rows.append(
@@ -126,11 +122,11 @@ def evaluate() -> int:
           f"top1={metrics['top1']:.2f}  "
           f"recall@3={metrics['recall@3']:.2f}  "
           f"recall@5={metrics['recall@5']:.2f}  "
-          f"scope-purity={scope_pure}/{scope_checked}")
+          f"prefix-purity={prefix_pure}/{prefix_checked}")
 
     failed = [k for k, v in metrics.items() if v < FLOOR[k]]
-    if scope_checked and scope_pure != scope_checked:
-        failed.append("scope-purity")
+    if prefix_checked and prefix_pure != prefix_checked:
+        failed.append("prefix-purity")
     if failed:
         print(f"BELOW FLOOR: {', '.join(failed)} (floor={FLOOR})")
         return 1

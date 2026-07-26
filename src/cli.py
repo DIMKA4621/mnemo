@@ -20,9 +20,9 @@ import sys
 from pathlib import Path
 
 from .config import TOP_K, resolve
-from .embed_server import server_is_up
-from .embedder import is_model_cached, warmup
+from .embedder import warmup
 from .index import pending_embeddings, reindex
+from .providers import get_provider
 from .search import search
 
 
@@ -35,14 +35,10 @@ def _cmd_warmup() -> int:
 
 def _cmd_ingest(root: Path) -> int:
     # Never silently pull 2 GB inside a hook: refuse if work needs the
-    # model but it was never warmed up AND no resident is reachable to
-    # embed remotely. A live resident (local or a shared/remote one via
+    # model but the provider cannot embed (no cached model AND no reachable
+    # resident). A live resident (local or a shared/remote one via
     # MNEMO_EMBED_HOST) means the model is never loaded here — proceed.
-    if (
-        pending_embeddings(root)
-        and not is_model_cached()
-        and not server_is_up()
-    ):
+    if pending_embeddings(root) and not get_provider().health():
         print(
             "mnemo: changes detected, but the model is not cached and no "
             "embedding resident is reachable.\n"
@@ -57,8 +53,8 @@ def _cmd_ingest(root: Path) -> int:
 
 def _cmd_hook_postedit() -> int:
     """PostToolUse target. Reads the hook JSON from stdin, and only runs a
-    reconcile if the edited file is inside this project's memory tree.
-    Anything else (code, README, ...) returns instantly — the engine is
+    reconcile if the edited file is a markdown file inside the bank.
+    Anything else (code, images, ...) returns instantly — the engine is
     never spawned-into-work for unrelated edits. Always exit 0: a
     PostToolUse hook must never block the edit.
     """
@@ -74,17 +70,14 @@ def _cmd_hook_postedit() -> int:
     if not raw:
         return 0
 
-    root = payload.get("cwd")  # project root at edit time
+    root = payload.get("cwd")  # bank root at edit time
     paths = resolve(root)
     fp = Path(raw)
     if not fp.is_absolute():
         fp = Path(root or ".").joinpath(fp)
     fp = fp.resolve()
 
-    mem = paths.project_memory.resolve()
-    agt = paths.agent_memory.resolve()
-    in_memory = fp.is_relative_to(mem) or fp.is_relative_to(agt)
-    if not in_memory:
+    if fp.suffix.lower() != ".md" or not fp.is_relative_to(paths.root):
         return 0  # unrelated file -> instant no-op, DB never touched
 
     reindex(root)
@@ -161,10 +154,7 @@ def _cmd_hook_inject() -> int:
         return 0
 
     t_search_start = time.monotonic()
-    hits = search(
-        prompt, root=root, scope="project", qvec=vec, gate=True,
-        top_k=INJECT_TOP_N,
-    )
+    hits = search(prompt, root=root, qvec=vec, gate=True, top_k=INJECT_TOP_N)
     search_ms = (time.monotonic() - t_search_start) * 1000.0
     hit_records = [
         {
@@ -259,18 +249,16 @@ def _cmd_search(args: argparse.Namespace) -> int:
     hits = search(
         args.query,
         root=args.root,
-        scope=args.scope,
-        agent_name=args.agent,
+        path_prefix=args.path_prefix,
         top_k=args.top_k,
     )
     if not hits:
         print("No relevant results.")
         return 0
     for i, h in enumerate(hits, 1):
-        tag = h.scope + (f"/{h.agent_name}" if h.agent_name else "")
         print(
             f"\n[{i}] {h.path}  ·  {h.heading or '(no heading)'}  ·  "
-            f"{tag}  ·  score={h.score:.4f}"
+            f"score={h.score:.4f}"
         )
         snippet = " ".join(h.content.split())
         print(f"    {snippet[:300]}{'…' if len(snippet) > 300 else ''}")
@@ -324,11 +312,14 @@ def main(argv: list[str] | None = None) -> int:
     pi = sub.add_parser("ingest", help="Reconcile .md -> index (hash-diff + prune).")
     pi.add_argument("--root", default=None, help="Project root (default: cwd).")
 
-    ps = sub.add_parser("search", help="Semantic search over project memory.")
+    ps = sub.add_parser("search", help="Semantic search over a bank.")
     ps.add_argument("query")
-    ps.add_argument("--root", default=None, help="Project root (default: cwd).")
-    ps.add_argument("--scope", choices=["project", "agent"])
-    ps.add_argument("--agent", help="Filter to a single agent's memory.")
+    ps.add_argument("--root", default=None, help="Bank root (default: cwd).")
+    ps.add_argument(
+        "--path-prefix",
+        default=None,
+        help="Narrow to a folder (or file) inside the bank, e.g. 'logs'.",
+    )
     ps.add_argument("-k", "--top-k", type=int, default=TOP_K)
 
     args = parser.parse_args(argv)

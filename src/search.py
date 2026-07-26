@@ -1,8 +1,11 @@
-"""Read path: query -> relevant sections, scoped to a project root.
+"""Read path: query -> relevant sections of one bank.
 
-Vector search is primary; FTS5/BM25 is the secondary lexical net.
-Results are blended with reciprocal rank fusion (RRF). Scope
-(project / agent) is filtered on chunk metadata.
+Vector search is primary; FTS5/BM25 is the secondary lexical net. Results are
+blended with reciprocal rank fusion (RRF).
+
+v3: the bank is flat, so there is no scope filter. Narrowing is optional and
+purely navigational — ``path_prefix`` matches on the ``chunks.path`` that is
+already stored, at segment boundaries, so no new metadata is needed.
 """
 from __future__ import annotations
 
@@ -14,21 +17,33 @@ from pathlib import Path
 import sqlite_vec
 
 from .config import MIN_QUERY_CHARS, MIN_SIM, NEIGHBOR_WINDOW, RRF_K, TOP_K, resolve
-from .embedder import embed_query
+from .providers import EmbeddingUnavailable, get_provider
 from .store import connect, get_vectors
 
 
 @dataclass
 class Hit:
-    path: str
+    chunk_uid: str
+    path: str                 # POSIX relpath inside the bank
     heading: str
-    scope: str
-    agent_name: str | None
     content: str
-    score: float
-    sim: float | None = None  # cosine sim vs query; set only on gated calls
+    score: float              # RRF score
     chunk_index: int = -1     # position in file; -1 only for merged windows
     span: tuple[int, int] | None = None  # (first, last) chunk_index after merge
+    sim: float | None = None  # cosine sim vs query; set only on gated calls
+
+
+def _normalize_prefix(path_prefix: str | None) -> str | None:
+    """POSIX relpath from the bank root; '' and '.' mean "no filter"."""
+    if not path_prefix:
+        return None
+    cleaned = path_prefix.replace("\\", "/").strip().strip("/")
+    return None if cleaned in ("", ".") else cleaned
+
+
+def _under_prefix(path: str, prefix: str) -> bool:
+    """Segment-boundary match: 'log' must NOT match 'logs/x.md'."""
+    return path == prefix or path.startswith(prefix + "/")
 
 
 def _vector_ranked(conn: sqlite3.Connection, qvec: list[float], limit: int) -> list[int]:
@@ -45,13 +60,21 @@ def _fts_escape(query: str) -> str:
     return '"' + query.replace('"', '""') + '"'
 
 
-def _fts_ranked(conn: sqlite3.Connection, query: str, limit: int) -> list[int]:
-    rows = conn.execute(
-        "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ? "
-        "ORDER BY bm25(fts_chunks) LIMIT ?",
-        (_fts_escape(query), limit),
-    ).fetchall()
-    return [r["rowid"] for r in rows]
+def _fts_ranked(
+    conn: sqlite3.Connection, query: str, limit: int, prefix: str | None
+) -> list[int]:
+    sql = "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ?"
+    params: list[object] = [_fts_escape(query)]
+    if prefix is not None:
+        # The lexical leg can filter in SQL (unlike kNN), so it does.
+        sql += (
+            " AND rowid IN (SELECT id FROM chunks "
+            "WHERE path = ? OR path LIKE ?)"
+        )
+        params += [prefix, prefix + "/%"]
+    sql += " ORDER BY bm25(fts_chunks) LIMIT ?"
+    params.append(limit)
+    return [r["rowid"] for r in conn.execute(sql, params).fetchall()]
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -128,10 +151,9 @@ def _expand_neighbors(
             content = "\n\n".join(by_idx[i]["content"] for i in ordered_idxs)
             expanded.append(
                 Hit(
+                    chunk_uid=best.chunk_uid,
                     path=path,
                     heading=best.heading,
-                    scope=best.scope,
-                    agent_name=best.agent_name,
                     content=content,
                     score=best.score,
                     sim=best.sim,
@@ -149,15 +171,14 @@ def search(
     query: str,
     *,
     root: Path | str | None = None,
-    scope: str | None = None,
-    agent_name: str | None = None,
+    path_prefix: str | None = None,
     top_k: int = TOP_K,
     qvec: list[float] | None = None,
     gate: bool = False,
     min_sim: float | None = None,
     expand_window: int | None = None,
 ) -> list[Hit]:
-    """Hybrid (vector-primary + FTS) search with optional scope filter.
+    """Hybrid (vector-primary + FTS) search with an optional path filter.
 
     ``qvec``: a precomputed query embedding (the auto-inject path passes the
     one obtained from the warm helper, so the model is never loaded in this
@@ -170,25 +191,27 @@ def search(
     db = resolve(root).db
     if not db.exists():
         return []
+    prefix = _normalize_prefix(path_prefix)
     conn = connect(db)
     try:
         if qvec is None:
-            # Prefer the resident so a container / model-less host offloads
-            # the query embedding to the shared model. Fall back in-process
-            # ONLY if a model is actually cached — a search must never
-            # trigger an implicit ~2 GB download; if it can't embed, it
-            # degrades to "no results".
-            from .embed_server import embed_query_via_server
-            qvec = embed_query_via_server(query)
-            if qvec is None:
-                from .embedder import is_model_cached
-                if not is_model_cached():
-                    return []
-                qvec = embed_query(query)
-        pool = max(top_k * 4, 20)
+            # A search must never trigger an implicit ~2 GB download; if it
+            # cannot embed, it degrades to "no results" (NFR-10).
+            try:
+                qvec = get_provider().embed_query(query)
+            except EmbeddingUnavailable:
+                return []
+        # kNN cannot filter by path, so the filter is applied after it. With a
+        # prefix the candidate pool is widened, otherwise a narrow subfolder in
+        # a big bank returns almost nothing.
+        pool = (
+            min(max(top_k * 40, 200), 500)
+            if prefix is not None
+            else max(top_k * 4, 20)
+        )
         vec_ids = _vector_ranked(conn, qvec, pool)
         try:
-            fts_ids = _fts_ranked(conn, query, pool)
+            fts_ids = _fts_ranked(conn, query, pool, prefix)
         except sqlite3.OperationalError:
             fts_ids = []
         fused = _rrf(vec_ids, fts_ids)
@@ -212,9 +235,7 @@ def search(
             row = meta.get(cid)
             if row is None:
                 continue
-            if scope and row["scope"] != scope:
-                continue
-            if agent_name and row["agent_name"] != agent_name:
+            if prefix is not None and not _under_prefix(row["path"], prefix):
                 continue
             sim: float | None = None
             if gate:
@@ -226,10 +247,9 @@ def search(
                     continue
             hits.append(
                 Hit(
+                    chunk_uid=row["chunk_uid"],
                     path=row["path"],
                     heading=row["heading"] or "",
-                    scope=row["scope"],
-                    agent_name=row["agent_name"],
                     content=row["content"],
                     score=fused[cid],
                     sim=sim,

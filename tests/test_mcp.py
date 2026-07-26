@@ -85,10 +85,10 @@ async def main() -> int:
             r = await session.call_tool(
                 "memory_search",
                 {"query": "що рев'ювер завжди вимагає",
-                 "scope": "agent", "agent": "reviewer", "top_k": 1},
+                 "path_prefix": ".claude/agent-memory/reviewer", "top_k": 1},
             )
             txt = _text(r)
-            check("scoped search isolated to reviewer",
+            check("path_prefix search isolated to reviewer",
                   "agent-memory/reviewer/" in txt and "/developer/" not in txt,
                   detail=txt[:120])
 

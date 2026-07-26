@@ -1,8 +1,10 @@
-"""Central configuration — project-agnostic.
+"""Central configuration — bank-agnostic.
 
-The engine is installed once at user scope and serves ANY project: the
-project root is passed in (CLI --root, default cwd). Per-project index
-DBs and the shared model cache live under the user-scope home.
+The engine is installed once at user scope and serves ANY bank: the bank
+root is passed in (CLI --root, default cwd). A bank is one root folder,
+flat — every ``.md`` under it belongs to the same index (v3: no internal
+scopes). Per-bank index DBs and the shared model cache live under the
+user-scope home.
 """
 from __future__ import annotations
 
@@ -96,13 +98,25 @@ EMBED_HOST_IS_LOCAL: bool = EMBED_HOST in _LOOPBACK
 # serving isolated environments keeps the model resident permanently.
 EMBED_IDLE_TIMEOUT: int = int(os.environ.get("MNEMO_EMBED_IDLE_TIMEOUT", "1800"))
 
+# Embedding provider (see src/providers/). `local` = the resident ONNX
+# e5-large; `api` = an external embeddings endpoint (added in a later phase).
+# The provider key (name:model:dim) is recorded in each bank's index, so a
+# provider change is detected and the bank is rebuilt instead of mixing
+# vectors from two different models in one database.
+EMBED_PROVIDER: str = os.environ.get("MNEMO_PROVIDER", "local")
+
 # Embedding CPU cap. ONNX Runtime defaults to ALL cores per embed call;
 # the serial resident under multi-agent load then pegs the whole machine.
 # Bound every embed (resident, in-process fallback, ingest, tests, warmup)
 # to a fraction of the *available* CPUs. sched_getaffinity honours
 # cgroup/taskset limits on Linux; cpu_count is the cross-platform fallback.
 # MNEMO_EMBED_THREADS overrides the computed value explicitly.
-EMBED_THREADS_DIVISOR: int = 3
+#
+# v3 raises the ceiling from cpu/3 to cpu*3/4: indexing is the throughput
+# bottleneck and the old third-of-the-machine cap left most cores idle. ONNX
+# scales sub-linearly past the physical cores, so this is not a 2.25x win —
+# see the measured numbers in the phase-0 notes.
+EMBED_THREADS_FRACTION: tuple[int, int] = (3, 4)
 
 
 def _available_cpus() -> int:
@@ -120,28 +134,47 @@ def _embed_threads() -> int:
             return max(1, min(int(override), cpu))
         except ValueError:
             pass  # garbage env -> fall through to the computed default
-    return max(1, cpu // EMBED_THREADS_DIVISOR)
+    num, den = EMBED_THREADS_FRACTION
+    return max(1, cpu * num // den)
 
 
 EMBED_THREADS: int = _embed_threads()
 
 
 @dataclass(frozen=True)
-class ProjectPaths:
-    """Resolved locations for one project root."""
+class BankPaths:
+    """Resolved locations for one bank root."""
 
+    id: str    # sha1-derived bank id (see bank_id)
     root: Path
-    project_memory: Path   # <root>/.claude/memory
-    agent_memory: Path     # <root>/.claude/agent-memory
-    db: Path               # user-scope state/<projhash>.db
+    db: Path   # user-scope state/<bank_id>.db
 
 
-def resolve(root: Path | str | None) -> ProjectPaths:
-    """Resolve all paths for a project root.
+def bank_id(root: Path) -> str:
+    """Stable id for a bank root — also the name of its index file.
+
+    Same ``sha1(root)[:16]`` scheme as v2, with two canonicalisations so one
+    folder never ends up with two databases: ``as_posix()`` (``E:\\x`` and
+    ``E:/x`` are the same bank) and lowercasing on Windows (NTFS is
+    case-insensitive; POSIX paths are case-sensitive and stay untouched).
+    Kept here rather than in the registry so both agree by construction.
+    """
+    canonical = root.expanduser().resolve().as_posix()
+    if os.name == "nt":
+        canonical = canonical.lower()
+    return hashlib.sha1(canonical.encode("utf-8")).hexdigest()[:16]
+
+
+def resolve(root: Path | str | None) -> BankPaths:
+    """Resolve all paths for a bank root.
 
     Precedence: explicit arg > $MNEMO_ROOT > $CLAUDE_PROJECT_DIR > cwd.
     Claude Code supplies CLAUDE_PROJECT_DIR to project-scoped MCP servers
-    and hooks, so project resolution never depends on the child cwd.
+    and hooks, so resolution never depends on the child cwd.
+
+    The key stays ``sha1(root)``, but the root it hashes is now the bank root
+    — so v2 index files are simply not reused (they are also incompatible;
+    ``store`` drops them).
     """
     chosen = (
         root
@@ -149,11 +182,5 @@ def resolve(root: Path | str | None) -> ProjectPaths:
         or os.environ.get("CLAUDE_PROJECT_DIR")
     )
     root_path = Path(chosen).resolve() if chosen else Path.cwd().resolve()
-    claude = root_path / ".claude"
-    proj_hash = hashlib.sha1(str(root_path).encode()).hexdigest()[:16]
-    return ProjectPaths(
-        root=root_path,
-        project_memory=claude / "memory",
-        agent_memory=claude / "agent-memory",
-        db=STATE_DIR / f"{proj_hash}.db",
-    )
+    bid = bank_id(root_path)
+    return BankPaths(id=bid, root=root_path, db=STATE_DIR / f"{bid}.db")

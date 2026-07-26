@@ -18,12 +18,10 @@ server = FastMCP("mnemo")
 @server.tool()
 def memory_search(
     query: str,
-    scope: str | None = None,
-    agent: str | None = None,
+    path_prefix: str | None = None,
     top_k: int = 5,
 ) -> str:
-    """Search this project's memory. `scope`: 'project' or 'agent';
-    `agent`: restrict to one agent's memory."""
+    """Search this bank. `path_prefix`: narrow to a folder inside it."""
     # Embed via the warm resident so this long-lived MCP process never
     # loads the ~2.2 GB model itself. qvec=None lets search() fall back
     # to an in-process embed if the resident is unreachable.
@@ -37,15 +35,14 @@ def memory_search(
     qvec = embed_query_via_server(query, budget_s=INJECT_BUDGET_S)
     if (time.monotonic() - t0) >= INJECT_BUDGET_S:
         return "Search timed out."
-    hits = search(query, scope=scope, agent_name=agent, top_k=top_k, qvec=qvec)
+    hits = search(query, path_prefix=path_prefix, top_k=top_k, qvec=qvec)
     if not hits:
         return "No relevant results."
     out = []
     for i, h in enumerate(hits, 1):
-        tag = h.scope + (f"/{h.agent_name}" if h.agent_name else "")
         snippet = " ".join(h.content.split())[:400]
         out.append(
-            f"[{i}] {h.path} · {h.heading or '(no heading)'} · {tag} "
+            f"[{i}] {h.path} · {h.heading or '(no heading)'} "
             f"· score={h.score:.4f}\n{snippet}"
         )
     return "\n\n".join(out)
