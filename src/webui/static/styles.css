@@ -514,7 +514,7 @@ h2 {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin: 2px 0;
+  margin: 1px 0;
   color: var(--accent);
   font-family: var(--mono);
   font-size: 10.5px;
@@ -534,7 +534,17 @@ h2 {
 .chunk-divider .cd-range { color: var(--fg-mute); }
 
 .chunk-body,
-.gap-body { padding: 4px 0 8px; }
+.gap-body { padding: 2px 0 4px; }
+
+/* The blank line a file puts between two sections. The splitter leaves it
+   outside both chunks, so it renders as its own `pre` — and at the document's
+   line height those two newlines were 40px of the 54px between chunks, which
+   is what turned a 14-chunk file into mostly whitespace. Scaled down rather
+   than collapsed: six blank lines still read as more than two, and the text
+   itself is untouched, so offsets, selection and copy all still match the
+   file. The divider line and its caption mark the boundary; the emptiness
+   around it was never doing that job. */
+.gap-body.is-blank { line-height: .8; }
 
 .gap-note {
   margin: 2px 0;

@@ -822,14 +822,27 @@ function renderFile() {
  */
 function appendGap(doc, text) {
   if (!text) return;
-  if (text.trim() !== '') {
+  const blank = text.trim() === '';
+  if (!blank) {
     doc.appendChild(el('div', { className: 'gap-note', text: '· поза чанками ·' }));
   }
-  doc.appendChild(el('pre', { className: 'gap-body', text: text }));
+  // A blank gap is still the file's own text and stays in the DOM, selectable
+  // and copyable — it is only rendered tighter. See `.gap-body.is-blank`.
+  doc.appendChild(el('pre', {
+    className: blank ? 'gap-body is-blank' : 'gap-body',
+    text: text,
+  }));
 }
 
 function chunkDivider(chunk) {
-  const label = '#' + chunk.chunk_index + (chunk.heading ? ' · ' + chunk.heading : '');
+  // Displayed 1-based; `chunk_index` is and stays 0-based everywhere else.
+  // This is a reading surface, and "#0" is an implementation detail leaking
+  // into it. Do NOT shift the stored value to match: `chunk_uid` is
+  // sha1(path\0chunk_index), so changing it would rewrite every chunk id and
+  // force a full re-embed of every bank. The one other place a human sees the
+  // raw number is the hit list in `queryRow`, which stays 0-based on purpose —
+  // it is a locator, not prose. So the two differ by one by design.
+  const label = '#' + (chunk.chunk_index + 1) + (chunk.heading ? ' · ' + chunk.heading : '');
   return el('div', { className: 'chunk-divider', title: 'chunk_uid ' + chunk.chunk_uid }, [
     el('span', { className: 'cd-label', text: label }),
     el('span', {
@@ -894,6 +907,10 @@ function renderLogs() {
 }
 
 function queryRow(ev) {
+  // Stays 0-based, unlike the label in `chunkDivider`. `path#index` is a
+  // locator you match against the store or against what a search face
+  // reported, not something to read as prose — so it has to agree with the
+  // data rather than with the viewer.
   const hits = (ev.hits || []).map((h) => h.path + '#' + h.chunk_index).join(', ');
   const tr = el('tr', { className: ev._live ? 'is-live' : '', title: hits }, [
     el('td', { text: fmtTime(ev.ts) }),
