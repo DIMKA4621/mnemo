@@ -383,6 +383,63 @@ def test_state_dir_is_resolved_live() -> None:
         service_ctl.service_pid_file().unlink(missing_ok=True)
 
 
+def test_ps_fingerprint_contract() -> None:
+    """The macOS/BSD path, exercised without a Mac.
+
+    HONEST LABEL: this tests our handling of `ps` output, not `ps` itself.
+    The sample is constructed to the documented `lstart` format, not captured
+    from a real Darwin box -- we have none. What it does establish is that
+    the parsing, the failure modes and the locale pinning behave as the
+    docstring claims, so the only thing left unverified is whether Darwin's
+    `ps` emits that format.
+    """
+    from unittest.mock import patch
+
+    calls: list[dict] = []
+
+    def fake_run(argv, **kwargs):
+        calls.append({"argv": argv, "env": kwargs.get("env") or {}})
+        return subprocess.CompletedProcess(argv, 0, "Sat Jul 26 10:00:00 2026\n", "")
+
+    with patch.object(service_ctl.subprocess, "run", fake_run):
+        value = service_ctl._ps_fingerprint(4321)
+    check("ps output is returned verbatim, stripped",
+          value == "Sat Jul 26 10:00:00 2026", detail=repr(value))
+    check("ps is asked for lstart with a suppressed header",
+          calls[0]["argv"] == ["ps", "-p", "4321", "-o", "lstart="],
+          detail=str(calls[0]["argv"]))
+    # Locale/timezone pinning is the difference between a stable fingerprint
+    # and disowning our own service when start and stop run under different
+    # shells.
+    check("LC_ALL is pinned to C", calls[0]["env"].get("LC_ALL") == "C")
+    check("TZ is pinned to UTC", calls[0]["env"].get("TZ") == "UTC")
+
+    def failing_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", "ps: illegal option -- o")
+
+    with patch.object(service_ctl.subprocess, "run", failing_run):
+        check("a ps without lstart yields None, not a bogus value",
+              service_ctl._ps_fingerprint(4321) is None)
+
+    def empty_run(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 0, "\n", "")
+
+    with patch.object(service_ctl.subprocess, "run", empty_run):
+        check("empty output yields None", service_ctl._ps_fingerprint(4321) is None)
+
+    def raising_run(argv, **kwargs):
+        raise OSError("ps not found")
+
+    with patch.object(service_ctl.subprocess, "run", raising_run):
+        check("a missing ps binary yields None", service_ctl._ps_fingerprint(4321) is None)
+
+    # The whole point of returning None: it must never widen what we kill.
+    service_ctl._write_identity({"pid": os.getpid(), "fingerprint": None})
+    check("a None fingerprint makes the process unmanageable, not killable",
+          service_ctl.owned_process() is None)
+    service_ctl.service_pid_file().unlink(missing_ok=True)
+
+
 def test_exit_code_259(work: Path) -> None:
     """259 is a legitimate exit code, not a synonym for "still running"."""
     script = work / "exit259.py"
@@ -676,6 +733,7 @@ def main() -> int:
         test_lifecycle(work, script)
         test_never_kills_bystanders(work)
         test_state_dir_is_resolved_live()
+        test_ps_fingerprint_contract()
         test_exit_code_259(work)
         test_clear_identity_spares_a_live_backend()
         test_start_is_serialised(work)

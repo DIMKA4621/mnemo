@@ -136,16 +136,46 @@ def _linux_fingerprint(pid: int) -> str | None:
 
 
 def _ps_fingerprint(pid: int) -> str | None:
-    """macOS / generic POSIX fallback: the start time as ps reports it."""
+    """macOS / generic POSIX fallback: the start time as ``ps`` reports it.
+
+    **Unverified on a real Mac — we have no machine.** What follows is
+    reasoning from the documented ``ps`` contract, not a measurement, and it
+    is written out so the next person can check it rather than re-derive it.
+
+    * ``lstart`` is a BSD/Darwin (and procps) extension, *not* in the POSIX
+      ``-o`` keyword set. Where it is missing, ``ps`` fails and we return
+      None. That degrades safely: a None fingerprint makes ``owned_process``
+      refuse, so the worst case is "cannot manage this service", never
+      "killed the wrong process". ``start`` says so out loud when it happens.
+    * There is deliberately no POSIX fallback. The portable keyword is
+      ``etime`` (elapsed time), which changes between readings and so cannot
+      serve as an equality check — an unstable fingerprint is worse than
+      none, because it fails in the direction of not recognising our own
+      process.
+    * ``LC_ALL``/``TZ`` are pinned because ``lstart`` is a *formatted local
+      date*. Two readings of the same process under different locales or
+      timezones would render differently and compare unequal — start under
+      one shell, stop under another, and we would disown our own service.
+      Pinning both makes the string depend only on the process.
+    * ``-o lstart=`` with an empty header suppresses the column heading
+      (POSIX behaviour for ``-o keyword=header``), so stdout is the value
+      alone.
+    * Resolution is one second, against 100 ns on Windows and clock ticks on
+      Linux. PID reuse *within the same second* would collide; that is the
+      documented weak spot of this platform's path.
+    """
     try:
         out = subprocess.run(
             ["ps", "-p", str(pid), "-o", "lstart="],
             capture_output=True,
             text=True,
             timeout=5,
+            env={**os.environ, "LC_ALL": "C", "TZ": "UTC"},
         )
     except (OSError, subprocess.SubprocessError):
         return None
+    if out.returncode != 0:
+        return None  # no such process, or a ps without `lstart`
     value = out.stdout.strip()
     return value or None
 
@@ -694,10 +724,21 @@ def start(
                     return EXIT_DOWN
                 time.sleep(0.05)
 
+            fingerprint = process_fingerprint(pid)
+            if fingerprint is None:
+                # Without it `stop` will refuse to touch this process, by
+                # design. Say so now rather than at stop time: silently
+                # unmanageable is the worst of the three outcomes.
+                print(
+                    "mnemo service: WARNING - cannot read this platform's "
+                    "process start time, so `service stop` will refuse to "
+                    f"manage pid {pid}; stop it manually"
+                )
+
             _write_identity(
                 {
                     "pid": pid,
-                    "fingerprint": process_fingerprint(pid),
+                    "fingerprint": fingerprint,
                     "started_at": datetime.now(timezone.utc).astimezone().isoformat(),
                     "python": argv[0],
                     "argv": argv,
