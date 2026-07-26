@@ -9,6 +9,9 @@
   hook-inject       UserPromptSubmit target: inject relevant memory
   embed-server      resident embedding helper (auto-started, not run by hand)
   projects          list known projects (hash → cwd → last inject → log size)
+  serve             run the backend in the foreground (the service's target)
+  service …         start / stop / status / restart the background service
+  autostart …       enable / disable / status of per-OS start-at-login
 
 `--root` defaults to the current directory, so the SessionStart hook
 indexes whatever project the session is in.
@@ -273,6 +276,22 @@ def main(argv: list[str] | None = None) -> int:
     except (AttributeError, ValueError):
         pass  # Windows has no SIGPIPE; some embeds restrict signal calls.
 
+    # Memory is Ukrainian as often as English, and results are printed with
+    # '·' / '…'. A default Windows console is cp1252, so writing a hit would
+    # die with UnicodeEncodeError. Force UTF-8 and replace anything the
+    # terminal genuinely cannot render — a mangled glyph beats a traceback.
+    #
+    # stdin matters just as much: the hooks are fed a JSON payload whose
+    # prompt is routinely Cyrillic. Decoded as cp1252 it arrives as mojibake
+    # with lone surrogates, which then poisons the search query and blows up
+    # the log writer downstream. All three streams, one rule.
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass  # redirected to something that cannot be reconfigured
+
     parser = argparse.ArgumentParser(
         prog="mnemo",
         description="Project memory: .md -> chunk -> embed -> sqlite-vec -> search.",
@@ -309,6 +328,35 @@ def main(argv: list[str] | None = None) -> int:
     )
     pn.add_argument("--root", default=None, help="Project root (default: cwd).")
 
+    # --- process lifecycle (block L, platform-dev) ---------------------
+    pv = sub.add_parser(
+        "serve",
+        help="Run the backend in the foreground (what `service start` "
+        "launches in a windowless child; not usually run by hand).",
+    )
+    pv.add_argument("--host", default=None, help="Bind address (default: loopback).")
+    pv.add_argument("--port", type=int, default=None, help="Port (default: 8918).")
+
+    psv = sub.add_parser(
+        "service",
+        help="Control the background service: start | stop | status | restart.",
+    )
+    psv.add_argument(
+        "action",
+        choices=("start", "stop", "status", "restart"),
+    )
+    psv.add_argument(
+        "--foreground",
+        action="store_true",
+        help="start only: run in this terminal instead of detaching.",
+    )
+
+    pas = sub.add_parser(
+        "autostart",
+        help="Start the service at login: enable | disable | status.",
+    )
+    pas.add_argument("action", choices=("enable", "disable", "status"))
+
     pi = sub.add_parser("ingest", help="Reconcile .md -> index (hash-diff + prune).")
     pi.add_argument("--root", default=None, help="Project root (default: cwd).")
 
@@ -339,6 +387,26 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.cmd == "projects":
         return _cmd_projects()
+    if args.cmd == "serve":
+        from .api import run
+        run(host=args.host, port=args.port)
+        return 0
+    if args.cmd == "service":
+        from . import service_ctl
+        if args.action == "start":
+            return service_ctl.start(foreground=args.foreground)
+        if args.action == "stop":
+            return service_ctl.stop()
+        if args.action == "restart":
+            return service_ctl.restart()
+        return service_ctl.status()
+    if args.cmd == "autostart":
+        from . import autostart
+        if args.action == "enable":
+            return autostart.enable()
+        if args.action == "disable":
+            return autostart.disable()
+        return autostart.status()
     if args.cmd == "init":
         from .scaffold import init_project
         return init_project(args.root)
