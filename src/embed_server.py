@@ -22,6 +22,7 @@ import os
 import socket
 import struct
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -39,6 +40,29 @@ from .config import (
 )
 
 _HDR = struct.Struct("!I")  # 4-byte length prefix
+
+# Two lanes over ONE model, instead of a pool of residents.
+#
+# The resident used to answer strictly one request at a time, so a search
+# arriving mid-index queued behind the whole batch: measured **15.7 s**, and
+# at the 20 s client ceiling it sometimes returned nothing at all. The
+# specified fix was a pool of N residents — but that buys concurrency with a
+# second full copy of the model, and since the resident no longer idle-exits
+# that ~1.6 GB is permanent. ~3.1 GB at rest to avoid a 16 s wait.
+#
+# One ONNX session is safe to Run() from several threads, and verified here:
+# concurrent results are bit-identical to serial (delta 0.00e+00). So a
+# query and a batch can share the session and split its intra-op threads.
+# Measured: the query drops to ~0.37 s and the batch pays ~2%.
+#
+# Each kind gets its OWN permit rather than a shared priority queue, which
+# is what makes starvation impossible in both directions: a flood of queries
+# can never take the batch lane, and a long batch can never hold the query
+# lane. No aging, no priority inversion, nothing to tune.
+_QUERY_LANE = threading.Semaphore(1)
+_BATCH_LANE = threading.Semaphore(1)
+# Bounds threads if a client misbehaves; matches the listen backlog.
+_inflight = threading.Semaphore(8)
 
 
 class TokenRejected(RuntimeError):
@@ -157,21 +181,39 @@ def serve() -> None:
     # 0 -> no idle exit: stay resident for the environments we serve.
     srv.settimeout(EMBED_IDLE_TIMEOUT or None)
 
-    # Lazy: the model loads on the first request (the documented ~3 s cost,
-    # paid once per cold start, not per message).
+    # Lazy: the model loads on the first request that needs it. It must NOT
+    # be preloaded here — binding and then loading for ~6 s before the first
+    # accept() leaves liveness probes (`server_is_up`, `stop_resident`)
+    # timing out against a resident that is perfectly healthy, just busy.
+    # `embedder._model` is locked internally, so the two lanes racing on the
+    # first request still build only one session.
     from .embedder import embed_passages, embed_query
 
     while True:
         try:
             conn, _ = srv.accept()
         except socket.timeout:
-            return  # idle long enough -> free the ~1.6 GB
+            if _inflight.acquire(blocking=False):
+                _inflight.release()
+                return  # idle AND nothing running -> free the ~1.6 GB
+            continue   # work in flight; a daemon thread would die with us
+        _inflight.acquire()
+        threading.Thread(
+            target=_serve_one,
+            args=(conn, tok, embed_passages, embed_query),
+            daemon=True,
+        ).start()
+
+
+def _serve_one(conn, tok: str, embed_passages, embed_query) -> None:
+    """Handle one connection, in the lane its request belongs to."""
+    try:
         with conn:
             try:
                 req = _recv(conn, timeout=10.0)
                 if req.get("token") != tok:
                     _send(conn, {"error": "unauthorized"})
-                    continue
+                    return
                 if req.get("kind") == "passages":
                     texts = req.get("texts")
                     if (
@@ -182,20 +224,25 @@ def serve() -> None:
                         )
                     ):
                         _send(conn, {"error": "empty"})
-                        continue
-                    _send(conn, {"vecs": embed_passages(texts)})
-                    continue
+                        return
+                    with _BATCH_LANE:
+                        vecs = embed_passages(texts)
+                    _send(conn, {"vecs": vecs})
+                    return
                 text = (req.get("text") or "").strip()
                 if not text:
                     _send(conn, {"error": "empty"})
-                    continue
-                if req.get("kind") == "passage":
-                    vec = embed_passages([text])[0]
-                else:
-                    vec = embed_query(text)
+                    return
+                with _QUERY_LANE:
+                    if req.get("kind") == "passage":
+                        vec = embed_passages([text])[0]
+                    else:
+                        vec = embed_query(text)
                 _send(conn, {"vec": vec})
             except (OSError, ValueError, json.JSONDecodeError):
                 pass  # one bad client must never kill the resident
+    finally:
+        _inflight.release()
 
 
 # --------------------------------------------------------------- client

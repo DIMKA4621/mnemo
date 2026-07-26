@@ -10,8 +10,8 @@ to silently download.
 """
 from __future__ import annotations
 
+import threading
 import warnings
-from functools import lru_cache
 from typing import TYPE_CHECKING
 
 from .config import EMBED_THREADS, EMBEDDING_MODEL, MODEL_CACHE
@@ -29,6 +29,10 @@ if TYPE_CHECKING:  # `fastembed` is imported lazily — see below
 # fastembed >=0.6 uses mean pooling for e5 (the canonical e5 behaviour);
 # its compatibility warning is noise for us — silence just that one.
 warnings.filterwarnings("ignore", message=".*mean pooling instead of CLS.*")
+
+# Built once, shared by both request lanes in the resident.
+_MODEL: "TextEmbedding | None" = None
+_MODEL_LOCK = threading.Lock()
 
 
 def _model_cache_spec() -> tuple[str, set[str]] | None:
@@ -84,8 +88,25 @@ def is_model_cached() -> bool:
     return False
 
 
-@lru_cache(maxsize=1)
 def _model() -> TextEmbedding:
+    """The one loaded model, built at most once even under concurrency.
+
+    Double-checked locking rather than ``lru_cache``: the resident serves a
+    query lane and a batch lane at the same time, and ``lru_cache`` does not
+    hold a lock across the miss, so two first-requests racing could each
+    build a session and briefly hold two ~1.5 GB copies. The fast path is
+    still just a module-global read.
+    """
+    global _MODEL
+    if _MODEL is not None:
+        return _MODEL
+    with _MODEL_LOCK:
+        if _MODEL is None:
+            _MODEL = _build_model()
+    return _MODEL
+
+
+def _build_model() -> TextEmbedding:
     from fastembed import TextEmbedding
 
     # Create the cache dir only when missing: on a read-only mount (container
