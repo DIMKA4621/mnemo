@@ -150,17 +150,30 @@ function reportError(err) {
 // token gate
 // ---------------------------------------------------------------------------
 
+/**
+ * Gate wording, per state.
+ *
+ * The no-token state says nothing about the service. It cannot: it issues no
+ * request at all, so it has observed nothing to report — a page that claimed
+ * "сервіс працює" from behind zero requests would say exactly the same thing
+ * with the backend down. It asks for a token and shows where to get one.
+ *
+ * The rejected state may name the service's behaviour, because there it did
+ * make a request and did get a 401 back.
+ */
 const GATE_COPY = {
   missing: {
     title: 'Потрібен токен доступу',
-    text: 'Кабінет слухає лише локальний інтерфейс і захищений токеном. ' +
-          'Це не помилка: сервіс працює, просто ця вкладка ще не автентифікована.',
+    text: 'Щоб відкрити кабінет, потрібен токен. ' +
+          'Команда друкує посилання з чинним токеном і відкриває його:',
+    lead: null,
     note: null,
   },
   rejected: {
     title: 'Токен не підійшов',
     text: 'Сервіс відхилив наданий токен (HTTP 401). Найімовірніше він застарілий ' +
           'або скопійований не повністю — актуальний токен видає сама команда.',
+    lead: 'Команда друкує готове посилання з чинним токеном і відкриває його:',
     note: 'Токен відхилено сервісом.',
   },
 };
@@ -205,14 +218,15 @@ function buildGate() {
     gate.note,
   ]);
 
+  // Only the rejected state needs a separate line introducing the command;
+  // the no-token copy is one sentence that already ends in that colon.
+  gate.lead = el('p', { className: 'gate-lead', attrs: { hidden: '' } });
+
   gate.card = el('div', { className: 'gate-card' }, [
     el('div', { className: 'gate-brand', text: 'mnemo' }),
     gate.title,
     gate.text,
-    el('p', {
-      className: 'gate-lead',
-      text: 'Команда друкує готове посилання з чинним токеном і відкриває його:',
-    }),
+    gate.lead,
     el('code', { className: 'gate-cmd', text: 'mnemo ui' }),
     form,
   ]);
@@ -236,8 +250,13 @@ function openGate(variant) {
   setConnState('idle', 'не автентифіковано');
 
   gate.card.classList.toggle('is-error', variant === 'rejected');
+  // Without the separate lead line the prose sits directly above the command,
+  // so it takes the tighter margin the lead would otherwise have carried.
+  gate.card.classList.toggle('is-terse', !copy.lead);
   gate.title.textContent = copy.title;
   gate.text.textContent = copy.text;
+  gate.lead.textContent = copy.lead || '';
+  gate.lead.hidden = !copy.lead;
   gateNote(copy.note);
   gate.root.hidden = false;
   gate.input.focus();

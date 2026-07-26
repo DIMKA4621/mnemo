@@ -170,6 +170,9 @@ h2 {
   font-size: 12px;
 }
 
+/* No lead line: the prose itself introduces the command, so it closes up. */
+.gate-card.is-terse .gate-text { margin-bottom: 6px; }
+
 .gate-cmd {
   display: block;
   padding: 8px 10px;
