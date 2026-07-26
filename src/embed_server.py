@@ -81,7 +81,24 @@ def serve() -> None:
     exits on idle. Singleton: if the port is already held, this instance
     steps aside — but says so on stderr, because a resident bound to a
     narrower address (e.g. a loopback one that autostarted first) silently
-    shadows a wanted shared bind and cuts every remote client off."""
+    shadows a wanted shared bind and cuts every remote client off.
+
+    Refuses to start without a cached model. The resident is autostarted by
+    clients (a search, a hook), and its first request would call
+    ``TextEmbedding(...)``, which *downloads* ~2.2 GB when the model is
+    absent. That would put an implicit download behind an ordinary search —
+    the one thing "the model is fetched only by an explicit `warmup`" forbids.
+    The in-process legs check ``is_model_cached()`` already; this closes the
+    same hole on the spawn path."""
+    from .embedder import is_model_cached
+
+    if not is_model_cached():
+        print(
+            "mnemo embed-server: no model in the cache — refusing to start. "
+            "Run `mnemo warmup` once (the only step allowed to download it).",
+            file=sys.stderr,
+        )
+        return
     tok = _token()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)

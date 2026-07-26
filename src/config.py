@@ -35,6 +35,13 @@ STATE_DIR: Path = Path(
 )
 MODEL_CACHE: Path = USER_HOME / "model-cache"  # e5-large, once for all banks
 
+# Whether two paths differing only in case are the same path. NTFS says yes —
+# ``rglob("*.md")`` there happily returns ``NOTES.MD``, and a user typing
+# ``notes`` or an exclude pattern of ``.venv/**`` means it whatever the case on
+# disk. POSIX says no, and folding would be wrong. Both the exclude walk and
+# the search path_prefix read this, so they cannot drift apart.
+FOLD_PATH_CASE: bool = os.name == "nt"
+
 
 @dataclass(frozen=True)
 class BankPaths:

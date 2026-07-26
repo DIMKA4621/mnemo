@@ -6,23 +6,39 @@ blended with reciprocal rank fusion (RRF).
 v3: the bank is flat, so there is no scope filter. Narrowing is optional and
 purely navigational — ``path_prefix`` matches on the ``chunks.path`` that is
 already stored, at segment boundaries, so no new metadata is needed.
+
+This module stays **pure** (Memory-contracts-v3 §5): it is handed an open
+connection and a provider, and knows nothing about banks, the registry or the
+queue. It never composes a status — ``indexing`` / ``empty`` / ``ready``
+depends on the work queue, which lives in the API layer.
 """
 from __future__ import annotations
 
 import math
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 
 import sqlite_vec
 
-from .config import MIN_QUERY_CHARS, MIN_SIM, NEIGHBOR_WINDOW, RRF_K, TOP_K, resolve
-from .providers import EmbeddingUnavailable, get_provider
-from .store import connect, get_vectors
-
+from .config import (
+    FOLD_PATH_CASE,
+    MIN_QUERY_CHARS,
+    MIN_SIM,
+    NEIGHBOR_WINDOW,
+    RRF_K,
+    TOP_K,
+)
+from .providers import EmbeddingProvider, EmbeddingUnavailable, get_provider
+from .store import get_vectors
 
 @dataclass
 class Hit:
+    """One result. For a merged neighbour window (``span`` set), ``chunk_uid``
+    and ``chunk_index`` identify the *anchor* — the best-scoring chunk in the
+    window — while ``span`` gives the inclusive range of chunk indices whose
+    text was concatenated into ``content``. A UI highlighting a hit should
+    follow ``span`` when present and ``chunk_uid`` only otherwise."""
+
     chunk_uid: str
     path: str                 # POSIX relpath inside the bank
     heading: str
@@ -34,15 +50,28 @@ class Hit:
 
 
 def _normalize_prefix(path_prefix: str | None) -> str | None:
-    """POSIX relpath from the bank root; '' and '.' mean "no filter"."""
+    """POSIX relpath from the bank root; '' and '.' mean "no filter".
+
+    Each segment is stripped separately: a prefix pasted out of a UI arrives
+    as ``" logs / 2026 "`` often enough, and stripping the whole string first
+    would leave ``"logs / 2026"`` — which matches nothing, silently.
+    """
     if not path_prefix:
         return None
-    cleaned = path_prefix.replace("\\", "/").strip().strip("/")
-    return None if cleaned in ("", ".") else cleaned
+    segments = [s.strip() for s in path_prefix.replace("\\", "/").split("/")]
+    cleaned = "/".join(s for s in segments if s and s != ".")
+    return cleaned or None
+
+
+def _fold(value: str) -> str:
+    """Case-fold where the filesystem does — NTFS indexes ``NOTES.MD`` and a
+    user typing ``--path-prefix notes`` means it. POSIX keeps them distinct."""
+    return value.lower() if FOLD_PATH_CASE else value
 
 
 def _under_prefix(path: str, prefix: str) -> bool:
     """Segment-boundary match: 'log' must NOT match 'logs/x.md'."""
+    path, prefix = _fold(path), _fold(prefix)
     return path == prefix or path.startswith(prefix + "/")
 
 
@@ -66,10 +95,13 @@ def _fts_ranked(
     sql = "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ?"
     params: list[object] = [_fts_escape(query)]
     if prefix is not None:
-        # The lexical leg can filter in SQL (unlike kNN), so it does.
+        # The lexical leg can narrow in SQL (unlike kNN), so it does. LIKE is
+        # ASCII-case-insensitive in SQLite, which may over-select — harmless,
+        # because `_under_prefix` is the authority and re-checks every row.
+        # Under-selecting is what would silently lose hits, so never use `=`.
         sql += (
             " AND rowid IN (SELECT id FROM chunks "
-            "WHERE path = ? OR path LIKE ?)"
+            "WHERE path LIKE ? OR path LIKE ?)"
         )
         params += [prefix, prefix + "/%"]
     sql += " ORDER BY bm25(fts_chunks) LIMIT ?"
@@ -168,37 +200,39 @@ def _expand_neighbors(
 
 
 def search(
+    conn: sqlite3.Connection,
     query: str,
     *,
-    root: Path | str | None = None,
-    path_prefix: str | None = None,
-    top_k: int = TOP_K,
     qvec: list[float] | None = None,
+    provider: EmbeddingProvider | None = None,
+    top_k: int = TOP_K,
+    path_prefix: str | None = None,
     gate: bool = False,
     min_sim: float | None = None,
     expand_window: int | None = None,
 ) -> list[Hit]:
     """Hybrid (vector-primary + FTS) search with an optional path filter.
 
+    Takes an **open connection**: the caller owns the bank's lifecycle, which
+    is what lets the backend hold one long-lived read connection per bank
+    instead of reopening the database on every request.
+
     ``qvec``: a precomputed query embedding (the auto-inject path passes the
     one obtained from the warm helper, so the model is never loaded in this
-    process). ``gate``: drop empty/too-short queries and weak matches by a
-    cosine-similarity floor — used ONLY by auto-inject; manual MCP/CLI
+    process). ``provider``: used only when ``qvec`` is None; defaults to the
+    service provider. ``gate``: drop empty/too-short queries and weak matches
+    by a cosine-similarity floor — used ONLY by auto-inject; manual MCP/CLI
     search stays ungated (the agent judges relevance itself).
     """
     if gate and len(query.strip()) < MIN_QUERY_CHARS:
         return []
-    db = resolve(root).db
-    if not db.exists():
-        return []
     prefix = _normalize_prefix(path_prefix)
-    conn = connect(db)
     try:
         if qvec is None:
             # A search must never trigger an implicit ~2 GB download; if it
             # cannot embed, it degrades to "no results" (NFR-10).
             try:
-                qvec = get_provider().embed_query(query)
+                qvec = (provider or get_provider()).embed_query(query)
             except EmbeddingUnavailable:
                 return []
         # kNN cannot filter by path, so the filter is applied after it. With a
@@ -260,5 +294,9 @@ def search(
                 break
         win = NEIGHBOR_WINDOW if expand_window is None else expand_window
         return _expand_neighbors(conn, hits, win)
-    finally:
-        conn.close()
+    except sqlite3.OperationalError as exc:
+        # A bank whose schema was never created reads as "nothing here" — the
+        # connection may deliberately be read-only, so we do not create it.
+        if "no such table" in str(exc):
+            return []
+        raise

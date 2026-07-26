@@ -1,16 +1,17 @@
 """MCP face of the engine — the SAME code, exposed as agent-callable tools.
 
-Not a daemon: the client spawns `mnemo mcp` over stdio for the
-session and kills it on exit. The project root comes from cwd (or
-$MNEMO_ROOT), so a project-level .mcp.json scopes it to that
-project's memory automatically.
+Not a daemon: the client spawns `mnemo mcp` over stdio for the session and
+kills it on exit. The bank root comes from cwd (or $MNEMO_ROOT), so a
+project-level .mcp.json scopes it to that bank automatically. Phase 4
+replaces this with an HTTP endpoint mounted in the backend, so nothing is
+spawned at all.
 """
 from __future__ import annotations
 
 from mcp.server.fastmcp import FastMCP
 
+from .cli import _search_bank
 from .index import reindex
-from .search import search
 
 server = FastMCP("mnemo")
 
@@ -35,7 +36,8 @@ def memory_search(
     qvec = embed_query_via_server(query, budget_s=INJECT_BUDGET_S)
     if (time.monotonic() - t0) >= INJECT_BUDGET_S:
         return "Search timed out."
-    hits = search(query, path_prefix=path_prefix, top_k=top_k, qvec=qvec)
+    hits = _search_bank(None, query, path_prefix=path_prefix, top_k=top_k,
+                        qvec=qvec)
     if not hits:
         return "No relevant results."
     out = []

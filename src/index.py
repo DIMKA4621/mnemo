@@ -39,7 +39,13 @@ from pathlib import Path
 from typing import Callable
 
 from .chunker import split_markdown
-from .config import BATCH_SIZE, DEFAULT_EXCLUDE, BankPaths, resolve
+from .config import (
+    BATCH_SIZE,
+    DEFAULT_EXCLUDE,
+    FOLD_PATH_CASE,
+    BankPaths,
+    resolve,
+)
 from .providers import EmbeddingProvider, EmbeddingUnavailable, get_provider
 from .store import (
     chunk_uid,
@@ -117,7 +123,15 @@ def path_is_excluded(rel: str, patterns: list[str]) -> bool:
     common case is ``__pycache__`` or a nested ``.venv``, and a pattern that
     only matched at the top level would quietly let those through. Anything
     else is a plain fnmatch against the whole relpath.
+
+    Matching folds case where the filesystem does (``config.FOLD_PATH_CASE``):
+    on Windows a folder called ``Venv`` is the same folder as ``venv``, and an
+    exclude list that missed it would index a virtualenv on one machine and
+    not on another.
     """
+    if FOLD_PATH_CASE:
+        rel = rel.lower()
+        patterns = [p.lower() for p in patterns]
     segments = rel.split("/")
     for pattern in patterns:
         if pattern.endswith("/**"):
@@ -354,8 +368,15 @@ def _open_bank(paths: BankPaths, provider: EmbeddingProvider, verbose: bool):
     A provider/model/dim change wipes the content here, so the reconcile that
     follows re-embeds everything from the .md.
     """
-    conn = connect(paths.db)
-    rebuild = needs_rebuild(conn, provider_key=provider.key, dim=provider.dim)
+    conn = connect(paths.db, dim=provider.dim)
+    if needs_rebuild(conn, provider_key=provider.key, dim=provider.dim):
+        # Wipe BEFORE claiming the new identity. If meta were written first
+        # and we died here, it would advertise the new provider over the old
+        # provider's vectors, `needs_rebuild` would answer False forever, and
+        # search would blend incomparable vectors with nothing to notice it.
+        reset_index(conn, dim=provider.dim)
+        if verbose:
+            print(f"provider changed -> full rebuild of {paths.db.name}")
     init_meta(
         conn,
         bank_id=paths.id,
@@ -363,10 +384,6 @@ def _open_bank(paths: BankPaths, provider: EmbeddingProvider, verbose: bool):
         provider_key=provider.key,
         dim=provider.dim,
     )
-    if rebuild:
-        reset_index(conn)
-        if verbose:
-            print(f"provider changed -> full rebuild of {paths.db.name}")
     return conn
 
 

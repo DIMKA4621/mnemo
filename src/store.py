@@ -50,13 +50,26 @@ def chunk_uid(path: str, chunk_index: int) -> str:
     ).hexdigest()[:16]
 
 
-def connect(db_path: Path) -> sqlite3.Connection:
-    """Open the bank DB with sqlite-vec loaded and the schema ensured.
+def connect(
+    db_path: Path, *, ensure: bool = True, dim: int | None = None
+) -> sqlite3.Connection:
+    """Open the bank DB with sqlite-vec loaded.
 
-    Concurrency: parallel Claude Code sessions, the MCP server, and the
-    hooks all open the same file. WAL lets readers and a writer coexist;
+    Concurrency: parallel Claude Code sessions, the MCP server, the hooks and
+    the backend all open the same file. WAL lets readers and a writer coexist;
     ``busy_timeout`` makes the rare DDL / writer-vs-writer collision wait
     instead of failing with ``database is locked``.
+
+    ``ensure=False`` opens **without any DDL** — the read path. Opening must
+    not write: a reader that takes the single WAL writer lock contends with
+    the indexer on every search, and on a database that is genuinely
+    read-only (permissions, an antivirus lock, a read-only mount) the write
+    fails and the bank looks *empty* rather than unreadable — which tells
+    every agent to stop asking about a bank that is actually full.
+
+    With ``ensure=True`` the schema is created only when it is missing or
+    outdated; a database already at the current version is opened with reads
+    alone (see ``ensure_schema``), so the default stays cheap and lock-free.
     """
     db_path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_path, timeout=10.0)
@@ -67,7 +80,8 @@ def connect(db_path: Path) -> sqlite3.Connection:
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
     conn.row_factory = sqlite3.Row
-    _ensure_schema(conn)
+    if ensure:
+        ensure_schema(conn, dim=dim)
     return conn
 
 
@@ -116,22 +130,55 @@ def _create_content(conn: sqlite3.Connection, dim: int) -> None:
     )
 
 
-def _ensure_schema(conn: sqlite3.Connection) -> None:
-    """Create the schema, dropping an incompatible one first.
+class SchemaTooNew(RuntimeError):
+    """The database was written by a newer mnemo than this one."""
 
-    A v2 database (scope / agent_name columns, no ``meta``) or any future
-    layout mismatch is wiped here rather than migrated. Nothing is lost: the
-    next reconcile finds an empty change-state and re-derives everything from
-    the .md — which is the documented migration path for v3.
+
+def _schema_int(value: str | None) -> int | None:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def ensure_schema(conn: sqlite3.Connection, *, dim: int | None = None) -> None:
+    """Create the schema, dropping an OLDER incompatible one first.
+
+    A v2 database (scope / agent_name columns, no ``meta``) or any older
+    layout is wiped rather than migrated. Nothing is lost: the next reconcile
+    finds an empty change-state and re-derives everything from the .md, which
+    is the documented migration path for v3.
+
+    A **newer** schema is never touched. One engine directory is shared by
+    every project on the machine, so an older build meeting an index written
+    by a newer one is a normal consequence of a rollback or of two phases in
+    flight — and silently destroying that index would be the worst possible
+    response. It raises instead.
+
+    Fast path: an already-current database is detected with reads only and
+    returns without opening a write transaction. That is what keeps a search
+    from contending with the indexer for the WAL writer lock, and what lets a
+    read-only database be opened at all.
     """
     existing = {
         r["name"]
         for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
     }
-    if existing & set(_ALL_TABLES) and _read_meta(conn).get(
-        "schema_version"
-    ) != SCHEMA_VERSION:
-        for table in _ALL_TABLES:
+    stored = _read_meta(conn).get("schema_version") if "meta" in existing else None
+    current = _schema_int(SCHEMA_VERSION)
+    found = _schema_int(stored)
+
+    if stored is not None and found is not None and current is not None:
+        if found > current:
+            raise SchemaTooNew(
+                f"index schema v{found} was written by a newer mnemo "
+                f"(this build speaks v{current}); refusing to touch it"
+            )
+        if found == current and _ALL_TABLES[0] in existing:
+            return  # already current — no DDL, no write, no lock
+
+    if existing & set(_ALL_TABLES) and stored != SCHEMA_VERSION:
+        for table in _ALL_TABLES:  # older or pre-meta layout -> rebuild
             conn.execute(f"DROP TABLE IF EXISTS {table}")
 
     conn.execute(
@@ -140,7 +187,11 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         "    value TEXT NOT NULL)"
     )
     _set(conn, "schema_version", SCHEMA_VERSION)
-    _create_content(conn, EMBEDDING_DIM)
+    # The vector column width belongs to whoever produces the vectors. Fall
+    # back to what the index already recorded, and only then to the built-in
+    # default — the store must not assume the local provider (phase 7).
+    width = dim or _schema_int(_read_meta(conn).get("embedding_dim")) or EMBEDDING_DIM
+    _create_content(conn, width)
     conn.commit()
 
 
@@ -215,32 +266,57 @@ def needs_rebuild(
     ) != str(dim)
 
 
-def reset_index(conn: sqlite3.Connection) -> None:
+def reset_index(conn: sqlite3.Connection, *, dim: int | None = None) -> None:
     """Drop every chunk, vector, FTS row and hash; keep the meta.
 
     DROP rather than DELETE: a rebuild may be triggered by a dimensionality
     change, and the ``vec0`` column width is part of the table definition.
+
+    Pass ``dim`` — the width of the vectors that are about to be written — so
+    this can run **before** ``init_meta`` claims the new provider. Order
+    matters: if meta were updated first and the process died before the wipe,
+    meta would claim provider B over provider A's vectors, ``needs_rebuild``
+    would answer False forever, and search would silently blend incomparable
+    vectors. Wiping first is recoverable; the reverse is not. ``dim=None``
+    falls back to what meta already records, for callers rebuilding in place.
     """
     for table in _CONTENT_TABLES:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
-    dim = int(_read_meta(conn).get("embedding_dim") or EMBEDDING_DIM)
-    _create_content(conn, dim)
+    width = dim or _schema_int(_read_meta(conn).get("embedding_dim")) or EMBEDDING_DIM
+    _create_content(conn, width)
     conn.commit()
 
 
 # ----------------------------------------------------------------- write
 
 
+def _query(conn: sqlite3.Connection, sql: str, params: tuple = ()) -> list:
+    """Run a read query, treating "the schema is not there yet" as empty.
+
+    A reader may legitimately open a database that no writer has initialised
+    (``connect(..., ensure=False)``, or one that is read-only). "No rows" is
+    the honest answer there; anything else — a corrupt file, a locked page —
+    still raises, because that is not the same thing as empty.
+    """
+    try:
+        return conn.execute(sql, params).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "no such table" in str(exc):
+            return []
+        raise
+
+
 def get_indexed_hashes(conn: sqlite3.Connection) -> dict[str, str]:
     """Map of relpath -> sha256 for everything currently indexed."""
     return {
         r["path"]: r["sha256"]
-        for r in conn.execute("SELECT path, sha256 FROM files")
+        for r in _query(conn, "SELECT path, sha256 FROM files")
     }
 
 
 def get_file_row(conn: sqlite3.Connection, path: str) -> sqlite3.Row | None:
-    return conn.execute("SELECT * FROM files WHERE path = ?", (path,)).fetchone()
+    rows = _query(conn, "SELECT * FROM files WHERE path = ?", (path,))
+    return rows[0] if rows else None
 
 
 def insert_chunk(
@@ -323,31 +399,35 @@ def get_vectors(
     placeholders = ",".join("?" * len(ids))
     return {
         r["rowid"]: json.loads(r["j"])
-        for r in conn.execute(
+        for r in _query(
+            conn,
             f"SELECT rowid, vec_to_json(embedding) AS j "
             f"FROM vec_chunks WHERE rowid IN ({placeholders})",
-            ids,
+            tuple(ids),
         )
     }
 
 
 def chunk_count(conn: sqlite3.Connection) -> int:
     """Total chunks — 0 is what makes a bank's status ``empty``, not ``ready``."""
-    return conn.execute("SELECT count(*) AS n FROM chunks").fetchone()["n"]
+    rows = _query(conn, "SELECT count(*) AS n FROM chunks")
+    return rows[0]["n"] if rows else 0
 
 
 def file_count(conn: sqlite3.Connection) -> int:
-    return conn.execute("SELECT count(*) AS n FROM files").fetchone()["n"]
+    rows = _query(conn, "SELECT count(*) AS n FROM files")
+    return rows[0]["n"] if rows else 0
 
 
 def list_files(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    return conn.execute("SELECT * FROM files ORDER BY path").fetchall()
+    return _query(conn, "SELECT * FROM files ORDER BY path")
 
 
 def chunk_map(conn: sqlite3.Connection, path: str) -> list[sqlite3.Row]:
     """Chunk boundaries of one file, in order — the UI's chunk-viz source."""
-    return conn.execute(
+    return _query(
+        conn,
         "SELECT chunk_uid, chunk_index, heading, start_char, end_char "
         "FROM chunks WHERE path = ? ORDER BY chunk_index",
         (path,),
-    ).fetchall()
+    )

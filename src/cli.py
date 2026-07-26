@@ -2,10 +2,10 @@
 
   warmup            explicit one-time 2 GB model download + sanity check
   init [--root]     wire mnemo into a project (additive, idempotent)
-  ingest [--root]   reconcile a project's .md -> its index (hook target)
-  search [--root]   semantic search over a project's memory
+  ingest [--root]   reconcile a bank's .md -> its index (hook target)
+  search [--root]   semantic search over a bank
   mcp               run the stdio MCP server (agent-callable tools)
-  hook-postedit     PostToolUse target: reindex ONLY if a memory file changed
+  hook-postedit     PostToolUse target: reindex ONLY if a bank .md changed
   hook-inject       UserPromptSubmit target: inject relevant memory
   embed-server      resident embedding helper (auto-started, not run by hand)
   projects          list known projects (hash → cwd → last inject → log size)
@@ -13,8 +13,8 @@
   service …         start / stop / status / restart the background service
   autostart …       enable / disable / status of per-OS start-at-login
 
-`--root` defaults to the current directory, so the SessionStart hook
-indexes whatever project the session is in.
+`--root` is the **bank root** and defaults to the current directory: a bank
+is one folder, flat, and every `.md` under it belongs to the same index.
 """
 from __future__ import annotations
 
@@ -157,7 +157,7 @@ def _cmd_hook_inject() -> int:
         return 0
 
     t_search_start = time.monotonic()
-    hits = search(prompt, root=root, qvec=vec, gate=True, top_k=INJECT_TOP_N)
+    hits = _search_bank(root, prompt, qvec=vec, gate=True, top_k=INJECT_TOP_N)
     search_ms = (time.monotonic() - t_search_start) * 1000.0
     hit_records = [
         {
@@ -248,10 +248,30 @@ def _cmd_projects() -> int:
     return 0
 
 
+def _search_bank(root, query: str, **kwargs):
+    """Open a bank read-only and search it.
+
+    `search()` is pure and takes an open connection, so the caller owns the
+    lifecycle. Read-only on purpose: a search must never create or migrate an
+    index — an absent one simply has nothing to say. Phase 4 replaces this
+    with an HTTP call to the backend.
+    """
+    from .store import connect
+
+    paths = resolve(root)
+    if not paths.db.exists():
+        return []
+    conn = connect(paths.db, ensure=False)
+    try:
+        return search(conn, query, **kwargs)
+    finally:
+        conn.close()
+
+
 def _cmd_search(args: argparse.Namespace) -> int:
-    hits = search(
+    hits = _search_bank(
+        args.root,
         args.query,
-        root=args.root,
         path_prefix=args.path_prefix,
         top_k=args.top_k,
     )
