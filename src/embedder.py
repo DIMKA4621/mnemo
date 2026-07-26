@@ -86,6 +86,8 @@ def is_model_cached() -> bool:
 
 @lru_cache(maxsize=1)
 def _model() -> TextEmbedding:
+    from fastembed import TextEmbedding
+
     # Create the cache dir only when missing: on a read-only mount (container
     # with model-cache from the host) the model is already present and an
     # unconditional mkdir on the existing dir can raise EROFS.

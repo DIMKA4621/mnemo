@@ -118,11 +118,30 @@ EMBED_TOKEN_FILE: Path = STATE_DIR / "embed.token"
 _LOOPBACK: frozenset[str] = frozenset({"127.0.0.1", "::1", "localhost"})
 EMBED_HOST_IS_LOCAL: bool = EMBED_HOST in _LOOPBACK
 
+# How long to wait for the resident to accept a connection. This is a
+# liveness probe, not a request: measured on loopback, a live resident
+# accepts in ~0.5 ms, and a dead port refuses rather than dawdling. The old
+# 0.5 s was a thousandfold margin that every degraded search paid in full.
+# The knob exists for a resident so saturated that its listen backlog is
+# full — if that is ever observed, raise this rather than re-argue it.
+# A remote resident keeps the generous value: the measurement was loopback.
+EMBED_PROBE_TIMEOUT: float = float(
+    os.environ.get("MNEMO_EMBED_PROBE_TIMEOUT", "0.15")
+)
+
 # Idle exit frees the ~1.6 GB the resident holds. 0 disables it: a machine
 # serving isolated environments keeps the model resident permanently.
-# v3 will default this to 0 (always-warm, design §4) — but only in phase 5,
-# together with `mnemo service stop`: until a supported way to release the
-# memory exists, a 0 default would pin 1.6 GB with no way out.
+#
+# COST OF THE CURRENT DEFAULT, measured: once the resident has exited, the
+# next search pays ~9 s — 0.5 s failed probe + 2.3 s to spawn and bind +
+# 6.2 s to load the model. So with 1800 s, the first search after any
+# half-hour gap takes ~9 s, which sits badly against FR-3 ("пошук —
+# миттєвий").
+#
+# It stays at 1800 anyway until phase 5, and deliberately: `0` means the
+# model is pinned in RAM with no supported way to release it until
+# `mnemo service stop` exists. Phase 5 owns both that command and the
+# always-on service that keeps the resident warm, and flips this to 0.
 EMBED_IDLE_TIMEOUT: int = int(os.environ.get("MNEMO_EMBED_IDLE_TIMEOUT", "1800"))
 
 # Embedding CPU cap. ONNX Runtime defaults to ALL cores per embed call;

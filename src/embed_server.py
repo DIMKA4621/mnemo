@@ -32,6 +32,7 @@ from .config import (
     EMBED_HOST_IS_LOCAL,
     EMBED_IDLE_TIMEOUT,
     EMBED_PORT,
+    EMBED_PROBE_TIMEOUT,
     EMBED_TOKEN_FILE,
 )
 
@@ -161,7 +162,15 @@ def serve() -> None:
 # --------------------------------------------------------------- client
 
 
-def _connect(timeout: float) -> socket.socket | None:
+def _connect(timeout: float | None = None) -> socket.socket | None:
+    """Probe the resident. ``timeout=None`` uses the configured probe budget.
+
+    Loopback gets the tight budget (a live resident accepts in ~0.5 ms); a
+    remote resident keeps the generous one, since the measurement that
+    justified tightening it was taken on loopback only.
+    """
+    if timeout is None:
+        timeout = EMBED_PROBE_TIMEOUT if EMBED_HOST_IS_LOCAL else 0.5
     try:
         return socket.create_connection((EMBED_HOST, EMBED_PORT), timeout=timeout)
     except OSError:
@@ -208,7 +217,7 @@ def _obtain_socket() -> socket.socket | None:
     Returns None if the resident cannot be reached — every caller must
     treat that as "degrade gracefully", never as fatal.
     """
-    sock = _connect(timeout=0.5)
+    sock = _connect()
     if sock is not None:
         return sock
     if not EMBED_HOST_IS_LOCAL:
@@ -221,7 +230,7 @@ def _obtain_socket() -> socket.socket | None:
     deadline = time.time() + 5.0  # process bind is fast (no model yet)
     while time.time() < deadline:
         time.sleep(0.2)
-        sock = _connect(timeout=0.5)
+        sock = _connect()
         if sock is not None:
             return sock
     return None
@@ -235,7 +244,7 @@ def server_is_up() -> bool:
     container that ships no model and dials a shared remote one). Does not
     autostart anything — a pure liveness check on the configured address.
     """
-    sock = _connect(timeout=0.5)
+    sock = _connect()
     if sock is None:
         return False
     sock.close()
