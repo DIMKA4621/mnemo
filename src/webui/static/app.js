@@ -588,12 +588,7 @@ function renderFile() {
   let cursor = 0;
 
   for (const chunk of chunks) {
-    // Anything the index did not claim is shown plainly, with a marker — this
-    // only happens if the indexer left a gap, and hiding it would be a lie.
-    if (chunk.start_char > cursor) {
-      doc.appendChild(el('div', { className: 'gap-note', text: '· поза чанками ·' }));
-      doc.appendChild(el('pre', { className: 'chunk-body', text: cut.slice(cursor, chunk.start_char) }));
-    }
+    appendGap(doc, cut.slice(cursor, chunk.start_char));
     doc.appendChild(chunkDivider(chunk));
     doc.appendChild(el('pre', {
       className: 'chunk-body',
@@ -602,16 +597,29 @@ function renderFile() {
     cursor = Math.max(cursor, chunk.end_char);
   }
 
-  if (cursor < cut.total) {
-    doc.appendChild(el('div', { className: 'gap-note', text: '· поза чанками ·' }));
-    doc.appendChild(el('pre', { className: 'chunk-body', text: cut.slice(cursor, cut.total) }));
-  }
+  appendGap(doc, cut.slice(cursor, cut.total));
 
   doc.appendChild(el('div', { className: 'chunk-divider is-end' }, [
     el('span', { className: 'cd-label', text: 'кінець · ' + cut.total + ' символів' }),
   ]));
 
   body.appendChild(doc);
+}
+
+/**
+ * Render text that no chunk claims.
+ *
+ * The splitter leaves the blank line between sections outside both chunks, so
+ * a whitespace-only gap is ordinary and gets no marker. A gap with real
+ * content in it means the index does not cover part of the file — that is
+ * worth seeing, so it keeps the marker.
+ */
+function appendGap(doc, text) {
+  if (!text) return;
+  if (text.trim() !== '') {
+    doc.appendChild(el('div', { className: 'gap-note', text: '· поза чанками ·' }));
+  }
+  doc.appendChild(el('pre', { className: 'gap-body', text: text }));
 }
 
 function chunkDivider(chunk) {

@@ -414,7 +414,8 @@ h2 {
 .chunk-divider .cd-label { white-space: nowrap; }
 .chunk-divider .cd-range { color: var(--fg-mute); }
 
-.chunk-body { padding: 4px 0 8px; }
+.chunk-body,
+.gap-body { padding: 4px 0 8px; }
 
 .gap-note {
   margin: 2px 0;
