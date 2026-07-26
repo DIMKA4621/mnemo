@@ -27,24 +27,15 @@ _STATE = Path(tempfile.mkdtemp(prefix="mnemo service "))
 os.environ["MNEMO_STATE_DIR"] = str(_STATE)
 
 from src import service_ctl  # noqa: E402
-from src.config import EMBED_PORT  # noqa: E402
+from _hygiene import ResidentGuard  # noqa: E402
 
 _passed = _failed = 0
 
-# Since MNEMO_EMBED_IDLE_TIMEOUT defaults to 0, a resident started during a
-# test never exits by itself -- a suite that spawns one and walks away leaves
-# ~1.5 GB resident until reboot. Teardown reaps it, but ONLY if we created
-# it: a resident that was already running belongs to the user's own work and
-# is none of our business.
-_PREEXISTING_RESIDENT = service_ctl._listening_pid(EMBED_PORT) is not None
-
-
-def _reap_resident_we_created() -> None:
-    if _PREEXISTING_RESIDENT:
-        return
-    outcome = service_ctl.stop_resident()
-    if outcome == service_ctl.RESIDENT_STOPPED:
-        print("teardown: reaped the embedding resident this suite started")
+# Reaping is by process identity, not by port: a resident stranded on a
+# non-default port is invisible to stop_resident(), which only inspects the
+# configured one. See tests/_hygiene.py.
+_RESIDENTS = ResidentGuard()
+_RESIDENTS.snapshot()
 
 # A child that reports what it can see about its own console, then idles
 # until a stop file appears. With --alloc it first calls AllocConsole(),
@@ -637,6 +628,16 @@ def _embed_port_of_our_own():
         with patch.object(config, "EMBED_PORT", port):
             yield port
     finally:
+        # Reap anything still on this port. An ephemeral port nobody else
+        # knows about makes this unambiguous: whatever is here is ours. It
+        # also matters more than it looks -- a resident stranded on a random
+        # port is invisible to `stop_resident`, which only ever inspects the
+        # configured one, so it would hold ~1.5 GB until reboot with no
+        # command able to find it. That happened; this is the fix.
+        stray = service_ctl._listening_pid(port)
+        if stray is not None:
+            service_ctl._terminate_tree(stray)
+            print(f"teardown: reaped a stray resident on private port {port}")
         if previous is None:
             os.environ.pop("MNEMO_EMBED_PORT", None)
         else:
@@ -834,7 +835,7 @@ def main() -> int:
         finally:
             # The backend indexes on start, which spawns a resident on the
             # real port. With idle exit off it would outlive the suite.
-            _reap_resident_we_created()
+            _RESIDENTS.reap()
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
