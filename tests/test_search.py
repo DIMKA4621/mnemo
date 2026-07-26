@@ -19,8 +19,10 @@ for _stream in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from src.config import resolve  # noqa: E402
 from src.index import reindex  # noqa: E402
 from src.search import search  # noqa: E402
+from src.store import connect  # noqa: E402
 
 # The labeled corpus is a bundled fixture (a synthetic "demo project"),
 # NOT this repo's own memory — mnemo is the framework, it keeps no
@@ -91,7 +93,11 @@ def evaluate() -> int:
     rows: list[str] = []
 
     for c in CASES:
-        hits = search(c.query, root=FIXTURE, path_prefix=c.prefix, top_k=5)
+        conn = connect(resolve(FIXTURE).db, ensure=False)
+        try:
+            hits = search(conn, c.query, path_prefix=c.prefix, top_k=5)
+        finally:
+            conn.close()
         paths = [h.path for h in hits]
         hit1 = bool(paths) and paths[0] in c.expected
         hit3 = any(p in c.expected for p in paths[:3])
