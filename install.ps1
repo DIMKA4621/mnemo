@@ -419,7 +419,11 @@ function Invoke-Install {
             if (-not [string]::IsNullOrWhiteSpace($candidate)) {
                 $resolved = [System.IO.Path]::GetFullPath($candidate)
                 if ($resolved -ne $powerShellHome) {
-                    throw "HOME resolves to '$resolved', but PowerShell ~ resolves to '$powerShellHome'. mnemo requires both to match for portable MCP and hook wiring."
+                    # MCP no longer depends on this (it is a URL + token since
+                    # phase 4), but the git-tracked hook command still is
+                    # `~/.claude/mnemo/bin/mnemo`, and the engine itself lives
+                    # under HOME. Both break if the two disagree.
+                    throw "HOME resolves to '$resolved', but PowerShell ~ resolves to '$powerShellHome'. mnemo requires both to match: the engine lives under HOME and the git-tracked hook resolves ~ at run time."
                 }
             }
         }

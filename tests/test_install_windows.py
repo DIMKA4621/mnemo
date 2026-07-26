@@ -223,14 +223,25 @@ def main() -> int:
 
         # An isolated -InstallHome must not reach into user scope: no logon
         # task, no profile edit, no environment variable.
+        #
+        # Asserting "no task exists" was wrong: once the machine has a real
+        # engine installed, the logon task legitimately exists and the check
+        # failed for the right reason at the wrong target. The invariant is
+        # narrower -- whatever task exists must not point at THIS temporary
+        # engine home.
         assert "isolated home" in first.stdout, first.stdout
         task = subprocess.run(
-            ["schtasks", "/Query", "/TN", "mnemo service"],
+            ["schtasks", "/Query", "/TN", "mnemo service", "/XML"],
             capture_output=True, text=True, encoding="utf-8",
             errors="replace", timeout=60,
         )
-        assert task.returncode != 0, "an isolated install registered a logon task"
-        ok("isolated install touches no user-scope registration")
+        if task.returncode == 0:
+            assert str(engine) not in task.stdout, (
+                "an isolated install redirected the real logon task at itself"
+            )
+            ok("isolated install left the real logon task pointing elsewhere")
+        else:
+            ok("isolated install registered no logon task")
 
         assert (engine / "bin" / "mnemow.exe").is_file()
         ok("both launchers installed (console + windowless)")

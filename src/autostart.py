@@ -147,14 +147,26 @@ def _windows_enable() -> int:
         print("mnemo autostart: run install.ps1 first")
         return EXIT_FAILED
 
-    # schtasks reads the XML as UTF-16, as declared in the prolog.
-    xml_path = USER_HOME / "state" / "autostart-task.xml"
-    xml_path.parent.mkdir(parents=True, exist_ok=True)
-    xml_path.write_text(task_xml(launcher), encoding="utf-16")
+    # schtasks reads the XML as UTF-16, as declared in the prolog. It is a
+    # hand-off file, not state: state/ holds the index, the bank registry and
+    # the journal, and nothing else may accumulate there. Written to a temp
+    # directory and removed once the scheduler has taken a copy.
+    import tempfile
 
-    result = _run(
-        ["schtasks", "/Create", "/TN", TASK_NAME, "/XML", str(xml_path), "/F"]
-    )
+    handle, raw = tempfile.mkstemp(prefix="mnemo-task-", suffix=".xml")
+    os.close(handle)
+    xml_path = Path(raw)
+    try:
+        xml_path.write_text(task_xml(launcher), encoding="utf-16")
+        result = _run(
+            ["schtasks", "/Create", "/TN", TASK_NAME, "/XML", str(xml_path), "/F"]
+        )
+    finally:
+        try:
+            xml_path.unlink()
+        except OSError:
+            pass
+
     if result.returncode != 0:
         print(f"mnemo autostart: schtasks failed: {result.stdout.strip()} {result.stderr.strip()}")
         return EXIT_FAILED
