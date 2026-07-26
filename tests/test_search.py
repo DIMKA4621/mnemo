@@ -13,6 +13,10 @@ import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8")
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src.index import reindex  # noqa: E402

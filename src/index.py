@@ -43,7 +43,7 @@ def _discover(paths: ProjectPaths) -> list[tuple[Path, str, str | None]]:
 
 def _disk(paths: ProjectPaths) -> dict[str, tuple[Path, str, str | None]]:
     return {
-        str(p.relative_to(paths.root)): (p, scope, agent)
+        p.relative_to(paths.root).as_posix(): (p, scope, agent)
         for p, scope, agent in _discover(paths)
     }
 

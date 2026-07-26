@@ -20,8 +20,10 @@ index is rebuilt from it deterministically and never edited by hand.
 **Engine — user scope, once per machine, NOT in git**
 `~/.claude/mnemo/`: `.venv`, `model-cache` (~2.2 GB, only via an
 explicit `warmup`), `state/<projhash>.db` (the disposable index),
-`bin/mnemo` (self-locating launcher). Installed by `install.sh`;
-idempotent; never deletes `state/` or `model-cache/`.
+`bin/mnemo` (self-locating launcher; a real `bin\mnemo.exe` on Windows).
+Installed by `install.sh` on POSIX and `install.ps1` on native Windows
+(PowerShell 5.1+, 64-bit Python 3.10+ — no WSL, PowerShell 7 or PATH
+entry required); idempotent; never deletes `state/` or `model-cache/`.
 
 **Wiring — git scope, per project, ships to everyone who clones**
 Created by `mnemo init` — additive, idempotent, refuses rather than
@@ -111,13 +113,31 @@ additively, after insisting it is needed for the model to work.
   warm resident helper, gated search, injects the few most relevant
   curated sections. Best-effort; never blocks. No SessionEnd hook.
 
-## Portable invocation
+## Portable invocation (cross-platform)
 
 `mnemo init` writes a launcher reference with **no machine path** in
-git: hooks use the shell form (`~` expands per-user at run time); the
-`.mcp.json` `command` is a `/bin/sh -c` wrapper expanding `$HOME`. POSIX
-(Linux/macOS); Windows is separate deferred debt. Resolve a conflict by
-copying the portable form from the `mnemo init` refusal report.
+git — identical on Linux, macOS and native Windows:
+
+- **Hooks** use the shell form `~/.claude/mnemo/bin/mnemo <subcmd>` — the
+  shell expands `~` per user at run time.
+- **`.mcp.json`** `command` is `${HOME}/.claude/mnemo/bin/mnemo` with
+  `args: ["mcp"]` — Claude Code substitutes each teammate's own `$HOME`
+  at spawn time.
+
+The one logical path resolves to the platform's real launcher:
+`~/.claude/mnemo/bin/mnemo` (extensionless Bash script) on Linux/macOS,
+`bin\mnemo.exe` on Windows (process creation resolves the extensionless
+path to the `.exe`). On Windows `install.ps1` sets the user `HOME`
+environment variable **only when it is absent** (so `${HOME}` resolves),
+never overwrites it, and refuses a value different from PowerShell
+`$HOME`/`%USERPROFILE%` so MCP and hooks cannot diverge. After first
+creating it, close and reopen the launching terminal or IDE, then restart
+Claude Code. Runtime root resolution is the same everywhere — explicit
+`--root` > `MNEMO_ROOT` > `CLAUDE_PROJECT_DIR` > cwd — and indexed
+relative file identifiers always use `/`, avoiding separator-only drift
+between platforms. Resolve a wiring
+conflict by copying the portable form from the `mnemo init` refusal
+report.
 
 ## `mnemo` is not a human command
 

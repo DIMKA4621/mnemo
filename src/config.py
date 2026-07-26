@@ -139,11 +139,15 @@ class ProjectPaths:
 def resolve(root: Path | str | None) -> ProjectPaths:
     """Resolve all paths for a project root.
 
-    Precedence: explicit arg > $MNEMO_ROOT > current directory.
-    The env override lets an MCP server (spawned with an arbitrary cwd)
-    be pinned to the right project.
+    Precedence: explicit arg > $MNEMO_ROOT > $CLAUDE_PROJECT_DIR > cwd.
+    Claude Code supplies CLAUDE_PROJECT_DIR to project-scoped MCP servers
+    and hooks, so project resolution never depends on the child cwd.
     """
-    chosen = root or os.environ.get("MNEMO_ROOT")
+    chosen = (
+        root
+        or os.environ.get("MNEMO_ROOT")
+        or os.environ.get("CLAUDE_PROJECT_DIR")
+    )
     root_path = Path(chosen).resolve() if chosen else Path.cwd().resolve()
     claude = root_path / ".claude"
     proj_hash = hashlib.sha1(str(root_path).encode()).hexdigest()[:16]
