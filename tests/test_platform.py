@@ -31,7 +31,7 @@ for _stream in (sys.stdout, sys.stderr):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
 from src import config, embedder  # noqa: E402
-from src.index import _disk  # noqa: E402
+from src.index import scan_bank  # noqa: E402
 from src.scaffold import (  # noqa: E402
     _Refuse,
     _plan_mcp,
@@ -383,7 +383,7 @@ def test_index_paths() -> None:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("# vendor\n", encoding="utf-8")
 
-        walk = _disk(config.resolve(root))
+        walk = scan_bank(config.resolve(root).root)
         check(
             "vendor directories are excluded at any depth",
             not [rel for rel in vendored if rel in walk],
@@ -398,7 +398,7 @@ def test_index_paths() -> None:
             (root / rel).unlink()
 
         # Back to just the curated fixture for the strict identifier list.
-        walk = _disk(config.resolve(root))
+        walk = scan_bank(config.resolve(root).root)
         identifiers = sorted(walk)
         check(
             "flat walk takes every .md under the bank root",
@@ -423,16 +423,16 @@ def test_index_paths() -> None:
         check(
             "stored identifiers are relative to the bank root",
             all(not Path(value).is_absolute() for value in identifiers)
-            and all(walk[v] == root / v for v in identifiers),
+            and all(walk[v].abs_path == root / v for v in identifiers),
             detail=str(identifiers),
         )
-        # `_disk` sorts Path objects, so the key order is normcase-folded on
+        # `scan_bank` sorts Path objects, so key order is normcase-folded on
         # Windows and byte-ordered on POSIX — the two platforms disagree.
         # What the indexer actually relies on is that ONE machine repeats
         # itself, so assert that, not a cross-platform order.
         check(
             "walk order is stable across calls",
-            list(_disk(config.resolve(root))) == list(walk),
+            list(scan_bank(config.resolve(root).root)) == list(walk),
             detail=str(list(walk)),
         )
 
