@@ -275,19 +275,88 @@ EMBED_PROVIDER: str = os.environ.get("MNEMO_PROVIDER", "local")
 
 
 # --- registry & banks (G) -----------------------  service-dev
-# (empty — add MNEMO_BANKS_FILE and friends here)
+
+# The banks registry: one human-editable JSON document listing every memory
+# root this machine serves. Hand edits are picked up without a restart (the
+# registry re-reads whenever the file's mtime changes), so relocating it is a
+# supported move rather than a trick.
+#
+# Only the OVERRIDE lives here, as a raw string, deliberately. A
+# `BANKS_FILE = STATE_DIR / "banks.json"` constant would be evaluated once at
+# import and then never follow a later change to STATE_DIR — the frozen-path
+# bug that leaked empty databases into the user's real state dir. Anything
+# derived from STATE_DIR is computed **when asked**, by the module that owns
+# it (`registry.banks_file()`), not cached here.
+#
+# Same rule for everyone: read `config.STATE_DIR` through the module, never
+# `from .config import STATE_DIR`.
+BANKS_FILE_OVERRIDE: str | None = os.environ.get("MNEMO_BANKS_FILE")
 
 
 # --- api / websocket (J) ------------------------  service-dev
-# (empty — add MNEMO_API_HOST / _PORT / _TOKEN / _URL here)
+
+# Everything mnemo does goes through this one loopback backend. Port 8918,
+# not 8917: the embedding resident already owns 8917.
+SERVICE_VERSION: str = "3.0.0"
+API_HOST: str = os.environ.get("MNEMO_API_HOST", "127.0.0.1")
+API_PORT: int = int(os.environ.get("MNEMO_API_PORT", "8918"))
+# The token is 48 hex chars in `STATE_DIR/api.token`, generated on first
+# start. The PATH is derived live by `api.token_file()` (see the note in the
+# registry section); only the value override belongs here.
+API_TOKEN: str | None = os.environ.get("MNEMO_API_TOKEN")
+API_URL: str = os.environ.get(
+    "MNEMO_API_URL", f"http://{API_HOST}:{API_PORT}"
+)
+# A face that finds no backend starts one (windowless) and carries on, so the
+# service is up on first use rather than after a reboot. 0 disables it — set
+# it in CI, where a stray background process outliving the job is worse than
+# a failed call.
+API_AUTOSTART: bool = os.environ.get("MNEMO_API_AUTOSTART", "1") != "0"
+# How long a face waits for a backend it just started before giving up.
+API_AUTOSTART_WAIT_S: float = float(
+    os.environ.get("MNEMO_API_AUTOSTART_WAIT_S", "20")
+)
+# WebSocket: keepalive, and the ceiling on index_progress chatter (§9.7).
+WS_PING_INTERVAL_S: float = 30.0
+WS_PROGRESS_THROTTLE_MS: int = 200
 
 
 # --- queue & watcher (E, F) ---------------------  service-dev
-# (empty — add MNEMO_QUEUE_PRIORITY / _WORKERS / _DEBOUNCE_MS here)
+
+# 0 -> pure FIFO: every task becomes NORMAL and nothing is preempted. On by
+# default so a single edit never waits behind a full rebuild.
+QUEUE_PRIORITY: bool = os.environ.get("MNEMO_QUEUE_PRIORITY", "1") != "0"
+# Priority alone is one-sided: a sustained stream of HIGH (an active editing
+# session is exactly that) would keep a bulk build from ever finishing. After
+# N consecutive HIGH tasks the worker takes one LOW regardless, so both
+# directions are bounded. 0 disables aging.
+QUEUE_AGING: int = int(os.environ.get("MNEMO_QUEUE_AGING", "8"))
+# One worker: the backend is the only writer to a bank's index.
+WORKERS: int = int(os.environ.get("MNEMO_WORKERS", "1"))
+# Collapse a storm of saves — an editor writing, a formatter rewriting right
+# after, a `git checkout` touching hundreds of files — into one reindex.
+DEBOUNCE_MS: int = int(os.environ.get("MNEMO_DEBOUNCE_MS", "800"))
+# Catch up on whatever changed while the service was down.
+RECONCILE_ON_START: bool = os.environ.get("MNEMO_RECONCILE_ON_START", "1") != "0"
+# Safety net: watchdog can miss events (network shares, a suspended laptop, a
+# burst that overflows the OS buffer), and a missed delete is invisible
+# forever otherwise. A rescan is a bulk — scan and hash-diff, no embedding —
+# so an idle bank costs one directory walk. 0 disables it.
+RESCAN_INTERVAL_S: float = float(
+    os.environ.get("MNEMO_RESCAN_INTERVAL_S", "900")
+)
 
 
 # --- service log & retention (I) ----------------  service-dev
-# (empty — add MNEMO_LOG_RETENTION_DAYS / _MAX_ROWS here)
+
+# Query and index events live in `STATE_DIR/service.db`, written only by the
+# backend, one connection, WAL. The path is derived live by
+# `servicelog.db_path()` — see the frozen-path note in the registry section.
+LOG_RETENTION_DAYS: int = int(os.environ.get("MNEMO_LOG_RETENTION_DAYS", "30"))
+# Row backstop for a machine that queries far more than it sleeps; 0 = off.
+LOG_MAX_ROWS: int = int(os.environ.get("MNEMO_LOG_MAX_ROWS", "200000"))
+# Pruned at start and on this interval.
+LOG_PRUNE_INTERVAL_S: float = 6 * 3600
 
 
 # --- process lifecycle (L) ----------------------  platform-dev

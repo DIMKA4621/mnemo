@@ -51,13 +51,29 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
-from .config import (
-    SERVICE_INFO_FILE,
-    SERVICE_PID_FILE,
-    SERVICE_START_GRACE,
-    SERVICE_STOP_TIMEOUT,
-    STATE_DIR,
-)
+from . import config
+from .config import SERVICE_START_GRACE, SERVICE_STOP_TIMEOUT
+
+
+def state_dir() -> Path:
+    """The writable state directory, resolved when asked.
+
+    Never ``from .config import STATE_DIR``: that binds the Path once at
+    import, so a test or a container that repoints ``config.STATE_DIR``
+    afterwards would leave this module reading and writing the old
+    directory. Same value, computed live -- as api.service_info_file does.
+    """
+    return Path(config.STATE_DIR)
+
+
+def service_pid_file() -> Path:
+    """Our spawn-identity file. Derived live, see state_dir()."""
+    return state_dir() / "service.pid"
+
+
+def service_info_file() -> Path:
+    """The backend's service.json. Derived live, see state_dir()."""
+    return state_dir() / "service.json"
 
 # Exit codes. 3 means "service is down" across the whole CLI (contracts
 # §11.1), so a script can tell it apart from "ran fine, found nothing".
@@ -269,19 +285,19 @@ def _read_json(path: Path) -> dict | None:
 
 def read_service_info() -> dict | None:
     """The backend's ``service.json`` (contracts §11.2), or None."""
-    return _read_json(SERVICE_INFO_FILE)
+    return _read_json(service_info_file())
 
 
 def read_identity() -> dict | None:
     """Our ``service.pid``: who we spawned, and which instance it was."""
-    return _read_json(SERVICE_PID_FILE)
+    return _read_json(service_pid_file())
 
 
 def _write_identity(identity: dict[str, Any]) -> None:
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
-    tmp = SERVICE_PID_FILE.with_suffix(".pid.tmp")
+    state_dir().mkdir(parents=True, exist_ok=True)
+    tmp = service_pid_file().with_suffix(".pid.tmp")
     tmp.write_text(json.dumps(identity, indent=2), encoding="utf-8")
-    tmp.replace(SERVICE_PID_FILE)  # atomic: never a half-written state file
+    tmp.replace(service_pid_file())  # atomic: never a half-written state file
 
 
 def _clear_identity() -> None:
@@ -293,7 +309,7 @@ def _clear_identity() -> None:
     started.
     """
     try:
-        SERVICE_PID_FILE.unlink()
+        service_pid_file().unlink()
     except OSError:
         pass
 
@@ -303,7 +319,7 @@ def _clear_identity() -> None:
         not isinstance(info_pid, int) or _pid_state(info_pid) == GONE
     ):
         try:
-            SERVICE_INFO_FILE.unlink()
+            service_info_file().unlink()
         except OSError:
             pass
 
@@ -470,11 +486,129 @@ def _default_target() -> list[str]:
     return [windowless_python(), "-m", "src.cli", "serve"]
 
 
+# ------------------------------------------------------------- resident
+
+# The embedding resident is a second process holding ~1.6 GB, and it is NOT
+# one we spawn: a hook or a search starts it on demand. So `service stop` has
+# to reach a process it has no fingerprint for -- and the rule that a bare PID
+# is never grounds to kill still applies.
+#
+# The proof used instead is stronger than a file: the OS says which PID owns
+# the listening socket on the resident's port, and the process on that port
+# answers OUR authenticated protocol with this machine's token. A stranger
+# that happened to bind the port cannot do the second part. The PID and its
+# creation time are re-checked after the probe, so a resident exiting mid-way
+# cannot hand the kill to whoever inherits the number.
+
+RESIDENT_STOPPED = "stopped"
+RESIDENT_ABSENT = "absent"
+RESIDENT_FOREIGN = "foreign"   # alive, but not answering our token
+RESIDENT_FAILED = "failed"
+
+
+def _listening_pid(port: int) -> int | None:
+    """PID owning the LISTEN socket on ``port``, straight from the OS."""
+    if os.name == "nt":
+        out = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            capture_output=True, text=True, errors="replace",
+            creationflags=_CREATE_NO_WINDOW, timeout=30, check=False,
+        ).stdout
+        for line in out.splitlines():
+            parts = line.split()
+            if len(parts) >= 5 and parts[3].upper() == "LISTENING":
+                local = parts[1]
+                if local.rsplit(":", 1)[-1] == str(port) and parts[4].isdigit():
+                    return int(parts[4])
+        return None
+
+    for argv, extract in (
+        (["ss", "-ltnpH"], lambda line: line.split("pid=")[1].split(",")[0]
+            if "pid=" in line else None),
+        (["lsof", "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+         lambda line: line.strip() or None),
+    ):
+        try:
+            out = subprocess.run(
+                argv, capture_output=True, text=True, errors="replace",
+                timeout=30, check=False,
+            ).stdout
+        except (OSError, subprocess.SubprocessError):
+            continue
+        for line in out.splitlines():
+            if argv[0] == "ss" and f":{port} " not in line and not line.endswith(f":{port}"):
+                continue
+            value = extract(line)
+            if value and value.isdigit():
+                return int(value)
+    return None
+
+
+def _resident_answers_our_token(host: str, port: int, timeout: float = 2.0) -> bool:
+    """True when the listener speaks our protocol AND accepts our token.
+
+    Sends an empty query: the resident replies ``{"error": "empty"}`` without
+    embedding anything, so this costs nothing and never loads a model.
+    """
+    import socket as _socket
+
+    from .embed_server import _recv, _send, _token
+
+    try:
+        token = _token()
+    except OSError:
+        return False
+    try:
+        with _socket.create_connection((host, port), timeout=timeout) as sock:
+            _send(sock, {"token": token, "text": "", "kind": "query"})
+            reply = _recv(sock, timeout=timeout)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    # "empty" = authenticated and understood us. "unauthorized" = someone
+    # else's resident, which we must not touch.
+    return reply.get("error") == "empty"
+
+
+def stop_resident(*, timeout: float = 10.0) -> str:
+    """Stop the embedding resident, if it is ours to stop.
+
+    Without this, `service stop` frees the backend but leaves the process
+    that actually holds the ~1.6 GB running with no command that ends it --
+    which is worse than a slow cold start, because nothing tells the user.
+    """
+    from .config import EMBED_HOST, EMBED_HOST_IS_LOCAL, EMBED_PORT
+
+    if not EMBED_HOST_IS_LOCAL:
+        # A shared/remote resident belongs to whoever runs that machine.
+        return RESIDENT_ABSENT
+
+    pid = _listening_pid(EMBED_PORT)
+    if pid is None or _pid_state(pid) != ALIVE:
+        return RESIDENT_ABSENT
+    before = process_fingerprint(pid)
+
+    if not _resident_answers_our_token(EMBED_HOST, EMBED_PORT):
+        return RESIDENT_FOREIGN
+
+    # Re-check: the resident could have exited during the probe and left the
+    # port (and the PID) to somebody else.
+    if _listening_pid(EMBED_PORT) != pid or process_fingerprint(pid) != before:
+        return RESIDENT_ABSENT
+
+    _terminate_tree(pid)
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if _pid_state(pid) != ALIVE or process_fingerprint(pid) != before:
+            return RESIDENT_STOPPED
+        time.sleep(0.1)
+    return RESIDENT_FAILED
+
+
 # ------------------------------------------------------------- lifecycle
 
 
 def _start_lock() -> Path:
-    return STATE_DIR / "service.start.lock"
+    return state_dir() / "service.start.lock"
 
 
 @contextmanager
@@ -485,7 +619,7 @@ def _exclusive_start():
     SERVICE_START_GRACE) reads as "stopped", so a second start spawns a
     second backend and only one of them is ever tracked.
     """
-    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    state_dir().mkdir(parents=True, exist_ok=True)
     lock = _start_lock()
     handle = None
     for _ in range(2):
@@ -584,6 +718,15 @@ def stop(*, timeout: float = SERVICE_STOP_TIMEOUT) -> int:
     fingerprint, PIDs are reused, and the file can be stale or hand-edited --
     so a bare PID must never reach TerminateProcess.
     """
+    # "stop" means all of mnemo, not just the backend. The resident is a
+    # separate process holding the model; leaving it behind would make a
+    # successful-looking stop still hold ~1.6 GB.
+    resident = stop_resident()
+    if resident == RESIDENT_STOPPED:
+        print("mnemo service: embedding resident stopped (model released)")
+    elif resident == RESIDENT_FOREIGN:
+        print("mnemo service: a resident on the embed port is not ours - left alone")
+
     owned = owned_process()
     if owned is None:
         state = probe()
@@ -664,7 +807,22 @@ def status() -> int:
         f"mnemo service: running (pid {state.pid}, {endpoint}, "
         f"since {started}{origin})"
     )
+    _report_resident()
     return EXIT_OK
+
+
+def _report_resident() -> None:
+    """One line about the model holder — the other half of "is mnemo up"."""
+    from .config import EMBED_HOST_IS_LOCAL, EMBED_PORT
+
+    if not EMBED_HOST_IS_LOCAL:
+        print("mnemo service: embedding resident is remote (not managed here)")
+        return
+    pid = _listening_pid(EMBED_PORT)
+    if pid is None or _pid_state(pid) != ALIVE:
+        print("mnemo service: embedding resident not running (model not loaded)")
+        return
+    print(f"mnemo service: embedding resident running (pid {pid}, port {EMBED_PORT})")
 
 
 def restart(*, target: Sequence[str] | None = None) -> int:

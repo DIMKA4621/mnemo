@@ -294,8 +294,8 @@ def test_never_kills_bystanders(work: Path) -> None:
     )
     try:
         wait_for(report)  # it is up and running
-        service_ctl.SERVICE_PID_FILE.unlink(missing_ok=True)
-        service_ctl.SERVICE_INFO_FILE.write_text(
+        service_ctl.service_pid_file().unlink(missing_ok=True)
+        service_ctl.service_info_file().write_text(
             json.dumps({
                 "pid": innocent.pid,
                 "port": 8918,
@@ -315,7 +315,7 @@ def test_never_kills_bystanders(work: Path) -> None:
               innocent.poll() is None, detail=f"exit={innocent.poll()}")
 
         # ... and the same for a truncated / hand-edited file.
-        service_ctl.SERVICE_INFO_FILE.write_text(
+        service_ctl.service_info_file().write_text(
             f'{{"pid": {innocent.pid}, "por', encoding="utf-8"
         )
         service_ctl.stop()
@@ -348,8 +348,39 @@ def test_never_kills_bystanders(work: Path) -> None:
         except subprocess.TimeoutExpired:
             innocent.kill()
         stop_file.unlink(missing_ok=True)
-        service_ctl.SERVICE_PID_FILE.unlink(missing_ok=True)
-        service_ctl.SERVICE_INFO_FILE.unlink(missing_ok=True)
+        service_ctl.service_pid_file().unlink(missing_ok=True)
+        service_ctl.service_info_file().unlink(missing_ok=True)
+
+
+def test_state_dir_is_resolved_live() -> None:
+    """A relocated state dir must move the pid file with it.
+
+    ``SERVICE_PID_FILE`` is ``STATE_DIR / "service.pid"`` evaluated at import;
+    binding it would leave service_ctl reading the pid from the directory the
+    state used to be in. Same bug api.service_info_file() exists to avoid.
+    """
+    from unittest.mock import patch
+
+    import src.config as config
+
+    with tempfile.TemporaryDirectory(prefix="mnemo relocated ") as raw:
+        moved = Path(raw)
+        with patch.object(config, "STATE_DIR", moved):
+            check("state_dir() follows a relocated config.STATE_DIR",
+                  service_ctl.state_dir() == moved, detail=str(service_ctl.state_dir()))
+            check("the pid file follows the state dir",
+                  service_ctl.service_pid_file() == moved / "service.pid",
+                  detail=str(service_ctl.service_pid_file()))
+            check("the backend info file follows the state dir",
+                  service_ctl.service_info_file() == moved / "service.json",
+                  detail=str(service_ctl.service_info_file()))
+
+            service_ctl._write_identity({"pid": 1, "fingerprint": "x"})
+            check("writes land in the relocated directory",
+                  (moved / "service.pid").is_file())
+            check("reads come back from the relocated directory",
+                  (service_ctl.read_identity() or {}).get("pid") == 1)
+        service_ctl.service_pid_file().unlink(missing_ok=True)
 
 
 def test_exit_code_259(work: Path) -> None:
@@ -368,22 +399,22 @@ def test_exit_code_259(work: Path) -> None:
 
 def test_clear_identity_spares_a_live_backend() -> None:
     """Clearing our stale entry must not delete a live backend's file."""
-    service_ctl.SERVICE_PID_FILE.unlink(missing_ok=True)
-    service_ctl.SERVICE_INFO_FILE.write_text(
+    service_ctl.service_pid_file().unlink(missing_ok=True)
+    service_ctl.service_info_file().write_text(
         json.dumps({"pid": os.getpid(), "host": "127.0.0.1", "port": 8918}),
         encoding="utf-8",
     )
     service_ctl._clear_identity()
     check("service.json of a LIVE process is left alone",
-          service_ctl.SERVICE_INFO_FILE.is_file())
+          service_ctl.service_info_file().is_file())
 
-    service_ctl.SERVICE_INFO_FILE.write_text(
+    service_ctl.service_info_file().write_text(
         json.dumps({"pid": 999_999_999, "host": "127.0.0.1", "port": 8918}),
         encoding="utf-8",
     )
     service_ctl._clear_identity()
     check("service.json of a DEAD process is cleaned up",
-          not service_ctl.SERVICE_INFO_FILE.is_file())
+          not service_ctl.service_info_file().is_file())
 
 
 def test_start_is_serialised(work: Path) -> None:
@@ -395,8 +426,8 @@ def test_start_is_serialised(work: Path) -> None:
         str(work / "race-report.json"),
         str(stop_file),
     ]
-    service_ctl.SERVICE_PID_FILE.unlink(missing_ok=True)
-    service_ctl.SERVICE_INFO_FILE.unlink(missing_ok=True)
+    service_ctl.service_pid_file().unlink(missing_ok=True)
+    service_ctl.service_info_file().unlink(missing_ok=True)
 
     import threading
 
@@ -454,6 +485,100 @@ def test_mnemow_refuses_stdio_faces() -> None:
               mnemo_bootstrap.main_gui() == 2)
     finally:
         sys.argv = argv
+
+
+def test_stop_reaps_the_resident(work: Path) -> None:
+    """`service stop` must release the ~1.6 GB, not just the backend.
+
+    engine-dev's acceptance wording: after `mnemo service stop`, nothing is
+    listening on the embed port and no interpreter holds the model. The
+    resident is not a process we spawned, so this also exercises the
+    identity proof that replaces a fingerprint: OS-reported socket owner +
+    a reply to our authenticated protocol.
+    """
+    from src.config import EMBED_PORT
+
+    if service_ctl._listening_pid(EMBED_PORT) is not None:
+        print("SKIP  resident reap (a resident is already running on this machine)")
+        return
+
+    # Start one the way a hook would, then prove stop() reaches it.
+    started = service_ctl.spawn_detached(
+        [service_ctl.windowless_python(), "-m", "src.cli", "embed-server"],
+        cwd=REPO,
+    )
+    deadline = time.monotonic() + 60.0
+    pid = None
+    while time.monotonic() < deadline:
+        pid = service_ctl._listening_pid(EMBED_PORT)
+        if pid is not None:
+            break
+        time.sleep(0.5)
+
+    if pid is None:
+        check("a resident could be started for the test", False,
+              detail=f"nothing bound {EMBED_PORT} (spawned {started})")
+        return
+    check("the resident is listening before stop", True)
+    check("the resident answers our authenticated protocol",
+          service_ctl._resident_answers_our_token("127.0.0.1", EMBED_PORT))
+
+    outcome = service_ctl.stop_resident()
+    check("stop_resident reports it stopped one", outcome == service_ctl.RESIDENT_STOPPED,
+          detail=outcome)
+    check("NOTHING is listening on the embed port afterwards",
+          service_ctl._listening_pid(EMBED_PORT) is None)
+    check("the resident process is gone (model released)",
+          service_ctl._pid_state(pid) != service_ctl.ALIVE)
+
+    check("stopping again is a harmless no-op",
+          service_ctl.stop_resident() == service_ctl.RESIDENT_ABSENT)
+
+
+def test_resident_stop_spares_a_stranger(work: Path) -> None:
+    """A listener that does not answer our token must not be killed."""
+    import socket as _socket
+
+    from src.config import EMBED_PORT
+
+    if service_ctl._listening_pid(EMBED_PORT) is not None:
+        print("SKIP  stranger-on-the-port (port already in use)")
+        return
+
+    # A plain listener that speaks nothing: same port, not our resident.
+    script = work / "stranger.py"
+    script.write_text(
+        "import socket, time\n"
+        "s = socket.socket()\n"
+        "s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+        f"s.bind(('127.0.0.1', {EMBED_PORT}))\n"
+        "s.listen(5)\n"
+        "time.sleep(120)\n",
+        encoding="utf-8",
+    )
+    stranger = subprocess.Popen(
+        [sys.executable, str(script)],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.monotonic() + 20.0
+        while time.monotonic() < deadline:
+            if service_ctl._listening_pid(EMBED_PORT) is not None:
+                break
+            time.sleep(0.25)
+
+        outcome = service_ctl.stop_resident()
+        check("a stranger on the embed port is reported foreign, not stopped",
+              outcome == service_ctl.RESIDENT_FOREIGN, detail=outcome)
+        time.sleep(0.4)
+        check("THE STRANGER ON THE EMBED PORT SURVIVED",
+              stranger.poll() is None, detail=f"exit={stranger.poll()}")
+    finally:
+        stranger.terminate()
+        try:
+            stranger.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            stranger.kill()
 
 
 def free_port() -> int:
@@ -550,10 +675,13 @@ def main() -> int:
         test_windowless_spawn(work, script)
         test_lifecycle(work, script)
         test_never_kills_bystanders(work)
+        test_state_dir_is_resolved_live()
         test_exit_code_259(work)
         test_clear_identity_spares_a_live_backend()
         test_start_is_serialised(work)
         test_mnemow_refuses_stdio_faces()
+        test_resident_stop_spares_a_stranger(work)
+        test_stop_reaps_the_resident(work)
         test_real_backend()
 
     print(f"\n{_passed} passed, {_failed} failed")

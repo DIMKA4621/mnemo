@@ -21,7 +21,6 @@ import json
 import os
 import socket
 import struct
-import subprocess
 import sys
 import time
 from pathlib import Path
@@ -216,24 +215,27 @@ def _connect(timeout: float | None = None) -> socket.socket | None:
 
 
 def _spawn_server() -> None:
-    """Start the resident detached — cross-platform."""
+    """Start the resident windowless and detached — cross-platform.
+
+    Delegates to ``service_ctl.spawn_detached`` rather than assembling flags
+    here: ``DETACHED_PROCESS`` alone is NOT enough on Windows (a child that
+    calls ``AllocConsole()`` gets a real visible window), and MSDN says
+    ``CREATE_NO_WINDOW`` is *ignored* when OR-ed with it — so the obvious
+    "fix" of adding the flag would have degraded silently. One primitive,
+    used by every spawn we make, is the only way NFR-1 stays true.
+
+    Note the doc is wrong here: contracts §11.2 prescribes
+    ``CREATE_NO_WINDOW | DETACHED_PROCESS``. docs-keeper is correcting it.
+    """
+    from .service_ctl import spawn_detached, windowless_python
+
     engine_root = Path(__file__).resolve().parent.parent
-    cmd = [sys.executable, "-m", "src.cli", "embed-server"]
-    kwargs: dict = dict(
-        cwd=str(engine_root),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if os.name == "nt":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
-            | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-    else:
-        kwargs["start_new_session"] = True
+    # pythonw.exe is a GUI-subsystem binary: it cannot own a console at all,
+    # which is the only form of the guarantee that survives being launched by
+    # Task Scheduler or a shortcut.
+    cmd = [windowless_python(), "-m", "src.cli", "embed-server"]
     try:
-        subprocess.Popen(cmd, **kwargs)
+        spawn_detached(cmd, cwd=engine_root)
     except OSError:
         pass
 
