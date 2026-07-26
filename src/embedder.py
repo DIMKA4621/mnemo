@@ -144,29 +144,47 @@ def _build_model() -> TextEmbedding:
             # `mnemo service stop`. Disabling it makes allocations transient,
             # freed after each run, so RSS tracks live tensors.
             #
-            # Measured with the arena off, Windows working set, fresh
-            # resident per run, real chunks through the socket:
-            #     transient PEAK   ~2070 MB
-            #     steady           ~1530 MB, flat once the run ends
+            # Peak RSS depends on BATCH SIZE and the LONGEST SEQUENCE in a
+            # batch, not on the thread ceiling. Measured at BATCH_SIZE=16:
+            # ~1.56 GB on short English chunks, ~2.07 GB on Ukrainian
+            # markdown up to 1200 chars (512-token cap). Steady state after
+            # a run is ~1.5 GB regardless of workload.
             #
-            # The peak does NOT scale with the intra-op thread count, which
-            # is what everyone here assumed. A controlled A/B differing only
-            # in MNEMO_EMBED_THREADS: 9 threads -> 2067.4 MB peak, 4 threads
-            # -> 2066.4 MB. A 0.05% difference, stable across four runs
-            # (2066.4 / 2067.4 / 2068.6 / 2075.8). What the peak does track
-            # is the batch's token count, so a corpus of longer sections
-            # reads higher than one of shorter sections — a 226-chunk run of
-            # ~900-char sections peaked at 1716 MB on the same machine.
+            # ALWAYS RECORD THE WORKLOAD WITH THE NUMBER. The figure this
+            # replaced ("1563 MB") was almost certainly correct — a later
+            # sweep measured 1557 MB on short English text, 6 MB away. What
+            # went wrong is that nobody wrote down the shape it was taken
+            # on, so it hardened from "true under these conditions" into
+            # "the number", and looked false the moment the conditions
+            # changed. The same applies to the 5407 MB arena-on half of that
+            # pair: arena and workload shape are independent axes, so it was
+            # a sound comparison at one particular shape, and it has not
+            # been reproduced here (it was probably Linux RSS, not Windows
+            # working set).
+            #
+            # Two independent levers, each large, isolated one at a time:
+            #   fixed sequence length, batch  4 ->  16 : +311 MB
+            #   fixed batch, longest 54 -> 447 tokens  : +376 MB
+            # The thread ceiling is not a lever: 9 vs 4 threads differ by
+            # 1.0 MB (0.05%) across six runs, on quiet and busy machines
+            # alike.
+            #
+            # A batch is NOT simply padded to its longest member — measured,
+            # against the obvious assumption. Two batch-16 arms whose longest
+            # member truncates to the same 512 tokens: all-long cost 736 MB
+            # transient, mixed-with-a-long-tail cost 539 MB. Full padding
+            # would have made them identical. fastembed is already
+            # length-aware, so short members really are cheaper, and sorting
+            # chunks by length before batching would reclaim far less than
+            # it appears — which is why we did not build it.
             #
             # Cost is ~25% per big ingest batch; the query path embeds one
             # text, so search latency is unaffected.
             #
-            # NFR-9's "~1.6 GB" describes the STEADY state, not the peak.
-            # Note the resident no longer idle-exits (EMBED_IDLE_TIMEOUT=0),
-            # so the steady figure is what the machine carries until
-            # `mnemo service stop`. The historical 5407 MB arena-on figure
-            # was almost certainly Linux RSS and has not been reproduced
-            # here; treat the cross-platform comparison as indicative only.
+            # NFR-9's "~1.6 GB" describes the STEADY state (1504-1526 MB
+            # across every condition measured), not the peak. The resident
+            # no longer idle-exits, so that steady figure is what the
+            # machine carries until `mnemo service stop`.
             so.enable_cpu_mem_arena = False
         return _orig_session(*args, **kwargs)
 

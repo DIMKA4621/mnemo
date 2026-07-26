@@ -37,6 +37,7 @@ from .config import (
     EMBED_SECONDS_PER_CHUNK,
     EMBED_TOKEN_FILE,
     LEGACY_EMBED_TOKEN_FILE,
+    USER_HOME,
 )
 
 _HDR = struct.Struct("!I")  # 4-byte length prefix
@@ -140,6 +141,44 @@ def _token() -> str:
 # --------------------------------------------------------------- server
 
 
+def _enable_crash_trace() -> None:
+    """Leave a trace if this process dies without a Python exception.
+
+    The resident is spawned with stderr on devnull, so a native death —
+    a segfault inside ONNX Runtime, a stack overflow, anything below the
+    interpreter — currently vanishes completely: no traceback, no log, and
+    the client sees only a connection reset. Its production symptom is
+    therefore a *silent* fallback to an in-process model, which is exactly
+    the class of failure that has cost this project the most time.
+
+    ``faulthandler`` costs nothing at runtime and turns that silence into a
+    stack dump. It cannot catch a hard kill (``taskkill /F``), which is
+    itself useful: an empty log after a disappearance says "something killed
+    me", a dump says "I fell over".
+    """
+    import faulthandler
+
+    try:
+        # USER_HOME, not the token's directory and not STATE_DIR: the handle
+        # stays open for the process's life (a signal handler cannot safely
+        # reopen), so it must live somewhere permanent. Anchoring it to a
+        # relocatable path pins a temp directory open and breaks cleanup —
+        # which is exactly what it did the first time I wrote this.
+        path = USER_HOME / "embed-crash.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Kept open for the process's life on purpose: faulthandler writes to
+        # this descriptor from a signal handler, where reopening is unsafe.
+        handle = path.open("a", encoding="utf-8")
+        handle.write(
+            f"--- resident {os.getpid()} started "
+            f"{time.strftime('%Y-%m-%dT%H:%M:%S')} on port {EMBED_PORT} ---\n"
+        )
+        handle.flush()
+        faulthandler.enable(file=handle, all_threads=True)
+    except OSError:
+        pass  # diagnostics must never be the reason a resident fails to start
+
+
 def serve() -> None:
     """Resident model holder. Binds $MNEMO_EMBED_BIND, serves embeddings,
     exits on idle. Singleton: if the port is already held, this instance
@@ -163,6 +202,7 @@ def serve() -> None:
             file=sys.stderr,
         )
         return
+    _enable_crash_trace()
     tok = _token()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -340,6 +380,26 @@ def server_is_up() -> bool:
     return True
 
 
+def _warn_died_mid_request(what: str, exc: BaseException) -> None:
+    """A resident that died WHILE serving us is not "never reachable".
+
+    The two look identical to a caller — both end in a fallback to an
+    in-process model, a second ~2.2 GB and a ~50x slowdown — but only one of
+    them means something broke. A resident has been observed vanishing with
+    no Python traceback and an empty stderr (a native death), and the only
+    production symptom of that is the silent fallback. So the client says it
+    happened, because nothing else will.
+    """
+    print(
+        f"mnemo: the embedding resident at {EMBED_HOST}:{EMBED_PORT} accepted "
+        f"our {what} request and then died ({type(exc).__name__}). That is a "
+        f"crash, not an absent resident. Falling back to an in-process model "
+        f"— much slower, ~2.2 GB here. Check "
+        f"{USER_HOME / 'embed-crash.log'} for a native trace.",
+        file=sys.stderr,
+    )
+
+
 def _raise_if_unauthorized(resp: dict) -> None:
     """Turn the resident's refusal into a loud, specific failure.
 
@@ -394,6 +454,9 @@ def embed_query_via_server(
         _raise_if_unauthorized(resp)
         vec = resp.get("vec")
         return vec if isinstance(vec, list) else None
+    except (ConnectionError, EOFError) as exc:
+        _warn_died_mid_request("query", exc)
+        return None
     except (OSError, ValueError, json.JSONDecodeError):
         return None
 
