@@ -109,7 +109,25 @@ EMBEDDING_DIM: int = 1024
 EMBED_BIND: str = os.environ.get("MNEMO_EMBED_BIND", "127.0.0.1")
 EMBED_HOST: str = os.environ.get("MNEMO_EMBED_HOST", "127.0.0.1")
 EMBED_PORT: int = int(os.environ.get("MNEMO_EMBED_PORT", "8917"))
-EMBED_TOKEN_FILE: Path = STATE_DIR / "embed.token"
+
+# The resident's shared secret lives with the ENGINE, not with the state.
+#
+# It used to sit in STATE_DIR, and that was a design error with an expensive
+# symptom. The resident is one per machine; STATE_DIR is per-context and is
+# explicitly meant to be relocated (see its docstring — a container points it
+# at ephemeral storage). So every process that moved STATE_DIR minted its own
+# token, the shared resident rejected it, and the client "degraded" by loading
+# 2.2 GB in-process and embedding there — 50x slower, no error, no log line.
+# Deriving a machine-shared secret from a per-context path guarantees that.
+#
+# MNEMO_EMBED_TOKEN_FILE overrides it for the genuinely separate case: a
+# second resident that must not share this machine's secret.
+EMBED_TOKEN_FILE: Path = Path(
+    os.environ.get("MNEMO_EMBED_TOKEN_FILE", USER_HOME / "embed.token")
+)
+# Where the token used to live. Read once, to adopt it silently, so upgrading
+# does not orphan a resident that is already running with the old secret.
+LEGACY_EMBED_TOKEN_FILE: Path = USER_HOME / "state" / "embed.token"
 
 # A client may only autostart a resident it can actually own: one reachable
 # on this machine's loopback. Pointed at a remote resident, the client uses
@@ -283,6 +301,12 @@ SERVICE_INFO_FILE: Path = STATE_DIR / "service.json"
 # that makes liveness trustworthy. A bare PID is not proof the process is
 # ours (the OS reuses PIDs), so this records the process creation time as
 # well — see service_ctl.process_fingerprint.
+#
+# Like SERVICE_INFO_FILE above, this is ``STATE_DIR / …`` evaluated at import
+# and therefore frozen: relocating ``config.STATE_DIR`` afterwards does not
+# move it. Both are kept only as the documented default location — the live
+# accessors ``service_ctl.service_pid_file()`` / ``service_info_file()`` and
+# ``api.service_info_file()`` are what the code must use.
 SERVICE_PID_FILE: Path = STATE_DIR / "service.pid"
 
 # How long `service stop` waits for a graceful exit before escalating.

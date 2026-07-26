@@ -34,9 +34,20 @@ from .config import (
     EMBED_PORT,
     EMBED_PROBE_TIMEOUT,
     EMBED_TOKEN_FILE,
+    LEGACY_EMBED_TOKEN_FILE,
 )
 
 _HDR = struct.Struct("!I")  # 4-byte length prefix
+
+
+class TokenRejected(RuntimeError):
+    """The resident is alive and refused our token.
+
+    A distinct type because it needs a distinct response. "Unreachable" means
+    fall back and embed locally; "refused" means we are talking to a resident
+    that is not ours, and falling back would quietly load a second copy of the
+    model — the failure mode this exception exists to make impossible.
+    """
 
 
 def _recv_n(sock: socket.socket, n: int) -> bytes:
@@ -60,15 +71,42 @@ def _recv(sock: socket.socket, timeout: float) -> dict:
     return json.loads(_recv_n(sock, n).decode("utf-8"))
 
 
+def token_file() -> Path:
+    """Where the shared secret lives, resolved per call.
+
+    Not frozen at import: a test or a container sets
+    ``MNEMO_EMBED_TOKEN_FILE`` at runtime, and a constant captured when the
+    module first loaded would quietly ignore it — the same import-time freeze
+    that made the token follow ``STATE_DIR`` in the first place.
+    """
+    override = os.environ.get("MNEMO_EMBED_TOKEN_FILE")
+    return Path(override) if override else EMBED_TOKEN_FILE
+
+
 def _token() -> str:
-    """Read the shared secret, creating it (0600) on first server start."""
-    if EMBED_TOKEN_FILE.exists():
-        return EMBED_TOKEN_FILE.read_text().strip()
-    EMBED_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tok = os.urandom(24).hex()
-    EMBED_TOKEN_FILE.write_text(tok)
+    """Read the machine's shared secret, creating it (0600) on first use.
+
+    On first run after the move out of STATE_DIR, adopt the token from the
+    old default location if it is there: a resident may already be running
+    with it, and minting a new one would make this client's very next call
+    fail against a resident that is otherwise perfectly healthy.
+    """
+    path = token_file()
+    if path.exists():
+        return path.read_text().strip()
+
+    tok = ""
+    if LEGACY_EMBED_TOKEN_FILE.exists():
+        try:
+            tok = LEGACY_EMBED_TOKEN_FILE.read_text().strip()
+        except OSError:
+            tok = ""
+    tok = tok or os.urandom(24).hex()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tok)
     try:
-        os.chmod(EMBED_TOKEN_FILE, 0o600)  # best-effort; no-op on some FS
+        os.chmod(path, 0o600)  # best-effort; no-op on some FS
     except OSError:
         pass
     return tok
@@ -251,6 +289,26 @@ def server_is_up() -> bool:
     return True
 
 
+def _raise_if_unauthorized(resp: dict) -> None:
+    """Turn the resident's refusal into a loud, specific failure.
+
+    Raised rather than returned so no caller can absorb it by accident. The
+    message names the fix, because the cause is almost always one process
+    reading a different token file than the resident did.
+    """
+    if resp.get("error") != "unauthorized":
+        return
+    message = (
+        f"the embedding resident at {EMBED_HOST}:{EMBED_PORT} refused our "
+        f"token (read from {token_file()}). It is running with a "
+        f"different secret — restart it, or point MNEMO_EMBED_TOKEN_FILE at "
+        f"the one it used. NOT falling back to an in-process model: that "
+        f"would load a second ~2.2 GB copy beside a working resident."
+    )
+    print(f"mnemo: {message}", file=sys.stderr)
+    raise TokenRejected(message)
+
+
 def embed_query_via_server(
     text: str, *, budget_s: float | None = None,
 ) -> list[float] | None:
@@ -261,8 +319,10 @@ def embed_query_via_server(
     step. ``None`` keeps the historical 20 s ceiling for batch / ingest
     paths where cold start (~3 s) must comfortably fit.
 
-    Returns None on ANY failure — the caller skips injection and never
-    blocks the user's turn.
+    Returns None when the resident cannot be reached — the caller skips
+    injection and never blocks the user's turn. Raises ``TokenRejected`` when
+    it *can* be reached and refuses us, because that is not a degradation to
+    absorb silently.
     """
     if not text.strip():
         return None
@@ -280,6 +340,7 @@ def embed_query_via_server(
             # Generous default: first request after a cold start loads the
             # model (~3 s). Steady state is milliseconds.
             resp = _recv(sock, timeout=budget_s if budget_s is not None else 20.0)
+        _raise_if_unauthorized(resp)
         vec = resp.get("vec")
         return vec if isinstance(vec, list) else None
     except (OSError, ValueError, json.JSONDecodeError):
@@ -294,9 +355,11 @@ def embed_passages_via_server(texts: list[str]) -> list[list[float]] | None:
     loads the ~2.2 GB model itself — that in-process load was the cause
     of both the per-edit CPU storm and the multi-GB MCP growth.
 
-    Returns None on ANY failure so the caller can fall back to an
-    in-process embed (keeps ``mnemo ingest`` / tests deterministic when
-    the resident is genuinely unavailable, e.g. offline / CI).
+    Returns None when the resident is genuinely unreachable, so the caller
+    can fall back to an in-process embed (keeps ``mnemo ingest`` / tests
+    deterministic offline / in CI). Raises ``TokenRejected`` when a live
+    resident refuses us — falling back there would load a second copy of the
+    model beside a perfectly good one and run 50x slower without a word.
     """
     if not texts or not all(isinstance(t, str) and t.strip() for t in texts):
         return None
@@ -314,6 +377,7 @@ def embed_passages_via_server(texts: list[str]) -> list[list[float]] | None:
             # Cold start loads the model (~3 s) then embeds the batch;
             # steady state is milliseconds. Generous ceiling.
             resp = _recv(sock, timeout=60.0)
+        _raise_if_unauthorized(resp)
         vecs = resp.get("vecs")
         if not isinstance(vecs, list) or len(vecs) != len(texts):
             return None

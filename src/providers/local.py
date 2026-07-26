@@ -43,9 +43,15 @@ class LocalProvider(EmbeddingProvider):
     def embed_passages(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        from ..embed_server import embed_passages_via_server
+        from ..embed_server import TokenRejected, embed_passages_via_server
 
-        vectors = embed_passages_via_server(texts)
+        try:
+            vectors = embed_passages_via_server(texts)
+        except TokenRejected as exc:
+            # A live resident that refuses us is not "unavailable" — falling
+            # back would load 2.2 GB beside a working one and run 50x slower
+            # in silence. Fail loudly instead; the message names the fix.
+            raise EmbeddingUnavailable(str(exc)) from exc
         if vectors is None:
             from ..embedder import embed_passages, is_model_cached
 
@@ -60,9 +66,12 @@ class LocalProvider(EmbeddingProvider):
         return vectors
 
     def embed_query(self, text: str) -> list[float]:
-        from ..embed_server import embed_query_via_server
+        from ..embed_server import TokenRejected, embed_query_via_server
 
-        vec = embed_query_via_server(text)
+        try:
+            vec = embed_query_via_server(text)
+        except TokenRejected as exc:
+            raise EmbeddingUnavailable(str(exc)) from exc
         if vec is not None:
             return vec
 
