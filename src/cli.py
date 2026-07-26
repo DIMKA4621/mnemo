@@ -92,8 +92,26 @@ def _cmd_doctor() -> int:
     print(f"api token        {'present' if client.token else 'MISSING'}")
     try:
         health = client.health()
-        print(f"backend          up (pid {health.get('pid')}, "
-              f"{health.get('banks')} banks, queue {health.get('queue_depth')})")
+        # Two PIDs, and both are real. On Windows a venv's pythonw.exe is a
+        # redirector that launches the interpreter as a child: service.pid
+        # records what we spawned, service.json what actually serves the
+        # socket. Printing one unlabelled number next to `service status`
+        # printing the other is how a user ends up hunting the wrong process
+        # in Task Manager.
+        serving = health.get("pid")
+        launcher = None
+        try:
+            from . import service_ctl
+
+            identity = service_ctl.read_identity() or {}
+            launcher = identity.get("pid")
+        except Exception:  # noqa: BLE001 - diagnostics never fail
+            pass
+        pids = f"serving pid {serving}"
+        if launcher and launcher != serving:
+            pids += f", launcher pid {launcher}"
+        print(f"backend          up ({pids}, {health.get('banks')} banks, "
+              f"queue {health.get('queue_depth')})")
     except ServiceDown as exc:
         print(f"backend          DOWN — {exc}")
     try:
@@ -187,8 +205,11 @@ def _cmd_banks(args: argparse.Namespace) -> int:
                 print(f"mnemo: no bank named {args.path!r}", file=sys.stderr)
                 raise SystemExit(EXIT_ERROR)
             c.remove_bank(target["id"], drop_index=not args.keep_index)
-            print(f"removed {target['name']}"
-                  f"{' (index kept)' if args.keep_index else ''}")
+            if args.keep_index:
+                print(f"removed {target['name']} from the registry; its index "
+                      f"file was kept on disk (--keep-index)")
+            else:
+                print(f"removed {target['name']} and deleted its index")
 
     return _run_api(call)
 

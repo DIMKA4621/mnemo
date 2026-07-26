@@ -35,7 +35,7 @@ import re
 import secrets
 import threading
 import time
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal
@@ -177,6 +177,10 @@ _ERROR_STATUS: dict[str, int] = {
     "path_outside_bank": 400,
     "file_not_found": 404,
     "embed_unavailable": 503,
+    # [NEW beyond §9.2] A file WE hold open, or that the worker is still
+    # writing. `internal` said only "something broke"; this names the cause
+    # and the fix, and it is a state the user can actually resolve.
+    "index_locked": 409,
     "internal": 500,
 }
 
@@ -307,55 +311,32 @@ def _resolve_bank(ref: str, *, require_enabled: bool = True) -> Bank:
     return bank
 
 
-# Read connections, cached per thread per bank.
-#
-# `store.connect()` runs `_ensure_schema` — CREATE TABLE and CREATE VIRTUAL
-# TABLE — on every call, so connecting per request meant DDL on every search
-# and every bank listing, competing with the single writer. Caching removes
-# that from the hot path.
-#
-# Per *thread* because a sqlite3 connection is not safe to share across
-# threads and FastAPI runs these sync endpoints in a bounded worker pool; a
-# shared connection would need a lock that reintroduces the serialisation.
-# `_generation` invalidates a cached handle when the file underneath is
-# replaced (rebuild, delete), which a long-lived connection would not notice.
-_bank_conns = threading.local()
-_generation: dict[str, int] = {}
-_generation_lock = threading.Lock()
+@contextmanager
+def _bank_conn(bank: Bank):
+    """A short-lived read connection to a bank's index, or ``None``.
 
+    Deliberately **not** cached. It used to be, to keep `_ensure_schema`'s
+    DDL off every request — but `connect(..., ensure=False)` removes that,
+    and `ensure_schema` is now read-first anyway, so the cache was saving
+    only ~7 ms of connection setup on a ~200 ms search.
 
-def invalidate_bank(bank_id: str) -> None:
-    """Drop cached readers for a bank whose database was replaced."""
-    with _generation_lock:
-        _generation[bank_id] = _generation.get(bank_id, 0) + 1
-
-
-def _open_bank(bank: Bank):
-    """Cached read connection to a bank's index, or ``None`` when it has none.
+    What it cost was worse: on Windows an open SQLite handle makes the file
+    undeletable, so `banks remove` failed with WinError 32 and left an
+    orphaned 4 MB index behind. A per-thread cache also cannot be closed from
+    the thread doing the removal. Correctness of a destructive operation
+    beats 3% of a search.
 
     Never creates the file: listing banks must not leave an empty database
     behind for every root that was registered but never indexed.
     """
     if not bank.db_path.exists():
-        return None
-    cache = getattr(_bank_conns, "cache", None)
-    if cache is None:
-        cache = _bank_conns.cache = {}
-    with _generation_lock:
-        generation = _generation.get(bank.id, 0)
-    entry = cache.get(bank.id)
-    if entry is not None:
-        gen, path, conn = entry
-        if gen == generation and path == bank.db_path:
-            return conn
-        with suppress(Exception):
-            conn.close()
-    # ensure=False: opening a bank to READ must never run DDL. A reader
-    # that takes the WAL writer lock contends with the indexer on every
-    # single search, which is exactly the hot path this cache exists for.
+        yield None
+        return
     conn = store.connect(bank.db_path, ensure=False)
-    cache[bank.id] = (generation, bank.db_path, conn)
-    return conn
+    try:
+        yield conn
+    finally:
+        conn.close()
 
 
 def _queue_state(bank: Bank) -> tuple[int, bool]:
@@ -417,15 +398,16 @@ def _bank_info(bank: Bank) -> dict:
     status_probe = _queue_state(bank)
     files = chunks = db_bytes = 0
     last_indexed: str | None = None
+    index_provider_key: str | None = None
     try:
-        conn = _open_bank(bank)
-        if conn is not None:
-            files = store.file_count(conn)
-            chunks = store.chunk_count(conn)
-            db_bytes = bank.db_path.stat().st_size
-            meta = store.get_meta(conn)
-            last_indexed = meta.get("last_indexed_at")
-            index_provider_key = meta.get("provider_key")
+        with _bank_conn(bank) as conn:
+            if conn is not None:
+                files = store.file_count(conn)
+                chunks = store.chunk_count(conn)
+                db_bytes = bank.db_path.stat().st_size
+                meta = store.get_meta(conn)
+                last_indexed = meta.get("last_indexed_at")
+                index_provider_key = meta.get("provider_key")
     except Exception as exc:  # noqa: BLE001 - a broken index must still list
         log.warning("cannot read index of bank %s: %s", bank.name, exc)
     status, queued = _status_from(status_probe, chunks)
@@ -704,10 +686,6 @@ def _on_queue_event(ev: dict) -> None:
         took_ms=data.get("took_ms"),
         error=data.get("error"),
     )
-
-    # A rebuild replaces the database file underneath any cached reader.
-    if data.get("kind") == "rebuild":
-        invalidate_bank(bank_id)
 
     failed = type_ == "index_error"
     if _bank_failed.get(bank_id, False) == failed:
@@ -994,25 +972,25 @@ def _engine_search(conn, req: SearchRequest, bank: Bank) -> list[Any]:
 def api_search(req: SearchRequest) -> dict:
     bank = _resolve_bank(req.bank)
     started = time.perf_counter()
-    conn = _open_bank(bank)
     degraded: str | None = None
     hits: list[Any] = []
     chunks = 0
     # Queue state before chunk count, so a bank that finishes mid-request
     # cannot be reported as `empty` (see _status_from).
     status_probe = _queue_state(bank)
-    if conn is not None:
-        chunks = store.chunk_count(conn)
-    status, queued = _status_from(status_probe, chunks)
-    # No chunks means no possible match — never load a model to prove it.
-    if chunks:
-        try:
-            hits = _engine_search(conn, req, bank)
-        except EmbeddingUnavailable as exc:
-            # NFR-10: degrade, do not fail. The caller still learns the
-            # bank's real state and that the answer is incomplete.
-            degraded = "embed_unavailable"
-            log.warning("search degraded on bank %s: %s", bank.name, exc)
+    with _bank_conn(bank) as conn:
+        if conn is not None:
+            chunks = store.chunk_count(conn)
+        status, queued = _status_from(status_probe, chunks)
+        # No chunks means no possible match — never load a model to prove it.
+        if chunks:
+            try:
+                hits = _engine_search(conn, req, bank)
+            except EmbeddingUnavailable as exc:
+                # NFR-10: degrade, do not fail. The caller still learns the
+                # bank's real state and that the answer is incomplete.
+                degraded = "embed_unavailable"
+                log.warning("search degraded on bank %s: %s", bank.name, exc)
     took_ms = (time.perf_counter() - started) * 1000
 
     servicelog.log_query(
@@ -1082,11 +1060,68 @@ def api_bank(bank_id: str) -> dict:
 @app.delete("/api/banks/{bank_id}")
 def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
     bank = _resolve_bank(bank_id, require_enabled=False)
-    registry.remove(bank.id, drop_index=drop_index)
-    invalidate_bank(bank.id)   # cached readers point at a file that is gone
+
+    # Order matters, and this is the order that cannot half-succeed.
+    #
+    # Deleting the index first and the registry entry second means a failed
+    # unlink leaves the bank registered — recoverable, and visible. The
+    # reverse (what this used to do) removed the bank from banks.json and
+    # THEN failed to delete the file, leaving a 4 MB orphan with nothing
+    # pointing at it and an `internal` error on screen.
+    if drop_index:
+        # Nothing of ours may hold the file. Readers are already
+        # request-scoped; the worker is not, so quiet the bank first.
+        q = _queue()
+        if q is not None and not q.drop_bank(bank.id):
+            # Nothing was changed, so let the bank work again — otherwise a
+            # refused removal would leave it permanently frozen.
+            q.resume_bank(bank.id)
+            raise ApiError(
+                "index_locked",
+                f"bank {bank.name!r} is still being indexed; "
+                f"try again in a moment",
+                bank_id=bank.id,
+            )
+        removed, failed = _unlink_index(bank)
+        if failed:
+            if q is not None:
+                q.resume_bank(bank.id)
+            raise ApiError(
+                "index_locked",
+                f"cannot delete {failed[0].name}: another process is holding "
+                f"it open. The bank is still registered — nothing was lost. "
+                f"Stop the service (`mnemo service stop`) and retry, or use "
+                f"`--keep-index` to unregister and leave the file.",
+                bank_id=bank.id,
+                files=[p.name for p in failed],
+            )
+        log.info("removed index for bank %s (%d file(s))", bank.name, removed)
+
+    registry.remove(bank.id, drop_index=False)
     _bank_failed.pop(bank.id, None)
     hub.publish("bank_removed", {"bank_id": bank.id}, bank.id)
-    return {"ok": True}
+    return {"ok": True, "index_removed": bool(drop_index)}
+
+
+def _unlink_index(bank: Bank) -> tuple[int, list[Path]]:
+    """Delete a bank's index and its WAL/SHM siblings.
+
+    Returns ``(deleted, still_locked)``. The siblings matter: leaving a
+    ``-wal`` next to a deleted database is the kind of debris that makes a
+    later rebuild behave oddly for no visible reason.
+    """
+    removed, failed = 0, []
+    base = bank.db_path
+    for candidate in (base, base.with_name(base.name + "-wal"),
+                      base.with_name(base.name + "-shm")):
+        try:
+            candidate.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            failed.append(candidate)
+    return removed, failed
 
 
 @app.post("/api/reindex", status_code=202)
@@ -1128,22 +1163,22 @@ def api_tree(
         raise ApiError("root_not_found", f"{root.as_posix()} is gone", ref=bank)
 
     indexed: dict[str, dict] = {}
-    conn = _open_bank(b)
-    if conn is not None:
-        # Counts come from an index-only GROUP BY; only rows that actually
-        # carry a heading are materialised, instead of every chunk in the bank.
-        for row in conn.execute(
-            "SELECT path, count(*) AS n FROM chunks GROUP BY path"
-        ):
-            indexed[row["path"]] = {"chunks": row["n"], "headings": []}
-        for row in conn.execute(
-            "SELECT path, heading FROM chunks "
-            "WHERE heading IS NOT NULL AND heading != '' "
-            "ORDER BY path, chunk_index"
-        ):
-            entry = indexed.get(row["path"])
-            if entry is not None and row["heading"] not in entry["headings"]:
-                entry["headings"].append(row["heading"])
+    with _bank_conn(b) as conn:
+        if conn is not None:
+            # Counts come from an index-only GROUP BY; only rows that actually
+            # carry a heading are materialised, not every chunk in the bank.
+            for row in conn.execute(
+                "SELECT path, count(*) AS n FROM chunks GROUP BY path"
+            ):
+                indexed[row["path"]] = {"chunks": row["n"], "headings": []}
+            for row in conn.execute(
+                "SELECT path, heading FROM chunks "
+                "WHERE heading IS NOT NULL AND heading != '' "
+                "ORDER BY path, chunk_index"
+            ):
+                entry = indexed.get(row["path"])
+                if entry is not None and row["heading"] not in entry["headings"]:
+                    entry["headings"].append(row["heading"])
 
     patterns = _compile_excludes(b.exclude)
     files = dirs = 0
@@ -1267,20 +1302,20 @@ def api_file(bank: str, path: str) -> dict:
 
     chunks: list[dict] = []
     indexed = False
-    conn = _open_bank(b)
-    if conn is not None:
-        rows = store.chunk_map(conn, rel)
-        indexed = store.get_file_row(conn, rel) is not None
-        chunks = [
-            {
-                "chunk_uid": r["chunk_uid"],
-                "chunk_index": r["chunk_index"],
-                "heading": r["heading"],
-                "start_char": r["start_char"],
-                "end_char": r["end_char"],
-            }
-            for r in rows
-        ]
+    with _bank_conn(b) as conn:
+        if conn is not None:
+            rows = store.chunk_map(conn, rel)
+            indexed = store.get_file_row(conn, rel) is not None
+            chunks = [
+                {
+                    "chunk_uid": r["chunk_uid"],
+                    "chunk_index": r["chunk_index"],
+                    "heading": r["heading"],
+                    "start_char": r["start_char"],
+                    "end_char": r["end_char"],
+                }
+                for r in rows
+            ]
 
     return {
         "bank_id": b.id,

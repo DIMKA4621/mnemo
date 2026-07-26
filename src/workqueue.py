@@ -167,6 +167,9 @@ _running: dict[str, "_Running"] = {}
 # reads `empty`/`ready` while a scan is discovering 500 changed files, which
 # is the single most visible moment to get wrong.
 _scanning: set[str] = set()
+# Banks being removed. `enqueue` refuses them and a running scan stops at its
+# next file, so a removal is not racing a scanner that refills the queue.
+_cancelled: set[str] = set()
 _seq = itertools.count()
 _consecutive_high = 0
 
@@ -314,6 +317,8 @@ def enqueue(task: Task) -> str:
     """Queue a task. A `file`/`prune` task for a path already waiting is
     deduplicated: same-or-lower priority is dropped, higher replaces it."""
     with _cv:
+        if task.bank_id in _cancelled:
+            return task.id      # bank is being removed; queueing is pointless
         priority = _effective(task.priority)
         key = (task.bank_id, task.path) if task.path else None
         start_batch = task.start_batch
@@ -660,7 +665,7 @@ def _scan_bank_streaming(task: Task, bank: registry.Bank) -> None:
 
         seen: set[str] = set()
         for abs_path in sorted(bank.root.rglob("*.md")):
-            if _stop.is_set():
+            if _stop.is_set() or bank.id in _cancelled:
                 return
             if not abs_path.is_file():
                 continue
@@ -679,6 +684,8 @@ def _scan_bank_streaming(task: Task, bank: registry.Bank) -> None:
             planned += 1
 
         for rel in sorted(set(indexed) - seen):
+            if bank.id in _cancelled:
+                return
             enqueue_prune(bank.id, rel, priority=task.priority,
                           trigger=task.trigger)
             pruned += 1
@@ -809,8 +816,57 @@ def stop(timeout: float = 10.0) -> None:
         _scanners.clear()
         _running.clear()
         _scanning.clear()
+        _cancelled.clear()
         _consecutive_high = 0
         _on_event = None
+
+
+def drop_bank(bank_id: str, *, timeout: float = 15.0) -> bool:
+    """Cancel everything queued for a bank and wait for work in flight.
+
+    Removing a bank while the worker holds a write connection to its index
+    is the same class of race as removing it while a reader is open: on
+    Windows the file simply cannot be unlinked.
+
+    **Cancelling comes first, and it has to.** Purging the queue alone is not
+    enough: a `bulk` scan runs on its own thread and streams new `file` tasks
+    as it walks, so it refills the queue as fast as we empty it and the wait
+    burns its whole timeout for nothing. The cancel flag stops the scanner at
+    its next file and makes `enqueue` refuse anything further for this bank,
+    which turns a race into a bounded wait for the one task already running.
+
+    Returns True when the bank is quiet. On False the caller must call
+    `resume_bank`, or the bank stays frozen for the rest of the process.
+    """
+    with _cv:
+        _cancelled.add(bank_id)
+        doomed = [t for t in _waiting.values() if t.bank_id == bank_id]
+        for task in doomed:
+            del _waiting[task.id]
+            key = (task.bank_id, task.path) if task.path else None
+            if key is not None and _by_file.get(key) == task.id:
+                del _by_file[key]
+        _cv.notify_all()
+    if doomed:
+        log.info("dropped %d queued task(s) for bank %s", len(doomed), bank_id)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not busy(bank_id):
+            return True
+        time.sleep(0.1)
+    return not busy(bank_id)
+
+
+def resume_bank(bank_id: str) -> None:
+    """Undo `drop_bank`'s cancellation — for a removal that did not happen."""
+    with _cv:
+        _cancelled.discard(bank_id)
+
+
+def is_cancelled(bank_id: str) -> bool:
+    with _lock:
+        return bank_id in _cancelled
 
 
 def clear() -> None:
