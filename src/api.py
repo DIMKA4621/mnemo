@@ -639,6 +639,11 @@ def _queue_snapshot_json() -> dict:
             "path": current.path,
             "batch": getattr(snap, "current_batch", 0),
             "batches": getattr(snap, "current_batches", 0),
+            # Absolute epoch seconds, so a page reloaded mid-index shows the
+            # task's real elapsed time instead of counting from the reload.
+            # Same field and unit as the `queue` WS delta — if only one
+            # carried it the counter would reset on the next event.
+            "started_at": getattr(snap, "current_started_at", 0.0),
         },
     }
 

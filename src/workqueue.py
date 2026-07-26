@@ -92,6 +92,20 @@ class QueueSnapshot:
     current: Task | None
     current_batch: int
     current_batches: int
+    # Epoch seconds, absolute — never an elapsed count. Elapsed goes stale
+    # the instant it is serialised, and a client seeding from a snapshot
+    # would have to guess the snapshot's own age; from an epoch it computes
+    # elapsed at render time. Unit matches `ts_epoch` in the journal rather
+    # than inventing a second convention.
+    #
+    # Clock skew is not a concern: the backend is loopback-only, so the
+    # client shares this clock. A remote backend would need this normalised.
+    #
+    # For a **resumed** task this is when the CURRENT run began, not the
+    # first attempt — the worker builds a fresh `_Running` each time it takes
+    # a task, and a file resumed at batch 7 has genuinely only been working
+    # since the resume. On a large file the two readings differ by minutes.
+    current_started_at: float = 0.0
     # bank_id -> {"depth": int, "indexing": bool}. Service-wide totals cannot
     # answer "is THIS bank busy", which is the question every bank row in the
     # cabinet asks and the question `status` is computed from.
@@ -238,6 +252,7 @@ def _emit_queue(force: bool = False) -> None:
             "path": current.path,
             "batch": snap.current_batch,
             "batches": snap.current_batches,
+            "started_at": snap.current_started_at,
         },
     )
 
@@ -296,6 +311,7 @@ def snapshot() -> QueueSnapshot:
             current=first.task if first else None,
             current_batch=first.batch if first else 0,
             current_batches=first.batches if first else 0,
+            current_started_at=first.started_at if first else 0.0,
             by_bank=by_bank,
         )
 
