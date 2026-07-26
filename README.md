@@ -89,6 +89,13 @@ peak that depends on batch size and the longest chunk in a batch (~2.1 GB
 on Ukrainian markdown at the default batch of 16). The model is **never**
 downloaded implicitly — `warmup` is the only step that fetches it.
 
+If the helper dies below Python — a segfault inside the ONNX runtime — it
+leaves a native stack dump at `~/.claude/mnemo/embed-crash.log`, and the
+client says so instead of falling back in silence. Both cases end in an
+in-process model (a second ~2.2 GB, far slower), but only one of them
+means something broke, so they read differently. An empty crash log after
+the helper disappears means something killed it; a dump means it fell over.
+
 The index is disposable: delete a bank's `state/*.db`, run `mnemo
 ingest`, and you are back to an identical state. The `.md` is the only
 thing that matters.
