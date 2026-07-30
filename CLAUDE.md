@@ -43,9 +43,17 @@ for every subagent (they do not inherit this file). `docs/Memory-design-v2.md`
 and `-v1.md` are historical only; `docs/Setup-design.md` covers the
 install model and is mid-transition (see its header).
 
-Project decision history, research and rationale live in Claude Code's
-memory for this project (loaded each session as `MEMORY.md`). Read it
-before planning — do not re-investigate what is already recorded there.
+Project decision history, research and rationale live in **this repo's own
+bank**: `.claude/memory/` (`MEMORY.md` index, `logs/`, `topics/`), served by
+the `mnemo` MCP server in `.mcp.json`. **Search it with `memory_search`
+before planning** — do not re-investigate what is already recorded.
+
+It used to sit in Claude Code's per-project store
+(`~/.claude/projects/…/memory/`) and auto-load every session. It moved so
+memory rides with the commit; the old folder is a frozen backup. The
+consequence is deliberate and worth stating: **nothing auto-loads any more**,
+so memory that is not searched for is memory not used. `.claude/rules/
+mnemo-memory.md` is the binding rule, and mnemo now dogfoods itself.
 
 ## Architecture map
 
@@ -71,9 +79,12 @@ Service (the persistent backend):
 - `src/registry.py` — banks registry (`state/banks.json`); resolve by
   id, name or nested path.
 - `src/servicelog.py` — `service.db`: query + index events, retention.
-- `src/api.py` — FastAPI/uvicorn loopback API (`/search`, `/reindex`,
-  `/tree`, `/status`, `/banks`, `/fs/dirs`, `/logs`), Bearer token, search
-  status.
+- `src/api.py` — FastAPI/uvicorn loopback host. Two surfaces, and the
+  split is deliberate: **private** `/api/*` for the cabinet (`/search`,
+  `/reindex`, `/tree`, `/status`, `/banks`, `/fs/dirs`, `/file`, `/logs`
+  — hidden from OpenAPI), and **external** `/mcp-tools/<tool_name>`, the
+  three MCP tools as plain HTTP for a human with curl or Swagger. Bearer
+  token on both; `/mcp-tools` also takes `?token=`.
 - `src/workqueue.py`, `src/watcher.py` — priority queue + worker and the
   watchdog→debounce→enqueue path (**phase 3, in flight**).
 - `src/service_ctl.py` — `mnemo service …`, windowless spawn, PID/port
@@ -81,17 +92,22 @@ Service (the persistent backend):
 - `src/webui/` — the local cabinet served by the backend; `devserver.py`
   answers contract shapes from fixtures and is a dev tool only.
 
-Faces still in their v2 shape until phase 4:
+Faces:
 
-- `src/mcp_server.py` — stdio MCP today; becomes an HTTP face mounted in
-  `api.py`. Tools already flat: `memory_search(query, path_prefix, top_k)`.
-- `src/cli.py` — still talks to the engine directly; becomes a thin
-  client of the API (`src/client.py`).
+- `src/mcp_server.py` — **FastMCP** (from the official `mcp` SDK), mounted
+  into `api.py` at `/mcp`. FastAPI only hosts it; the two frameworks are
+  nested, not mixed. Tool bodies live in module-level `run_search` /
+  `run_tree` / `run_reindex` so `/mcp-tools/*` mirrors them by *calling*
+  them — the mirror cannot drift from the tool.
+- `src/cli.py` — thin client of the API (`src/client.py`); `warmup`,
+  `init`, `doctor` stay local. Hook targets `memory-hook` (SessionStart)
+  and `hook-inject` (UserPromptSubmit) are **seeds**: working commands
+  that nothing wires automatically.
 - `src/scaffold.py` — `mnemo init`: additive, idempotent, refuses on
-  conflict. Its `.mcp.json` shape and memory-rule text are rewritten at
-  phase 4.
-- `src/inject_log.py` — v2 JSONL telemetry behind `hook-inject`;
-  superseded by `servicelog`.
+  conflict. Writes **no hook** unless `--with-memory-hook` /
+  `--with-inject-hook`; `--migrate` unwires what was not asked for. Owns
+  `_MEMORY_RULE`, the text that lands in adopted repos as
+  `.claude/rules/mnemo-memory.md`.
 
 Around it:
 
@@ -100,8 +116,10 @@ Around it:
   `-Python`/`-DepsOnly`; PowerShell 5.1+, 64-bit Python 3.10+).
 - `tests/test_search.py` — labeled recall eval (regression floor);
   `tests/test_platform.py`, `tests/test_install_windows.py` — wiring and
-  installer; `tests/test_mcp.py` — MCP client check (stdio, dies at
-  phase 4).
+  installer; `tests/test_mcp.py` — MCP over HTTP against the running
+  service, plus the check that `/mcp-tools/*` is byte-identical to the
+  tools it mirrors. The bundled fixture corpus uses the canonical layout
+  (`.claude/memory/` with `logs/`, `agents/<role>/` inside).
 - Installed engine: `~/.claude/mnemo/` (`bin/mnemo`, a real `bin\mnemo.exe`
   on Windows, `.venv`, `model-cache`, `state/`). Project wiring: `.mcp.json`,
   `.claude/settings.json`. Adoption skill + its bundled templates:
@@ -113,13 +131,21 @@ Landed and working today:
 
 ```
 mnemo warmup                        one-time explicit ~2.2 GB model download + check
-mnemo init [--root DIR]             additive, idempotent project wiring
-mnemo ingest [--root DIR]           reconcile .md -> index (hash-diff + prune)
+mnemo init [--root DIR]             additive, idempotent project wiring; NO hook
+     [--migrate]                    also unwire hooks mnemo no longer writes
+     [--with-memory-hook]           wire the SessionStart seed (MEMORY.md + layout)
+     [--with-inject-hook]           wire the UserPromptSubmit seed (top-N hits)
 mnemo search "q" [--path-prefix P]  hybrid search over a bank
-mnemo mcp                           stdio MCP server (goes away at phase 4)
-mnemo hook-inject | hook-postedit   hook targets, not typed by hand
+mnemo reindex [--bank B] [--full]   queue a reindex (`ingest` is a deprecated alias)
+mnemo banks list|add|remove         registry, through the API
+mnemo status | logs | tree | ui     service state, journal, tree, cabinet
+mnemo memory-hook | hook-inject     hook seeds, not typed by hand
 mnemo embed-server                  resident model daemon (auto-started)
 ```
+
+There is no `mnemo mcp`: MCP is HTTP inside the running service, so a session
+connects instead of spawning. Poke it by hand at `/mcp-tools/*` (Swagger at
+`http://127.0.0.1:8918/docs`, token from `~/.claude/mnemo/state/api.token`).
 
 Service control (`mnemo serve`, `mnemo service start|stop|status|restart`,
 `mnemo autostart enable|disable|status`) is **phase 5, in flight** — the

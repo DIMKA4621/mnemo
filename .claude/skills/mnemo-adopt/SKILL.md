@@ -32,16 +32,22 @@ plans and delegates to a team of teammate agents.
 
 ## Status — mnemo is mid-transition to v3 (read before adopting)
 
-The wiring this skill installs is the **current, working** shape and is
-what you should install today. Two parts of it are already known to move
-at **v3 phase 4** — say so to the user instead of promising permanence:
+The wiring this skill installs is the **current, working** shape. Three
+things changed with v3 phase 4 and are now the truth — a project adopted
+earlier carries the old shape and needs `mnemo init --migrate`:
 
-- MCP moves from a per-session **stdio spawn** to **HTTP** against a
-  running local service. `mnemo init --migrate` will rewrite the wiring;
-  a hand-built variant will not be recognised, so do not hand-author one.
-- The `SessionStart` and `PostToolUse` reindexing hooks **go away** — a
-  file watcher takes over. Only the `UserPromptSubmit` auto-inject hook
-  survives.
+- MCP is **HTTP** against the running local service — no per-session
+  stdio spawn. `mnemo init --migrate` rewrites legacy wiring; a
+  hand-built variant will not be recognised, so do not hand-author one.
+- **`init` wires no hooks at all.** The reindexing hooks are gone (the
+  watcher does that job) and auto-inject is now opt-in
+  (`--with-memory-hook` / `--with-inject-hook`). Memory is reached by
+  **searching** — `memory_search` — and the discipline lives in
+  `.claude/rules/mnemo-memory.md`. `--migrate` unwires hooks earlier
+  versions added.
+- **`/mcp-tools/<tool_name>`** mirrors the three tools as plain HTTP for
+  hand-checking (Swagger at `/docs`); `/api/*` is the cabinet's private
+  channel and is not published.
 
 **Already true today** (v3 phase 0 has landed — this is not a forecast):
 
@@ -50,21 +56,28 @@ at **v3 phase 4** — say so to the user instead of promising permanence:
   `--path-prefix` instead of `--scope`/`--agent`. Everything `*.md` under
   a bank root is **one index**; `path_prefix` narrows a search but is
   navigation, not isolation. Real isolation = a **separate bank**.
-- `.claude/agent-memory/<role>/` remains a useful **folder convention**
-  for per-role notes, and the memory rule still directs agents there —
-  but it is no longer an access boundary.
+- **Per-role notes belong at `.claude/memory/agents/<role>/`**, inside the
+  memory root — not at `.claude/agent-memory/` beside it. One root means
+  the bank boundary is a folder, so `skills/`, `rules/` and `agents/`
+  stay out of the index without any exclusion list. A repo carrying the
+  old two-folder layout should be offered the move explicitly (show the
+  mapping, do not move files silently). The convention is not an access
+  boundary either way — real isolation is a separate bank.
 - **A bank root indexes everything below it.** `mnemo ingest --root
   <project>` now walks the whole project tree for `*.md` (minus `.git`,
-  `.venv`, `node_modules`, `__pycache__`), not just `.claude/memory` and
-  `.claude/agent-memory`. Tell the user plainly if their repo carries a
-  lot of unrelated markdown.
+  `.venv`, `node_modules`, `__pycache__`), not just `.claude/memory`.
+  Tell the user plainly if their repo carries a lot of unrelated markdown
+  — and prefer a bank rooted at `.claude/memory`, which is the layout the
+  rule teaches.
 - The index schema changed: the first run under the new engine rebuilds
   from the `.md`. Nothing is lost, but a large project's first build is
   not instant.
 
-**How an adopted project is laid out into banks** — one bank for
-`.claude/`, or one per agent — is a **phase-4 decision for the user and
-the team lead**. Do not decide it here and do not pre-build for it.
+**How an adopted project is laid out into banks.** The default is **one
+bank rooted at `.claude/memory`** — that is the boundary the layout above
+exists to create. Per-agent isolation, if wanted, is a **separate bank per
+`agents/<role>/` subfolder** with its own MCP connection, never a scope
+inside one bank. Ask the user before choosing the second shape.
 
 ## The hard boundary (do not cross it)
 
@@ -95,8 +108,8 @@ the team lead**. Do not decide it here and do not pre-build for it.
 - **`CLAUDE.md`** carries the **team-lead role** (main session only):
   plan and delegate, do not implement.
 - A subagent's `memory: project` is its *built-in* per-agent memory
-  (user scope). The git-shared curated layer is `.claude/agent-memory/
-  <role>/`, driven by the rule + instructions + the mnemo hook. Both
+  (user scope). The git-shared curated layer is `.claude/memory/agents/
+  <role>/`, driven by the rule + instructions + `memory_search`. Both
   matter; do not conflate them. Note the folder is a **convention**, not
   a search scope — see the status section above.
 
@@ -123,13 +136,18 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
 ```bash
 ls -la .mcp.json CLAUDE.md .claude 2>/dev/null
 ls -la .claude/settings.json .claude/rules .claude/memory \
-       .claude/agent-memory .claude/agents 2>/dev/null
+       .claude/memory/agents .claude/agent-memory .claude/agents 2>/dev/null
 ```
 
 Read what is found. Determine:
 
-- Wiring: mnemo server + the three hooks present? portable form or an
-  old hardcoded path (→ a conflict `mnemo init` will refuse → Step 4)?
+- Wiring: mnemo server present, in the **HTTP** form? portable, or an old
+  hardcoded/stdio path (→ a conflict `mnemo init` will refuse → Step 4)?
+  Any hook found is legacy — `init` writes none.
+- Layout: is memory **one root** (`.claude/memory/` with `logs/`,
+  `topics/`, `agents/<role>/`), or the old split with
+  `.claude/agent-memory/` beside it (→ offer the move, show the mapping,
+  never move files silently)?
 - Is `.claude/rules/mnemo-memory.md` present? identical to what `mnemo
   init` writes, or different (→ judgement)?
 - `CLAUDE.md`: present? does it already carry a team-lead section?
@@ -252,14 +270,14 @@ conflict is resolved.
 6. **Memory migration.** Per `references/memory-migration.md`: curate
    the chosen user-scope files into `.claude/memory/` (thin index +
    topic files + `logs/`) and per-agent notes into
-   `.claude/agent-memory/<role>/`. Show the source→target mapping and
+   `.claude/memory/agents/<role>/`. Show the source→target mapping and
    what is dropped (session state / noise) before writing.
 
 ### Step 5 — Per-agent memory stubs (after the roster is fixed)
 
 Only now that the agent set is decided, create one-line stubs so agents
 do not fabricate structure later. For each agent `<role>`, if
-`.claude/agent-memory/<role>/MEMORY.md` is absent, create it from
+`.claude/memory/agents/<role>/MEMORY.md` is absent, create it from
 `templates/agent-memory.md.template` (a single `# <ROLE> agent memory`
 heading). Do not create empty `logs/` or other structure.
 
@@ -280,8 +298,8 @@ Get-Content .claude\settings.json -Raw | ConvertFrom-Json > $null; "settings JSO
 & "$HOME\.claude\mnemo\bin\mnemo.exe" search "architecture" --root "$PWD" | Select-Object -First 10
 ```
 
-Confirm: portable `mnemo` server + three hooks; `.claude/rules/
-mnemo-memory.md` present; `CLAUDE.md` is the clean team-lead role (its
+Confirm: portable `mnemo` server in HTTP form, **no hook unless the user
+asked for a seed**; `.claude/rules/mnemo-memory.md` present; `CLAUDE.md` is the clean team-lead role (its
 old content redistributed, nothing lost); every agent `memory:
 project`; team flag set if approved; index built. If the model is not
 warmed, `mnemo ingest` will say so — report that plainly.
@@ -290,7 +308,7 @@ warmed, `mnemo ingest` will say so — report that plainly.
 
 ```
 ✓ Engine:   <installed | present>  model <warmed | not warmed>
-✓ Wiring:   .mcp.json + .claude/settings.json (portable) [+conflicts resolved]
+✓ Wiring:   .mcp.json (HTTP, portable) [+conflicts resolved]; hooks: none unless asked
 ✓ Rule:     .claude/rules/mnemo-memory.md (binding, all agents)
 ✓ CLAUDE.md: clean team-lead (old content redistributed: agents/rules/memory)
 ✓ Agents:   planner/developer/tester/reviewer — memory: project
@@ -300,8 +318,9 @@ warmed, `mnemo ingest` will say so — report that plainly.
 Review the diffs above, then:
   git add .mcp.json .claude/ CLAUDE.md
   git commit        # your message, your call
-Then trust the project in Claude Code when prompted (hooks + MCP) and
-restart the session so hooks, MCP and the agent team load.
+Then trust the project in Claude Code when prompted (MCP) and restart the
+session so MCP, the rule and the agent team load. Nothing is injected
+automatically — memory is reached by calling `memory_search`.
 ```
 
 Do not run `git add`/`git commit` yourself.

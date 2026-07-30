@@ -58,27 +58,34 @@ Claude Code. Everything below is identical across platforms.
 Adoption commits a tiny bit of git-tracked wiring into the project so it
 travels with the repo:
 
-- **`.mcp.json`** — registers the `mnemo` MCP server. Claude Code spawns
-  `mnemo mcp` over stdio per session (not a daemon), scoped to this
-  project. Tools: `memory_search(query, path_prefix, top_k)`,
-  `memory_reindex`.
-- **`.claude/settings.json`** — three hooks:
-  - `SessionStart` → `mnemo ingest` — full reconcile (catches outside
-    changes like a `git pull`).
-  - `PostToolUse` (Edit/Write/MultiEdit) → `mnemo hook-postedit` —
-    reindexes when the edited file is an `.md` inside the bank; any
-    other edit is an instant no-op.
-  - `UserPromptSubmit` → `mnemo hook-inject` — embeds your prompt,
-    searches this project's memory, and surfaces the relevant sections
-    into the turn.
+- **`.mcp.json`** — registers the `mnemo` MCP server over **HTTP**:
+  `http://127.0.0.1:8918/mcp/<bank-name>?token=${MNEMO_API_TOKEN}`. A
+  session *connects* to the running service — nothing is spawned, so no
+  console flashes on Windows. Tools: `memory_search(query, top_k,
+  path_prefix, bank)`, `memory_tree`, `memory_reindex`. Nothing
+  machine-specific lands in git: the bank is a **name** (survives a clone)
+  and the token is a placeholder the installer exports.
 - **`.claude/rules/mnemo-memory.md`** — the binding memory rule, loaded
-  for the main session and every subagent.
+  for the main session and every subagent. Its body is deliberately
+  portable: paste it into any agent's system prompt, point that agent at
+  the MCP server, and the discipline travels.
+- **`.claude/settings.json` — no hooks.** Reindexing is the watcher's job,
+  and memory is found by searching, not by injection. The two hook seeds
+  stay available but are never wired for you:
+  - `mnemo init --with-memory-hook` → `SessionStart`: injects the bank's
+    `MEMORY.md` and the layout — a **map**, which tells an agent to go
+    look. Reads the file off disk, so it works with the service down.
+  - `mnemo init --with-inject-hook` → `UserPromptSubmit`: injects top-N
+    search hits. Off for a reason worth knowing — it delivers memory
+    *before* the task is stated, which reads as memory already gathered.
 
-> **This wiring changes at v3 phase 4.** MCP moves to HTTP against the
-> running service (no per-session spawn), the reindexing hooks disappear
-> because the watcher does that job, and only the auto-inject hook stays.
-> Nothing is asked of you yet — but do not hand-build wiring around the
-> current shape today.
+  `mnemo init --migrate` unwires hooks earlier versions added.
+
+Memory itself lives at **`.claude/memory/`** — `MEMORY.md` as a thin index,
+`logs/` for day notes, `topics/` one concept per file, `agents/<role>/` for
+per-role memory. Everything nests under that one root, which is why the bank
+never swallows your `skills/`, `rules/` or `agents/`: the boundary is the
+folder, so there is no exclusion list to maintain.
 
 Embedding is served by one warm helper per machine (`embed-server`,
 loopback only) so hooks stay light and CPU stays bounded. It starts on
@@ -104,15 +111,31 @@ thing that matters.
 
 ```bash
 mnemo warmup                 # one-time model download + sanity check
-mnemo init [--root DIR]      # additive, idempotent project wiring
-mnemo ingest [--root DIR]    # reconcile .md -> index (hash-diff + prune)
+mnemo init [--root DIR]      # additive, idempotent project wiring; no hooks
 mnemo search "query" [--path-prefix SUBFOLDER] [-k N]
-mnemo mcp                    # stdio MCP server (agent tools)
+mnemo reindex [--bank B] [--path P] [--full]
+mnemo banks list | add <path> | remove <ref>
+mnemo status | logs | tree | ui
+mnemo service start | stop | status | restart
 ```
 
-`hook-postedit`, `hook-inject` and `embed-server` exist too but are
-invoked by the hooks, not by hand. `$MNEMO_ROOT` overrides the bank
-root; `--root` defaults to the current directory.
+There is **no `mnemo mcp`**: MCP is HTTP inside the running service. To poke
+the same three tools by hand, use the mirror — plain request/response, no
+JSON-RPC:
+
+```bash
+TOKEN=$(cat ~/.claude/mnemo/state/api.token)
+curl "http://127.0.0.1:8918/mcp-tools/memory_search?bank=NAME&query=rollback&token=$TOKEN"
+```
+
+It returns exactly what the agent reads (`&format=json` wraps that same
+string). Swagger for it: `http://127.0.0.1:8918/docs` — click **Authorize**
+and paste the token. The cabinet's own `/api/*` is private and deliberately
+absent from that page.
+
+`memory-hook`, `hook-inject`, `hook-postedit` and `embed-server` exist too but
+are not typed by hand. `$MNEMO_ROOT` overrides the bank root; `--root`
+defaults to the current directory.
 
 The v2 `--scope project|agent` / `--agent NAME` flags are **gone**: banks
 are flat, and `--path-prefix` replaces them with any folder depth. The

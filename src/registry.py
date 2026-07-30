@@ -44,7 +44,11 @@ REGISTRY_VERSION = 1
 
 # Directories that carry no identity of their own: a bank rooted at
 # ``<proj>/.claude/memory`` is "the <proj> bank", not "the memory bank".
-_WIRING_DIRS = frozenset({".claude", "memory", "agent-memory", "mnemo"})
+_WIRING_DIRS = frozenset({".claude", "memory", "agent-memory"})
+# ``mnemo`` is wiring only as ``~/.claude/mnemo`` — the engine's own folder.
+# Listed unconditionally it also swallowed a *project* named `mnemo`, which
+# named this repository's own bank after its grandparent (`other`).
+_ENGINE_DIR = "mnemo"
 
 _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 
@@ -133,10 +137,17 @@ def default_name(root: Path) -> str:
     folders matters because otherwise every project on the machine would want
     to be called ``memory`` and the uniqueness suffixes would carry all the
     meaning.
+
+    ``mnemo`` counts as wiring only directly under ``.claude`` (the installed
+    engine). A project folder *called* ``mnemo`` keeps its name — otherwise
+    this repository's own bank ends up named after its grandparent.
     """
     node = root.expanduser().resolve()
     while node.parent != node and (
-        node.name.casefold() in _WIRING_DIRS or node.name.startswith(".")
+        node.name.casefold() in _WIRING_DIRS
+        or node.name.startswith(".")
+        or (node.name.casefold() == _ENGINE_DIR
+            and node.parent.name.casefold() == ".claude")
     ):
         node = node.parent
     return node.name or root.expanduser().resolve().as_posix().strip("/:")

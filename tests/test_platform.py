@@ -140,13 +140,18 @@ def _check_hook_wiring(settings: dict) -> None:
     """Every event named explicitly — a hook group dropped from the source
     must fail here, not vanish along with the loop that iterated it.
 
-    v3 generates exactly ONE hook. `ingest` and `hook-postedit` were the v2
-    wiring and indexed inline, inside the user's session; phase 4 retired
-    them in favour of the watcher. Their absence is asserted below and is
-    the more valuable half of this function: it is what catches a
-    regression that quietly reintroduces synchronous indexing.
+    Called with the plan for a run that **asked for both seeds**: `init`
+    itself writes no hook (asserted separately), so this checks the shape a
+    seed takes once requested.
+
+    `ingest` and `hook-postedit` were the v2 wiring and indexed inline, inside
+    the user's session; phase 4 retired them in favour of the watcher. Their
+    absence is asserted below and is the more valuable half of this function:
+    it is what catches a regression that quietly reintroduces synchronous
+    indexing.
     """
     expected = {
+        "SessionStart": ("memory-hook", None),
         "UserPromptSubmit": ("hook-inject", None),
     }
     retired = {
@@ -224,7 +229,13 @@ def test_scaffold() -> None:
         )
 
         mcp_text = _plan_mcp(mcp_path, [])
-        settings_text = _plan_settings(settings_path, [])
+        # A default `init` wires NO hook (design #15): nothing to plan, so the
+        # file is not even rewritten. Asserted before anything else, because a
+        # regression here puts a hook into somebody's git-tracked settings.
+        default_settings_text = _plan_settings(settings_path, [])
+        # The seeded shape is what the rest of the hook checks look at.
+        settings_text = _plan_settings(settings_path, [], False,
+                                       frozenset({"memory", "inject"}))
         mcp = json.loads(mcp_text or "{}")
         settings = json.loads(settings_text or "{}")
 
@@ -266,12 +277,29 @@ def test_scaffold() -> None:
             settings.get("permissions") == {"allow": ["Read"]},
             detail=str(settings),
         )
+        check(
+            "default init plans no hook at all",
+            default_settings_text is None,
+            detail=str(default_settings_text),
+        )
         _check_hook_wiring(settings)
 
         mcp_path.write_text(mcp_text or "", encoding="utf-8")
         settings_path.write_text(settings_text or "", encoding="utf-8")
         check("MCP idempotent", _plan_mcp(mcp_path, []) is None)
-        check("hooks idempotent", _plan_settings(settings_path, []) is None)
+        check(
+            "hooks idempotent",
+            _plan_settings(settings_path, [], False,
+                           frozenset({"memory", "inject"})) is None,
+        )
+        # A seeded project is not un-seeded by a plain re-run: `init` without
+        # the flags must leave an already-wired hook alone, never remove it
+        # behind the user's back. Removal is `--migrate`, and only that.
+        check(
+            "plain re-run does not unwire an existing seed",
+            _plan_settings(settings_path, []) is None
+            and "hook-inject" in settings_path.read_text(encoding="utf-8"),
+        )
 
         # Two legacy generations exist in the wild (contracts §15.2), and
         # `mnemo init --migrate` must recognise BOTH in phase 4. Projects
@@ -354,7 +382,7 @@ def test_index_paths() -> None:
     with tempfile.TemporaryDirectory(prefix="mnemo paths ") as raw:
         root = Path(raw) / "проєкт"
         memory = root / ".claude" / "memory" / "nested"
-        agent = root / ".claude" / "agent-memory" / "reviewer"
+        agent = root / ".claude" / "memory" / "agents" / "reviewer"
         docs = root / "docs" / "deep dive"
         for d in (memory, agent, docs):
             d.mkdir(parents=True)
@@ -403,7 +431,7 @@ def test_index_paths() -> None:
         check(
             "flat walk takes every .md under the bank root",
             identifiers == [
-                ".claude/agent-memory/reviewer/MEMORY.md",
+                ".claude/memory/agents/reviewer/MEMORY.md",
                 ".claude/memory/nested/topic.md",
                 "README.md",
                 "docs/deep dive/нотатка.md",

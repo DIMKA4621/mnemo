@@ -93,7 +93,101 @@ def _no_hits_text(payload: dict) -> str:
     return "No relevant results."
 
 
+# ------------------------------------------------ tool bodies (shared)
+#
+# The bodies live OUTSIDE `_register` so the `/mcp-tools/*` mirror (§9.8) can
+# call the very same code. That is the whole point of the mirror: identical
+# names, identical parameters, identical text. Had it re-implemented the
+# formatting, the two would have drifted the first time either changed — and a
+# debug surface that quietly disagrees with what the agent reads is worse than
+# no debug surface at all.
+
+
+def run_search(
+    query: str,
+    top_k: int = 5,
+    path_prefix: str | None = None,
+    bank: str | None = None,
+    *,
+    face: str = "mcp",
+) -> str:
+    """Search this project's curated memory. Returns numbered sections."""
+    from .api import SearchRequest, api_search
+
+    target, problem = _resolve(bank)
+    if problem:
+        return problem
+    payload = api_search(SearchRequest(
+        bank=target.id, query=query, top_k=max(1, min(int(top_k), 50)),
+        path_prefix=path_prefix, face=face,
+    ))
+    lines = [_status_line(target, payload)]
+    if not payload["hits"]:
+        lines.append(_no_hits_text(payload))
+        return "\n".join(lines)
+    for i, hit in enumerate(payload["hits"], 1):
+        lines.append(
+            f"[{i}] {hit['path']} · {hit['heading'] or '(no heading)'} "
+            f"· score={hit['score']:.4f}"
+        )
+        lines.append(hit["content"])
+    return "\n".join(lines)
+
+
+def run_tree(
+    path_prefix: str | None = None,
+    depth: int = 3,
+    bank: str | None = None,
+) -> str:
+    """Show the memory tree, with each file's headings."""
+    from .api import api_tree
+
+    target, problem = _resolve(bank)
+    if problem:
+        return problem
+    payload = api_tree(bank=target.id, links=False, depth=max(0, int(depth)))
+    lines = [f"[mnemo · bank={target.name} · {payload['files']} files]"]
+
+    def walk(node: dict, indent: int) -> None:
+        for child in node.get("children", []):
+            rel = child["path"]
+            if path_prefix and not (
+                rel == path_prefix
+                or rel.startswith(path_prefix + "/")
+                or path_prefix.startswith(rel + "/")
+            ):
+                continue
+            pad = "  " * indent
+            if child["type"] == "dir":
+                lines.append(f"{pad}{child['name']}/")
+                walk(child, indent + 1)
+            else:
+                heads = ", ".join(child.get("headings") or [])
+                lines.append(
+                    f"{pad}{child['name']}" + (f"  — {heads}" if heads else "")
+                )
+
+    walk(payload["tree"], 0)
+    return "\n".join(lines)
+
+
+def run_reindex(path: str | None = None, bank: str | None = None) -> str:
+    """Queue a reindex of one file, or of the whole bank."""
+    from .api import ReindexRequest, api_reindex
+
+    target, problem = _resolve(bank)
+    if problem:
+        return problem
+    payload = api_reindex(ReindexRequest(bank=target.id, path=path, full=False))
+    return (f"[mnemo · bank={target.name}] queued "
+            f"{len(payload['task_ids'])} task(s); "
+            f"{payload['queued']} waiting.")
+
+
 def _register(mcp: FastMCP) -> None:
+    # Declarations only. The docstring is what the agent reads as the tool's
+    # description, so it stays here, on the decorated function — that is where
+    # `@mcp.tool()` looks for it.
     @mcp.tool()
     def memory_search(
         query: str,
@@ -102,26 +196,7 @@ def _register(mcp: FastMCP) -> None:
         bank: str | None = None,
     ) -> str:
         """Search this project's curated memory. Returns numbered sections."""
-        from .api import SearchRequest, api_search
-
-        target, problem = _resolve(bank)
-        if problem:
-            return problem
-        payload = api_search(SearchRequest(
-            bank=target.id, query=query, top_k=max(1, min(int(top_k), 50)),
-            path_prefix=path_prefix, face="mcp",
-        ))
-        lines = [_status_line(target, payload)]
-        if not payload["hits"]:
-            lines.append(_no_hits_text(payload))
-            return "\n".join(lines)
-        for i, hit in enumerate(payload["hits"], 1):
-            lines.append(
-                f"[{i}] {hit['path']} · {hit['heading'] or '(no heading)'} "
-                f"· score={hit['score']:.4f}"
-            )
-            lines.append(hit["content"])
-        return "\n".join(lines)
+        return run_search(query, top_k, path_prefix, bank)
 
     @mcp.tool()
     def memory_tree(
@@ -130,49 +205,12 @@ def _register(mcp: FastMCP) -> None:
         bank: str | None = None,
     ) -> str:
         """Show the memory tree, with each file's headings."""
-        from .api import api_tree
-
-        target, problem = _resolve(bank)
-        if problem:
-            return problem
-        payload = api_tree(bank=target.id, links=False, depth=max(0, int(depth)))
-        lines = [f"[mnemo · bank={target.name} · {payload['files']} files]"]
-
-        def walk(node: dict, indent: int) -> None:
-            for child in node.get("children", []):
-                rel = child["path"]
-                if path_prefix and not (
-                    rel == path_prefix
-                    or rel.startswith(path_prefix + "/")
-                    or path_prefix.startswith(rel + "/")
-                ):
-                    continue
-                pad = "  " * indent
-                if child["type"] == "dir":
-                    lines.append(f"{pad}{child['name']}/")
-                    walk(child, indent + 1)
-                else:
-                    heads = ", ".join(child.get("headings") or [])
-                    lines.append(
-                        f"{pad}{child['name']}" + (f"  — {heads}" if heads else "")
-                    )
-
-        walk(payload["tree"], 0)
-        return "\n".join(lines)
+        return run_tree(path_prefix, depth, bank)
 
     @mcp.tool()
     def memory_reindex(path: str | None = None, bank: str | None = None) -> str:
         """Queue a reindex of one file, or of the whole bank."""
-        from .api import ReindexRequest, api_reindex
-
-        target, problem = _resolve(bank)
-        if problem:
-            return problem
-        payload = api_reindex(ReindexRequest(bank=target.id, path=path,
-                                             full=False))
-        return (f"[mnemo · bank={target.name}] queued "
-                f"{len(payload['task_ids'])} task(s); "
-                f"{payload['queued']} waiting.")
+        return run_reindex(path, bank)
 
 
 def server() -> FastMCP:

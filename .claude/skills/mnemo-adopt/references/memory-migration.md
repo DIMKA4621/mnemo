@@ -61,15 +61,15 @@ Subagents declare memory in their definition frontmatter
 (`.claude/agents/<role>.md`):
 
 ```yaml
-memory: project   # shared in git under .claude/agent-memory/<role>/
+memory: project   # shared in git under .claude/memory/agents/<role>/
 ```
 
 - `memory: project` → already git-shared; nothing to migrate, just
-  confirm `.claude/agent-memory/<role>/` exists.
+  confirm `.claude/memory/agents/<role>/` exists.
 - `memory: user` (or a non-project scope) → that agent's notes are kept
   at user scope. If such notes exist for this project's agents under
   the same `~/.claude/projects/<slug>/` tree, offer to pull them into
-  `.claude/agent-memory/<role>/` and flip the agent to `memory: project`
+  `.claude/memory/agents/<role>/` and flip the agent to `memory: project`
   (shown as a diff). Never flip scope silently — the choice may be
   deliberate.
 - No `memory:` field → agent memory is effectively off; offer to enable
@@ -87,7 +87,7 @@ The target is mnemo's native shape — do not dump files verbatim:
   detail the built-in `MEMORY.md` inlined into proper topic files.
 - One concept per topic file (`architecture.md`, `database.md`, …).
 - Day-by-day notes → `logs/YYYY-MM-DD.md` (append-only).
-- Agent-specific knowledge → `.claude/agent-memory/<role>/`, not the
+- Agent-specific knowledge → `.claude/memory/agents/<role>/`, not the
   shared index.
 - Drop duplicates, session state, and anything already captured in the
   codebase or `CLAUDE.md`.

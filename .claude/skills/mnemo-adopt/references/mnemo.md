@@ -25,7 +25,7 @@ and the MCP tool. `memory_search(query, path_prefix, top_k)` and `mnemo
 search --path-prefix` narrow a search to a subfolder at any depth, which
 is a **navigation** convenience; the only real isolation boundary is a
 **separate bank** with its own MCP connection. Which is why
-`.claude/agent-memory/<role>/` still organises per-role notes but no
+`.claude/memory/agents/<role>/` still organises per-role notes but no
 longer walls them off.
 
 ## Two layers
@@ -44,7 +44,8 @@ Created by `mnemo init` — additive, idempotent, refuses rather than
 overwrite, never touches `CLAUDE.md`, never invents memory:
 
 - `.mcp.json` — registers the `mnemo` MCP server (portable form).
-- `.claude/settings.json` — three hooks (portable shell form).
+- `.claude/settings.json` — **untouched unless a hook seed is asked for**
+  (`--with-memory-hook` / `--with-inject-hook`, portable shell form).
 - `.claude/memory/MEMORY.md` — a **one-line anchor** if absent
   (`# Memory Index — <project>`), nothing more.
 - `.claude/rules/mnemo-memory.md` — the **binding memory rule** if
@@ -84,10 +85,10 @@ needs that "doing" content moved to the roles that own it.
 
 A subagent's frontmatter `memory: project` enables its **built-in**
 per-agent memory at **user scope** (`~/.claude/projects/<slug>/agents/
-<agent>/memory/`) — not git, not `.claude/agent-memory/`. The
-git-shared curated layer is `.claude/agent-memory/<role>/`, driven by
-the binding rule + the agent's instructions + the mnemo PostToolUse
-hook (which indexes writes there). The adopt skill requires `memory:
+<agent>/memory/`) — not git, not the project's memory root. The
+git-shared curated layer is `.claude/memory/agents/<role>/`, driven by
+the binding rule + the agent's instructions; the watcher indexes writes
+there on its own, with no hook involved. The adopt skill requires `memory:
 project` on every agent **and** relies on the rule for the git layer —
 both, for different reasons.
 
@@ -116,23 +117,29 @@ Agent teams are experimental and **off by default**. They require
 **project** `.claude/settings.json` `env` (ships to the whole team),
 additively, after insisting it is needed for the model to work.
 
-## The hooks
+## The hooks — seeds, and nothing is wired for you
 
-- **SessionStart → `mnemo ingest`** — full reconcile (hash-diff +
-  prune).
-- **PostToolUse (Edit|Write|MultiEdit) → `mnemo hook-postedit`** —
-  reconciles when the edited file is an `.md` inside the bank; instant
-  no-op otherwise. Also captures teammates' memory writes.
-- **UserPromptSubmit → `mnemo hook-inject`** — embeds the prompt via a
-  warm resident helper, gated search, injects the few most relevant
-  curated sections. Best-effort; never blocks. No SessionEnd hook.
+`mnemo init` writes **no hook**. Memory is reached by calling
+`memory_search`; the discipline lives in `.claude/rules/mnemo-memory.md`,
+which loads for the team lead and every subagent. Two seeds exist and are
+wired only on request:
 
-**At v3 phase 4 the first two disappear.** A file watcher inside the
-service reindexes on its own, so nothing needs to be triggered from a
-session; `hook-postedit` degrades to an exit-0 shim and `ingest` to a
+- **`--with-memory-hook` → SessionStart → `mnemo memory-hook`** — injects
+  the bank's `MEMORY.md` and the folder layout. A **map**, which tells an
+  agent to go and look; it cannot be mistaken for having searched. Reads
+  the file off disk, so it works with the service down and cannot hang a
+  session start. This is the recommended one, and it replaces the native
+  `MEMORY.md` auto-load that a bank inside the repo does not get.
+- **`--with-inject-hook` → UserPromptSubmit → `mnemo hook-inject`** —
+  embeds the prompt, gated search, injects the few most relevant sections.
+  Best-effort, never blocks. Off by default for a reason worth repeating to
+  the user: it delivers memory **before** the task is stated, and an agent
+  that sees sections in its context concludes it has already searched.
+
+**The two v2 reindexing hooks are gone.** A watcher inside the service
+reindexes on its own; `hook-postedit` is an exit-0 shim and `ingest` a
 deprecated alias, so already-adopted projects keep working until their
-owner re-runs `mnemo init --migrate`. The auto-inject hook survives and
-becomes a thin HTTP call to the service's search endpoint.
+owner runs `mnemo init --migrate`, which unwires them.
 
 ## Portable invocation (cross-platform)
 
@@ -166,9 +173,9 @@ report.
 
 ## `mnemo` is not a human command
 
-Nobody types `mnemo`. It is called only by the git-tracked hooks, the
-MCP registration, and this skill (`install.sh --check`, `mnemo init`,
-`warmup`, `ingest`, `search` for verification). Not on `PATH`.
+Nobody types `mnemo` for memory. It is called by the MCP registration,
+any wired hook seed, and this skill (`install.sh --check`, `mnemo init`,
+`warmup`, `reindex`, `search` for verification). Not on `PATH`.
 
 v3 softens this in one direction only: the service commands
 (`service start|stop|status|restart`), `doctor` and `ui` are meant for a

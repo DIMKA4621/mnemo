@@ -40,9 +40,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
-from fastapi import FastAPI, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    FastAPI, Query, Request, Security, WebSocket, WebSocketDisconnect,
+)
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -823,7 +826,19 @@ app = FastAPI(
 # ------------------------------------------------------- auth + envelope
 
 
-_GUARDED = ("/api", "/mcp")
+_GUARDED = ("/api", "/mcp", "/mcp-tools")
+# The two faces that may take the token from the query string (§9.1).
+_URL_TOKEN_OK = ("/mcp", "/mcp-tools")
+
+# Declared so the OpenAPI schema carries a security scheme and `/docs` grows an
+# **Authorize** button. Without it the auth lives only in the middleware below,
+# never reaches the schema, and every "Try it out" answers 401 with no way for
+# the person clicking it to fix that. `auto_error=False`: the middleware is
+# still the one that rejects, this only describes what it wants.
+bearer_scheme = HTTPBearer(
+    auto_error=False,
+    description="Contents of ~/.claude/mnemo/state/api.token",
+)
 
 
 @app.middleware("http")
@@ -836,10 +851,14 @@ async def auth_middleware(request: Request, call_next):
             or request.headers.get("x-mnemo-token")
             # `/mcp/<bank>?token=…` — the MCP face carries its token in the
             # URL precisely so it does not depend on a client forwarding
-            # headers. Accepted only there: an /api caller has no reason to
-            # put a secret somewhere it lands in shell history and logs.
+            # headers, and `/mcp-tools/*` accepts it because that surface
+            # exists to be poked with curl. Nowhere else: an /api caller has
+            # no reason to put a secret where it lands in shell history and
+            # proxy logs. Spelled out rather than left to `/mcp-tools`
+            # happening to start with `/mcp` — renaming one must not silently
+            # change the other's auth.
             or (request.query_params.get("token")
-                if path.startswith("/mcp") else None)
+                if path.startswith(_URL_TOKEN_OK) else None)
         )
         if not _token_ok(presented):
             # A plain 401 BEFORE the MCP handshake. Letting an unauthorised
@@ -973,7 +992,7 @@ def _engine_search(conn, req: SearchRequest, bank: Bank) -> list[Any]:
     )
 
 
-@app.post("/api/search")
+@app.post("/api/search", include_in_schema=False)
 def api_search(req: SearchRequest) -> dict:
     bank = _resolve_bank(req.bank)
     started = time.perf_counter()
@@ -1033,12 +1052,12 @@ def api_search(req: SearchRequest) -> dict:
     return body
 
 
-@app.get("/api/banks")
+@app.get("/api/banks", include_in_schema=False)
 def api_banks() -> dict:
     return {"banks": [_bank_info(b) for b in registry.load()]}
 
 
-@app.post("/api/banks", status_code=201)
+@app.post("/api/banks", status_code=201, include_in_schema=False)
 def api_add_bank(req: AddBankRequest) -> dict:
     try:
         bank = registry.add(req.root, name=req.name, provider=req.provider)
@@ -1057,12 +1076,12 @@ def api_add_bank(req: AddBankRequest) -> dict:
     return info
 
 
-@app.get("/api/banks/{bank_id}")
+@app.get("/api/banks/{bank_id}", include_in_schema=False)
 def api_bank(bank_id: str) -> dict:
     return _bank_info(_resolve_bank(bank_id, require_enabled=False))
 
 
-@app.delete("/api/banks/{bank_id}")
+@app.delete("/api/banks/{bank_id}", include_in_schema=False)
 def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
     bank = _resolve_bank(bank_id, require_enabled=False)
 
@@ -1229,7 +1248,7 @@ def _registered_roots() -> dict[str, str]:
     return out
 
 
-@app.get("/api/fs/dirs")
+@app.get("/api/fs/dirs", include_in_schema=False)
 def api_fs_dirs(path: str | None = None) -> dict:
     """Sub-directories of one directory (§9.5). Defaults to the user's home."""
     raw = (path or "").strip()
@@ -1299,7 +1318,7 @@ def api_fs_dirs(path: str | None = None) -> dict:
     }
 
 
-@app.post("/api/reindex", status_code=202)
+@app.post("/api/reindex", status_code=202, include_in_schema=False)
 def api_reindex(req: ReindexRequest) -> dict:
     bank = _resolve_bank(req.bank)
     q = _require_queue()
@@ -1326,7 +1345,7 @@ def _safe_relpath(bank: Bank, path: str) -> str:
     return rel.as_posix()
 
 
-@app.get("/api/tree")
+@app.get("/api/tree", include_in_schema=False)
 def api_tree(
     bank: str,
     links: bool = False,
@@ -1456,7 +1475,7 @@ def _as_indexed(raw: bytes) -> str:
     ).replace("\r", "\n")
 
 
-@app.get("/api/file")
+@app.get("/api/file", include_in_schema=False)
 def api_file(bank: str, path: str) -> dict:
     b = _resolve_bank(bank, require_enabled=False)
     rel = _safe_relpath(b, path)
@@ -1503,7 +1522,7 @@ def api_file(bank: str, path: str) -> dict:
     }
 
 
-@app.get("/api/status")
+@app.get("/api/status", include_in_schema=False)
 def api_status() -> dict:
     identity, provider_error = _provider_identity(None)
     try:
@@ -1540,7 +1559,7 @@ def api_status() -> dict:
     }
 
 
-@app.get("/api/logs")
+@app.get("/api/logs", include_in_schema=False)
 def api_logs(
     kind: Literal["query", "index"],
     bank: str | None = None,
@@ -1639,6 +1658,80 @@ except ImportError:
     _STATIC_DIR = None
 if _STATIC_DIR is not None and _STATIC_DIR.is_dir():
     app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
+
+# ------------------------------------------------ /mcp-tools — tool mirror
+#
+# The same three tools as plain HTTP: send a request, get an answer, no
+# JSON-RPC and no streaming (§9.8). This is the surface for a person with curl
+# and for a script asking "does it answer at all" — agents use `/mcp`.
+#
+# It is a MIRROR, not a second API, and three things keep it honest: the paths
+# are the tool names verbatim, the parameters and defaults are copied from the
+# tool signatures, and the body is produced by the very same `run_*` functions
+# the tools call. `?format=json` only wraps that same string — it does not
+# restructure it, because two shapes would mean two contracts to keep in step.
+#
+# These are also the ONLY routes in the OpenAPI schema: every `/api` route is
+# `include_in_schema=False`, so `/docs` shows what is meant to be looked at
+# from outside and not the cabinet's private plumbing.
+
+_MIRROR_TAGS = ["mcp-tools"]
+
+
+def _mirror(tool: str, text: str, fmt: str, bank: str | None):
+    """text/plain by default — byte for byte what the agent reads."""
+    if fmt == "json":
+        return {"tool": tool, "bank": bank, "text": text}
+    return PlainTextResponse(text)
+
+
+@app.get("/mcp-tools/memory_search", tags=_MIRROR_TAGS,
+         dependencies=[Security(bearer_scheme)])
+def mcp_tools_memory_search(
+    query: str,
+    top_k: int = 5,
+    path_prefix: str | None = None,
+    bank: str | None = None,
+    format: Literal["text", "json"] = "text",
+):
+    """Search this project's curated memory. Returns numbered sections."""
+    from .mcp_server import run_search
+
+    # face="mcp-tools": a hand-poked query must not be counted as an agent's
+    # in the journal, or the usage numbers stop meaning anything.
+    text = run_search(query, top_k, path_prefix, bank, face="mcp-tools")
+    return _mirror("memory_search", text, format, bank)
+
+
+@app.get("/mcp-tools/memory_tree", tags=_MIRROR_TAGS,
+         dependencies=[Security(bearer_scheme)])
+def mcp_tools_memory_tree(
+    path_prefix: str | None = None,
+    depth: int = 3,
+    bank: str | None = None,
+    format: Literal["text", "json"] = "text",
+):
+    """Show the memory tree, with each file's headings."""
+    from .mcp_server import run_tree
+
+    return _mirror("memory_tree", run_tree(path_prefix, depth, bank),
+                   format, bank)
+
+
+@app.post("/mcp-tools/memory_reindex", tags=_MIRROR_TAGS,
+          dependencies=[Security(bearer_scheme)])
+def mcp_tools_memory_reindex(
+    path: str | None = None,
+    bank: str | None = None,
+    format: Literal["text", "json"] = "text",
+):
+    """Queue a reindex of one file, or of the whole bank."""
+    from .mcp_server import run_reindex
+
+    # POST, unlike its two siblings: this one changes state (it queues work).
+    # The others stay GET so they can be pasted into an address bar.
+    return _mirror("memory_reindex", run_reindex(path, bank), format, bank)
+
 
 # MCP over HTTP, in this same process and this same uvicorn — nothing is
 # spawned for a Claude Code session (NFR-2). Mounted last so the /api routes

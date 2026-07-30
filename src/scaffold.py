@@ -12,7 +12,11 @@ This is a SAFE primitive, not a judgement call. It only ever:
     exists, leaving that migration to the adopt skill (shown diff +
     confirmation). It never edits CLAUDE.md.
 
-The git-tracked invocation is portable by construction: hooks use the
+**No hook is written unless asked for.** `settings.json` is left alone by a
+default `init` — the seeds are wired only by `--with-memory-hook` /
+`--with-inject-hook`, and `--migrate` unwires whatever was not asked for.
+
+The git-tracked invocation is portable by construction: hook seeds use the
 shell form so `~` expands per-user at run time; the MCP server directly
 executes the same logical launcher path after Claude Code expands
 `${HOME}`. Installers provide that contract as a script on POSIX and a
@@ -23,14 +27,15 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from typing import Iterable
 from urllib.parse import quote
 
 from . import config
 from .config import resolve
 
 # Portable launcher reference. Each teammate's own $HOME resolves at run
-# time — nothing machine-specific lands in git. Still needed for the
-# `hook-inject` hook; the MCP wiring no longer uses it at all.
+# time — nothing machine-specific lands in git. Needed only by the hook seeds;
+# the MCP wiring no longer uses it at all.
 _LAUNCHER = "~/.claude/mnemo/bin/mnemo"
 
 
@@ -90,28 +95,53 @@ def _is_legacy_mcp(entry: object) -> str | None:
         return "L2"
     return None
 
-# One hook group per event. Shell form (a bare `command` string, no
-# `args`) so the shell expands `~` at run time.
+# Hook seeds. Shell form (a bare `command` string, no `args`) so the shell
+# expands `~` at run time.
 #
-# v3 generates exactly ONE hook. `SessionStart -> ingest` and
-# `PostToolUse -> hook-postedit` are gone: the watcher reindexes on its own,
-# so both were doing work the service already does — and doing it *inside*
-# the session, which is the blocking behaviour v3 exists to remove.
-# `--migrate` removes them from a project that already has them; until then
-# both subcommands keep working (`hook-postedit` is a no-op shim).
-_HOOK_GROUPS: dict[str, dict] = {
-    "UserPromptSubmit": {
+# **`init` writes NO hook unless asked** (design #15). The mechanism stays
+# whole — that is what a seed is — but nothing lands in somebody's
+# git-tracked `settings.json` by default, because the primary access to memory
+# is MCP and the discipline is carried by the rule, not by an injection.
+#
+# The two seeds differ in kind, and the difference is the reason only one of
+# them is recommended:
+#
+#   * `memory-hook` hands over the bank's `MEMORY.md` plus the layout — a
+#     **map**, which says "search for the detail". It cannot be mistaken for
+#     having searched.
+#   * `hook-inject` hands over top-N sections **before** the task is even
+#     stated, which reads as memory already gathered. That false sense of
+#     coverage is why it is off.
+#
+# seed name -> (event, subcommand, hook group)
+_HOOK_SEEDS: dict[str, tuple[str, str, dict]] = {
+    "memory": ("SessionStart", "memory-hook", {
+        "hooks": [
+            {"type": "command",
+             "command": f"{_LAUNCHER} memory-hook", "timeout": 10},
+        ],
+    }),
+    "inject": ("UserPromptSubmit", "hook-inject", {
         "hooks": [
             {"type": "command",
              "command": f"{_LAUNCHER} hook-inject", "timeout": 30},
         ],
-    },
+    }),
 }
-# Event -> the mnemo subcommand that identifies "our" hook entry.
-_EVENT_SUBCMD = {"UserPromptSubmit": "hook-inject"}
-# Hooks v2 generated that v3 removes. `--migrate` deletes exactly these and
-# nothing else.
-_RETIRED_HOOKS = {"SessionStart": "ingest", "PostToolUse": "hook-postedit"}
+
+# Hooks earlier generations wrote that `--migrate` removes. Pairs, not a dict
+# keyed by event: `SessionStart` appears twice with different subcommands (v2's
+# `ingest`, v3's `memory-hook` seed), and a dict would silently lose one.
+#
+#   * v2: `SessionStart -> ingest`, `PostToolUse -> hook-postedit` — both did
+#     work the watcher now does, and did it *inside* the session, which is the
+#     blocking behaviour v3 exists to remove.
+#   * early v3: `UserPromptSubmit -> hook-inject` was wired automatically.
+#     Now it is opt-in, so `--migrate` unwires it unless it was asked for.
+_RETIRED_HOOKS: tuple[tuple[str, str], ...] = (
+    ("SessionStart", "ingest"),
+    ("PostToolUse", "hook-postedit"),
+)
 
 # The strict, universal project-memory rule. `.claude/rules/*.md`
 # auto-loads into the team lead AND every subagent (subagents do not
@@ -121,61 +151,103 @@ _RETIRED_HOOKS = {"SessionStart": "ingest", "PostToolUse": "hook-postedit"}
 _MEMORY_RULE = """\
 # Project memory (mnemo) — binding rule
 
-This project uses **mnemo** for shared, searchable memory. This rule is
-mandatory and applies to everyone in the session — the team lead and
-every subagent. It replaces any default or built-in memory behavior.
+Everything below the divider is **portable**: it is the whole instruction for
+working with this project's memory, and it stands on its own. If an agent or a
+platform has no notion of rule files, paste that part into its system prompt,
+give it the `mnemo` MCP server, and it has what it needs.
 
-**Location — read carefully.** Memory lives in the **project's own
-`.claude/` directory at the repository root** (the project you are
-working in). This is NOT `~/.claude/` in your home directory and NOT
-any user-level Claude folder. Every path below is relative to the
-project root. The curated markdown there is the single source of truth
-and the only memory you write to.
+**This part is Claude Code specific.** The file lives at
+`.claude/rules/mnemo-memory.md` and auto-loads for everyone in the session —
+the team lead **and every subagent** (subagents do not inherit `CLAUDE.md`, so
+this is the one place the discipline binds for all). It replaces any default or
+built-in memory behavior.
 
-## Before non-trivial work
+---
 
-Search the project memory first — the `mnemo` MCP tool `memory_search`.
-Narrow with `path_prefix` when you know roughly where to look (for
-example `logs` or `topics`); leave it out to search the whole bank. Do
-not re-investigate decisions, architecture or pitfalls already recorded.
+## Where memory lives
 
-## After significant work or any decision
+The project's **own** `.claude/memory/` at the repository root — not
+`~/.claude/`, not any user-level or session-local store. One root, everything
+nested inside it:
 
-Record it in the project tree so it is not lost:
+```
+.claude/memory/
+  MEMORY.md          index: links + quick facts, kept under ~200 lines
+  logs/YYYY-MM-DD.md what was done that day, decisions, commits
+  topics/<name>.md   one concept per file: architecture, research, pitfalls
+  agents/<role>/     per-role memory, when a project has agent roles
+```
 
-- keep `MEMORY.md` a thin index — links and quick facts only;
-- put detail in topic files, one concept per file;
-- append day notes under `logs/YYYY-MM-DD.md`.
+Everything else under `.claude/` — `agents/`, `rules/`, `skills/`,
+`settings.json` — is **not** memory and is not part of the searchable bank.
+That is why memory nests under one root: the boundary is the folder, so no
+exclusion list has to be maintained.
+
+The curated markdown is the **single source of truth**. The vector index is
+derived from it, disposable, and rebuilt automatically — never edit the index,
+and never treat it as a place where something is stored.
+
+## Searching — the part that is not optional
+
+The MCP tool is **`memory_search`**. Narrow with `path_prefix` when you know
+roughly where to look (`logs`, `topics`, `agents/reviewer`); leave it out to
+search the whole bank. `memory_tree` shows the layout with each file's
+headings.
+
+**You have not consulted memory until you have called `memory_search` in this
+session, for this task.** Text that happens to be in your context is not a
+search result: it may be stale, it may be about something else, and it is not
+evidence that anything was checked. Do not reason from "I think I already have
+this".
+
+Search **before**:
+
+- planning, or proposing an approach;
+- changing architecture, an interface, or a schema;
+- debugging anything that is not a one-line typo;
+- answering "why is this like this?" or "did we try X?";
+- re-investigating anything that smells like it was decided before.
+
+Read what comes back. A recorded decision is not a suggestion — if you intend
+to go against one, say so explicitly and say why.
+
+Three answers mean three different things, and they are not interchangeable:
+
+| Answer | Meaning | What to do |
+|---|---|---|
+| `status=ready`, no hits | genuinely nothing recorded | proceed, then record what you learn |
+| `status=indexing` | the index is still building | retry shortly — do **not** conclude "no memory" |
+| `status=empty` | nothing indexed yet at all | say so; the bank may need registering |
+
+## Writing — after significant work or any decision
+
+- `MEMORY.md` stays an **index**: links and quick facts, under ~200 lines. When
+  it outgrows that, move detail into `topics/` and leave a link.
+- One concept per file in `topics/`. Day-by-day notes in `logs/`.
+- Write more rather than less: a redundant entry costs nothing, a lost insight
+  costs the next session's time. When in doubt, record it.
+- Record **research and debugging conclusions**, not just outcomes — the dead
+  ends are what save the next attempt.
+- No duplicates: check what is recorded before adding.
+- No session state ("currently doing X") — only durable knowledge.
+- Remove entries that became wrong. Stale memory is worse than none.
+- Do not record what the code, the git history or `CLAUDE.md` already says.
 
 ## Hard constraints
 
-- Edit only the `.md` files in the project's `.claude/`. Never edit the
-  index database — it is derived and rebuilt from the `.md`.
-- The `.md` in git is the source of truth; the index is disposable.
+- Edit only the `.md` under `.claude/memory/`. Use native file tools; there is
+  no memory-write tool and there will not be one.
 - Never write shared knowledge to `~/.claude/` or any user-level,
-  session-local or built-in memory — only the project's git-tracked
-  `.claude/` counts.
+  session-local or built-in memory. Only the project's git-tracked
+  `.claude/memory/` counts.
 - Reindexing is automatic: a background service watches these files and
   re-indexes within seconds of a save. You never run a command for it.
   `memory_reindex` exists only to force the issue.
-- A search may answer `status=indexing` (the index is still building —
-  retry shortly) or `status=empty` (nothing indexed yet). Neither means
-  "no such memory"; only `status=ready` with no hits means that.
-- Memory rides with the commit: when a memory `.md` change accompanies
-  a code change, `git add` it together and land both in the **same
-  commit**; refer to that commit by its **subject/scope, never by a
-  hash** (hashes break on force-push/rebase). Never leave memory
-  uncommitted trailing a code commit.
-
-## Hygiene
-
-- `MEMORY.md` is an index, not a store — links + quick facts only;
-  detail belongs in topic files.
-- One concept per topic file; day-by-day notes in `logs/`.
-- No duplicates: check what is already recorded before adding.
-- No session state ("currently doing X") — only durable knowledge.
-- Remove outdated entries: stale memory is worse than none.
-- Do not record what the code, git history or CLAUDE.md already says.
+- **Memory rides with the commit.** When a memory `.md` change accompanies a
+  code change, `git add` both and land them in the **same** commit. Refer to
+  that commit by its **subject/scope, never by a hash** — hashes break on
+  force-push, rebase and amend. Never leave memory uncommitted behind a code
+  commit.
 """
 
 
@@ -264,8 +336,24 @@ def _is_mnemo_cmd(command: object, subcmd: str) -> bool:
     return bool(toks) and "mnemo" in command and toks[-1] == subcmd
 
 
-def _drop_retired_hooks(hooks: dict, path: Path, log: list[str]) -> bool:
-    """`--migrate` only: remove the two hooks v3 no longer generates.
+def _retired_for(wanted: frozenset[str]) -> tuple[tuple[str, str], ...]:
+    """`(event, subcmd)` pairs `--migrate` should unwire from this project.
+
+    The retired v2 hooks, plus any **seed the caller did not ask for** — that
+    is what makes `--migrate` bring an early-v3 project (auto-wired
+    `hook-inject`) in line with "no hook unless asked", while
+    `--with-inject-hook` keeps the one it was asked to keep.
+    """
+    return _RETIRED_HOOKS + tuple(
+        (event, subcmd)
+        for seed, (event, subcmd, _group) in _HOOK_SEEDS.items()
+        if seed not in wanted
+    )
+
+
+def _drop_retired_hooks(hooks: dict, path: Path, log: list[str],
+                        retired: tuple[tuple[str, str], ...]) -> bool:
+    """`--migrate` only: unwire hooks this generation no longer writes.
 
     Surgical by construction — it deletes a hook entry only when
     `_is_mnemo_cmd` says mnemo wrote it, and removes the surrounding group
@@ -273,7 +361,7 @@ def _drop_retired_hooks(hooks: dict, path: Path, log: list[str]) -> bool:
     left exactly where it was.
     """
     changed = False
-    for event, subcmd in _RETIRED_HOOKS.items():
+    for event, subcmd in retired:
         arr = hooks.get(event)
         if not isinstance(arr, list):
             continue
@@ -292,7 +380,7 @@ def _drop_retired_hooks(hooks: dict, path: Path, log: list[str]) -> bool:
             if len(kept) != len(entries):
                 changed = True
                 log.append(f"  settings.json        -hooks.{event} "
-                           f"(mnemo {subcmd}, retired in v3)")
+                           f"(mnemo {subcmd}, no longer wired by default)")
             if kept:
                 grp = dict(grp, hooks=kept)
                 kept_groups.append(grp)
@@ -305,10 +393,18 @@ def _drop_retired_hooks(hooks: dict, path: Path, log: list[str]) -> bool:
     return changed
 
 
-def _plan_settings(path: Path, log: list[str],
-                   migrate: bool = False) -> str | None:
+def _plan_settings(path: Path, log: list[str], migrate: bool = False,
+                   hooks_wanted: frozenset[str] = frozenset()) -> str | None:
     """Return the new `.claude/settings.json` text, or None if already
-    correct. Raises _Refuse on a conflicting mnemo hook."""
+    correct. Raises _Refuse on a conflicting mnemo hook.
+
+    With no seed requested and no `--migrate`, this returns None without
+    reading a thing into the file — a default `init` leaves `settings.json`
+    absent rather than creating one that says nothing.
+    """
+    if not hooks_wanted and not migrate:
+        return None
+
     data = _load_json(path)
     hooks = data.get("hooks")
     if hooks is None:
@@ -316,9 +412,12 @@ def _plan_settings(path: Path, log: list[str],
     elif not isinstance(hooks, dict):
         raise _Refuse(f"{path}: 'hooks' is not an object; left untouched")
 
-    changed = _drop_retired_hooks(hooks, path, log) if migrate else False
-    for event, group in _HOOK_GROUPS.items():
-        subcmd = _EVENT_SUBCMD[event]
+    changed = (
+        _drop_retired_hooks(hooks, path, log, _retired_for(hooks_wanted))
+        if migrate else False
+    )
+    for seed in sorted(hooks_wanted):
+        event, subcmd, group = _HOOK_SEEDS[seed]
         desired_cmd = group["hooks"][0]["command"]
         arr = hooks.get(event)
         if arr is None:
@@ -412,19 +511,29 @@ def bank_name_for(proj: Path) -> str:
     return registry.default_name(claude / "memory")
 
 
-def init_project(root: str | None, *, migrate: bool = False) -> int:
+def init_project(root: str | None, *, migrate: bool = False,
+                 hooks: Iterable[str] = ()) -> int:
     """Wire mnemo into a project. Returns 0 on success, 1 on refusal
-    (in which case NOTHING was written)."""
+    (in which case NOTHING was written).
+
+    ``hooks`` names the seeds to wire (``"memory"``, ``"inject"``); empty — the
+    default — writes none.
+    """
     paths = resolve(root)
     proj = paths.root
     mcp_path = proj / ".mcp.json"
     settings_path = proj / ".claude" / "settings.json"
+    wanted = frozenset(hooks)
+    unknown = wanted - set(_HOOK_SEEDS)
+    if unknown:
+        print(f"mnemo init: unknown hook seed(s): {', '.join(sorted(unknown))}")
+        return 1
 
     log: list[str] = []
     try:
         new_mcp = _plan_mcp(mcp_path, log, bank_name=bank_name_for(proj),
                             migrate=migrate)
-        new_settings = _plan_settings(settings_path, log, migrate)
+        new_settings = _plan_settings(settings_path, log, migrate, wanted)
     except _Refuse as exc:
         print(f"mnemo init: refused — {exc}")
         print("mnemo init: NOTHING was written.")

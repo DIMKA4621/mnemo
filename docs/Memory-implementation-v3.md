@@ -61,7 +61,7 @@
 | H | **Search** | kNN + FTS + RRF + статус | `search(bank, q, path_prefix?) -> hits + status` | є (`search.py`); **−scope-фільтр**, +опц. `path_prefix`, +обгортка статусу |
 | I | **Logs** | журнал query+index; читання з фільтром | `log_query(...)`, `log_index(...)`, `read(bank?, since?)` | **SQLite `service.db`** (заміняє JSONL); retention за часом |
 | J | **Core API (FastAPI)** | єдиний loopback-API над B–I | `/search /reindex /tree /status /banks /logs` + `/ws` | нове |
-| K | **Faces** | доступ до J | MCP — **FastMCP**-ендпоінт у J (HTTP); CLI / хук / Web UI — HTTP-клієнти | рефактор + новий UI |
+| K | **Faces** | доступ до J | MCP — **FastMCP**, змонтований у J (HTTP); `/mcp-tools/*` — дзеркало тих самих тулів звичайним HTTP; CLI / Web UI / насіння-хуки — HTTP-клієнти | рефактор + новий UI |
 | L | **Lifecycle** | підйом/тепло/reconcile | autostart-on-demand + reconcile-on-start | патерн є (`_spawn_server`) |
 
 ---
@@ -71,8 +71,9 @@
 ```mermaid
 flowchart TB
   subgraph Faces["Обличчя — тонкі клієнти (K)"]
-    MCP[MCP]
-    HOOK[Auto-inject хук]
+    MCP[MCP — агенти]
+    TOOLS["/mcp-tools — людина, curl, Swagger"]
+    HOOK["Хуки-насіння (off)"]
     CLI[CLI]
     UI[Web UI]
   end
@@ -194,7 +195,8 @@ padding ішов до максимуму батчу, ці числа були б
 
 **Фаза 4 — Обличчя як клієнти**
 - K: CLI → виклик API (ops `warmup`/`init` лишаються локальними); MCP на **FastMCP** (HTTP,
-  адресація по банку); auto-inject хук → клієнт `/search`.
+  адресація по банку); дзеркало `/mcp-tools/*` для ручної перевірки; хуки — насіння,
+  автоматично не додаються.
 - ✅ **Перевірка:** ті самі результати через CLI, MCP і HTTP; Claude Code бачить MCP **по URL**
   (жодного спавну, **жодного вікна** на Windows); два різні банки через два MCP-підключення
   не змішуються; бекенд вимкнено → CLI/MCP деградують мʼяко з поясненням, не падають.

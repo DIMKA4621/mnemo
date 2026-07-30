@@ -236,23 +236,15 @@ RRF_K: int = 60
 # CLI searches (one query returns a self-contained excerpt). 0 = off.
 NEIGHBOR_WINDOW: int = 1
 
-# Auto-inject (UserPromptSubmit) — how many sections to surface.
+# Auto-inject seed (UserPromptSubmit) — how many sections to surface. Only
+# `hook-inject` reads this, and that hook is off unless explicitly wired.
 INJECT_TOP_N: int = 3
-# Soft wall-clock budget for one inject / MCP search call (seconds).
-# Sits below Claude Code's 30 s hook timeout so we exit gracefully with a
-# log line instead of being SIGKILL-ed mid-step. Covers embed + search.
-INJECT_BUDGET_S: float = 20.0
-
-# Inject telemetry log — JSONL, user-scope, rotated, ONE FILE PER BANK.
-# Path: ``state/logs/<bank_id>.log`` — same id as the bank's index DB so a
-# log line and its index sit side by side. One line per hook-inject call
-# (ok / skipped / errored) so MIN_SIM / TOP_N / gate behaviour is tunable
-# from real data instead of guesswork. Replaced by the service log
-# (``service.db``) in phase 2.
-INJECT_LOG_DIR: Path = STATE_DIR / "logs"
-INJECT_LOG_MAX_BYTES: int = 5 * 1024 * 1024   # 5 MB per file
-INJECT_LOG_BACKUPS: int = 3                   # 3 rotated → ~20 MB cap per bank
-INJECT_LOG_PROMPT_CHARS: int = 200            # truncate prompt in the log
+# The JSONL inject telemetry (`INJECT_LOG_*`, `state/logs/<bank_id>.log`) is
+# gone, together with `inject_log.py`: the service journal (`service.db`,
+# §7.5) records the same calls as ordinary `query_events`, and each hit now
+# carries its `sim` in `hits_json` — which is what the telemetry existed to
+# expose. `INJECT_BUDGET_S` went with it; the client's HTTP timeout is the
+# real deadline, and two competing budgets only disagree.
 # Weak-match gate (auto-inject path only; manual search is never gated).
 # Cosine-similarity floor on the vector leg + a minimum query length.
 # e5 has a high baseline similarity (anisotropy); measured on the test

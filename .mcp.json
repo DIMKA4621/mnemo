@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "mnemo": {
+      "type": "http",
+      "url": "http://127.0.0.1:8918/mcp/mnemo?token=${MNEMO_API_TOKEN}",
+      "headers": {
+        "Authorization": "Bearer ${MNEMO_API_TOKEN}",
+        "X-Mnemo-Bank": "mnemo"
+      }
+    }
+  }
+}

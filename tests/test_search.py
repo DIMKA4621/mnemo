@@ -29,7 +29,10 @@ from src.store import connect  # noqa: E402
 # in-repo memory and wires no hooks into itself.
 FIXTURE = str(Path(__file__).resolve().parent / "fixtures")
 M = ".claude/memory/"
-A = ".claude/agent-memory/"
+# Per-role memory nests INSIDE the memory root (design #18) — one bank root,
+# so skills/rules/agents outside it are excluded by the folder boundary rather
+# than by a list of exceptions.
+A = ".claude/memory/agents/"
 
 
 @dataclass
