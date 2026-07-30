@@ -370,8 +370,12 @@ h2 {
   color: var(--fg-dim);
 }
 
+/* `wrap` is load-bearing, not defensive polish: `.btn` is `white-space: nowrap`,
+   so a label that does not fit cannot shrink — without wrapping the row would
+   overflow the card at the narrow breakpoint instead. */
 .bank-actions {
   display: flex;
+  flex-wrap: wrap;
   gap: 6px;
   margin-top: 7px;
 }
@@ -616,9 +620,16 @@ h2 {
    at the old 1200px cut a 1210px-wide window left the document 440px, which
    is narrower than the file list beside it — the exact inversion this rule
    exists to prevent. The widths are what the user asked for; the point at
-   which the narrower pair takes over is what has to move to pay for them. */
+   which the narrower pair takes over is what has to move to pay for them.
+
+   The bank column is 300px because it is pinned from both sides. Below
+   287px the two action buttons stop fitting on one row (262px of button
+   plus 25px of pane and card padding) and stack. Above 311px the document
+   inverts at the bottom of this range: at a 1001px window, 1001 - W - 345
+   must still exceed the 345px file list. Widening it further means moving
+   the 1000px cut up as well. */
 @media (max-width: 1400px) {
-  .layout { grid-template-columns: 260px 345px minmax(0, 1fr); }
+  .layout { grid-template-columns: 300px 345px minmax(0, 1fr); }
 }
 
 /* Below this the columns are squeezing the document into a gutter, so stack

@@ -476,14 +476,14 @@ function bankCard(bank) {
   card.appendChild(el('div', { className: 'bank-actions' }, [
     el('button', {
       className: 'btn',
-      text: 'Реіндекс',
-      title: 'hash-diff реконсиляція банку (bulk, LOW)',
+      text: 'Синхронізація індексу',
+      title: 'Переіндексує лише файли, що змінилися, і знімає з індексу видалені',
       on: { click: stop(() => reindex(bank, { full: false })) },
     }),
     el('button', {
       className: 'btn',
-      text: 'Повна перебудова',
-      title: 'reset_index + повний білд (rebuild, LOW)',
+      text: 'Повний реіндекс',
+      title: 'Стирає індекс і збирає його заново — довго, пропорційно розміру банку',
       on: { click: stop(() => reindex(bank, { full: true })) },
     }),
   ]));
@@ -493,10 +493,12 @@ function bankCard(bank) {
 
 // A task is not always a file: `bulk`/`rebuild` work on the whole bank and
 // carry no path at all, so they get named rather than left as a blank slot.
+// These read the same as the buttons that queue them — a user watching the
+// progress bar should recognise the thing they just clicked.
 const TASK_KIND_LABEL = {
   file: 'файл',
-  bulk: 'звірка банку',
-  rebuild: 'повна перебудова',
+  bulk: 'синхронізація індексу',
+  rebuild: 'повний реіндекс',
   prune: 'зняття з індексу',
 };
 
@@ -672,7 +674,9 @@ async function reindex(bank, opts) {
   try {
     const res = await api('/api/reindex', { method: 'POST', body: body });
     hideBanner();
-    const what = opts.path ? opts.path : (opts.full ? 'повна перебудова' : 'реконсиляція');
+    const what = opts.path
+      ? opts.path
+      : TASK_KIND_LABEL[opts.full ? 'rebuild' : 'bulk'];
     setNote(bank.id, 'поставлено: ' + what + ' · у черзі ' + res.queued +
                      ' · task ' + (res.task_ids || []).join(', '));
   } catch (err) {
