@@ -1129,6 +1129,176 @@ def _unlink_index(bank: Bank) -> tuple[int, list[Path]]:
     return removed, failed
 
 
+# ------------------------------------------- filesystem browse (bank picker)
+#
+# A browser cannot tell a page which folder the user picked. `webkitdirectory`
+# yields relative names only, and `showDirectoryPicker()` hands back a handle
+# while withholding the path *on purpose* — the absolute path is treated as
+# private to the machine. So the cabinet's "add a bank" picker cannot come from
+# the page; the walking has to happen on this side, and this is that endpoint.
+#
+# It is deliberately the smallest thing that answers the two questions a person
+# asks while picking a bank root: what is inside this folder, and is there any
+# markdown here to index. It lists directory *names*, never file names, never
+# file contents.
+
+# Directories returned for one listing. A folder with more subdirectories than
+# this is not something anybody browses by clicking — the path field is the
+# answer there, so the listing says it was cut rather than pretending.
+_FS_ENTRY_LIMIT = 500
+
+# How long the `.md` count may take before it reports a floor instead of a
+# total. A budget in seconds rather than in directories because latency is the
+# thing being protected: one click in the picker must stay a click. A projects
+# folder blows through any plausible directory ceiling in milliseconds and then
+# reports a number that is not just approximate but wrong by two orders of
+# magnitude, so the ceiling stays only as a backstop against a pathological
+# tree of empty directories.
+_MD_SCAN_SECONDS = 0.4
+_MD_SCAN_CAP = 20000
+
+
+def _fs_roots() -> list[dict]:
+    """Places to start browsing from: drive letters, or ``/``.
+
+    Windows drives come from the kernel's bitmask rather than from probing
+    ``A:\\`` … ``Z:\\`` one at a time: probing spins up removable media and
+    blocks for seconds on a disconnected network mapping.
+    """
+    if os.name != "nt":
+        return [{"name": "/", "path": "/"}]
+    mask = 0
+    try:
+        import ctypes
+
+        mask = int(ctypes.windll.kernel32.GetLogicalDrives())  # type: ignore[attr-defined]
+    except Exception:  # noqa: BLE001 - no drive list must never break browsing
+        log.debug("GetLogicalDrives unavailable; browsing without drive roots")
+    roots = []
+    for i in range(26):
+        if mask & (1 << i):
+            letter = chr(ord("A") + i)
+            roots.append({"name": f"{letter}:", "path": f"{letter}:/"})
+    return roots
+
+
+def _count_md_tree(root: Path) -> tuple[int, bool]:
+    """`.md` anywhere under ``root``, honouring the indexer's own excludes.
+
+    Returns ``(count, capped)``, where ``capped`` means "at least this many"
+    — the walk ran out of its time budget. Counting one level deep would be
+    cheaper and wrong: a bank root's markdown usually sits in ``docs/`` or
+    ``logs/``, so a folder holding hundreds of notes would report zero and read
+    as "empty, wrong folder". The same ``DEFAULT_EXCLUDE`` the walk uses applies
+    here, or the number would promise files the index is never going to hold.
+    """
+    patterns = _compile_excludes(config.DEFAULT_EXCLUDE)
+    deadline = time.monotonic() + _MD_SCAN_SECONDS
+    found = scanned = 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        here = Path(dirpath)
+        try:
+            rel_dir = here.relative_to(root).as_posix()
+        except ValueError:  # a symlink walked us out of the tree
+            dirnames[:] = []
+            continue
+        rel_dir = "" if rel_dir == "." else rel_dir
+        dirnames[:] = [
+            d
+            for d in dirnames
+            if not _excluded(f"{rel_dir}/{d}" if rel_dir else d, patterns, is_dir=True)
+        ]
+        for name in filenames:
+            if not name.endswith(".md"):
+                continue
+            rel = f"{rel_dir}/{name}" if rel_dir else name
+            if not _excluded(rel, patterns, is_dir=False):
+                found += 1
+        scanned += 1
+        if scanned >= _MD_SCAN_CAP or time.monotonic() >= deadline:
+            return found, True
+    return found, False
+
+
+def _registered_roots() -> dict[str, str]:
+    """Resolved bank root → bank name, so the picker can say "already a bank"."""
+    out: dict[str, str] = {}
+    for bank in registry.load():
+        with suppress(OSError):
+            out[bank.root.expanduser().resolve().as_posix()] = bank.name
+    return out
+
+
+@app.get("/api/fs/dirs")
+def api_fs_dirs(path: str | None = None) -> dict:
+    """Sub-directories of one directory (§9.5). Defaults to the user's home."""
+    raw = (path or "").strip()
+    target = Path(raw).expanduser() if raw else Path.home()
+    if not target.is_absolute():
+        raise ApiError("bad_request", "потрібен абсолютний шлях", path=raw)
+    try:
+        target = target.resolve()
+        listable = target.is_dir()
+        exists = listable or target.exists()
+    except OSError as exc:
+        # A dead network mapping raises here rather than answering False.
+        raise ApiError("bad_request", f"шлях недоступний: {exc}", path=raw) from exc
+    if not listable:
+        # "gone" and "that is a file" are different mistakes and get different
+        # sentences: one is a typo to fix, the other is a folder to go up from.
+        raise ApiError(
+            "bad_request",
+            f"{target.as_posix()} — це файл, а не тека" if exists
+            else f"немає такої теки: {target.as_posix()}",
+            path=raw,
+        )
+
+    registered = _registered_roots()
+    entries: list[dict] = []
+    truncated = False
+    try:
+        with os.scandir(target) as it:
+            for item in it:
+                try:
+                    # Symlinks and Windows junctions are followed on purpose:
+                    # this never recurses, so a loop costs nothing, while
+                    # skipping them would hide ordinary folders.
+                    if not item.is_dir():
+                        continue
+                except OSError:
+                    continue
+                if len(entries) >= _FS_ENTRY_LIMIT:
+                    truncated = True
+                    break
+                as_posix = Path(item.path).as_posix()
+                entries.append({
+                    "name": item.name,
+                    "path": as_posix,
+                    "registered": registered.get(as_posix),
+                })
+    except PermissionError as exc:
+        raise ApiError("bad_request", "нема доступу до цієї теки", path=raw) from exc
+    except OSError as exc:
+        raise ApiError("bad_request", f"тека не читається: {exc}", path=raw) from exc
+
+    entries.sort(key=lambda e: e["name"].lower())
+    md, md_capped = _count_md_tree(target)
+    parent = target.parent
+    return {
+        "path": target.as_posix(),
+        "display": str(target),
+        # `Path("C:/").parent` is itself; a root has nowhere up to go.
+        "parent": None if parent == target else parent.as_posix(),
+        "home": Path.home().as_posix(),
+        "roots": _fs_roots(),
+        "registered": registered.get(target.as_posix()),
+        "md": md,
+        "md_capped": md_capped,
+        "entries": entries,
+        "truncated": truncated,
+    }
+
+
 @app.post("/api/reindex", status_code=202)
 def api_reindex(req: ReindexRequest) -> dict:
     bank = _resolve_bank(req.bank)

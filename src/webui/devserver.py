@@ -101,6 +101,76 @@ def find_bank(ref: str) -> dict | None:
 
 
 # --------------------------------------------------------------------------
+# fixture filesystem, for the bank picker (contract 9.5 GET /api/fs/dirs)
+# --------------------------------------------------------------------------
+#
+# Invented, not read off the disk. Browsing the real filesystem here would let
+# a UI mistake register a real folder against a fake service — and the point of
+# this server is to answer *shapes*, not to be the backend.
+
+FS_HOME = "/home/dev"
+
+FS_FIXTURE: dict[str, list[str]] = {
+    "/": ["home", "srv"],
+    "/home": ["dev"],
+    "/home/dev": [".claude", "notes", "projects", "empty-folder"],
+    "/home/dev/.claude": ["memory", "skills"],
+    "/home/dev/.claude/memory": ["logs"],
+    "/home/dev/.claude/memory/logs": [],
+    "/home/dev/.claude/skills": [],
+    "/home/dev/notes": [],
+    "/home/dev/projects": ["mnemo", "voice-agent"],
+    "/home/dev/projects/mnemo": ["docs"],
+    "/home/dev/projects/mnemo/docs": [],
+    "/home/dev/projects/voice-agent": [],
+    "/home/dev/empty-folder": [],
+    "/srv": [],
+}
+
+# `.md` under each path, counted the way the real endpoint counts: recursively.
+FS_MD: dict[str, int] = {
+    "/home/dev": 74,
+    "/home/dev/.claude": 61,
+    "/home/dev/.claude/memory": 61,
+    "/home/dev/.claude/memory/logs": 24,
+    "/home/dev/notes": 13,
+    "/home/dev/projects": 0,
+    "/home/dev/projects/mnemo": 9,
+    "/home/dev/projects/mnemo/docs": 9,
+}
+
+
+def fs_listing(path: str | None) -> dict | None:
+    """One directory listing, or ``None`` when the fixture has no such path."""
+    target = (path or "").strip().replace("\\", "/") or FS_HOME
+    if len(target) > 1:
+        target = target.rstrip("/")
+    if target not in FS_FIXTURE:
+        return None
+    parent = target.rsplit("/", 1)[0] or "/"
+    with _lock:
+        registered = {b["root"].rstrip("/"): b["name"] for b in BANKS}
+    entries = [
+        {"name": name,
+         "path": (target.rstrip("/") + "/" + name),
+         "registered": registered.get(target.rstrip("/") + "/" + name)}
+        for name in sorted(FS_FIXTURE[target], key=str.lower)
+    ]
+    return {
+        "path": target,
+        "display": target,
+        "parent": None if target == "/" else parent,
+        "home": FS_HOME,
+        "roots": [{"name": "/", "path": "/"}],
+        "registered": registered.get(target),
+        "md": FS_MD.get(target, 0),
+        "md_capped": False,
+        "entries": entries,
+        "truncated": False,
+    }
+
+
+# --------------------------------------------------------------------------
 # WebSocket plumbing (RFC 6455, the small subset a browser needs)
 # --------------------------------------------------------------------------
 
@@ -446,6 +516,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/reindex":
             self.post_reindex(body)
             return
+        if parsed.path == "/api/banks":
+            self.post_bank(body)
+            return
         self.fail(404, "internal", "no route " + parsed.path)
 
     # -- static ----------------------------------------------------------
@@ -483,6 +556,15 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(404, "bank_not_found", "no bank matches", {"ref": path})
                 return
             self.json_out(200, bank_info(bank))
+            return
+
+        if path == "/api/fs/dirs":
+            listing = fs_listing((query.get("path") or [""])[0])
+            if listing is None:
+                self.fail(400, "bad_request", "нема такої теки (фікстура)",
+                          {"path": (query.get("path") or [""])[0]})
+                return
+            self.json_out(200, listing)
             return
 
         if path == "/api/status":
@@ -558,6 +640,54 @@ class Handler(BaseHTTPRequestHandler):
         total = len(rows)
         self.json_out(200, {"kind": kind, "total": total, "limit": limit,
                             "offset": offset, "events": rows[offset:offset + limit]})
+
+    def post_bank(self, body: dict) -> None:
+        """`POST /api/banks` — register a fixture bank and pretend to index it."""
+        root = (body.get("root") or "").strip().replace("\\", "/").rstrip("/")
+        if not root:
+            self.fail(400, "bad_request", "root is required", {"root": root})
+            return
+        if root not in FS_FIXTURE:
+            self.fail(400, "root_not_found", "нема такої теки (фікстура)",
+                      {"root": root})
+            return
+        with _lock:
+            clash = next((b for b in BANKS if b["root"].rstrip("/") == root), None)
+        if clash:
+            self.fail(409, "bank_exists", f"уже зареєстровано як {clash['name']!r}",
+                      {"root": root})
+            return
+
+        name = (body.get("name") or "").strip() or (root.rsplit("/", 1)[-1] or "root")
+        bank = {
+            "id": hashlib.sha256(root.encode("utf-8")).hexdigest()[:16],
+            "name": name,
+            "root": root,
+            "provider": body.get("provider") or "local",
+            "enabled": True,
+            "exists": True,
+            "git": False,
+            "files": 0,
+            "chunks": 0,
+            "db_bytes": 0,
+            "last_indexed": None,
+            # A fresh bank has no index and a bulk task waiting — `empty`, with
+            # `queued`, is exactly the distinction decision #11 insists on.
+            "status": "empty",
+            "queued": 1,
+            "indexing": False,
+            "last_error": None,
+        }
+        with _lock:
+            BANKS.append(bank)
+        broadcast("bank_added", bank["id"], {"bank": dict(bank)})
+        threading.Thread(
+            target=simulate_task,
+            args=(bank,),
+            kwargs={"kind": "bulk", "path": None, "batch_ms": Handler.batch_ms},
+            daemon=True,
+        ).start()
+        self.json_out(201, bank_info(bank))
 
     def post_reindex(self, body: dict) -> None:
         ref = body.get("bank") or ""

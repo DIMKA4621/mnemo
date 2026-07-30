@@ -72,7 +72,8 @@ Service (the persistent backend):
   id, name or nested path.
 - `src/servicelog.py` — `service.db`: query + index events, retention.
 - `src/api.py` — FastAPI/uvicorn loopback API (`/search`, `/reindex`,
-  `/tree`, `/status`, `/banks`, `/logs`), Bearer token, search status.
+  `/tree`, `/status`, `/banks`, `/fs/dirs`, `/logs`), Bearer token, search
+  status.
 - `src/workqueue.py`, `src/watcher.py` — priority queue + worker and the
   watchdog→debounce→enqueue path (**phase 3, in flight**).
 - `src/service_ctl.py` — `mnemo service …`, windowless spawn, PID/port

@@ -396,7 +396,10 @@ function renderBanks() {
   clear(list);
 
   if (!state.banks.length) {
-    list.appendChild(el('p', { className: 'empty-hint', text: 'Жодного банку не зареєстровано.' }));
+    list.appendChild(el('p', {
+      className: 'empty-hint',
+      text: 'Жодного банку не зареєстровано — «＋ додати» у шапці вибирає теку з .md.',
+    }));
     syncTicker();
     return;
   }
@@ -681,6 +684,273 @@ async function reindex(bank, opts) {
                      ' · task ' + (res.task_ids || []).join(', '));
   } catch (err) {
     reportError(err);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// bank picker (contract 9.5: GET /api/fs/dirs + POST /api/banks)
+// ---------------------------------------------------------------------------
+
+/**
+ * Why a folder browser instead of the operating system's own dialog.
+ *
+ * A page cannot learn which folder a person picked: `webkitdirectory` gives
+ * relative names only, and `showDirectoryPicker()` returns a handle while
+ * withholding the path deliberately. The absolute path can therefore only come
+ * from the backend, which is why this walks `/api/fs/dirs` instead of opening a
+ * native dialog. The path field stays: pasting from Explorer beats clicking
+ * through six levels, and it is the way out when a listing is truncated.
+ *
+ * Built in JS rather than in index.html for the reason spelled out at the gate:
+ * a cached document plus a fresh script must not leave this code addressing
+ * markup that is not there.
+ */
+const picker = { path: null, data: null, busy: false };
+
+const LAST_DIR_KEY = 'mnemo_fs_last';
+
+function buildPicker() {
+  picker.roots = el('div', { className: 'fs-roots' });
+  picker.input = el('input', {
+    className: 'fs-input',
+    attrs: {
+      type: 'text', spellcheck: 'false', placeholder: 'або вставте шлях',
+      id: 'fs-path',
+    },
+    on: {
+      keydown: (ev) => {
+        if (ev.key !== 'Enter') return;
+        ev.preventDefault();
+        pickerGo(picker.input.value.trim());
+      },
+    },
+  });
+  picker.list = el('div', { className: 'fs-list' });
+  picker.hint = el('p', { className: 'fs-hint' });
+  picker.name = el('input', {
+    className: 'fs-input',
+    attrs: {
+      type: 'text', spellcheck: 'false', placeholder: 'вгадається з назви теки',
+      id: 'fs-bank-name',
+    },
+    on: {
+      keydown: (ev) => {
+        if (ev.key === 'Enter') { ev.preventDefault(); pickerSubmit(); }
+      },
+    },
+  });
+  picker.error = el('p', { className: 'modal-error', attrs: { hidden: '' } });
+  picker.submit = el('button', {
+    className: 'btn btn-primary',
+    text: 'Додати цю теку',
+    on: { click: () => pickerSubmit() },
+  });
+
+  const box = el('div', {
+    className: 'modal-box',
+    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Додати банк' },
+    // The overlay closes on click; inside it, a click is just a click.
+    on: { click: (ev) => ev.stopPropagation() },
+  }, [
+    el('div', { className: 'modal-head' }, [
+      el('h2', { text: 'Додати банк' }),
+      el('button', {
+        className: 'btn btn-ghost',
+        text: '✕',
+        title: 'Закрити (Esc)',
+        on: { click: () => closePicker() },
+      }),
+    ]),
+    el('div', { className: 'modal-body' }, [
+      el('label', {
+        className: 'fs-label',
+        text: 'Тека з .md — вона стане коренем банку',
+        attrs: { for: 'fs-path' },
+      }),
+      picker.roots,
+      picker.input,
+      picker.list,
+      picker.hint,
+      el('label', {
+        className: 'fs-label',
+        text: 'Назва банку (необов’язково)',
+        attrs: { for: 'fs-bank-name' },
+      }),
+      picker.name,
+      picker.error,
+    ]),
+    el('div', { className: 'modal-foot' }, [
+      el('button', { className: 'btn', text: 'Скасувати', on: { click: () => closePicker() } }),
+      picker.submit,
+    ]),
+  ]);
+
+  picker.root = el('div', {
+    className: 'modal',
+    attrs: { hidden: '' },
+    on: { click: () => closePicker() },
+  }, [box]);
+  document.body.appendChild(picker.root);
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !picker.root.hidden) closePicker();
+  });
+}
+
+function openPicker() {
+  picker.root.hidden = false;
+  picker.error.hidden = true;
+  picker.name.value = '';
+  // Resume where the last look around ended — adding two banks from one folder
+  // should not mean walking down from home twice.
+  pickerGo(sessionStorage.getItem(LAST_DIR_KEY) || null);
+  picker.input.focus();
+}
+
+function closePicker() {
+  picker.root.hidden = true;
+}
+
+async function pickerGo(path) {
+  picker.busy = true;
+  renderPicker();
+  try {
+    const q = path ? '?path=' + encodeURIComponent(path) : '';
+    const data = await api('/api/fs/dirs' + q);
+    picker.data = data;
+    picker.path = data.path;
+    picker.error.hidden = true;
+    sessionStorage.setItem(LAST_DIR_KEY, data.path);
+  } catch (err) {
+    if (isAuthError(err)) { closePicker(); reportError(err); return; }
+    // Keep the previous listing on screen: a mistyped path should leave the
+    // browser where it was, not empty it.
+    pickerError(err.message);
+  } finally {
+    picker.busy = false;
+    renderPicker();
+  }
+}
+
+function pickerError(message) {
+  picker.error.textContent = message;
+  picker.error.hidden = false;
+}
+
+function renderPicker() {
+  const data = picker.data;
+
+  clear(picker.roots);
+  if (data) {
+    picker.roots.appendChild(el('button', {
+      className: 'chip',
+      text: '⌂ дім',
+      title: data.home,
+      on: { click: () => pickerGo(data.home) },
+    }));
+    for (const root of data.roots || []) {
+      picker.roots.appendChild(el('button', {
+        className: 'chip',
+        text: root.name,
+        on: { click: () => pickerGo(root.path) },
+      }));
+    }
+  }
+
+  if (data && document.activeElement !== picker.input) {
+    picker.input.value = data.display || data.path;
+  }
+
+  clear(picker.list);
+  if (!data) {
+    picker.list.appendChild(el('p', { className: 'muted', text: 'читаю…' }));
+  } else {
+    if (data.parent) {
+      picker.list.appendChild(el('button', {
+        className: 'fs-row is-up',
+        text: '⬆  ..',
+        title: data.parent,
+        on: { click: () => pickerGo(data.parent) },
+      }));
+    }
+    for (const entry of data.entries || []) {
+      picker.list.appendChild(el('button', {
+        className: 'fs-row',
+        title: entry.registered ? 'уже банк: ' + entry.registered : entry.path,
+        on: { click: () => pickerGo(entry.path) },
+      }, [
+        el('span', { className: 'fs-name', text: entry.name }),
+        entry.registered
+          ? el('span', { className: 'badge badge-git', text: 'банк' })
+          : null,
+      ]));
+    }
+    if (!(data.entries || []).length) {
+      picker.list.appendChild(el('p', { className: 'muted', text: 'жодної підтеки' }));
+    }
+    if (data.truncated) {
+      picker.list.appendChild(el('p', {
+        className: 'muted',
+        text: 'показано перші ' + data.entries.length + ' тек — решту вставте шляхом',
+      }));
+    }
+  }
+
+  clear(picker.hint);
+  if (data) {
+    // Nothing here is a veto, only a warning: a folder can be registered while
+    // still empty, and the watcher will index the .md that appear later.
+    const count = data.md_capped ? '≥' + data.md : String(data.md);
+    // "(з підтеками)" is a claim about recursion, so it may only appear when
+    // there are subfolders to recurse into: on a flat folder it reads as a
+    // promise about something that is not there.
+    const nested = (data.entries || []).length ? ' (з підтеками)' : '';
+    picker.hint.appendChild(el('span', {
+      className: data.md ? '' : 'fs-warn',
+      text: data.md
+        ? 'у цій теці ' + count + ' .md' + nested
+        : 'у цій теці немає .md — індексувати буде нічого',
+      title: data.md_capped
+        ? 'рахунок обірвано за часом — файлів щонайменше стільки, ' +
+          'індексуватися будуть усі'
+        : 'без .git, .venv, node_modules — так само, як їх пропускає індексатор',
+    }));
+    if (data.registered) {
+      picker.hint.appendChild(el('span', {
+        className: 'fs-warn',
+        text: ' · уже зареєстрована як «' + data.registered + '»',
+      }));
+    }
+  }
+
+  picker.submit.disabled = picker.busy || !data || !!data.registered;
+  picker.submit.textContent = picker.busy ? 'читаю…' : 'Додати цю теку';
+}
+
+async function pickerSubmit() {
+  if (!picker.path || picker.busy) return;
+  const body = { root: picker.path, name: picker.name.value.trim() || null };
+  picker.busy = true;
+  renderPicker();
+  try {
+    const info = await api('/api/banks', { method: 'POST', body: body });
+    closePicker();
+    hideBanner();
+    state.banks = state.banks.concat([info]);
+    renderBanks();
+    // The bank was registered *and* queued in one call, so say both — and open
+    // it, so the first build is visible instead of happening off-screen.
+    setNote(info.id, 'банк додано · індексація стала в чергу');
+    selectBank(info.id);
+    loadBanks().catch(() => {});
+  } catch (err) {
+    if (isAuthError(err)) { closePicker(); reportError(err); return; }
+    // `root_not_found` and `bank_exists` are both fixable right here, so the
+    // message belongs in the dialog rather than in the page-wide banner.
+    pickerError(err.message);
+  } finally {
+    picker.busy = false;
+    renderPicker();
   }
 }
 
@@ -1292,10 +1562,21 @@ function handleEvent(envelope) {
 // ---------------------------------------------------------------------------
 
 function bindControls() {
-  $('banks-refresh').addEventListener('click', () => {
+  const refresh = $('banks-refresh');
+  refresh.addEventListener('click', () => {
     loadBanks().catch(reportError);
     loadStatus().catch(() => {});
   });
+
+  // Inserted rather than written into index.html: the document may come from
+  // cache while this script does not, and a button this code addresses by id
+  // would then be missing (same reasoning as the gate).
+  refresh.parentNode.insertBefore(el('button', {
+    className: 'btn btn-ghost',
+    text: '＋ додати',
+    title: 'Зареєструвати нову теку з .md як банк',
+    on: { click: () => openPicker() },
+  }), refresh);
 
   $('log-refresh').addEventListener('click', () => loadLogs().catch(reportError));
 
@@ -1359,6 +1640,7 @@ async function start() {
 async function boot() {
   bindControls();
   buildGate();
+  buildPicker();
   renderService();
   if (!token) {
     // First run: nothing has been rejected, so ask before knocking.
