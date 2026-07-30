@@ -1685,9 +1685,9 @@ def _mirror(tool: str, text: str, fmt: str, bank: str | None):
     return PlainTextResponse(text)
 
 
-@app.get("/mcp-tools/memory_search", tags=_MIRROR_TAGS,
+@app.get("/mcp-tools/search", tags=_MIRROR_TAGS,
          dependencies=[Security(bearer_scheme)])
-def mcp_tools_memory_search(
+def mcp_tools_search(
     query: str,
     top_k: int = 5,
     path_prefix: str | None = None,
@@ -1700,12 +1700,12 @@ def mcp_tools_memory_search(
     # face="mcp-tools": a hand-poked query must not be counted as an agent's
     # in the journal, or the usage numbers stop meaning anything.
     text = run_search(query, top_k, path_prefix, bank, face="mcp-tools")
-    return _mirror("memory_search", text, format, bank)
+    return _mirror("search", text, format, bank)
 
 
-@app.get("/mcp-tools/memory_tree", tags=_MIRROR_TAGS,
+@app.get("/mcp-tools/tree", tags=_MIRROR_TAGS,
          dependencies=[Security(bearer_scheme)])
-def mcp_tools_memory_tree(
+def mcp_tools_tree(
     path_prefix: str | None = None,
     depth: int = 3,
     bank: str | None = None,
@@ -1714,13 +1714,13 @@ def mcp_tools_memory_tree(
     """Show the memory tree, with each file's headings."""
     from .mcp_server import run_tree
 
-    return _mirror("memory_tree", run_tree(path_prefix, depth, bank),
+    return _mirror("tree", run_tree(path_prefix, depth, bank),
                    format, bank)
 
 
-@app.post("/mcp-tools/memory_reindex", tags=_MIRROR_TAGS,
+@app.post("/mcp-tools/reindex", tags=_MIRROR_TAGS,
           dependencies=[Security(bearer_scheme)])
-def mcp_tools_memory_reindex(
+def mcp_tools_reindex(
     path: str | None = None,
     bank: str | None = None,
     format: Literal["text", "json"] = "text",
@@ -1730,7 +1730,7 @@ def mcp_tools_memory_reindex(
 
     # POST, unlike its two siblings: this one changes state (it queues work).
     # The others stay GET so they can be pasted into an address bar.
-    return _mirror("memory_reindex", run_reindex(path, bank), format, bank)
+    return _mirror("reindex", run_reindex(path, bank), format, bank)
 
 
 # MCP over HTTP, in this same process and this same uvicorn — nothing is

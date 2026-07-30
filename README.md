@@ -61,10 +61,11 @@ travels with the repo:
 - **`.mcp.json`** — registers the `mnemo` MCP server over **HTTP**:
   `http://127.0.0.1:8918/mcp/<bank-name>?token=${MNEMO_API_TOKEN}`. A
   session *connects* to the running service — nothing is spawned, so no
-  console flashes on Windows. Tools: `memory_search(query, top_k,
-  path_prefix, bank)`, `memory_tree`, `memory_reindex`. Nothing
-  machine-specific lands in git: the bank is a **name** (survives a clone)
-  and the token is a placeholder the installer exports.
+  console flashes on Windows. Tools: `search(query, top_k, path_prefix,
+  bank)`, `tree`, `reindex` — short names on purpose, since Claude Code
+  already namespaces them as `mcp__mnemo__search`. Nothing machine-specific
+  lands in git: the bank is a **name** (survives a clone) and the token is a
+  placeholder the installer exports.
 - **`.claude/rules/mnemo-memory.md`** — the binding memory rule, loaded
   for the main session and every subagent. Its body is deliberately
   portable: paste it into any agent's system prompt, point that agent at
@@ -125,7 +126,7 @@ JSON-RPC:
 
 ```bash
 TOKEN=$(cat ~/.claude/mnemo/state/api.token)
-curl "http://127.0.0.1:8918/mcp-tools/memory_search?bank=NAME&query=rollback&token=$TOKEN"
+curl "http://127.0.0.1:8918/mcp-tools/search?bank=NAME&query=rollback&token=$TOKEN"
 ```
 
 It returns exactly what the agent reads (`&format=json` wraps that same

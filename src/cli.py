@@ -498,7 +498,7 @@ def _cmd_memory_hook() -> int:
     out.append(
         "\nLayout: `logs/YYYY-MM-DD.md` (day notes), `topics/<name>.md` (one "
         "concept per file), `agents/<role>/` (per-role memory). This index is "
-        "a map, NOT the memory: search the bank with the `memory_search` MCP "
+        "a map, NOT the memory: search the bank with the `search` MCP "
         "tool before planning, changing architecture, debugging, or answering "
         "\"why is this like this\". Record what you learn back into these "
         "files."

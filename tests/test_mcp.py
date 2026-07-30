@@ -2,7 +2,7 @@
 
 Talks to the **running service** the way Claude Code does: streamable HTTP at
 `/mcp/<bank>?token=…`, no process spawned (NFR-2). Lists tools, calls
-`memory_search` and `memory_tree`, and then checks the one property that keeps
+`search` and `tree`, and then checks the one property that keeps
 the `/mcp-tools/*` mirror honest — that it returns the *same bytes* as the tool
 it mirrors (§9.8).
 
@@ -105,14 +105,14 @@ async def main() -> int:
             tools = {t.name for t in (await session.list_tools()).tools}
             check(
                 "tools exposed",
-                {"memory_search", "memory_tree", "memory_reindex"} <= tools,
+                {"search", "tree", "reindex"} <= tools,
                 detail=str(sorted(tools)),
             )
-            check("memory_write is NOT exposed (decision #6)",
-                  "memory_write" not in tools, detail=str(sorted(tools)))
+            check("write is NOT exposed (decision #6)",
+                  "write" not in tools, detail=str(sorted(tools)))
 
             search_text = _text(await session.call_tool(
-                "memory_search", {"query": query, "top_k": 2}))
+                "search", {"query": query, "top_k": 2}))
             # The status header is what lets an agent tell "nothing indexed"
             # from "no match" without a second call (§10.2).
             check("search answers with a status header",
@@ -120,7 +120,7 @@ async def main() -> int:
                   detail=search_text[:120])
 
             tree_text = _text(await session.call_tool(
-                "memory_tree", {"depth": 1}))
+                "tree", {"depth": 1}))
             check("tree answers with a file count",
                   tree_text.startswith(f"[mnemo · bank={bank} ·")
                   and "files]" in tree_text.splitlines()[0],
@@ -132,22 +132,22 @@ async def main() -> int:
     q = urllib.parse.quote(query)
     b = urllib.parse.quote(bank, safe="")
     mirror_text = _get(
-        f"/mcp-tools/memory_search?bank={b}&query={q}&top_k=2", token)
-    check("mirror /mcp-tools/memory_search is byte-identical to the tool",
+        f"/mcp-tools/search?bank={b}&query={q}&top_k=2", token)
+    check("mirror /mcp-tools/search is byte-identical to the tool",
           mirror_text == search_text,
           detail=f"mcp={len(search_text)}b mirror={len(mirror_text)}b")
 
-    mirror_tree = _get(f"/mcp-tools/memory_tree?bank={b}&depth=1", token)
-    check("mirror /mcp-tools/memory_tree is byte-identical to the tool",
+    mirror_tree = _get(f"/mcp-tools/tree?bank={b}&depth=1", token)
+    check("mirror /mcp-tools/tree is byte-identical to the tool",
           mirror_tree == tree_text,
           detail=f"mcp={len(tree_text)}b mirror={len(mirror_tree)}b")
 
     envelope = json.loads(_get(
-        f"/mcp-tools/memory_search?bank={b}&query={q}&top_k=2&format=json",
+        f"/mcp-tools/search?bank={b}&query={q}&top_k=2&format=json",
         token))
     check("?format=json wraps the same string, does not reshape it",
           envelope.get("text") == mirror_text
-          and envelope.get("tool") == "memory_search",
+          and envelope.get("tool") == "search",
           detail=str(sorted(envelope)))
 
     # The private surface must stay private: no /api route in the schema.

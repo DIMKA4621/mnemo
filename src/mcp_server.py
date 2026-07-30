@@ -189,7 +189,7 @@ def _register(mcp: FastMCP) -> None:
     # description, so it stays here, on the decorated function — that is where
     # `@mcp.tool()` looks for it.
     @mcp.tool()
-    def memory_search(
+    def search(
         query: str,
         top_k: int = 5,
         path_prefix: str | None = None,
@@ -199,7 +199,7 @@ def _register(mcp: FastMCP) -> None:
         return run_search(query, top_k, path_prefix, bank)
 
     @mcp.tool()
-    def memory_tree(
+    def tree(
         path_prefix: str | None = None,
         depth: int = 3,
         bank: str | None = None,
@@ -208,7 +208,7 @@ def _register(mcp: FastMCP) -> None:
         return run_tree(path_prefix, depth, bank)
 
     @mcp.tool()
-    def memory_reindex(path: str | None = None, bank: str | None = None) -> str:
+    def reindex(path: str | None = None, bank: str | None = None) -> str:
         """Queue a reindex of one file, or of the whole bank."""
         return run_reindex(path, bank)
 

@@ -426,7 +426,7 @@ def embed_query_via_server(
     """Query embedding from the resident, starting it if needed.
 
     ``budget_s`` overrides the default recv timeout so callers with a
-    wall-clock budget (hook-inject, MCP memory_search) can bound this
+    wall-clock budget (hook-inject, MCP search) can bound this
     step. ``None`` keeps the historical 20 s ceiling for batch / ingest
     paths where cold start (~3 s) must comfortably fit.
 

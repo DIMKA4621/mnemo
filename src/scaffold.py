@@ -189,12 +189,12 @@ and never treat it as a place where something is stored.
 
 ## Searching — the part that is not optional
 
-The MCP tool is **`memory_search`**. Narrow with `path_prefix` when you know
+The MCP tool is **`search`**. Narrow with `path_prefix` when you know
 roughly where to look (`logs`, `topics`, `agents/reviewer`); leave it out to
-search the whole bank. `memory_tree` shows the layout with each file's
+search the whole bank. `tree` shows the layout with each file's
 headings.
 
-**You have not consulted memory until you have called `memory_search` in this
+**You have not consulted memory until you have called `search` in this
 session, for this task.** Text that happens to be in your context is not a
 search result: it may be stale, it may be about something else, and it is not
 evidence that anything was checked. Do not reason from "I think I already have
@@ -242,7 +242,7 @@ Three answers mean three different things, and they are not interchangeable:
   `.claude/memory/` counts.
 - Reindexing is automatic: a background service watches these files and
   re-indexes within seconds of a save. You never run a command for it.
-  `memory_reindex` exists only to force the issue.
+  `reindex` exists only to force the issue.
 - **Memory rides with the commit.** When a memory `.md` change accompanies a
   code change, `git add` both and land them in the **same** commit. Refer to
   that commit by its **subject/scope, never by a hash** — hashes break on

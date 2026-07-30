@@ -1287,17 +1287,17 @@ def snapshot() -> QueueSnapshot
 
 | Ендпоінт | Метод | Параметри (query) |
 |---|---|---|
-| `/mcp-tools/memory_search` | `GET` | `query` (обовʼязковий), `top_k=5`, `path_prefix`, `bank` |
-| `/mcp-tools/memory_tree` | `GET` | `path_prefix`, `depth=3`, `bank` |
-| `/mcp-tools/memory_reindex` | `POST` | `path`, `bank` |
+| `/mcp-tools/search` | `GET` | `query` (обовʼязковий), `top_k=5`, `path_prefix`, `bank` |
+| `/mcp-tools/tree` | `GET` | `path_prefix`, `depth=3`, `bank` |
+| `/mcp-tools/reindex` | `POST` | `path`, `bank` |
 
-`memory_reindex` — `POST`, бо він **змінює стан** (ставить задачу в чергу);
+`reindex` — `POST`, бо він **змінює стан** (ставить задачу в чергу);
 решта читає й лишається `GET`, щоб її можна було вставити в адресний рядок.
 
 **Формат.** Типово `text/plain` — байт у байт те, що повертає тул:
 
 ```
-GET /mcp-tools/memory_search?bank=mnemo&query=черга&top_k=2
+GET /mcp-tools/search?bank=mnemo&query=черга&top_k=2
 
 [mnemo · bank=mnemo · status=ready · queued=0 · chunks=42]
 [1] topics/queue.md · Priority queue · score=0.0325
@@ -1307,7 +1307,7 @@ GET /mcp-tools/memory_search?bank=mnemo&query=черга&top_k=2
 `?format=json` — те саме в конверті, для скриптів:
 
 ```json
-{"tool": "memory_search", "bank": "mnemo", "text": "[mnemo · bank=…]\n[1] …"}
+{"tool": "search", "bank": "mnemo", "text": "[mnemo · bank=…]\n[1] …"}
 ```
 
 Поле `text` — **той самий рядок**, що й у `text/plain`. JSON тут не «структурує
@@ -1364,13 +1364,27 @@ OpenAPI, бо це JSON-RPC, тож свагера на `/mcp` не буває �
 
 | Тул | Аргументи | Повертає |
 |---|---|---|
-| `memory_search` | `query: str`, `top_k: int = 5`, `path_prefix: str \| None = None`, `bank: str \| None = None` | текст: заголовок зі статусом + пронумеровані секції |
-| `memory_tree` | `path_prefix: str \| None = None`, `depth: int = 3`, `bank: str \| None = None` | текст: відступне дерево з заголовками |
-| `memory_reindex` | `path: str \| None = None`, `bank: str \| None = None` | текст: «queued N task(s)» |
+| `search` | `query: str`, `top_k: int = 5`, `path_prefix: str \| None = None`, `bank: str \| None = None` | текст: заголовок зі статусом + пронумеровані секції |
+| `tree` | `path_prefix: str \| None = None`, `depth: int = 3`, `bank: str \| None = None` | текст: відступне дерево з заголовками |
+| `reindex` | `path: str \| None = None`, `bank: str \| None = None` | текст: «queued N task(s)» |
 
-`memory_write` **немає** (рішення #6).
+`write` **немає** (рішення #6).
 
-Текст `memory_search` починається рядком статусу, щоб агент бачив стан без
+**Імена — без префікса, і це рішення тимліда.** Було `memory_search`,
+`memory_tree`, `memory_reindex`; стало `search`, `tree`, `reindex`. Причина:
+клієнт і так подає тул під іменем сервера — Claude Code показує його як
+**`mcp__mnemo__search`**, — тож `memory_` вдруге повторює те, що вже є в
+неймспейсі, і платить за це токенами в описі кожного тула. Побоювання «агент
+сплутає з іншим `search`» знято тим самим фактом: неймспейс розводить їх до
+того, як модель почне вибирати.
+
+> **Наслідок для вже прийнятих проєктів.** `.mcp.json` імен тулів не містить,
+> тому перевмикати нічого не треба. А от `.claude/rules/mnemo-memory.md`, який
+> уже лежить у чужому репозиторії, згадує старі імена — і `mnemo init` його
+> **не перезаписує** (він ніколи не чіпає наявний файл). Оновлення цього тексту
+> — свідомий крок власника проєкту, з дифом, як і будь-яка інша правка правила.
+
+Текст `search` починається рядком статусу, щоб агент бачив стан без
 окремого поля:
 
 ```
@@ -1741,6 +1755,7 @@ CLI лишається детермінованим примітивом: або
 | 9 | Хуки | `init` не додає **жодного**; два насіння за прапорцями: `memory-hook` (SessionStart, `MEMORY.md` + карта, читає з диска) і `hook-inject` (UserPromptSubmit, top-N). Дисципліну тримає **правило**. Скасовано попереднє «даємо готові приклад-хуки»: авто-інжект створює фальшиве відчуття, що агент уже шукав | 11.1, design #15, FR-5a |
 | 10 | Як не затягнути в банк скіли/агентів/рули | **вкладеною розкладкою, не ексклюдами**: уся памʼять під `.claude/memory/` (`logs/`, `topics/`, `agents/<role>/`), корінь банку — саме `memory`. Механізму ексклюдів (`exclude` у реєстрі, `.mnemoignore`) **не заводимо**: межа теки — позитивне правило, список винятків гниє (нову теку забув дописати — вона тихо в індексі) | design #18, FR-1a |
 | 11 | Правило памʼяті | **портативне ядро + тонка CC-обгортка**: ядро (структура, тригери, дисципліна запису, імена тулів) мусить працювати вставленим у system prompt будь-якого агента, бо MCP уже стандартний | design #19, 15.9 |
+| 12 | Імена тулів | **без префікса**: `search`, `tree`, `reindex` (було `memory_*`). Клієнт і так подає тул як `mcp__mnemo__search` — префікс дублює неймспейс і платить токенами в описі кожного тула. Шляхи дзеркала йдуть за іменами: `/mcp-tools/search` | 10.2, 9.8 |
 
 **Один розворот проти першої редакції:** пріоритет статусу змінено з
 `empty > indexing` на **`indexing > empty`** (5.2). Причина — придатність до
@@ -1830,7 +1845,7 @@ L2**, а не лише `/bin/sh`.
 ### 15.3 Тести: що вмирає, що змінює сенс **[NEW]**
 
 **`tests/test_mcp.py` — переведений на `path_prefix`, помре у фазі 4.**
-Фаза 0 прибрала `scope`/`agent` з `memory_search` і **тим самим комітом**
+Фаза 0 прибрала `scope`/`agent` з `search` і **тим самим комітом**
 (`7560221`) перевела тест: рядок 88 передає
 `"path_prefix": ".claude/agent-memory/reviewer"`, асерт ізоляції став
 перевіркою шляху. Жодного `scope=`/`agent=` у файлі не лишилось.
@@ -2043,7 +2058,7 @@ Claude Code віддає його хукам і MCP, а `cwd` дочірньог
 `.claude/rules/mnemo-memory.md` — тобто в чужі репозиторії, у git. Він вчить:
 «`memory_search` (scope `project`, and your agent scope when relevant)» і
 «agent-specific knowledge → `.claude/agent-memory/<role>/`». У v3 скоупів
-немає (рішення #13), а `memory_search` таких аргументів не приймає вже
+немає (рішення #13), а `search` таких аргументів не приймає вже
 сьогодні. *Власник:* service-dev (файл його), *фаза:* 4, разом із рештою
 `scaffold.py`. Текст має розповідати про плаский банк і про те, що
 розділення — це окремі банки.

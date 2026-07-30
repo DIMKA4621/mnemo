@@ -20,7 +20,7 @@ Do:
 Do not: expand scope, change interfaces, or commit unless the user
 asked.
 
-Before coding, search the project memory (`mnemo` tool `memory_search`;
+Before coding, search the project memory (`mnemo` tool `search`;
 narrow with `path_prefix` when you want one folder) for conventions,
 decisions and known pitfalls. After significant work or a domain
 decision, record it. The binding memory rule

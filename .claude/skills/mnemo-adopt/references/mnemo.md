@@ -21,7 +21,7 @@ A **bank** is one root folder of `.md`, anywhere on disk; everything
 `*.md` below it is a single index (minus `.git`, `.venv`,
 `node_modules`, `__pycache__`). There are **no internal scopes** — the
 v2 `project` / `agent` split is gone from the schema, the walk, the CLI
-and the MCP tool. `memory_search(query, path_prefix, top_k)` and `mnemo
+and the MCP tool. `search(query, path_prefix, top_k)` and `mnemo
 search --path-prefix` narrow a search to a subfolder at any depth, which
 is a **navigation** convenience; the only real isolation boundary is a
 **separate bank** with its own MCP connection. Which is why
@@ -120,7 +120,7 @@ additively, after insisting it is needed for the model to work.
 ## The hooks — seeds, and nothing is wired for you
 
 `mnemo init` writes **no hook**. Memory is reached by calling
-`memory_search`; the discipline lives in `.claude/rules/mnemo-memory.md`,
+`search`; the discipline lives in `.claude/rules/mnemo-memory.md`,
 which loads for the team lead and every subagent. Two seeds exist and are
 wired only on request:
 

@@ -1,7 +1,7 @@
 # mnemo project memory
 
 Bank root: `.claude/memory` (this folder), searchable through the `mnemo` MCP
-server — `memory_search`. This file is an **index**: links + quick facts only;
+server — the `search` tool. This file is an **index**: links + quick facts only;
 detail lives in `topics/`, day notes in `logs/`.
 
 ## Architecture

@@ -42,7 +42,7 @@ earlier carries the old shape and needs `mnemo init --migrate`:
 - **`init` wires no hooks at all.** The reindexing hooks are gone (the
   watcher does that job) and auto-inject is now opt-in
   (`--with-memory-hook` / `--with-inject-hook`). Memory is reached by
-  **searching** — `memory_search` — and the discipline lives in
+  **searching** — `search` — and the discipline lives in
   `.claude/rules/mnemo-memory.md`. `--migrate` unwires hooks earlier
   versions added.
 - **`/mcp-tools/<tool_name>`** mirrors the three tools as plain HTTP for
@@ -51,7 +51,7 @@ earlier carries the old shape and needs `mnemo init --migrate`:
 
 **Already true today** (v3 phase 0 has landed — this is not a forecast):
 
-- **Banks are flat. Scopes are gone.** `memory_search(query,
+- **Banks are flat. Scopes are gone.** `search(query,
   path_prefix, top_k)` takes no `scope`/`agent`, and `mnemo search` has
   `--path-prefix` instead of `--scope`/`--agent`. Everything `*.md` under
   a bank root is **one index**; `path_prefix` narrows a search but is
@@ -109,7 +109,7 @@ inside one bank. Ask the user before choosing the second shape.
   plan and delegate, do not implement.
 - A subagent's `memory: project` is its *built-in* per-agent memory
   (user scope). The git-shared curated layer is `.claude/memory/agents/
-  <role>/`, driven by the rule + instructions + `memory_search`. Both
+  <role>/`, driven by the rule + instructions + `search`. Both
   matter; do not conflate them. Note the folder is a **convention**, not
   a search scope — see the status section above.
 
@@ -320,7 +320,7 @@ Review the diffs above, then:
   git commit        # your message, your call
 Then trust the project in Claude Code when prompted (MCP) and restart the
 session so MCP, the rule and the agent team load. Nothing is injected
-automatically — memory is reached by calling `memory_search`.
+automatically — memory is reached by calling `search`.
 ```
 
 Do not run `git add`/`git commit` yourself.

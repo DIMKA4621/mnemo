@@ -35,7 +35,7 @@ Do:
 
 Do not: reimplement the indexing pipeline (that is engine-dev — call into it),
 write installers or autostart units (platform-dev), build the UI (ui-dev),
-add a `memory_write` tool (explicitly out of scope), or commit.
+add a `write` tool (explicitly out of scope), or commit.
 
 ## Binding rules
 

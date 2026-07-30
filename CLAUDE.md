@@ -45,7 +45,7 @@ install model and is mid-transition (see its header).
 
 Project decision history, research and rationale live in **this repo's own
 bank**: `.claude/memory/` (`MEMORY.md` index, `logs/`, `topics/`), served by
-the `mnemo` MCP server in `.mcp.json`. **Search it with `memory_search`
+the `mnemo` MCP server in `.mcp.json`. **Search it with the `search` tool
 before planning** — do not re-investigate what is already recorded.
 
 It used to sit in Claude Code's per-project store
@@ -214,7 +214,7 @@ holds the venv's `python.exe`.
 - Native, no Docker, in v1; Docker is a later Linux/server option (#2).
 - Two long-lived processes: the backend (registry + index + watcher +
   API) and the model daemon holding the model warm (#4).
-- `memory_write` is not built — memory is edited only with native file
+- `write` is not built — memory is edited only with native file
   tools (#6).
 - Search never blocks: current index + status `indexing` / `empty` /
   `ready`, where `empty` (no index) ≠ no matches (#11).
