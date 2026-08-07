@@ -55,17 +55,48 @@ so MCP and hooks resolve the same canonical path. After first creating
 `HOME`, close and reopen the launching terminal or IDE before restarting
 Claude Code. Everything below is identical across platforms.
 
-Adoption commits a tiny bit of git-tracked wiring into the project so it
-travels with the repo:
+Adoption leaves a little wiring in the project. Most of it is git-tracked
+and travels with the repo; the exception is `.mcp.json`, which now carries
+a credential and therefore must not.
 
 - **`.mcp.json`** — registers the `mnemo` MCP server over **HTTP**:
-  `http://127.0.0.1:8918/mcp/<bank-name>?token=${MNEMO_API_TOKEN}`. A
-  session *connects* to the running service — nothing is spawned, so no
-  console flashes on Windows. Tools: `search(query, top_k, path_prefix,
-  bank)`, `tree`, `reindex` — short names on purpose, since Claude Code
-  already namespaces them as `mcp__mnemo__search`. Nothing machine-specific
-  lands in git: the bank is a **name** (survives a clone) and the token is a
-  placeholder the installer exports.
+  `http://127.0.0.1:8918/mcp?token=<bank-token>`. A session *connects* to
+  the running service — nothing is spawned, so no console flashes on
+  Windows. Tools: `search(query, top_k, path_prefix)` and `tree` — short
+  names on purpose, since Claude Code already namespaces them as
+  `mcp__mnemo__search`. The project face is **read-only**; `reindex` lives
+  on the admin face, because the watcher reindexes within seconds of a save
+  and a button nobody presses is a tool slot spent in every session.
+
+  **There is no path segment and no bank name in that URL.** Every bank is
+  minted its own token when it is registered, and that token is what tells
+  the service which bank a connection belongs to — nothing else does. A
+  second thing naming the bank could only ever disagree with the
+  credential, and the failure it buys is the worst kind available: a
+  request that succeeds against the wrong bank and looks entirely normal.
+  What tells a *person* which bank an entry is for is the `mcpServers` key
+  — `mnemo`, `mnemo-notes` — which is what one actually reads in a config.
+
+  Because that token is literal, `.mcp.json` is **generated and
+  git-ignored**. `mnemo init` adds the `.gitignore` line itself, and if the
+  file is already tracked it **refuses** — writes nothing, and prints the
+  `git rm --cached .mcp.json` to run first. The asymmetry is the reason: a
+  refusal costs one command, whereas a token committed into a tracked file
+  is in somebody else's clone by the time anyone notices.
+
+  A project that keeps its MCP config under the template convention —
+  `.mcp.json.template`, `.mcp.env.example` and `mcp-setup.sh` in git, the
+  real values in a git-ignored `.mcp.env` — gets the placeholder form
+  instead, and `init` detects that and writes into the template layer: the
+  entry into the template, the variables into `.mcp.env.example` and
+  `.mcp.env`, **and the matching `sed -e` lines into `mcp-setup.sh`**. That
+  last one is not a nicety. A substitution that is missing leaves
+  `{{MNEMO_TOKEN}}` sitting in the regenerated `.mcp.json`, while
+  `mcp-setup.sh` prints its success tick and exits 0 regardless — the
+  wiring is broken and nothing says so. Whoever clones such a project has
+  no token at all (`.mcp.env` is not in git): open the cabinet (`mnemo
+  ui`), copy the bank's token, paste it into `.mcp.env`, re-run
+  `mcp-setup.sh`.
 - **`.claude/rules/mnemo-memory.md`** — the binding memory rule, loaded
   for the main session and every subagent. Its body is deliberately
   portable: paste it into any agent's system prompt, point that agent at
@@ -80,7 +111,10 @@ travels with the repo:
     search hits. Off for a reason worth knowing — it delivers memory
     *before* the task is stated, which reads as memory already gathered.
 
-  `mnemo init --migrate` unwires hooks earlier versions added.
+  `mnemo init --migrate` is the upgrade path for a project adopted under an
+  older shape: it unwires hooks earlier versions added, and rewrites a
+  `.mcp.json` still pointing at the superseded `/mcp/<bank>?token=…` URL.
+  That URL now answers 400 rather than silently routing, and says so.
 
 Memory itself lives at **`.claude/memory/`** — `MEMORY.md` as a thin index,
 `logs/` for day notes, `topics/` one concept per file, `agents/<role>/` for
@@ -120,8 +154,18 @@ mnemo status | logs | tree | ui
 mnemo service start | stop | status | restart
 ```
 
-There is **no `mnemo mcp`**: MCP is HTTP inside the running service. To poke
-the same three tools by hand, use the mirror — plain request/response, no
+There is **no `mnemo mcp`**: MCP is HTTP inside the running service, on two
+separate faces. `/mcp?token=<bank-token>` is the **project** face — `search`
+and `tree` over the one bank that token belongs to, and nothing else.
+`/mcp-admin?token=<service-token>` is the **admin** face (server name
+`mnemo-admin`, so its tools namespace as `mcp__mnemo-admin__reindex`): it
+registers and drops banks, forces a reindex and reads the journal —
+`banks`, `bank_add`, `bank_remove`, `reindex`, `status`, `logs`. The two
+credentials do not cross. A bank token on `/mcp-admin` is a 401, and the
+service token on `/mcp` is a 401 too — it has no bank to resolve to — each
+saying which face the caller wanted.
+
+To poke the read tools by hand, use the mirror — plain request/response, no
 JSON-RPC:
 
 ```bash
@@ -149,6 +193,16 @@ later v3 phases; the target command set is listed in
 `docs/Memory-contracts-v3.md` §11.1.
 
 ## Run in a container
+
+> **⚠ Superseded — do not follow this section as written.** It describes the
+> **v2** model, where the CLI drove the engine directly inside the container.
+> It no longer does: `search`, `tree`, `reindex` and `logs` are clients of the
+> running service and address a bank with `--bank`, so the `--root` commands
+> below fail with an argparse error and there is no service in the container
+> for them to reach. How a container gets a service and a bank is an open
+> decision and the recipe is being redesigned; the engine/state split it
+> explains is still accurate, the commands are not. Full page, same caveat:
+> [`docs/containers/`](docs/containers/README.md).
 
 Dev/worker containers reuse the **host engine read-only** and keep their own
 **ephemeral** index: mount the engine (code + venv + model), point

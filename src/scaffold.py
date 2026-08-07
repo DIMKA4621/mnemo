@@ -5,30 +5,46 @@ This is a SAFE primitive, not a judgement call. It only ever:
     `.claude/memory/MEMORY.md` anchor and the binding memory rule
     `.claude/rules/mnemo-memory.md` (never invents memory structure,
     never overwrites a curated or human-authored file);
-  * merges strictly ADDITIVELY into `.mcp.json` / `.claude/settings.json`
-    (adds only mnemo's own keys/hook groups, never touches or reorders
-    foreign content);
+  * merges strictly ADDITIVELY into the project's MCP wiring and
+    `.claude/settings.json` (adds only mnemo's own keys/hook groups, never
+    touches or reorders foreign content);
   * refuses — writing NOTHING — if a *different* mnemo entry already
     exists, leaving that migration to the adopt skill (shown diff +
     confirmation). It never edits CLAUDE.md.
+
+**Where the entry goes depends on the project, and getting it wrong is
+silent.** A project set up by the user-scope `project-mcp-setup` skill keeps
+`.mcp.json` **generated and git-ignored**, regenerated wholesale from
+`.mcp.json.template` by `mcp-setup.sh` — so anything written straight into
+`.mcp.json` there is erased on the next run, with no error. `init` therefore
+looks for a template first: finding one it writes the placeholder entry into
+the template, the variables into `.mcp.env.example`, the real values into
+`.mcp.env`, and the substitutions into `mcp-setup.sh`. Finding none it writes
+`.mcp.json` directly and makes sure git ignores it.
+
+**The credential written is the bank's own token, and it is the whole
+address.** It opens that one bank's two read tools, and it is what tells the
+backend which bank this connection is for — there is no bank name and no path
+segment in anything `init` writes. The service-wide token belongs to the
+cabinet, the CLI and the admin face, and never to a project file.
 
 **No hook is written unless asked for.** `settings.json` is left alone by a
 default `init` — the seeds are wired only by `--with-memory-hook` /
 `--with-inject-hook`, and `--migrate` unwires whatever was not asked for.
 
-The git-tracked invocation is portable by construction: hook seeds use the
-shell form so `~` expands per-user at run time; the MCP server directly
-executes the same logical launcher path after Claude Code expands
-`${HOME}`. Installers provide that contract as a script on POSIX and a
-real executable on Windows. No machine-specific path is written into git.
+The git-tracked layer stays portable by construction: hook seeds use the shell
+form so `~` expands per-user at run time, and both varying values in the MCP
+entry — port and token — are `{{VAR}}` in the template, resolved from a
+git-ignored `.mcp.env`. No machine-specific path and no secret is written into
+a git-tracked file.
 """
 from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
 from typing import Iterable
-from urllib.parse import quote
 
 from . import config
 from .config import resolve
@@ -39,37 +55,90 @@ from .config import resolve
 _LAUNCHER = "~/.claude/mnemo/bin/mnemo"
 
 
-def _mcp_server(bank_name: str) -> dict:
-    """The v3 MCP entry (§10.4): HTTP, and nothing machine-specific.
+# The MCP server key `init` writes, and the thing every variable name is
+# derived from. Never the bank name: bank names are human labels that hold
+# spaces and Cyrillic, which no shell variable name may contain. Keeping the
+# name on the *value* side means the instance name — ASCII, ours — is the only
+# thing that has to be shell-safe.
+_INSTANCE = "mnemo"
 
-    Both moving parts are deliberate. The **bank is a name**, not a
-    `bank_id` — an id is `sha1(absolute path)[:16]`, correct on exactly one
-    machine with one checkout, and meaningless to a colleague who clones
-    elsewhere. The **token is a `${MNEMO_API_TOKEN}` placeholder**, exported
-    by the installer, so a secret never lands in a git-tracked file.
 
-    Both ride in the URL rather than in headers, because a header depends on
-    Claude Code forwarding `headers` for `type: http` — and if it does not,
-    authentication fails, not just addressing. The header form is still
-    accepted by the backend as an override; it is simply not depended on.
-    """
-    port = getattr(config, "API_PORT", None) or os.environ.get(
-        "MNEMO_API_PORT", "8918"
+def _var_prefix(instance: str) -> str:
+    """`mnemo` -> `MNEMO`; `mnemo-notes` -> `MNEMO_NOTES`."""
+    return re.sub(r"[^A-Za-z0-9]+", "_", instance).strip("_").upper() or "MNEMO"
+
+
+def _api_port() -> str:
+    return str(
+        getattr(config, "API_PORT", None)
+        or os.environ.get("MNEMO_API_PORT", "8918")
     )
-    # The name is percent-encoded: it is a human label, and on this project's
-    # own machine those contain spaces and Cyrillic. A raw space makes the
-    # URL invalid outright, and a raw non-ASCII byte is not portable across
-    # clients. `safe=""` also encodes `/` and `+`, which would otherwise be
-    # read as a path separator and as a space respectively.
+
+
+def _mcp_server(token: str) -> dict:
+    """The v3 MCP entry (§10.4), written straight into a `.mcp.json`.
+
+    **The token is the whole address.** It belongs to one bank, so the bank
+    needs no separate mention — and must not get one: two things that say
+    which bank can disagree, and the URL would be the one that is wrong.
+    That is why there is no `bank_name` parameter here any more.
+
+    The token is this bank's own, literal, which is why this form is only ever
+    written into a `.mcp.json` that git ignores. It is not the service token:
+    it opens this one bank's two read tools and nothing else, so a project
+    file never carries the credential that reaches every bank on the machine.
+    A project that keeps a `.mcp.json.template` gets the placeholder form
+    instead — see `_mcp_server_template`.
+
+    No `headers` key. The value rides in the URL because a header depends on
+    Claude Code forwarding `headers` for `type: http`, and if it does not,
+    authentication fails outright. `X-Mnemo-Bank` is gone for a second reason
+    on top of that: under token addressing it could only ever contradict the
+    credential.
+
+    **What tells a reader which bank this is** is the `mcpServers` key —
+    `mnemo`, `mnemo-notes` — which is what a person actually reads in a
+    config. A cosmetic path segment that routing ignored would be worse than
+    none: the next person reads a path component as routing.
+    """
     return {
         "type": "http",
-        "url": f"http://127.0.0.1:{port}/mcp/{quote(bank_name, safe='')}"
-               f"?token=${{MNEMO_API_TOKEN}}",
-        "headers": {
-            "Authorization": "Bearer ${MNEMO_API_TOKEN}",
-            "X-Mnemo-Bank": bank_name,
-        },
+        "url": f"http://127.0.0.1:{_api_port()}/mcp?token={token}",
     }
+
+
+def _mcp_server_template(instance: str) -> dict:
+    """The same entry with `{{VAR}}` placeholders, for a `.mcp.json.template`.
+
+    Shape pinned by the user-scope `project-mcp-setup` skill
+    (`templates/mnemo.example`) — one URL string with a placeholder at each
+    varying position, never a URL split across files. Two placeholders now,
+    not three: `{{MNEMO_BANK}}` went with the path segment.
+    """
+    prefix = _var_prefix(instance)
+    var = lambda name: "{{" + f"{prefix}_{name}" + "}}"  # noqa: E731
+    return {
+        "type": "http",
+        "url": f"http://127.0.0.1:{var('PORT')}/mcp?token={var('TOKEN')}",
+    }
+
+
+def _is_mnemo_http(entry: object) -> bool:
+    """Mnemo's own HTTP entry — ours to rewrite in place, current or not.
+
+    Matches the literal and the placeholder form, and **also the superseded
+    `/mcp/<bank>?token=…` shape**, which is the third generation `--migrate`
+    has to fix (§11.3). All three are entries mnemo authored; which one it is
+    decides whether the plan rewrites or leaves alone, and that comparison is
+    `existing == target`, made by the caller. Anything else under the `mnemo`
+    key is either a recognised stdio legacy or a refusal.
+    """
+    return (
+        isinstance(entry, dict)
+        and entry.get("type") == "http"
+        and isinstance(entry.get("url"), str)
+        and "/mcp" in entry["url"]
+    )
 
 
 # The two legacy generations `--migrate` must recognise (§15.2). L1 predates
@@ -275,19 +344,31 @@ def _dump_json(obj: dict) -> str:
     return json.dumps(obj, indent=2, ensure_ascii=False) + "\n"
 
 
-def _plan_mcp(path: Path, log: list[str], *, bank_name: str | None = None,
-              migrate: bool = False) -> str | None:
-    """Return the new `.mcp.json` text, or None if already correct.
+def _redacted(entry: dict) -> str:
+    """An entry as it may appear in a message on somebody's terminal.
 
-    Refuses on anything mnemo did not author. Rewrites a legacy mnemo entry
-    only under `--migrate`, and only after recognising it as L1 or L2 — an
-    unrecognised shape is always a refusal, never a guess.
-
-    ``(path, log)`` stay positional: the platform test calls this directly to
-    inspect the wiring mnemo generates, and a signature churn there would
-    break a check for no benefit.
+    A refusal prints what `init` *would* have written so the reader can see
+    the difference — and the literal form carries a live bank token. Refusals
+    are copied into issues and pasted into chats; the token is not what the
+    reader needs, so it never reaches the screen.
     """
-    bank_name = bank_name or bank_name_for(path.parent)
+    return re.sub(r"token=[0-9a-fA-F]{8,}", "token=<bank-token>",
+                  json.dumps(entry))
+
+
+def _plan_servers(path: Path, label: str, log: list[str], target: dict,
+                  *, migrate: bool) -> str | None:
+    """Merge mnemo's entry into an `.mcp.json`-shaped document.
+
+    Shared by the plain file and the template, because the two differ only in
+    what `target` looks like — the conflict rules, the additive merge and the
+    refusal wording are identical, and writing them twice is how they drift.
+
+    The classification runs **before** `target` matters, which is what lets
+    `init_project` validate (and refuse) before it has registered a bank or
+    fetched a token: every refusal below is a property of what is already in
+    the file.
+    """
     data = _load_json(path)
     servers = data.get("mcpServers")
     if servers is None:
@@ -295,37 +376,526 @@ def _plan_mcp(path: Path, log: list[str], *, bank_name: str | None = None,
     elif not isinstance(servers, dict):
         raise _Refuse(f"{path}: 'mcpServers' is not an object; left untouched")
 
-    target = _mcp_server(bank_name)
-    existing = servers.get("mnemo")
-    if existing == target:
-        log.append("  .mcp.json            mnemo server already present")
-        return None
-
-    if existing is not None:
+    existing = servers.get(_INSTANCE)
+    if existing is not None and not _is_mnemo_http(existing):
         generation = _is_legacy_mcp(existing)
         if generation is None:
             raise _Refuse(
-                f"{path}: 'mcpServers.mnemo' exists in a shape mnemo does "
-                f"not recognise.\n"
+                f"{path}: 'mcpServers.{_INSTANCE}' exists in a shape mnemo "
+                f"does not recognise.\n"
                 f"      found:    {json.dumps(existing)}\n"
-                f"      expected: {json.dumps(target)}\n"
+                f"      expected: {_redacted(target)}\n"
                 f"      (left untouched — resolve via the adopt skill)")
         if not migrate:
             raise _Refuse(
-                f"{path}: 'mcpServers.mnemo' is the legacy {generation} "
-                f"stdio form.\n"
+                f"{path}: 'mcpServers.{_INSTANCE}' is the legacy "
+                f"{generation} stdio form, which calls `mnemo mcp` — a "
+                f"subcommand that no longer exists.\n"
                 f"      found:    {json.dumps(existing)}\n"
-                f"      expected: {json.dumps(target)}\n"
+                f"      expected: {_redacted(target)}\n"
                 f"      (left untouched — re-run with `--migrate`)")
-        log.append(f"  .mcp.json            migrated mnemo server {generation}"
-                   f" -> http")
+        log.append(f"  {label:<20} migrated mnemo server {generation} -> http")
+    elif existing == target:
+        log.append(f"  {label:<20} mnemo server already present")
+        return None
+    elif existing is not None:
+        log.append(f"  {label:<20} updated mcpServers.{_INSTANCE}")
     else:
-        log.append("  .mcp.json            +mcpServers.mnemo")
+        log.append(f"  {label:<20} +mcpServers.{_INSTANCE}")
 
     # Additive: keep every other server and key, replace only ours.
-    servers["mnemo"] = target
+    servers[_INSTANCE] = target
     data["mcpServers"] = servers
     return _dump_json(data)
+
+
+def _plan_mcp(path: Path, log: list[str], *, token: str = "",
+              migrate: bool = False) -> str | None:
+    """Return the new `.mcp.json` text, or None if already correct.
+
+    The **no-template** form: the entry carries this bank's literal token, so
+    the file must be git-ignored — `init_project` ensures that separately.
+
+    Refuses on anything mnemo did not author. Rewrites a legacy mnemo entry
+    only under `--migrate`, and only after recognising it as L1 or L2 — an
+    unrecognised shape is always a refusal, never a guess. A superseded
+    `/mcp/<bank>` HTTP entry is not a refusal: it is the current generation
+    with a stale URL, so it is simply rewritten.
+
+    ``(path, log)`` stay positional: the platform test calls this directly to
+    inspect the wiring mnemo generates, and a signature churn there would
+    break a check for no benefit. ``bank_name`` is gone — the token is the
+    address now, so there is no name to put anywhere.
+    """
+    return _plan_servers(path, ".mcp.json", log, _mcp_server(token),
+                         migrate=migrate)
+
+
+def _plan_mcp_template(path: Path, log: list[str], *,
+                       migrate: bool = False) -> str | None:
+    """Return the new `.mcp.json.template` text, or None if already correct.
+
+    The **template** form. Where a project carries one, `.mcp.json` is a
+    generated artefact: `mcp-setup.sh` rewrites it wholesale from this file,
+    so an entry written straight into `.mcp.json` is erased on the next run,
+    silently. The entry therefore belongs here, with `{{VAR}}` placeholders,
+    and the values live in `.mcp.env`, which git ignores.
+
+    No token is needed to plan this file — that is the point of the
+    placeholders, and it is why validation can run before a bank exists.
+    """
+    return _plan_servers(path, ".mcp.json.template", log,
+                         _mcp_server_template(_INSTANCE), migrate=migrate)
+
+
+# ------------------------------------------------- the template convention
+#
+# A project set up by the user-scope `project-mcp-setup` skill keeps `.mcp.json`
+# **generated and git-ignored**; what git carries is `.mcp.json.template`,
+# `.mcp.env.example` and `mcp-setup.sh`, which regenerates `.mcp.json` from
+# `.mcp.env`. Detecting that convention is not a nicety: `mcp-setup.sh`
+# overwrites `.mcp.json` wholesale, so an entry written straight into it is
+# erased on the next run with no error and no trace. `init` therefore looks for
+# the template first and, finding one, writes into the template layer instead.
+
+
+def _read_text(path: Path) -> str:
+    """Read a file **without** newline translation.
+
+    `Path.read_text` would fold `\\r\\n` to `\\n` in memory, and `write_text`
+    would then expand every `\\n` back to `\\r\\n` on Windows — so a file that
+    was LF comes back CRLF, and the whole thing shows up as changed in git.
+    Reading raw is what lets `_newline` see what the file actually uses.
+    """
+    try:
+        with open(path, encoding="utf-8", newline="") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+
+def _newline(text: str) -> str:
+    """The line ending a file already uses, so an edit does not change it."""
+    return "\r\n" if "\r\n" in text else "\n"
+
+
+def _write(path: Path, text: str) -> None:
+    """Write exactly the bytes we built — no platform translation.
+
+    `newline=""` is the whole point: without it Python rewrites every `\\n` as
+    `\\r\\n` on Windows, which turns a one-line addition to `.gitignore` into a
+    whole-file diff and, far worse, puts a `\\r` at the end of every line of
+    `mcp-setup.sh` — where `set -euo pipefail\\r` is a syntax error on any real
+    Linux shell.
+    """
+    with open(path, "w", encoding="utf-8", newline="") as handle:
+        handle.write(text)
+
+
+def _env_comment(instance: str) -> str:
+    return f"# {instance}"
+
+
+def _plan_env(path: Path, log: list[str], label: str, prefix: str,
+              values: dict[str, str], comment: str,
+              *, update: bool = True, migrate: bool = False) -> str | None:
+    """Set mnemo's own `NAME=value` lines in a `.env`-shaped file.
+
+    Surgical in both directions: a variable that is already there has its
+    value replaced **in place**, keeping its position and any comment above
+    it; one that is missing is appended as a block at the end. Every foreign
+    line is left exactly where it was, because this file is shared with every
+    other MCP server the project uses.
+
+    Replacing in place rather than appending a second definition matters — a
+    later duplicate would win under `source`, so the file would work while
+    saying two different things, which is the shape of bug nobody finds.
+    """
+    original = _read_text(path)
+    eol = _newline(original)
+    lines = original.splitlines()
+    wanted = {f"{prefix}_{k}": v for k, v in values.items()}
+    # Variables mnemo used to write and no longer does — `MNEMO_BANK` today.
+    # Pruned rather than left: nothing substitutes them any more, so what
+    # stays behind is a value that looks authoritative and is read by nothing.
+    # Strictly mnemo's own keys, by prefix, so this cannot reach a variable
+    # belonging to another server.
+    #
+    # **`--migrate` only.** A plain `init` is additive and never deletes —
+    # that is the property the whole command is trusted for, and "it only
+    # deleted its own key" is not a distinction worth spending it on.
+    stale = ({f"{prefix}_{name}" for name in _RETIRED_ENV_VARS}
+             if migrate else set())
+    seen: set[str] = set()
+
+    kept: list[str] = []
+    for line in lines:
+        name, sep, _ = line.partition("=")
+        key = name.strip()
+        if sep and key in stale:
+            log.append(f"  {label:<20} -{key} (no longer used)")
+            continue
+        if sep and key in wanted:
+            seen.add(key)
+            # `update=False` for `.mcp.env.example`: that file is a git-tracked
+            # document about what the variables are, and whatever a human wrote
+            # next to a name there is theirs, not a value to correct.
+            replacement = f"{key}={wanted[key]}"
+            kept.append(replacement if update else line)
+            continue
+        kept.append(line)
+    lines = kept
+
+    missing = {k[len(prefix) + 1:]: v for k, v in wanted.items()
+               if k not in seen}
+    if missing:
+        if lines and lines[-1].strip():
+            lines.append("")
+        # Extended line by line rather than appended as one pre-joined block:
+        # a block joined with `\n` and dropped into a CRLF file would carry LF
+        # inside itself and CRLF around it.
+        lines.extend(comment.splitlines())
+        lines.extend(f"{prefix}_{k}={v}" for k, v in missing.items())
+
+    # Rejoined with the file's OWN line ending, not with `\n`: a `.mcp.env`
+    # edited on Windows is CRLF, and converting it wholesale would turn a
+    # three-line addition into a whole-file diff in somebody's repository.
+    text = eol.join(lines) + eol if lines else ""
+    if text == original:
+        log.append(f"  {label:<20} mnemo variables already present")
+        return None
+    log.append(f"  {label:<20} "
+               + ("+" if missing else "updated ")
+               + ", ".join(sorted(wanted)))
+    return text
+
+
+# The variables mnemo owns in a template project's `.mcp.env`, in the order
+# they are written.
+_ENV_VARS = ("PORT", "TOKEN")
+# Variables mnemo wrote in an earlier generation and now prunes. `BANK` went
+# with the URL path segment: the token addresses the bank, so a name in the
+# environment could only ever be a second opinion — and one that nothing
+# substitutes, since `{{MNEMO_BANK}}` no longer appears in the template.
+_RETIRED_ENV_VARS = ("BANK",)
+
+# The one comment `.mcp.env.example` carries for mnemo, verbatim from the
+# skill's `templates/mnemo.example` — it is what tells the next person where
+# the blank value comes from.
+_ENV_EXAMPLE_COMMENT = (
+    "# {instance} — the cabinet (`mnemo ui`) shows the bank's token, or read "
+    "it from\n"
+    "# ~/.claude/mnemo/state/banks.json"
+)
+
+
+def _sed_line(prefix: str, name: str) -> str:
+    """One `sed -e` substitution, in the exact shape mnemo writes it.
+
+    One function so that what `--migrate` recognises as "ours, verbatim" and
+    what `init` writes can never drift apart — a removal rule matched against
+    a *different* string from the one that produced the line is a removal rule
+    that quietly stops matching.
+    """
+    return f'  -e "s|{{{{{prefix}_{name}}}}}|${{{prefix}_{name}}}|g" \\'
+
+
+def _sed_lines(prefix: str) -> list[str]:
+    """The substitutions `mcp-setup.sh` needs, one per placeholder."""
+    return [_sed_line(prefix, name) for name in _ENV_VARS]
+
+
+def _plan_setup_sh(path: Path, log: list[str], prefix: str,
+                   notes: list[str], *, migrate: bool = False) -> str | None:
+    """Reconcile mnemo's `sed -e` lines inside the script's single invocation.
+
+    Both directions, because a generation change needs both: missing
+    substitutions are inserted, and — under `--migrate` — ones mnemo used to
+    write and no longer does (`{{MNEMO_BANK}}`) are removed. A leftover would
+    be a harmless no-op today and a lie in the file: it says a placeholder
+    exists that the template no longer contains.
+
+    **This script is not mnemo's file.** The user's `project-mcp-setup` skill
+    wrote it; mnemo only ever appended lines to it. So removal matches the
+    **exact line mnemo itself would have written**, modulo surrounding
+    whitespace — never "any line mentioning our placeholder". A line that has
+    since been edited by hand is left exactly where it is and reported,
+    because a hand-edited line is someone's intent and guessing at it is how a
+    project ends up unable to regenerate its own `.mcp.json`. Nothing else in
+    the script is reflowed, reordered or rewritten.
+
+    Returns the new text, ``None`` if nothing needs doing, and raises nothing
+    — a script whose sed invocation cannot be located is reported by the
+    caller and left untouched.
+
+    The anchor is the `"$TEMPLATE"` argument, which is the last thing in that
+    invocation by construction (`templates/setup.sh.head`): every `-e` line
+    goes before it.
+    """
+    original = _read_text(path)
+    if not original:
+        return None
+    eol = _newline(original)
+    lines = original.splitlines()
+
+    if migrate:
+        # The exact text mnemo writes for a retired variable. Compared
+        # stripped, so indentation may differ; anything else may not.
+        exact = {_sed_line(prefix, name).strip() for name in _RETIRED_ENV_VARS}
+        tokens = [f"{{{{{prefix}_{name}}}}}" for name in _RETIRED_ENV_VARS]
+        kept, hand_edited = [], []
+        for line in lines:
+            if any(token in line for token in tokens):
+                if line.strip() in exact:
+                    continue                    # ours, verbatim — remove it
+                hand_edited.append(line.strip())
+            kept.append(line)
+        dropped = len(lines) - len(kept)
+        if dropped:
+            log.append(f"  mcp-setup.sh         -{dropped} retired "
+                       f"substitution(s) ({', '.join(tokens)})")
+        for line in hand_edited:
+            notes.append(
+                f"mcp-setup.sh has a {', '.join(tokens)} line mnemo did not "
+                f"write:\n      {line}\n"
+                f"  It substitutes a placeholder the template no longer "
+                f"contains, but it has been edited by hand, so it was LEFT "
+                f"ALONE. Remove it yourself if it is dead."
+            )
+        lines = kept
+    else:
+        dropped = 0
+
+    wanted = [line for line in _sed_lines(prefix)
+              if line.strip() not in {existing.strip() for existing in lines}]
+    if wanted:
+        anchor = next(
+            (i for i, line in enumerate(lines)
+             if line.strip().startswith('"$TEMPLATE"')),
+            None,
+        )
+        if anchor is None:
+            # No recognisable invocation. Report what was already removed as
+            # not-done too: the caller prints the lines to add by hand, and
+            # half-editing the script would be worse than not touching it.
+            return None
+        lines[anchor:anchor] = wanted
+        log.append(f"  mcp-setup.sh         +{len(wanted)} sed substitution(s) "
+                   f"for {prefix}_*")
+    elif not dropped:
+        log.append("  mcp-setup.sh         sed lines already correct")
+        return None
+
+    # The script's own line ending. Rejoining an LF script with CRLF is not
+    # cosmetic here: `set -euo pipefail\r` is a syntax error on Linux, so this
+    # would hand the project back a `mcp-setup.sh` that no longer runs.
+    return eol.join(lines) + eol
+
+
+def _plan_gitignore(path: Path, log: list[str],
+                    needed: Iterable[str]) -> str | None:
+    """Ensure each entry is ignored, adding only the ones that are missing.
+
+    Never reorders and never rewrites: existing lines are untouched and the
+    missing ones are appended under one header. A `.gitignore` is a
+    human-curated, git-tracked file — the smallest possible edit is the only
+    acceptable one.
+    """
+    original = _read_text(path)
+    eol = _newline(original)
+    present = {line.strip() for line in original.splitlines()}
+    missing = [entry for entry in needed if entry not in present]
+    if not missing:
+        return None
+    body = original
+    if body and not body.endswith(("\n", "\r")):
+        body += eol
+    if body:
+        body += eol
+    body += "# mnemo — generated wiring holds a per-bank token" + eol
+    body += "".join(entry + eol for entry in missing)
+    log.append(f"  .gitignore           +{', '.join(missing)}")
+    return body
+
+
+# --------------------------------------------------------- git index probe
+#
+# "Is `.mcp.json` tracked?" has to be answered before `init` writes a literal
+# token into it, and it is answered by **reading** `.git/index` — never by
+# running git. Two reasons: `init` must never mutate a repository (the fix is
+# `git rm --cached`, and that is the user's call), and a read that needs no git
+# binary on PATH works in the environments where this actually matters.
+
+
+def _git_worktree(proj: Path) -> tuple[Path, Path] | None:
+    """``(work_tree_root, git_dir)`` for the repo containing ``proj``."""
+    node = proj.resolve()
+    while True:
+        marker = node / ".git"
+        if marker.is_dir():
+            return node, marker
+        if marker.is_file():
+            # A worktree or a submodule: the file holds `gitdir: <path>`.
+            text = _read_text(marker).strip()
+            if not text.startswith("gitdir:"):
+                return None
+            target = Path(text.split(":", 1)[1].strip())
+            return node, target if target.is_absolute() else (node / target)
+        if node.parent == node:
+            return None
+        node = node.parent
+
+
+def _varint(data: bytes, pos: int) -> tuple[int, int]:
+    """Git's offset-encoded variable-length integer. Returns ``(value, pos)``.
+
+    Used only by index v4. Not the same encoding as the one in packfiles: each
+    continuation adds one *before* shifting, which is what makes the encoding
+    prefix-free.
+    """
+    byte = data[pos]
+    pos += 1
+    value = byte & 0x7F
+    while byte & 0x80:
+        byte = data[pos]
+        pos += 1
+        value = ((value + 1) << 7) | (byte & 0x7F)
+    return value, pos
+
+
+def _index_paths(index: Path) -> set[str] | None:
+    """Every path in a git index. ``set()`` if there is no index at all;
+    ``None`` only when one exists and cannot be parsed.
+
+    That three-way answer is the point, and the caller depends on it: a fresh
+    `git init` with nothing staged has **no** `.git/index` file, and reading
+    that as "unknown" rather than "nothing is tracked" would make `init`
+    refuse in a brand-new repository, which is exactly where it is most likely
+    to be run.
+
+    Layout: a 12-byte header, then per entry 62 fixed bytes — 64 with the
+    extended flag — a path, and NUL padding to the next multiple of eight.
+
+    **v4 is parsed too**, not skipped. It was tempting to answer "unknown" for
+    it, since `index.version=4` is uncommon — but the caller now *refuses* on
+    unknown, and a format some people genuinely configure would then make
+    `init` unusable for them with no way forward. v4 differs in exactly two
+    ways: paths are prefix-compressed against the previous entry (a varint
+    saying how many trailing bytes to strip, then the new suffix), and entries
+    are not padded.
+
+    **Known limitation — a sparse index.** With ``index.sparse`` on, git may
+    store one directory entry in place of every file entry beneath it, so a
+    tracked file can be absent from the paths collected here. Recorded rather
+    than handled, for two reasons. It needs the project to sit *outside* the
+    sparse cone, and a directory outside the cone is not checked out — `init`
+    would be running in a folder that does not exist on disk; the repository
+    root is always in the cone. And it fails in the safe direction: a hidden
+    entry reads as "not tracked", which is the branch that writes
+    ``.gitignore`` for a file that was never in git anyway.
+
+    That safe direction is the property that earns this parser its keep, and
+    it is worth stating plainly: every failure mode routes to ``None``, and
+    the caller refuses on ``None``, so this can only ever be too cautious —
+    never permissive. ``set()`` comes back from exactly one condition, the
+    absence of an index file, which is a fact rather than an inference.
+    Answering "is it tracked?" by shelling out to git would be shorter, and
+    would not have violated the never-mutate rule either (a read is a read) —
+    but it would trade a failure mode that refuses for one that depends on a
+    binary being present and on its output being parsed correctly.
+    """
+    try:
+        data = index.read_bytes()
+    except FileNotFoundError:
+        return set()           # a repo with nothing staged yet
+    except OSError:
+        return None
+    if len(data) < 12 or data[:4] != b"DIRC":
+        return None
+    version = int.from_bytes(data[4:8], "big")
+    if version not in (2, 3, 4):
+        return None
+    count = int.from_bytes(data[8:12], "big")
+    out: set[str] = set()
+    pos = 12
+    previous = ""
+    try:
+        for _ in range(count):
+            if pos + 62 > len(data):
+                return None
+            flags = int.from_bytes(data[pos + 60:pos + 62], "big")
+            base = 62 + (2 if flags & 0x4000 else 0)
+            start = pos + base
+            if version < 4:
+                end = data.index(b"\x00", start)
+                path = data[start:end].decode("utf-8", errors="replace")
+                total = base + (end - start)
+                pos += total + (8 - total % 8)
+            else:
+                strip, start = _varint(data, start)
+                end = data.index(b"\x00", start)
+                suffix = data[start:end].decode("utf-8", errors="replace")
+                path = (previous[:len(previous) - strip] if strip else previous) + suffix
+                pos = end + 1
+            out.add(path)
+            previous = path
+    except (IndexError, ValueError):
+        # A truncated or otherwise malformed index. "Unknown", never "empty":
+        # answering "nothing is tracked" from a file we failed to read is how
+        # a token ends up in a tracked file.
+        return None
+    return out
+
+
+def _refuse_if_tracked(proj: Path, name: str) -> None:
+    """Refuse to write a literal bank token into a git-tracked file.
+
+    **A refusal, never a warning, and the asymmetry is the whole reason.** A
+    refusal costs one command to undo. A token committed into a tracked file
+    cannot be undone in any useful sense: by the time anyone notices, it is in
+    somebody else's clone. So "warn and write it anyway" is not a weaker
+    version of this rule, it is the absence of it.
+
+    `None` — an index that exists but will not parse — refuses too. Guessing
+    "probably not tracked" is the one guess whose wrong answer is the
+    unrecoverable one. A repository with nothing staged yet has no index file
+    at all, and `_index_paths` answers ``set()`` for that, so a brand-new repo
+    is not caught by this.
+
+    `init` never runs git, in either direction: it names the command and
+    stops. What to do about the file is the user's call.
+    """
+    tracked = _git_tracked(proj, name)
+    if tracked:
+        raise _Refuse(
+            f"{proj / name} is TRACKED by git, and `mnemo init` would write a "
+            f"literal bank token into it.\n"
+            f"      Untrack it first:  git rm --cached {name}\n"
+            f"      then re-run `mnemo init`.\n"
+            f"      (`init` never runs git — that command is yours to run.)")
+    if tracked is None:
+        raise _Refuse(
+            f"cannot tell whether {proj / name} is tracked by git: an index "
+            f"exists at {proj / '.git'} but could not be parsed.\n"
+            f"      `mnemo init` would write a literal bank token into that "
+            f"file, so this is refused rather than guessed.\n"
+            f"      Check with:  git ls-files --error-unmatch {name}")
+
+
+def _git_tracked(proj: Path, name: str) -> bool | None:
+    """Is ``proj/name`` in the index? ``None`` = could not tell."""
+    found = _git_worktree(proj)
+    if found is None:
+        return False           # not a repository: nothing can be tracked
+    work_tree, git_dir = found
+    paths = _index_paths(git_dir / "index")
+    if paths is None:
+        return None
+    try:
+        rel = (proj.resolve() / name).relative_to(work_tree).as_posix()
+    except ValueError:
+        return None
+    return rel in paths
 
 
 def _is_mnemo_cmd(command: object, subcmd: str) -> bool:
@@ -478,37 +1048,182 @@ def _seed_tree(claude: Path, log: list[str]) -> None:
 
     index = mem / "MEMORY.md"
     if not index.exists():
-        index.write_text(f"# Memory Index — {claude.parent.name}\n",
-                          encoding="utf-8")
+        _write(index, f"# Memory Index — {claude.parent.name}\n")
         log.append(f"  created              {index} (one-line anchor)")
     else:
         log.append(f"  kept                 {index} (already present)")
 
     rule = rules / "mnemo-memory.md"
     if not rule.exists():
-        rule.write_text(_MEMORY_RULE, encoding="utf-8")
+        _write(rule, _MEMORY_RULE)
         log.append(f"  created              {rule}")
     else:
         log.append(f"  kept                 {rule} (already present)")
 
 
-def bank_name_for(proj: Path) -> str:
-    """The name this project's bank is addressed by in `.mcp.json`.
+# `bank_name_for` used to live here: it worked out which name to put in the
+# URL, and had to guess it before the bank was registered. Nothing needs a
+# bank name in a file any more — the token is the address — so it went with
+# the segment rather than staying as a helper with no caller.
 
-    Prefers what the registry already calls it, so re-running `init` after a
-    rename does not silently point the wiring at a bank that no longer
-    answers to that name. Falls back to the same derivation `registry.add`
-    would use, so the two agree before the bank is registered.
+
+# Stands in for the bank token while `init` is deciding whether it would
+# refuse. No refusal depends on the token's value, so the validation pass can
+# run before a bank has been registered — which is what keeps "writes NOTHING
+# on refusal" true of the registry as well as of the project's files.
+_TOKEN_PROBE = "\x00probe\x00"
+
+
+class _Wiring:
+    """What `init` decided to write, before anything is written."""
+
+    def __init__(self) -> None:
+        self.writes: list[tuple[Path, str]] = []
+        self.log: list[str] = []
+        self.notes: list[str] = []
+
+    def add(self, path: Path, text: str | None) -> None:
+        if text is not None:
+            self.writes.append((path, text))
+
+
+def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
+    """Plan the MCP wiring for one project. Raises `_Refuse`, writes nothing.
+
+    Two shapes, chosen by one fact — does `.mcp.json.template` exist:
+
+    * **template project** — the entry goes into the template with `{{VAR}}`
+      placeholders, the variables into `.mcp.env.example`, the real values into
+      `.mcp.env` when that file is there, and the substitutions into
+      `mcp-setup.sh`. `.mcp.json` is not touched at all: it is a build product,
+      and `mcp-setup.sh` regenerates it.
+    * **plain project** — the entry goes into `.mcp.json` with the literal
+      token, and `.gitignore` gains `.mcp.json` if it does not already ignore
+      it.
+
+    Getting this wrong is silent, not loud: writing into `.mcp.json` where a
+    template exists survives exactly until the next `bash mcp-setup.sh`.
+    """
+    wiring = _Wiring()
+    prefix = _var_prefix(_INSTANCE)
+    template = proj / ".mcp.json.template"
+
+    if not template.exists():
+        mcp_path = proj / ".mcp.json"
+        _refuse_if_tracked(proj, ".mcp.json")
+        # Not tracked — safe to write, and git must keep it that way.
+        wiring.add(mcp_path, _plan_mcp(mcp_path, wiring.log, token=token,
+                                       migrate=migrate))
+        gitignore = proj / ".gitignore"
+        wiring.add(gitignore,
+                   _plan_gitignore(gitignore, wiring.log, [".mcp.json"]))
+        return wiring
+
+    wiring.add(template, _plan_mcp_template(template, wiring.log,
+                                            migrate=migrate))
+
+    example = proj / ".mcp.env.example"
+    wiring.add(example, _plan_env(
+        example, wiring.log, ".mcp.env.example", prefix,
+        {"PORT": _api_port(), "TOKEN": ""},
+        _ENV_EXAMPLE_COMMENT.format(instance=_INSTANCE),
+        update=False, migrate=migrate,
+    ))
+
+    # `.mcp.env` holds the real values and is git-ignored. Written only when
+    # it already exists: creating it would be creating a secrets file the
+    # project never asked for, and `mcp-setup.sh` already tells the user to
+    # copy the example when it is missing.
+    env = proj / ".mcp.env"
+    if env.exists():
+        # Same rule as `.mcp.json` in the other branch, for the same reason:
+        # this is where the literal token goes in a template project. The
+        # lead's rule was written about `.mcp.json`, but it is a rule about
+        # literal bank tokens in tracked files, and this is the other file
+        # that gets one.
+        _refuse_if_tracked(proj, ".mcp.env")
+        wiring.add(env, _plan_env(
+            env, wiring.log, ".mcp.env", prefix,
+            {"PORT": _api_port(), "TOKEN": token},
+            _env_comment(_INSTANCE), migrate=migrate,
+        ))
+    else:
+        wiring.notes.append(
+            ".mcp.env does not exist, so the real values were not written.\n"
+            "  Run:  cp .mcp.env.example .mcp.env  then re-run `mnemo init`"
+        )
+
+    setup = proj / "mcp-setup.sh"
+    if not setup.exists():
+        wiring.notes.append(
+            "there is a .mcp.json.template but no mcp-setup.sh, so nothing "
+            "regenerates .mcp.json.\n"
+            "  Add these lines to whatever does:\n"
+            + "\n".join(f"    {line}" for line in _sed_lines(prefix))
+        )
+    else:
+        planned = _plan_setup_sh(setup, wiring.log, prefix, wiring.notes,
+                                 migrate=migrate)
+        # `None` means either "already correct" or "no anchor to insert at",
+        # and only the second needs saying. The placeholder's presence is what
+        # separates them.
+        if planned is None and f"{{{{{prefix}_TOKEN}}}}" not in _read_text(setup):
+            wiring.notes.append(
+                "mcp-setup.sh has no recognisable `sed … \"$TEMPLATE\"` "
+                "invocation, so it was left untouched.\n"
+                "  Add these lines to its sed call by hand — WITHOUT them the "
+                "script still exits 0\n"
+                "  and writes a .mcp.json whose URL literally says "
+                "{{MNEMO_TOKEN}}, which never connects:\n"
+                + "\n".join(f"    {line}" for line in _sed_lines(prefix))
+            )
+        wiring.add(setup, planned)
+
+    return wiring
+
+
+def _register_bank(bank_root: Path, report: list[str]) -> str:
+    """Register the project's memory root and return its **token**.
+
+    The name is reported to the human and then dropped: no file `init` writes
+    contains it any more. The token is the address.
+
+    The service is asked first, because it is the one thing that can also
+    *queue the first index*. When it is down the registry is written directly
+    — it is a locked JSON document built for exactly that — so the wiring
+    still gets a real bank name and a real token, and the backend picks the
+    bank up through reconcile-on-start (§9.6). Wiring that is complete but
+    not yet indexed is worth far more than wiring with a blank token in it.
+
+    The token always comes from the registry rather than over HTTP: it is the
+    same value either way, and one code path has one failure mode.
     """
     from . import registry
+    from .client import ApiFailure, Client, ServiceDown
 
-    claude = proj / ".claude"
-    for candidate in (claude / "memory", claude, proj):
+    bank_root.mkdir(parents=True, exist_ok=True)
+    try:
+        info = Client(timeout=5.0).add_bank(str(bank_root))
+        report.append(f"  bank                 registered as {info['name']}; "
+                      f"indexing queued")
+    except ServiceDown:
         try:
-            return registry.resolve(str(candidate)).name
-        except Exception:  # noqa: BLE001 - not registered yet is normal
-            continue
-    return registry.default_name(claude / "memory")
+            bank = registry.add(bank_root)
+            report.append(f"  bank                 registered as {bank.name} "
+                          f"— backend is down, so it will be indexed when "
+                          f"the service next starts")
+        except registry.BankExists:
+            report.append("  bank                 already registered — "
+                          "backend is down, nothing queued")
+    except ApiFailure as exc:
+        if exc.code == "bank_exists":
+            report.append("  bank                 already registered")
+        else:
+            report.append(f"  bank                 not registered — "
+                          f"{exc.code}: {exc.message}")
+
+    bank = registry.resolve(str(bank_root))
+    return registry.token_for(bank.id)
 
 
 def init_project(root: str | None, *, migrate: bool = False,
@@ -518,10 +1233,16 @@ def init_project(root: str | None, *, migrate: bool = False,
 
     ``hooks`` names the seeds to wire (``"memory"``, ``"inject"``); empty — the
     default — writes none.
+
+    Two passes, and the split is what keeps the refusal guarantee honest. The
+    first plans everything with a probe token purely to find out whether
+    anything would refuse; only once nothing does are the seed, the bank and
+    its token created, and only then is the same plan rendered for real. No
+    refusal depends on the token's value, so the two passes always agree about
+    whether to stop.
     """
     paths = resolve(root)
     proj = paths.root
-    mcp_path = proj / ".mcp.json"
     settings_path = proj / ".claude" / "settings.json"
     wanted = frozenset(hooks)
     unknown = wanted - set(_HOOK_SEEDS)
@@ -529,53 +1250,61 @@ def init_project(root: str | None, *, migrate: bool = False,
         print(f"mnemo init: unknown hook seed(s): {', '.join(sorted(unknown))}")
         return 1
 
-    log: list[str] = []
+    # Pass 1 — validation only. Nothing is written and no bank is registered.
     try:
-        new_mcp = _plan_mcp(mcp_path, log, bank_name=bank_name_for(proj),
-                            migrate=migrate)
-        new_settings = _plan_settings(settings_path, log, migrate, wanted)
+        _plan_wiring(proj, token=_TOKEN_PROBE, migrate=migrate)
+        _plan_settings(settings_path, [], migrate, wanted)
     except _Refuse as exc:
         print(f"mnemo init: refused — {exc}")
         print("mnemo init: NOTHING was written.")
         return 1
 
-    # Validation passed — apply atomically (minimal seed + rule first,
-    # then the additive JSON merges).
+    # Nothing below can refuse. Seed first, because the bank root has to exist
+    # before it can be registered.
+    log: list[str] = []
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     _seed_tree(proj / ".claude", log)
-    if new_mcp is not None:
-        mcp_path.write_text(new_mcp, encoding="utf-8")
+
+    report: list[str] = []
+    try:
+        token = _register_bank(proj / ".claude" / "memory", report)
+    except Exception as exc:  # noqa: BLE001 - no bank means no usable wiring
+        print(f"mnemo init: project = {proj}")
+        for line in log + report:
+            print(line)
+        print(f"mnemo init: could not register the bank ({exc}); the MCP "
+              f"wiring needs its token, so it was NOT written.")
+        return 1
+
+    # Pass 2 — the same plan, rendered with the real token.
+    wiring = _plan_wiring(proj, token=token, migrate=migrate)
+    new_settings = _plan_settings(settings_path, wiring.log, migrate, wanted)
+    for path, text in wiring.writes:
+        _write(path, text)
     if new_settings is not None:
-        settings_path.write_text(new_settings, encoding="utf-8")
+        _write(settings_path, new_settings)
 
     print(f"mnemo init: project = {proj}")
-    for line in log:
+    for line in log + wiring.log + report:
         print(line)
-
-    # Register the bank with the running service and let it build the index.
-    # `init` never indexes inline any more: that was a multi-minute blocking
-    # step inside somebody's terminal, and the service does it in the
-    # background with a progress channel. If the backend is down, the wiring
-    # is still the deliverable — say so and move on.
-    from .client import ApiFailure, Client, ServiceDown
-
-    bank_root = proj / ".claude" / "memory"
-    try:
-        client = Client(timeout=5.0)
-        info = client.add_bank(str(bank_root))
-        print(f"  bank                 registered as {info['name']}; "
-              f"indexing queued")
-    except ServiceDown:
-        print("  bank                 NOT registered — backend is down.\n"
-              "                       run `mnemo service start`, then "
-              "`mnemo banks add .claude/memory`")
-    except ApiFailure as exc:
-        if exc.code == "bank_exists":
-            print("  bank                 already registered")
-        else:
-            print(f"  bank                 not registered — {exc.code}: "
-                  f"{exc.message}")
-
+    for note in wiring.notes:
+        print(f"  NOTE                 {note}")
+    if (proj / ".mcp.json.template").exists():
+        # The second sentence costs one line and covers a failure that is
+        # otherwise silent. `init` writes the `-e` lines itself, so this run
+        # is safe — but the same fragment gets hand-pasted (from the cabinet,
+        # from the skill's example), and `sed` copies an unmatched
+        # `{{PLACEHOLDER}}` through verbatim: the script prints its success
+        # tick, exits 0, and leaves a `.mcp.json` that simply never connects.
+        # Saying what that looks like is what makes it findable.
+        print("mnemo init: the entry went into .mcp.json.template — run "
+              "`bash mcp-setup.sh` to regenerate .mcp.json.")
+        print("            If a URL in .mcp.json still shows {{MNEMO_TOKEN}} "
+              "afterwards, mcp-setup.sh\n"
+              "            is missing that placeholder's `-e` line — sed "
+              "copies unmatched ones through\n"
+              "            and still exits 0. `mnemo init` adds them; "
+              "hand-pasting the fragment does not.")
     print("mnemo init: done. Review the changes, then commit them "
           "(and trust the project in Claude Code).")
     return 0

@@ -140,6 +140,41 @@ FS_MD: dict[str, int] = {
 }
 
 
+# --------------------------------------------------------------------------
+# fixture bank tokens (contract 9.5 GET/POST /api/banks/{bank_id}/token)
+# --------------------------------------------------------------------------
+#
+# Derived from the bank id, never read from the service's own state. The same
+# reasoning as FS_FIXTURE above, one step sharper: these are credentials. A dev
+# mock that reached for a real per-bank token would put a live secret behind a
+# page that is still being written, and a UI mistake here would leak it. Being
+# derived they are also stable across restarts, so a dev page keeps working
+# after this server is bounced.
+
+BANK_TOKENS: dict[str, str] = {}
+
+
+def bank_token(bank_id: str) -> str:
+    with _lock:
+        token = BANK_TOKENS.get(bank_id)
+        if token is None:
+            token = hashlib.sha256(
+                f"mnemo-dev-bank-token:{bank_id}".encode("utf-8")
+            ).hexdigest()[:48]
+            BANK_TOKENS[bank_id] = token
+        return token
+
+
+def regenerate_bank_token(bank_id: str) -> str:
+    """A new value, still invented — `secrets` would be no more real here."""
+    with _lock:
+        token = hashlib.sha256(
+            f"mnemo-dev-bank-token:{bank_id}:{time.time_ns()}".encode("utf-8")
+        ).hexdigest()[:48]
+        BANK_TOKENS[bank_id] = token
+        return token
+
+
 def fs_listing(path: str | None) -> dict | None:
     """One directory listing, or ``None`` when the fixture has no such path."""
     target = (path or "").strip().replace("\\", "/") or FS_HOME
@@ -519,6 +554,15 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/banks":
             self.post_bank(body)
             return
+        if parsed.path.startswith("/api/banks/") and parsed.path.endswith("/token"):
+            ref = parsed.path[len("/api/banks/"): -len("/token")]
+            bank = find_bank(unquote(ref))
+            if not bank:
+                self.fail(404, "bank_not_found", "no bank matches", {"ref": ref})
+                return
+            self.json_out(200, {"bank_id": bank["id"], "name": bank["name"],
+                                "token": regenerate_bank_token(bank["id"])})
+            return
         self.fail(404, "internal", "no route " + parsed.path)
 
     # -- static ----------------------------------------------------------
@@ -551,9 +595,19 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/api/banks/"):
-            bank = find_bank(path[len("/api/banks/"):])
+            # `/token` first: the generic bank lookup below would otherwise try
+            # to resolve "<id>/token" as a bank reference and 404.
+            ref = path[len("/api/banks/"):]
+            wants_token = ref.endswith("/token")
+            if wants_token:
+                ref = ref[: -len("/token")]
+            bank = find_bank(unquote(ref))
             if not bank:
-                self.fail(404, "bank_not_found", "no bank matches", {"ref": path})
+                self.fail(404, "bank_not_found", "no bank matches", {"ref": ref})
+                return
+            if wants_token:
+                self.json_out(200, {"bank_id": bank["id"], "name": bank["name"],
+                                    "token": bank_token(bank["id"])})
                 return
             self.json_out(200, bank_info(bank))
             return

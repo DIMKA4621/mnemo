@@ -489,6 +489,12 @@ function bankCard(bank) {
       title: 'Стирає індекс і збирає його заново — довго, пропорційно розміру банку',
       on: { click: stop(() => reindex(bank, { full: true })) },
     }),
+    el('button', {
+      className: 'btn',
+      text: 'Доступ MCP',
+      title: 'Токен цього банку і готовий фрагмент конфігурації для проєкту',
+      on: { click: stop(() => openTokenPanel(bank)) },
+    }),
   ]));
 
   return card;
@@ -951,6 +957,558 @@ async function pickerSubmit() {
   } finally {
     picker.busy = false;
     renderPicker();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// bank token panel (contract 9.5: GET/POST /api/banks/{id}/token)
+// ---------------------------------------------------------------------------
+
+/**
+ * The per-bank MCP token, and the two config shapes that carry it.
+ *
+ * A project's config holds the token of the one bank it may read, never the
+ * wide service token — so what a person actually needs here is not the value
+ * but a working snippet, which is why the value is one line and the snippets
+ * are the rest of the dialog.
+ *
+ * The token never reaches the DOM until it is asked for: everything on screen
+ * renders through `shownToken()`, which is bullets until «показати» is pressed,
+ * while the copy buttons build their text from `bankToken.value`. So a masked
+ * panel still yields a config that works, and the two never diverge in shape.
+ *
+ * Built in JS rather than in index.html for the reason spelled out at the gate:
+ * a cached document plus a fresh script must not leave this code addressing
+ * markup that is not there.
+ */
+const bankToken = {
+  bank: null,          // the BankInfo this panel was opened for
+  value: null,         // the real token, deliberately kept out of the DOM
+  revealed: false,
+  scope: 'user',       // which config shape is on screen
+  entry: 'mnemo',      // the name the config entry will carry
+  blocks: [],          // rendered snippets, so typing can repaint them in place
+  busy: false,
+  confirming: false,   // the regenerate confirmation is up
+  errorText: null,
+  note: null,
+};
+
+/**
+ * The port a generated config must point at.
+ *
+ * `/api/status` is the service's own statement of where it listens; the page's
+ * own URL is the fallback, because a cabinet answering at :8919 was plainly
+ * served by something on :8919. A hardcoded 8918 would hand out a config that
+ * cannot connect the moment the service moves.
+ */
+function servicePort() {
+  const fromStatus = state.service && state.service.port;
+  if (fromStatus) return fromStatus;
+  const fromUrl = window.location.port;
+  if (fromUrl) return fromUrl;
+  return window.location.protocol === 'https:' ? 443 : 80;
+}
+
+function maskToken(value) {
+  return '•'.repeat(value.length);
+}
+
+function shownToken() {
+  if (bankToken.value == null) return '…';
+  return bankToken.revealed ? bankToken.value : maskToken(bankToken.value);
+}
+
+/**
+ * Copy without going through the screen.
+ *
+ * The async clipboard API needs a secure context: 127.0.0.1 is one, but any
+ * other host the service may be reached at is not, and there the API is simply
+ * absent — hence the textarea path, which is the only moment the real value
+ * touches the DOM at all, and only because copying was asked for.
+ */
+async function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) {
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (err) {
+      // Denied or unavailable — fall through to the legacy path.
+    }
+  }
+  const sink = el('textarea', { className: 'tok-copysink' });
+  sink.value = text;
+  document.body.appendChild(sink);
+  sink.select();
+  let ok = false;
+  try {
+    ok = document.execCommand('copy');
+  } catch (err) {
+    ok = false;
+  }
+  document.body.removeChild(sink);
+  return ok;
+}
+
+function copyButton(get, title) {
+  const button = el('button', {
+    className: 'btn',
+    text: 'копіювати',
+    title: title,
+    on: { click: () => copyInto(button, get()) },
+  });
+  return button;
+}
+
+async function copyInto(button, text) {
+  if (text == null) return;
+  if (!(await copyText(text))) {
+    tokenError('Не вдалося скопіювати — виділіть текст і скопіюйте вручну.');
+    renderTokenPanel();
+    return;
+  }
+  const was = button.textContent;
+  button.textContent = 'скопійовано';
+  button.disabled = true;
+  // A re-render in the meantime detaches this node; touching it then is a
+  // no-op, which is exactly what should happen.
+  setTimeout(() => { button.textContent = was; button.disabled = false; }, 1400);
+}
+
+/**
+ * Cyrillic to Latin, enough for a config entry name.
+ *
+ * Not a transliteration standard, and not meant to be: it exists so a bank
+ * called «Моя пам'ять» yields a name a person can read and an MCP server name
+ * can hold. Ukrainian first, then the four Russian letters that differ.
+ */
+const TRANSLIT = {
+  'а': 'a', 'б': 'b', 'в': 'v', 'г': 'h', 'ґ': 'g', 'д': 'd', 'е': 'e',
+  'є': 'ye', 'ж': 'zh', 'з': 'z', 'и': 'y', 'і': 'i', 'ї': 'yi', 'й': 'y',
+  'к': 'k', 'л': 'l', 'м': 'm', 'н': 'n', 'о': 'o', 'п': 'p', 'р': 'r',
+  'с': 's', 'т': 't', 'у': 'u', 'ф': 'f', 'х': 'kh', 'ц': 'ts', 'ч': 'ch',
+  'ш': 'sh', 'щ': 'shch', 'ь': '', 'ю': 'yu', 'я': 'ya',
+  'ы': 'y', 'э': 'e', 'ъ': '', 'ё': 'e',
+};
+
+/**
+ * A starting entry name for this bank.
+ *
+ * The URL no longer names the bank, so with several mnemo servers side by side
+ * in `~/.claude.json` the entry name is the only thing telling them apart.
+ * Apostrophes drop rather than becoming separators — «пам'ять» should read
+ * `pamyat`, not `pam-yat`.
+ */
+function defaultEntryName(name) {
+  const slug = [...String(name || '').toLowerCase().replace(/['’ʼ`]/g, '')]
+    .map((ch) => (Object.prototype.hasOwnProperty.call(TRANSLIT, ch) ? TRANSLIT[ch] : ch))
+    .join('')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '');
+  if (!slug) return 'mnemo';
+  // A bank already called "mnemo…" must not come out as "mnemo-mnemo…".
+  return slug.startsWith('mnemo') ? slug : 'mnemo-' + slug;
+}
+
+/**
+ * What an MCP server name may hold; anything else becomes a separator.
+ *
+ * Runs collapse, and they have to be collapsed on the *result* rather than on
+ * the input: this runs once per keystroke, so a rejected character lands next
+ * to the dash the previous one already became — the run is never contiguous in
+ * the string being cleaned, and typing a Cyrillic word would otherwise leave a
+ * dash per letter.
+ */
+function sanitizeEntryName(value) {
+  return String(value).replace(/[^A-Za-z0-9_-]+/g, '-').replace(/-{2,}/g, '-');
+}
+
+function entryName() {
+  return bankToken.entry || 'mnemo';
+}
+
+/**
+ * The config shapes the projects on this machine actually use.
+ *
+ * `build` takes the token to print, so one definition serves both the masked
+ * line on screen and the full text a copy button produces. Nothing here needs
+ * escaping any more: the token identifies the bank on its own, so the URL is
+ * the bare `/mcp` endpoint and the bank name never enters it.
+ *
+ * Both `entryName()` and `servicePort()` are read inside `build` rather than
+ * captured around it, so a spec rendered once still follows the entry field as
+ * it is typed into.
+ */
+function tokenSnippets() {
+  if (bankToken.scope === 'user') {
+    return [{
+      caption: 'Запис у «mcpServers» файла ~/.claude.json',
+      secret: true,
+      build: (t) => '"' + entryName() + '": {"type": "http", "url": ' +
+                    '"http://127.0.0.1:' + servicePort() + '/mcp?token=' + t + '"}',
+    }];
+  }
+  return [
+    {
+      caption: 'Фрагмент для .mcp.json.template',
+      secret: false,
+      build: () => '"' + entryName() + '": {"type": "http", "url": ' +
+                   '"http://127.0.0.1:{{MNEMO_PORT}}/mcp?token={{MNEMO_TOKEN}}"}',
+    },
+    {
+      caption: 'Рядки для .mcp.env',
+      secret: true,
+      build: (t) => 'MNEMO_PORT=' + servicePort() + '\n' +
+                    'MNEMO_TOKEN=' + t,
+    },
+  ];
+}
+
+/**
+ * Project scope leads with the command, not with the paste.
+ *
+ * `mnemo init` writes all three pieces — the fragment into the template, the
+ * variables into `.mcp.env`, and the substitution lines into `mcp-setup.sh` —
+ * so presenting the manual procedure as the main path would be teaching
+ * something strictly worse than a command that already exists. The snippets
+ * stay below it because seeing what will land is worth having, and because
+ * they are the way out when `init` cannot be run in that project.
+ */
+function projectLeadNote() {
+  return el('p', { className: 'tok-lead' }, [
+    document.createTextNode('У проєкті це робить '),
+    el('code', { text: 'mnemo init' }),
+    document.createTextNode(' — він сам вписує фрагмент у .mcp.json.template, ' +
+      'змінні у .mcp.env і рядки підстановки в mcp-setup.sh. Нижче — те саме, ' +
+      'що він запише: щоб побачити наперед або вписати руками, якщо запустити ' +
+      'init у цьому проєкті не можна.'),
+  ]);
+}
+
+/**
+ * The failure that makes the manual path worth a warning.
+ *
+ * A placeholder with no matching `sed` line is copied through into `.mcp.json`
+ * verbatim, and `mcp-setup.sh` still prints its success line and exits 0 — so
+ * nothing marks the moment it went wrong. Measured, not hypothetical: this is
+ * what following the tab's earlier text to the letter actually produced.
+ */
+function manualPasteNote() {
+  return el('p', { className: 'tok-note' }, [
+    document.createTextNode('Якщо вписуєте руками, додайте до виклику '),
+    el('code', { text: 'sed' }),
+    document.createTextNode(' у mcp-setup.sh по рядку '),
+    el('code', { text: '-e "s|{{VAR}}|${VAR}|g"' }),
+    document.createTextNode(' на кожну змінну. Без цього плейсхолдер потрапляє ' +
+      'в .mcp.json дослівно, а скрипт усе одно звітує про успіх — і поломка ' +
+      'виявиться аж тоді, коли сервер мовчки не підключиться.'),
+  ]);
+}
+
+/**
+ * Repaint the snippet bodies in place.
+ *
+ * Typing in the entry field must not re-render the panel: that would rebuild
+ * the field out from under the caret. The copy buttons need nothing — they
+ * already call `build` at click time.
+ */
+function refreshSnippets() {
+  for (const block of bankToken.blocks) {
+    block.pre.textContent = block.spec.build(shownToken());
+  }
+  if (bankToken.entryHint) {
+    bankToken.entryHint.textContent = entryHintText();
+  }
+}
+
+function entryHintText() {
+  return 'За нею запис видно серед інших mcp-серверів; вона ж стає префіксом ' +
+         'імен інструментів — mcp__' + entryName() + '__search.';
+}
+
+const SCOPE_TABS = [
+  ['user', 'user scope · ~/.claude.json'],
+  ['project', 'project scope · .mcp.json.template'],
+];
+
+function buildTokenPanel() {
+  bankToken.title = el('h2', { text: 'Доступ MCP' });
+  bankToken.body = el('div', { className: 'modal-body' });
+  bankToken.regen = el('button', {
+    className: 'btn tok-regen',
+    text: 'Перегенерувати',
+    title: 'Видати банку новий токен; старий одразу перестане діяти',
+    on: { click: () => { bankToken.confirming = true; renderTokenPanel(); } },
+  });
+
+  const box = el('div', {
+    className: 'modal-box is-wide',
+    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Доступ MCP до банку' },
+    // The overlay closes on click; inside it, a click is just a click.
+    on: { click: (ev) => ev.stopPropagation() },
+  }, [
+    el('div', { className: 'modal-head' }, [
+      bankToken.title,
+      el('button', {
+        className: 'btn btn-ghost',
+        text: '✕',
+        title: 'Закрити (Esc)',
+        on: { click: () => closeTokenPanel() },
+      }),
+    ]),
+    bankToken.body,
+    el('div', { className: 'modal-foot' }, [
+      bankToken.regen,
+      el('button', { className: 'btn', text: 'Закрити', on: { click: () => closeTokenPanel() } }),
+    ]),
+  ]);
+
+  bankToken.root = el('div', {
+    className: 'modal',
+    attrs: { hidden: '' },
+    on: { click: () => closeTokenPanel() },
+  }, [box]);
+  document.body.appendChild(bankToken.root);
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key !== 'Escape' || bankToken.root.hidden) return;
+    // Esc backs out of the confirmation first — it must not be a second way
+    // to dismiss a question the user has not answered yet.
+    if (bankToken.confirming) {
+      bankToken.confirming = false;
+      renderTokenPanel();
+      return;
+    }
+    closeTokenPanel();
+  });
+}
+
+function openTokenPanel(bank) {
+  bankToken.bank = bank;
+  bankToken.value = null;
+  bankToken.revealed = false;
+  bankToken.confirming = false;
+  bankToken.scope = 'user';
+  bankToken.entry = defaultEntryName(bank.name);
+  bankToken.errorText = null;
+  bankToken.note = null;
+  bankToken.root.hidden = false;
+  renderTokenPanel();
+  loadBankToken();
+}
+
+function closeTokenPanel() {
+  bankToken.root.hidden = true;
+  // Do not leave the secret sitting in memory behind a closed dialog, nor the
+  // rendered panel in the DOM — with no bank, `renderTokenPanel` empties it.
+  bankToken.bank = null;
+  bankToken.value = null;
+  bankToken.revealed = false;
+  bankToken.confirming = false;
+  renderTokenPanel();
+}
+
+function tokenError(message) {
+  bankToken.errorText = message || null;
+}
+
+async function loadBankToken() {
+  const bank = bankToken.bank;
+  if (!bank) return;
+  bankToken.busy = true;
+  renderTokenPanel();
+  try {
+    const data = await api('/api/banks/' + encodeURIComponent(bank.id) + '/token');
+    // The panel can be closed or reopened for another bank while this is in
+    // flight; a late answer must not paint someone else's token.
+    if (bankToken.bank !== bank) return;
+    bankToken.value = data.token || '';
+    tokenError(null);
+  } catch (err) {
+    if (isAuthError(err)) { closeTokenPanel(); reportError(err); return; }
+    // Fixable in place — it belongs in the dialog, not in the page-wide banner.
+    tokenError(err.message);
+  } finally {
+    bankToken.busy = false;
+    renderTokenPanel();
+  }
+}
+
+async function regenerateBankToken() {
+  const bank = bankToken.bank;
+  if (!bank || bankToken.busy) return;
+  bankToken.busy = true;
+  renderTokenPanel();
+  try {
+    const data = await api('/api/banks/' + encodeURIComponent(bank.id) + '/token',
+                           { method: 'POST' });
+    if (bankToken.bank !== bank) return;
+    bankToken.value = data.token || '';
+    // A fresh secret is masked like any other: the copy buttons already carry
+    // the new value, so putting it on screen stays a deliberate act.
+    bankToken.revealed = false;
+    bankToken.confirming = false;
+    bankToken.note = 'Токен перегенеровано. Конфіги зі старим токеном більше не ' +
+                     'підключаться — впишіть у них новий.';
+    tokenError(null);
+  } catch (err) {
+    if (isAuthError(err)) { closeTokenPanel(); reportError(err); return; }
+    tokenError(err.message);
+  } finally {
+    bankToken.busy = false;
+    renderTokenPanel();
+  }
+}
+
+function renderTokenPanel() {
+  const bank = bankToken.bank;
+  const body = bankToken.body;
+  clear(body);
+  // The nodes `refreshSnippets` writes into are about to be replaced.
+  bankToken.blocks = [];
+  bankToken.entryHint = null;
+  if (!bank) return;
+
+  bankToken.title.textContent = 'Доступ MCP — ' + bank.name;
+  bankToken.regen.disabled = bankToken.busy || bankToken.confirming ||
+                             bankToken.value == null;
+
+  const ready = bankToken.value != null;
+
+  const field = el('input', {
+    className: 'fs-input tok-value',
+    attrs: {
+      id: 'tok-value', name: 'tok-value', type: 'text',
+      readonly: '', spellcheck: 'false', autocomplete: 'off',
+    },
+  });
+  field.value = shownToken();
+
+  body.appendChild(el('label', {
+    className: 'fs-label',
+    text: 'Токен банку',
+    attrs: { for: 'tok-value' },
+  }));
+  body.appendChild(el('div', { className: 'tok-row' }, [
+    field,
+    el('button', {
+      className: 'btn',
+      text: bankToken.revealed ? 'сховати' : 'показати',
+      title: bankToken.revealed ? 'Прибрати значення з екрана' : 'Показати значення на екрані',
+      attrs: { 'aria-pressed': bankToken.revealed ? 'true' : 'false' },
+      on: { click: () => { bankToken.revealed = !bankToken.revealed; renderTokenPanel(); } },
+    }),
+    copyButton(() => bankToken.value, 'Скопіювати токен, не показуючи його'),
+  ]));
+  for (const button of body.lastChild.querySelectorAll('button')) button.disabled = !ready;
+
+  body.appendChild(el('p', {
+    className: 'tok-note',
+    text: 'Відкриває лише банк «' + bank.name + '». Службовий токен, яким ' +
+          'відкрито цей кабінет, ширший — у конфіг проєкту він не потрібен.',
+  }));
+
+  // The URL no longer carries the bank, so two mnemo entries side by side
+  // differ only by an opaque token — the name is what a person reads.
+  const entry = el('input', {
+    className: 'fs-input',
+    attrs: {
+      id: 'tok-entry', name: 'tok-entry', type: 'text',
+      spellcheck: 'false', autocomplete: 'off', placeholder: 'mnemo',
+    },
+    on: {
+      input: () => {
+        const clean = sanitizeEntryName(entry.value);
+        if (clean !== entry.value) {
+          // Keep the caret where the typing left it, minus whatever the clean
+          // removed ahead of it — otherwise a collapse throws it to the end.
+          const at = Math.max(0, entry.selectionStart - (entry.value.length - clean.length));
+          entry.value = clean;
+          entry.setSelectionRange(at, at);
+        }
+        bankToken.entry = clean;
+        refreshSnippets();
+      },
+    },
+  });
+  entry.value = bankToken.entry;
+
+  body.appendChild(el('label', {
+    className: 'fs-label',
+    text: 'Назва запису в конфігурації',
+    attrs: { for: 'tok-entry' },
+  }));
+  body.appendChild(entry);
+  bankToken.entryHint = el('p', { className: 'tok-note', text: entryHintText() });
+  body.appendChild(bankToken.entryHint);
+
+  const tabs = el('div', { className: 'segmented tok-tabs' });
+  for (const [scope, label] of SCOPE_TABS) {
+    tabs.appendChild(el('button', {
+      className: 'seg' + (bankToken.scope === scope ? ' is-active' : ''),
+      text: label,
+      on: { click: () => { bankToken.scope = scope; renderTokenPanel(); } },
+    }));
+  }
+  body.appendChild(tabs);
+
+  if (bankToken.scope === 'project') body.appendChild(projectLeadNote());
+
+  for (const spec of tokenSnippets()) {
+    const copy = copyButton(() => spec.build(bankToken.value), 'Скопіювати у буфер');
+    copy.disabled = spec.secret && !ready;
+    const pre = el('pre', { className: 'tok-code', text: spec.build(shownToken()) });
+    body.appendChild(el('div', { className: 'tok-caption' }, [
+      el('span', { text: spec.caption }),
+      copy,
+    ]));
+    body.appendChild(pre);
+    bankToken.blocks.push({ spec: spec, pre: pre });
+  }
+
+  if (bankToken.scope === 'project') {
+    body.appendChild(el('p', {
+      className: 'tok-note',
+      text: '.mcp.json — згенерований файл: він у .gitignore, і mcp-setup.sh ' +
+            'переписує його з шаблону. Запис має лежати в .mcp.json.template, ' +
+            'інакше наступний запуск скрипта його зітре.',
+    }));
+    body.appendChild(manualPasteNote());
+  }
+
+  if (bankToken.confirming) {
+    // The question lands at the bottom of a body that already scrolls, so on a
+    // short window it would open below the fold — the button would look dead.
+    const confirm = el('div', { className: 'tok-confirm' }, [
+      el('p', {
+        className: 'tok-confirm-text',
+        text: 'Перегенерувати токен банку «' + bank.name + '»? Старий перестане ' +
+              'діяти негайно: кожен конфіг, який його вже містить — ~/.claude.json, ' +
+              '.mcp.env інших проєктів — більше не підключиться, доки ви не ' +
+              'впишете туди новий токен.',
+      }),
+      el('div', { className: 'tok-confirm-row' }, [
+        el('button', {
+          className: 'btn',
+          text: 'Скасувати',
+          on: { click: () => { bankToken.confirming = false; renderTokenPanel(); } },
+        }),
+        el('button', {
+          className: 'btn btn-danger',
+          text: 'Так, перегенерувати',
+          on: { click: () => regenerateBankToken() },
+        }),
+      ]),
+    ]);
+    body.appendChild(confirm);
+    confirm.scrollIntoView({ block: 'nearest' });
+  }
+
+  if (bankToken.note) {
+    body.appendChild(el('p', { className: 'tok-ok', text: bankToken.note }));
+  }
+  if (bankToken.errorText) {
+    body.appendChild(el('p', { className: 'modal-error', text: bankToken.errorText }));
   }
 }
 
@@ -1641,6 +2199,7 @@ async function boot() {
   bindControls();
   buildGate();
   buildPicker();
+  buildTokenPanel();
   renderService();
   if (!token) {
     // First run: nothing has been rejected, so ask before knocking.

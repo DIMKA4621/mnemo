@@ -20,7 +20,7 @@ Do: <what this role does — its responsibilities and outputs>.
 Do not: <its boundaries — what it must hand back to the lead instead of
 doing itself; never commit unless the user asked>.
 
-Before acting, search the project memory (`mnemo` tool `memory_search`;
+Before acting, search the project memory (`mnemo` tool `search`;
 narrow with `path_prefix` when you want one folder) for prior decisions,
 architecture and pitfalls — do not re-investigate what is recorded.
 After significant work or a domain decision, record it. The binding

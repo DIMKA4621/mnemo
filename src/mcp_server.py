@@ -5,42 +5,57 @@ a process (and on Windows, flashed a console) for every project. v3 mounts
 one streamable-HTTP MCP app into the running service, so a session *connects*
 instead of spawning: NFR-2, and the reason `mnemo mcp` no longer exists.
 
-**The bank and the token both travel in the URL** (team-lead decision):
+**The token is the whole address** (team-lead decision):
 
-    http://127.0.0.1:8918/mcp/<bank-name>?token=${MNEMO_API_TOKEN}
+    http://127.0.0.1:8918/mcp?token=<bank-token>
 
-Both were headers in the original design. That made the whole face depend on
-Claude Code forwarding `headers` from `.mcp.json` for `type: http` — and if
-it does not, `Authorization` does not arrive either, so **auth** fails, not
-merely bank addressing. The URL form has no such dependency. The bank is a
-**name**, which survives a clone; the token comes from the environment, so
-nothing machine-specific and no secret enters git. Headers remain supported
-as an override, never as a requirement.
+Once a token belongs to a bank, naming the bank again in the URL is redundant
+— and worse than redundant, because two things that say which bank can
+disagree. So the plain face has **no path segment**: the presented token is
+resolved to a bank by `registry.resolve_by_token`, in the auth middleware,
+before the request gets here. `Authorization: Bearer <bank-token>` works
+identically, for a client that prefers headers.
+
+Two whole classes of bug went away with the segment, and neither is worth
+recreating: the `raw_path` / `root_path` trap that a mounted app's path
+rewriting sets (it once cost a 404 that read as a broken handshake), and
+percent-encoding a bank name that routinely holds spaces and Cyrillic.
+
+What the URL no longer says is *which* bank an entry is for. That meaning
+moved to the **MCP server entry name** (`mnemo`, `mnemo-notes`) — which is
+what a person actually reads in a config anyway. A cosmetic segment that
+routing ignored would be worse than none: a path component that does not mean
+what it says is read as routing by the next person.
 
 The tools call the backend's internal functions **directly**. Self-HTTP from
 a mounted app would mean a second socket, a duplicate journal entry per call,
 and a request that can deadlock behind the very worker it is waiting on.
+
+**This face is read-only: `search` and `tree`, and nothing else.** Registering
+banks, dropping them, forcing a reindex and reading the journal live on the
+admin face (`src/mcp_admin.py`, mounted at `/mcp-admin`), which opens only for
+the service token. A project's own wiring holds that project's bank token, and
+that token buys exactly two read tools on exactly one bank.
 """
 from __future__ import annotations
 
 import contextvars
 import logging
 from typing import Any
-from urllib.parse import unquote
 
 from mcp.server.fastmcp import FastMCP
 
 log = logging.getLogger("mnemo.mcp")
 
-# The bank this request is addressed to, taken from the URL path segment by
-# the ASGI shim below. A ContextVar because a tool body has no access to the
-# HTTP request, and this is per-request state on an async stack.
-current_bank: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "mnemo_current_bank", default=None
-)
-# Header override, for a client that does send one.
-current_header_bank: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "mnemo_current_header_bank", default=None
+# The bank this request was authenticated as, lifted out of the ASGI scope by
+# the shim below. A ContextVar because a tool body has no access to the HTTP
+# request, and this is per-request state on an async stack.
+#
+# It holds a bank **id**, not a name or a user-supplied string: it is set from
+# a `Bank` the middleware already resolved, so nothing here re-parses anything
+# a caller sent.
+current_bank_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "mnemo_current_bank_id", default=None
 )
 
 _mcp: FastMCP | None = None
@@ -53,27 +68,49 @@ def _resolve(explicit: str | None):
     """Resolve this call's bank, or return text the agent can act on.
 
     Returns ``(bank, None)`` or ``(None, message)``. A tool must not raise at
-    an agent: a message listing the available banks tells it what to do next,
-    an exception just ends the turn.
+    an agent: a message telling it what to do next is actionable, an exception
+    just ends the turn.
+
+    Two callers, two paths, and no fallback chain between them:
+
+    * **the plain face** passes ``explicit=None`` and gets the bank its
+      *token* authenticated as. On this path a miss is impossible — auth
+      already 401'd anything that resolved to nothing — so there is no guess
+      left to make.
+    * **`/mcp-tools/*` and the admin tools** pass a bank by id, name or path.
+      Both sit behind the service token, which already reaches every bank, so
+      naming one adds no reach; it is simply how those surfaces work.
+
+    The old four-level chain (argument, URL segment, header, "the only bank")
+    is gone. Every level after the first existed to recover a bank the caller
+    had not named — and with the token as the address there is nothing to
+    recover, only opportunities to disagree with it.
     """
     from . import registry
-    from .api import resolve_bank_ref
     from .registry import AmbiguousBankRef, BankNotFound
 
-    try:
-        return resolve_bank_ref(
-            explicit=explicit,
-            header=current_header_bank.get(),
-            url_segment=current_bank.get(),
-        ), None
-    except (BankNotFound, AmbiguousBankRef) as exc:
-        names = ", ".join(b.name for b in registry.load()) or "(none registered)"
-        return None, (
-            f"[mnemo] {exc}\n"
-            f"Available banks: {names}\n"
-            f"Pass one as the `bank` argument, or register a root with "
-            f"`mnemo banks add <path>`."
-        )
+    if explicit and str(explicit).strip():
+        try:
+            return registry.resolve(str(explicit).strip()), None
+        except (BankNotFound, AmbiguousBankRef) as exc:
+            names = ", ".join(b.name for b in registry.load()) or "(none registered)"
+            return None, (
+                f"[mnemo] {exc}\n"
+                f"Registered banks: {names}"
+            )
+
+    bank_id = current_bank_id.get()
+    if bank_id:
+        try:
+            return registry.get(bank_id), None
+        except BankNotFound:
+            # The bank was deregistered between authentication and this call.
+            return None, ("[mnemo] this connection's bank has been removed "
+                          "from the registry.")
+    return None, (
+        "[mnemo] this request carried no bank. The MCP face is addressed by a "
+        "bank token — check the `token=` in this server's URL."
+    )
 
 
 def _status_line(bank, payload: dict) -> str:
@@ -103,6 +140,23 @@ def _no_hits_text(payload: dict) -> str:
 # no debug surface at all.
 
 
+def _domain_problem(exc: Exception) -> str:
+    """An `ApiError` rendered as text the agent can act on.
+
+    Reachable now in a way it was not before: a bank token authenticates even
+    when its bank is **disabled**, which is deliberate — the credential is
+    genuine, and "this bank is switched off" is a far more useful answer than
+    a 401 the holder cannot tell from a wrong token. But `api_search` raises
+    `bank_not_found` for a disabled bank, and an exception out of a tool ends
+    the agent's turn. So it is caught and spoken.
+    """
+    from .api import ApiError
+
+    if isinstance(exc, ApiError):
+        return f"[mnemo] {exc.code}: {exc.message}"
+    raise exc
+
+
 def run_search(
     query: str,
     top_k: int = 5,
@@ -117,10 +171,13 @@ def run_search(
     target, problem = _resolve(bank)
     if problem:
         return problem
-    payload = api_search(SearchRequest(
-        bank=target.id, query=query, top_k=max(1, min(int(top_k), 50)),
-        path_prefix=path_prefix, face=face,
-    ))
+    try:
+        payload = api_search(SearchRequest(
+            bank=target.id, query=query, top_k=max(1, min(int(top_k), 50)),
+            path_prefix=path_prefix, face=face,
+        ))
+    except Exception as exc:  # noqa: BLE001 - a tool answers, it does not raise
+        return _domain_problem(exc)
     lines = [_status_line(target, payload)]
     if not payload["hits"]:
         lines.append(_no_hits_text(payload))
@@ -145,7 +202,10 @@ def run_tree(
     target, problem = _resolve(bank)
     if problem:
         return problem
-    payload = api_tree(bank=target.id, links=False, depth=max(0, int(depth)))
+    try:
+        payload = api_tree(bank=target.id, links=False, depth=max(0, int(depth)))
+    except Exception as exc:  # noqa: BLE001 - a tool answers, it does not raise
+        return _domain_problem(exc)
     lines = [f"[mnemo · bank={target.name} · {payload['files']} files]"]
 
     def walk(node: dict, indent: int) -> None:
@@ -171,46 +231,69 @@ def run_tree(
     return "\n".join(lines)
 
 
-def run_reindex(path: str | None = None, bank: str | None = None) -> str:
+def run_reindex(
+    path: str | None = None,
+    bank: str | None = None,
+    full: bool = False,
+) -> str:
     """Queue a reindex of one file, or of the whole bank."""
     from .api import ReindexRequest, api_reindex
 
     target, problem = _resolve(bank)
     if problem:
         return problem
-    payload = api_reindex(ReindexRequest(bank=target.id, path=path, full=False))
+    payload = api_reindex(ReindexRequest(bank=target.id, path=path, full=full))
     return (f"[mnemo · bank={target.name}] queued "
             f"{len(payload['task_ids'])} task(s); "
             f"{payload['queued']} waiting.")
 
 
 def _register(mcp: FastMCP) -> None:
-    # Declarations only. The docstring is what the agent reads as the tool's
-    # description, so it stays here, on the decorated function — that is where
-    # `@mcp.tool()` looks for it.
+    """The plain face: two read-only tools, and the bank is not an argument.
+
+    **`bank` is gone from the tool schemas on purpose.** A connection pinned
+    to one bank used to be redirectable by passing `bank=` to a tool —
+    measured live, `/mcp/mnemo` calling `search(bank="odin-crm")` returned
+    odin-crm's memory — which defeats per-connection addressing and, with
+    per-bank tokens, would have made the token a key to any bank the holder
+    could name.
+
+    **The bank now comes from the presented token and from nothing else**
+    (§10.3). The URL segment, the `X-Mnemo-Bank` header and the
+    "if there is only one bank it must be that one" rule are all gone, and
+    each for the same reason: with the token as the address, every one of them
+    is a second thing saying which bank, free to disagree with the credential.
+    The failure mode that buys is the worst available — a request that
+    succeeds against the wrong bank and looks entirely normal.
+
+    The shared `run_*` bodies below KEEP their `bank` parameter, and the
+    asymmetry is deliberate: `/mcp-tools/*` (§9.8) is a hand-testing surface
+    behind the **service** token, where naming a bank per call is the whole
+    point.
+
+    **`reindex` is not here** — it moved to the admin face (`src/mcp_admin.py`).
+    The watcher reindexes on its own within seconds of a save, so on a project
+    face `reindex` is a tool slot spent in every single session on a button
+    almost nobody needs to press.
+
+    Declarations only. The docstring is what the agent reads as the tool's
+    description, so it stays on the decorated function — that is where
+    `@mcp.tool()` looks for it.
+    """
+
     @mcp.tool()
     def search(
         query: str,
         top_k: int = 5,
         path_prefix: str | None = None,
-        bank: str | None = None,
     ) -> str:
         """Search this project's curated memory. Returns numbered sections."""
-        return run_search(query, top_k, path_prefix, bank)
+        return run_search(query, top_k, path_prefix)
 
     @mcp.tool()
-    def tree(
-        path_prefix: str | None = None,
-        depth: int = 3,
-        bank: str | None = None,
-    ) -> str:
+    def tree(path_prefix: str | None = None, depth: int = 3) -> str:
         """Show the memory tree, with each file's headings."""
-        return run_tree(path_prefix, depth, bank)
-
-    @mcp.tool()
-    def reindex(path: str | None = None, bank: str | None = None) -> str:
-        """Queue a reindex of one file, or of the whole bank."""
-        return run_reindex(path, bank)
+        return run_tree(path_prefix, depth)
 
 
 def server() -> FastMCP:
@@ -219,8 +302,8 @@ def server() -> FastMCP:
     if _mcp is None:
         # stateless_http: every request is self-contained, which is what lets
         # one mounted app serve many banks and many sessions with no session
-        # affinity. streamable_http_path="/" because the bank segment is
-        # stripped off before the inner app ever sees the request.
+        # affinity — each request carries its own bank in its own token.
+        # streamable_http_path="/" because the mount point is the whole path.
         _mcp = FastMCP("mnemo", stateless_http=True, streamable_http_path="/")
         _register(_mcp)
     return _mcp
@@ -229,13 +312,22 @@ def server() -> FastMCP:
 # ------------------------------------------------------------------- ASGI
 
 
-class BankRoutingASGI:
-    """Strips ``/<bank-name>`` off the path and remembers it for the tools.
+class AuthenticatedBankASGI:
+    """Lifts the authenticated bank out of the ASGI scope into the ContextVar.
 
-    FastAPI cannot mount a sub-app under a path *parameter*, and the MCP app
-    owns everything below its mount point. So the routing lives here: one
-    small shim, rather than one mounted app per bank — which would have to be
-    rebuilt every time a bank is registered.
+    All that is left of what used to be `BankRoutingASGI`. That class existed
+    to cut ``/<bank-name>`` off the path and stash it — and carried a comment
+    block about a `raw_path` / `root_path` trap that once cost a 404 looking
+    like a broken handshake, plus the double-unquoting rule for a bank name
+    holding `/` or `%20`. **None of it survives the segment's removal**, and
+    none of it is worth keeping "just in case": there is no segment to parse,
+    so there is no path to rewrite and nothing to decode.
+
+    What remains is a handover. `api.auth_middleware` has already resolved the
+    presented token to a bank and written its id into ``scope``; a tool body
+    cannot see a scope, so this puts it where the body can read it. The value
+    is never parsed here and never comes from the request — only from the
+    middleware, which is the only place that has verified anything.
     """
 
     def __init__(self, app: Any) -> None:
@@ -244,52 +336,15 @@ class BankRoutingASGI:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             return await self.app(scope, receive, send)
+        from .api import BANK_SCOPE_KEY  # noqa: PLC0415 - avoids a cycle
 
-        # Starlette keeps the FULL path in `scope["path"]` and strips
-        # `root_path` only when matching (`starlette.routing.get_route_path`).
-        # So the bank segment has to be cut from the part *after* root_path,
-        # and the rewritten path must keep root_path on the front — otherwise
-        # the inner router subtracts the prefix from a path that no longer
-        # has it and matches nothing. This cost a 404 that looked like a
-        # broken handshake.
-        #
-        # The segment is taken from `raw_path`, which is still
-        # percent-encoded, and unquoted exactly once. `scope["path"]` is
-        # already decoded by the server, so reading the name from there would
-        # be wrong twice over: a name containing `/` would split into two
-        # segments (`%2F` having become a real separator), and unquoting it
-        # again would turn a name containing a literal `%20` into a space.
-        path = scope.get("path", "/") or "/"
-        root = scope.get("root_path", "") or ""
-        raw = scope.get("raw_path")
-        raw_path = raw.decode("latin-1") if isinstance(raw, bytes) else path
-        source = raw_path if raw_path.startswith(root) else path
-        route_path = source[len(root):] if source.startswith(root) else source
-
-        segment: str | None = None
-        rest = "/"
-        trimmed = route_path.lstrip("/")
-        if trimmed:
-            head, _, tail = trimmed.partition("/")
-            segment = unquote(head) if head else None
-            rest = "/" + tail if tail else "/"
-
-        headers = {
-            k.decode("latin-1").lower(): v.decode("latin-1")
-            for k, v in scope.get("headers", [])
-        }
-        new_path = root + rest
-        scope = dict(scope, path=new_path, raw_path=new_path.encode())
-
-        tok_bank = current_bank.set(segment)
-        tok_hdr = current_header_bank.set(headers.get("x-mnemo-bank"))
+        token = current_bank_id.set(scope.get(BANK_SCOPE_KEY))
         try:
             await self.app(scope, receive, send)
         finally:
-            current_bank.reset(tok_bank)
-            current_header_bank.reset(tok_hdr)
+            current_bank_id.reset(token)
 
 
 def build_app() -> Any:
     """The ASGI app to mount at ``/mcp``."""
-    return BankRoutingASGI(server().streamable_http_app())
+    return AuthenticatedBankASGI(server().streamable_http_app())

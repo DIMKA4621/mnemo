@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
+
 from fastapi import (
     FastAPI, Query, Request, Security, WebSocket, WebSocketDisconnect,
 )
@@ -166,6 +167,36 @@ def _token_ok(presented: str | None) -> bool:
     return secrets.compare_digest(presented.strip(), api_token())
 
 
+# What a caller who reached `/mcp` with the wrong kind of credential needs to
+# read. A bare "missing or invalid API token" is true and useless here: the
+# most likely holder of a rejected token is someone presenting the *service*
+# token, which is a perfectly valid credential on three other surfaces.
+_MCP_401 = (
+    "the MCP face is addressed by a bank token: the token identifies the "
+    "bank, and nothing else does. This one does not match any registered "
+    "bank.\n"
+    "If you just cloned this project, its `.mcp.env` is not in git and your "
+    "MNEMO_TOKEN is still blank. Fix it in three steps: open the cabinet "
+    "(`mnemo ui`), copy the token of the bank this project uses, paste it as "
+    "MNEMO_TOKEN in `.mcp.env`, then run `bash mcp-setup.sh` to regenerate "
+    "`.mcp.json`. A project with no `.mcp.json.template` instead gets its "
+    "token written straight in by `mnemo init`.\n"
+    "If you presented the SERVICE token: it does not open this face — it has "
+    "no bank to resolve to — and belongs on /mcp-admin or /mcp-tools."
+)
+
+# Same, for a URL that still carries the old `/mcp/<bank>` segment. Checked
+# before auth on purpose: the commonest way to arrive here is a config written
+# against the previous shape, whose token is *valid* — telling that caller
+# "unauthorized" would send them hunting for a credential problem that is not
+# there.
+_MCP_SEGMENT = (
+    "the MCP face takes no path segment — the bank comes from the token. "
+    "Use http://<host>:<port>/mcp?token=<bank-token>; if this URL came from "
+    "an older `.mcp.json`, re-run `mnemo init --migrate`."
+)
+
+
 # ------------------------------------------------------------------ errors
 
 
@@ -265,39 +296,17 @@ def _require_queue() -> Any:
 # ---------------------------------------------------------------- helpers
 
 
-def resolve_bank_ref(
-    *,
-    explicit: str | None = None,
-    header: str | None = None,
-    url_segment: str | None = None,
-) -> Bank:
-    """The one bank-addressing fallback, shared by REST and MCP (§10.3).
-
-    Precedence, highest first:
-
-    1. **explicit** — a tool's ``bank`` argument or a request body's ``bank``.
-       Always works, so a client whose wiring did not survive still has a way
-       through.
-    2. **URL segment** — ``/mcp/<name>``. The primary MCP path, because it
-       needs nothing forwarded.
-    3. **header** — ``X-Mnemo-Bank``. Supported, never depended on.
-    4. **the only bank** — if the registry holds exactly one, it is not
-       ambiguous and guessing is not guessing.
-
-    One function rather than one per face: a fallback chain written twice is
-    a fallback chain tested once. Raises ``BankNotFound`` when nothing
-    matches, so callers can turn it into a 404 or into helpful text.
-    """
-    for candidate in (explicit, url_segment, header):
-        if candidate and str(candidate).strip():
-            return registry.resolve(str(candidate).strip())
-    banks = [b for b in registry.load() if b.enabled]
-    if len(banks) == 1:
-        return banks[0]
-    raise BankNotFound(
-        "no bank specified and the registry holds "
-        f"{len(banks)} enabled banks — pass one explicitly"
-    )
+# The scope key the plain MCP face reads its bank out of, written by the auth
+# middleware once it has resolved the presented token.
+#
+# A plain `scope` entry rather than a ContextVar set here. `BaseHTTPMiddleware`
+# runs `call_next` in a child task; a ContextVar set before that call does
+# propagate, but only because task creation happens to copy the current
+# context — a fact about anyio that this code would then silently depend on.
+# The scope is the *same dict object* all the way down to the mounted app, so
+# there is nothing to reason about. `mcp_server`'s shim lifts it into the
+# ContextVar the tool bodies read, inside the app where that belongs.
+BANK_SCOPE_KEY = "mnemo_bank_id"
 
 
 def _resolve_bank(ref: str, *, require_enabled: bool = True) -> Bank:
@@ -765,6 +774,10 @@ async def lifespan(app: FastAPI):
     servicelog.connect()
     servicelog.start_pruner()
     registry.load(force=True)
+    # Banks registered before per-bank tokens existed get one here, in place:
+    # a migration that adds a field, not a rewrite of the document.
+    with suppress(Exception):
+        registry.ensure_tokens()
     _reconcile_on_start()
 
     q = _queue()
@@ -784,16 +797,20 @@ async def lifespan(app: FastAPI):
     _write_service_info()
     log.info("mnemo backend %s on %s:%s", SERVICE_VERSION, API_HOST, API_PORT)
 
-    # The MCP app is mounted, so FastAPI does not run its lifespan for us —
-    # its session manager has to be entered by hand or every /mcp request
-    # fails on a missing task group.
+    # Both MCP apps are mounted, so FastAPI does not run their lifespans for
+    # us — each session manager has to be entered by hand or every request to
+    # that face fails on a missing task group. Two instances, two managers:
+    # forgetting the second is a 500 on the admin face only, which is exactly
+    # the kind of failure that hides.
+    from .mcp_admin import server as mcp_admin  # noqa: PLC0415
     from .mcp_server import server as mcp_server  # noqa: PLC0415
 
     async with mcp_server().session_manager.run():
-        try:
-            yield
-        finally:
-            await _shutdown(ping, q, _watcher)
+        async with mcp_admin().session_manager.run():
+            try:
+                yield
+            finally:
+                await _shutdown(ping, q, _watcher)
     return
 
 
@@ -826,9 +843,12 @@ app = FastAPI(
 # ------------------------------------------------------- auth + envelope
 
 
-_GUARDED = ("/api", "/mcp", "/mcp-tools")
-# The two faces that may take the token from the query string (§9.1).
-_URL_TOKEN_OK = ("/mcp", "/mcp-tools")
+_GUARDED = ("/api", "/mcp", "/mcp-tools", "/mcp-admin")
+# The faces that may take the token from the query string (§9.1). `/mcp-admin`
+# is here for the same reason as `/mcp`: an MCP client configures a URL, not
+# headers, and the admin face is reached the same way.
+_URL_TOKEN_OK = ("/mcp", "/mcp-tools", "/mcp-admin")
+
 
 # Declared so the OpenAPI schema carries a security scheme and `/docs` grows an
 # **Authorize** button. Without it the auth lives only in the middleware below,
@@ -843,7 +863,40 @@ bearer_scheme = HTTPBearer(
 
 @app.middleware("http")
 async def auth_middleware(request: Request, call_next):
-    path = request.url.path
+    # `/mcp` -> `/mcp/`, `/mcp-admin` -> `/mcp-admin/`, before anything else
+    # looks at the path.
+    #
+    # A Starlette `Mount("/mcp")` compiles to `^/mcp/(?P<path>.*)$`, so the
+    # bare path — which is now exactly what an MCP client is configured with,
+    # for both faces — matches nothing and falls through to `redirect_slashes`:
+    # a 307 on every single request. This used not to bite the plain face,
+    # because a bank segment always followed; removing the segment is what
+    # makes it the common case. Rewriting here keeps each face at one round
+    # trip and removes the assumption that every MCP client follows a 307 on
+    # a POST.
+    #
+    # Read from the scope, not from `request.url`: Starlette builds that URL
+    # once and caches it, so a rewrite made after touching it would be
+    # invisible to everything downstream that asks the Request.
+    path = request.scope.get("path", "") or request.url.path
+    for mount in ("/mcp", "/mcp-admin"):
+        if path == mount:
+            path = mount + "/"
+            request.scope["path"] = path
+            request.scope["raw_path"] = path.encode()
+            break
+
+    # A leftover `/mcp/<bank>` is rejected, not quietly accepted and ignored.
+    # Swallowing it would leave a path component that does not mean what it
+    # says — worse than one that is absent, because the next person reads it
+    # as routing. Checked BEFORE auth deliberately: the commonest arrival here
+    # is a config written against the previous shape, carrying a *valid* bank
+    # token, and answering that caller "unauthorized" would send them hunting
+    # for a credential problem that does not exist.
+    if path.startswith("/mcp/") and path != "/mcp/":
+        return JSONResponse(_envelope("bad_request", _MCP_SEGMENT),
+                            status_code=400)
+
     if path.startswith(_GUARDED):
         header = request.headers.get("authorization", "")
         presented = (
@@ -860,11 +913,32 @@ async def auth_middleware(request: Request, call_next):
             or (request.query_params.get("token")
                 if path.startswith(_URL_TOKEN_OK) else None)
         )
-        if not _token_ok(presented):
-            # A plain 401 BEFORE the MCP handshake. Letting an unauthorised
-            # request reach the protocol layer makes Claude Code surface a
-            # transport error the user cannot act on, instead of "not
-            # authorised".
+        # The auth matrix (§9.1). Each surface takes exactly ONE kind of
+        # credential — there is no longer a face that accepts two:
+        #
+        #   /mcp          a BANK token only. The token *is* the address, so a
+        #                 service token here has no bank to resolve to and
+        #                 accepting it would mean guessing which one.
+        #   /mcp-admin    the service token ONLY — never a bank token, or a
+        #                 project's own wiring could add and drop banks.
+        #   /mcp-tools/*  the service token (it keeps the explicit `bank`
+        #                 parameter, so no single bank's token is the key).
+        #   /api/*        the service token.
+        #
+        # `/mcp/` is matched with its trailing slash, which the normalisation
+        # above guarantees. `/mcp-admin/` and `/mcp-tools/…` start with
+        # `/mcp-`, so they cannot fall into this branch by accident.
+        if path.startswith("/mcp/"):
+            bank = registry.resolve_by_token(presented)
+            if bank is None:
+                # A plain 401 BEFORE the MCP handshake. Letting an
+                # unauthorised request reach the protocol layer makes Claude
+                # Code surface a transport error the user cannot act on,
+                # instead of "not authorised".
+                return JSONResponse(_envelope("unauthorized", _MCP_401),
+                                    status_code=401)
+            request.scope[BANK_SCOPE_KEY] = bank.id
+        elif not _token_ok(presented):
             return JSONResponse(
                 _envelope("unauthorized", "missing or invalid API token"),
                 status_code=401,
@@ -1079,6 +1153,34 @@ def api_add_bank(req: AddBankRequest) -> dict:
 @app.get("/api/banks/{bank_id}", include_in_schema=False)
 def api_bank(bank_id: str) -> dict:
     return _bank_info(_resolve_bank(bank_id, require_enabled=False))
+
+
+# --------------------------------------------------------- per-bank tokens
+#
+# The credential a project's own wiring carries. `/api`, so: service token,
+# hidden from the schema. Deliberately NOT part of `_bank_info` — a bank list
+# is rendered in the cabinet and pasted into issues, and a secret that rides
+# along with every listing is a secret that leaks by accident. It is fetched
+# for one bank, on purpose, by the one view that shows it.
+
+
+def _token_json(bank: Bank, token: str) -> dict:
+    return {"bank_id": bank.id, "name": bank.name, "token": token}
+
+
+@app.get("/api/banks/{bank_id}/token", include_in_schema=False)
+def api_bank_token(bank_id: str) -> dict:
+    bank = _resolve_bank(bank_id, require_enabled=False)
+    return _token_json(bank, registry.token_for(bank.id))
+
+
+@app.post("/api/banks/{bank_id}/token", include_in_schema=False)
+def api_regenerate_bank_token(bank_id: str) -> dict:
+    """Rotate. Every `.mcp.json` pointed at this bank must be re-issued."""
+    bank = _resolve_bank(bank_id, require_enabled=False)
+    token = registry.regenerate_token(bank.id)
+    log.info("regenerated the token for bank %s", bank.name)
+    return _token_json(bank, token)
 
 
 @app.delete("/api/banks/{bank_id}", include_in_schema=False)
@@ -1560,6 +1662,11 @@ def api_status() -> dict:
 
 
 @app.get("/api/logs", include_in_schema=False)
+# NOTE for internal callers (the admin MCP tools call this directly, as they
+# must): `limit` and `offset` default to `Query(...)` descriptors, not to
+# numbers. FastAPI substitutes a real value per request; a plain Python call
+# does not, and the descriptor travels into `servicelog` and blows up there.
+# Pass both explicitly.
 def api_logs(
     kind: Literal["query", "index"],
     bank: str | None = None,
@@ -1671,6 +1778,14 @@ if _STATIC_DIR is not None and _STATIC_DIR.is_dir():
 # the tools call. `?format=json` only wraps that same string — it does not
 # restructure it, because two shapes would mean two contracts to keep in step.
 #
+# **It keeps `bank`, which the plain face's tools no longer have.** That is not
+# drift: `search`/`tree` on `/mcp/<bank>` are addressed by URL and may open
+# with that bank's own token, so a `bank` argument there would let one bank's
+# credential read another. This surface takes the SERVICE token, which already
+# opens every bank, so naming one per call adds no reach and is the only way
+# to hand-test across banks from Swagger. `reindex` mirrors the admin face's
+# tool (it left the plain face with phase 4's split) and carries its `full`.
+#
 # These are also the ONLY routes in the OpenAPI schema: every `/api` route is
 # `include_in_schema=False`, so `/docs` shows what is meant to be looked at
 # from outside and not the cabinet's private plumbing.
@@ -1723,6 +1838,7 @@ def mcp_tools_tree(
 def mcp_tools_reindex(
     path: str | None = None,
     bank: str | None = None,
+    full: bool = False,
     format: Literal["text", "json"] = "text",
 ):
     """Queue a reindex of one file, or of the whole bank."""
@@ -1730,16 +1846,24 @@ def mcp_tools_reindex(
 
     # POST, unlike its two siblings: this one changes state (it queues work).
     # The others stay GET so they can be pasted into an address bar.
-    return _mirror("reindex", run_reindex(path, bank), format, bank)
+    return _mirror("reindex", run_reindex(path, bank, full), format, bank)
 
 
 # MCP over HTTP, in this same process and this same uvicorn — nothing is
 # spawned for a Claude Code session (NFR-2). Mounted last so the /api routes
 # above are matched first. The bank travels as the path segment after /mcp.
+#
+# `/mcp-admin` is mounted BEFORE `/mcp` and is a separate path, not a bank:
+# the bank-routing shim under `/mcp` would otherwise read `admin` as a bank
+# name. Starlette matches mounts in declaration order, so the more specific
+# prefix has to be declared first.
 try:
+    from .mcp_admin import build_app as _build_admin
     from .mcp_server import build_app as _build_mcp
 except ImportError:  # pragma: no cover - the SDK is a hard dep, but be honest
-    _build_mcp = None
+    _build_admin = _build_mcp = None
+if _build_admin is not None:
+    app.mount("/mcp-admin", _build_admin(), name="mcp-admin")
 if _build_mcp is not None:
     app.mount("/mcp", _build_mcp(), name="mcp")
 

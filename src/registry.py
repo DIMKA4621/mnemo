@@ -15,6 +15,14 @@ Two properties this module enforces rather than assumes:
   collision (``notes`` -> ``notes-2``); ``update`` refuses one, because a
   silent rename would break the wiring that points at the old name.
 
+* **each bank carries its own token** — minted when the bank is first
+  registered and stored next to it. It opens that bank's MCP face and nothing
+  else, so a project's git-ignored wiring never has to hold the service-wide
+  credential. This is **least privilege, not a wall**: the service token still
+  opens every bank, and anyone who can read `banks.json` can read every token
+  in it. What it buys is that handing a colleague one project's `.mcp.env` does
+  not hand them every other bank on the machine.
+
 Unknown fields survive a rewrite: a note somebody added by hand is not data
 we own, so we carry it through instead of dropping it.
 """
@@ -26,6 +34,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import threading
 import time
 from dataclasses import dataclass, field
@@ -55,8 +64,17 @@ _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 # Fields this module owns. Anything else found in a bank object is preserved
 # verbatim under ``Bank.extra`` and written back on save.
 _KNOWN_FIELDS = frozenset(
-    {"id", "name", "root", "provider", "enabled", "exclude", "added_at"}
+    {"id", "name", "root", "provider", "enabled", "exclude", "added_at", "token"}
 )
+
+# Same generator and same shape as the service token (`api.api_token`) and as
+# `embed.token`: 48 hex characters. One shape for every credential mnemo mints
+# means one thing to recognise in a file and one thing to redact in a log.
+TOKEN_HEX_BYTES = 24
+
+
+def new_token() -> str:
+    return secrets.token_hex(TOKEN_HEX_BYTES)
 
 _lock = threading.RLock()
 _cache: list[Bank] | None = None
@@ -167,6 +185,10 @@ class Bank:
     enabled: bool = True
     exclude: list[str] = field(default_factory=_default_exclude)
     added_at: str = ""
+    # This bank's own MCP credential. Empty only for a bank registered before
+    # tokens existed and not yet migrated (`ensure_tokens`) — never empty for
+    # a bank this module created.
+    token: str = ""
     # Fields a human (or a future version) put in banks.json that we do not
     # understand. Round-tripped untouched.
     extra: dict[str, Any] = field(default_factory=dict, compare=False)
@@ -203,6 +225,7 @@ class Bank:
                 "enabled": self.enabled,
                 "exclude": list(self.exclude),
                 "added_at": self.added_at,
+                "token": self.token,
             }
         )
         return data
@@ -232,6 +255,10 @@ def _from_json(obj: dict[str, Any]) -> Bank:
         enabled=bool(obj.get("enabled", True)),
         exclude=list(obj.get("exclude") or _default_exclude()),
         added_at=str(obj.get("added_at") or ""),
+        # Read, never minted here: `load` is on every request path and must
+        # not write. Filling a blank is `ensure_tokens` / `token_for`, both of
+        # which take the cross-process lock.
+        token=str(obj.get("token") or ""),
         extra={k: v for k, v in obj.items() if k not in _KNOWN_FIELDS},
     )
 
@@ -338,6 +365,13 @@ def save(banks: list[Bank]) -> None:
             json.dumps(doc, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
         )
+        # The registry carries per-bank tokens, so it is now a secret-bearing
+        # file and gets `api.token`'s treatment. Set on the temp file, before
+        # the rename, so the document is never readable-by-all even briefly.
+        # POSIX-only in effect: on Windows this only clears the read-only bit,
+        # and the real protection is the user-profile ACL.
+        with contextlib.suppress(OSError):
+            os.chmod(tmp, 0o600)
         os.replace(tmp, path)
         _cache = list(banks)
         _cache_sig = _signature(path)
@@ -460,10 +494,111 @@ def add(
             enabled=True,
             exclude=_default_exclude(),
             added_at=_now_iso(),
+            token=new_token(),
         )
         banks.append(bank)
         save(banks)
         return bank
+
+
+# ------------------------------------------------------------------ tokens
+
+
+def ensure_tokens() -> int:
+    """Give every bank a token, keeping everything else in the file intact.
+
+    A **migration, not a rewrite**: banks registered before per-bank tokens
+    existed get one added; every other field — including anything a human put
+    there that this module does not understand — is round-tripped by
+    `to_json` / `extra`. Returns how many tokens were minted, so a caller can
+    say nothing when there was nothing to do.
+
+    Called once at service start (§9.6). Not from `load`: that runs on every
+    request path and must never write.
+    """
+    with _lock, _file_lock():
+        banks = load(force=True)
+        minted = 0
+        for i, bank in enumerate(banks):
+            if bank.token:
+                continue
+            banks[i] = _with_token(bank, new_token())
+            minted += 1
+        if minted:
+            save(banks)
+            log.info("minted a token for %d bank(s) with none", minted)
+        return minted
+
+
+def token_for(bank_id: str) -> str:
+    """This bank's token, minted and persisted if it has none."""
+    bank = get(bank_id)
+    if bank.token:
+        return bank.token
+    return regenerate_token(bank_id)
+
+
+def resolve_by_token(token: str) -> Bank | None:
+    """The bank a token addresses, or ``None``.
+
+    **This is the whole of bank addressing on the plain MCP face.** Once a
+    token belongs to a bank, the token *is* the address: there is no URL
+    segment to parse, no header to trust and no "if there is only one bank"
+    guess. One input, one answer.
+
+    A linear scan with ``compare_digest`` rather than a token→bank dict. The
+    dict would be O(1) and would need its own cache keyed on the registry's
+    mtime — a second invalidation path whose failure mode is serving the wrong
+    bank. The scan is one 48-character comparison per bank on an already-warm
+    ``load()`` (~40 us total for this machine's registry, against ~200 ms for
+    the search behind it), and it compares in constant time, which a dict
+    lookup does not. Simplicity wins on both axes here.
+
+    Returns ``None`` rather than raising: the only caller is authentication,
+    where "no match" is a 401 and not an exceptional condition. A disabled
+    bank still authenticates — the token is genuine — and the tool then says
+    the bank is disabled, which is a far more useful answer than a 401 the
+    holder cannot distinguish from a wrong credential.
+    """
+    candidate = (token or "").strip()
+    if not candidate:
+        return None
+    for bank in load():
+        if bank.token and secrets.compare_digest(candidate, bank.token):
+            return bank
+    return None
+
+
+def regenerate_token(bank_id: str) -> str:
+    """Mint a fresh token for one bank. The old one stops working at once.
+
+    Every `.mcp.json` pointed at this bank has to be re-issued afterwards —
+    which is the point of the button in the cabinet that calls this.
+    """
+    with _lock, _file_lock():
+        banks = load(force=True)
+        idx = next((i for i, b in enumerate(banks) if b.id == bank_id), None)
+        if idx is None:
+            raise BankNotFound(f"no bank with id {bank_id!r}")
+        token = new_token()
+        banks[idx] = _with_token(banks[idx], token)
+        save(banks)
+        return token
+
+
+def _with_token(bank: Bank, token: str) -> Bank:
+    """`Bank` is frozen — this is the one place a token is swapped in."""
+    return Bank(
+        id=bank.id,
+        name=bank.name,
+        root=bank.root,
+        provider=bank.provider,
+        enabled=bank.enabled,
+        exclude=list(bank.exclude),
+        added_at=bank.added_at,
+        token=token,
+        extra=bank.extra,
+    )
 
 
 def remove(bank_id: str, *, drop_index: bool = True) -> None:
@@ -525,6 +660,10 @@ def update(bank_id: str, **fields: Any) -> Bank:
             enabled=bool(fields.get("enabled", current.enabled)),
             exclude=list(fields.get("exclude", current.exclude)),
             added_at=current.added_at,
+            # Carried, never regenerated by an edit: renaming a bank must not
+            # silently invalidate every `.mcp.json` pointing at it. Rotation
+            # is `regenerate_token`, and only that.
+            token=current.token,
             extra=current.extra,
         )
         banks[idx] = updated

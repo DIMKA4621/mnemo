@@ -39,17 +39,66 @@ Installed by `install.sh` on POSIX and `install.ps1` on native Windows
 (PowerShell 5.1+, 64-bit Python 3.10+ — no WSL, PowerShell 7 or PATH
 entry required); idempotent; never deletes `state/` or `model-cache/`.
 
-**Wiring — git scope, per project, ships to everyone who clones**
+**Wiring — per project, most of it ships to everyone who clones**
 Created by `mnemo init` — additive, idempotent, refuses rather than
-overwrite, never touches `CLAUDE.md`, never invents memory:
+overwrite, never touches `CLAUDE.md`, never invents memory, never runs
+git:
 
-- `.mcp.json` — registers the `mnemo` MCP server (portable form).
-- `.claude/settings.json` — **untouched unless a hook seed is asked for**
-  (`--with-memory-hook` / `--with-inject-hook`, portable shell form).
 - `.claude/memory/MEMORY.md` — a **one-line anchor** if absent
-  (`# Memory Index — <project>`), nothing more.
+  (`# Memory Index — <project>`), nothing more. Git-tracked.
 - `.claude/rules/mnemo-memory.md` — the **binding memory rule** if
   absent. `mnemo init` owns this text; it is the single source.
+  Git-tracked.
+- `.claude/settings.json` — **untouched unless a hook seed is asked for**
+  (`--with-memory-hook` / `--with-inject-hook`, portable shell form).
+  Git-tracked.
+- The MCP entry — **not** git-tracked, because it holds a live token.
+  See below.
+
+**The MCP entry and why it stays out of git.** `init` registers the
+project's memory root as a bank; registration mints that bank a token,
+and the token is written into the entry. In a plain project that goes
+straight into `.mcp.json`, and `init` appends `.mcp.json` to `.gitignore`.
+Under the template convention (`.mcp.json.template` present) `.mcp.json`
+is a build product, so `init` writes the placeholder entry into the
+template, the variables into `.mcp.env.example` and `.mcp.env`, and the
+`sed -e` substitutions into `mcp-setup.sh` — all three, because a missing
+substitution leaves `{{MNEMO_TOKEN}}` in the regenerated file while the
+script exits 0 with a success tick.
+
+If `.mcp.json` is already tracked, `init` **refuses** and writes nothing,
+printing `git rm --cached .mcp.json`. A refusal costs one command; a token
+committed to a tracked file is in somebody else's clone before anyone
+notices. `init` never runs that command itself.
+
+## Two MCP faces, and which token opens which
+
+The tools carry **no `memory_` prefix** — Claude Code already namespaces
+them as `mcp__<server>__<tool>`, so a prefix only restated the namespace
+and cost tokens in every tool description.
+
+- **`/mcp?token=<bank-token>`** — the project face, server key `mnemo`.
+  **Read-only, two tools:** `search(query, top_k, path_prefix)` and
+  `tree(path_prefix, depth)`. Neither takes a `bank` argument; the bank
+  comes from the token. This is what an adopted project is wired to.
+- **`/mcp-admin?token=<service-token>`** — the admin face, server name
+  `mnemo-admin` (tools namespace as `mcp__mnemo-admin__reindex`). Tools:
+  `banks`, `bank_add`, `bank_remove`, `reindex`, `status`, `logs`.
+
+`reindex` sits on the admin face, not the project one, because the
+watcher reindexes within seconds of a save — on a project face it would
+be a tool slot spent in every session on a button almost nobody presses.
+
+The two credentials do not cross, and this is what makes a per-project
+token safe to hand out: a bank token on `/mcp-admin` is a 401, and the
+service token on `/mcp` is a 401 too, since it resolves to no bank. Never
+wire a project at `/mcp-admin` — that would give one project the
+credential that reaches every bank on the machine.
+
+For hand-checking there is `/mcp-tools/<tool_name>` (service token,
+plain HTTP, Swagger at `/docs`), which calls the very same tool bodies
+and so cannot drift from what an agent reads. `/api/*` is the cabinet's
+private channel and is not published.
 
 ## The binding rule vs CLAUDE.md (critical)
 
@@ -143,39 +192,57 @@ owner runs `mnemo init --migrate`, which unwires them.
 
 ## Portable invocation (cross-platform)
 
-`mnemo init` writes a launcher reference with **no machine path** in
-git — identical on Linux, macOS and native Windows:
+Nothing machine-dependent and no secret ever goes into a git-tracked
+file — identical on Linux, macOS and native Windows:
 
 - **Hooks** use the shell form `~/.claude/mnemo/bin/mnemo <subcmd>` — the
   shell expands `~` per user at run time.
-- **`.mcp.json`** `command` is `${HOME}/.claude/mnemo/bin/mnemo` with
-  `args: ["mcp"]` — Claude Code substitutes each teammate's own `$HOME`
-  at spawn time. **This form is replaced at v3 phase 4** by an HTTP
-  entry (`type: "http"`, a loopback URL, `Authorization: Bearer
-  ${MNEMO_API_TOKEN}`, and the bank addressed by **name** in a header).
-  The rule it obeys does not change — no machine-dependent value ever
-  goes into a git-tracked file — only what gets substituted.
+- **The MCP entry** is `{"type": "http", "url":
+  "http://127.0.0.1:<port>/mcp?token=<bank-token>"}`. No `command`, no
+  `args`, no spawn: the session connects to the already-running service.
+  No `headers` either — the value rides in the URL because a header
+  depends on Claude Code forwarding `headers` for `type: http`, and if it
+  does not, authentication fails outright.
+- **No path segment and no bank name.** The token *is* the address: it
+  belongs to one bank and resolves to it, so a second thing naming the
+  bank could only disagree with the credential — and a request that
+  succeeds against the wrong bank looks entirely normal. The
+  `X-Mnemo-Bank` header is gone for the same reason, as is the "if there
+  is only one bank it must be that one" fallback. What tells a reader
+  which bank an entry serves is the `mcpServers` key (`mnemo`,
+  `mnemo-notes`).
+- The literal token is the reason this one file is git-ignored rather
+  than tracked; a template project keeps `{{MNEMO_PORT}}` /
+  `{{MNEMO_TOKEN}}` in git and the values in `.mcp.env`. Portability is
+  unchanged — only what gets substituted.
 
 The one logical path resolves to the platform's real launcher:
 `~/.claude/mnemo/bin/mnemo` (extensionless Bash script) on Linux/macOS,
 `bin\mnemo.exe` on Windows (process creation resolves the extensionless
 path to the `.exe`). On Windows `install.ps1` sets the user `HOME`
-environment variable **only when it is absent** (so `${HOME}` resolves),
-never overwrites it, and refuses a value different from PowerShell
-`$HOME`/`%USERPROFILE%` so MCP and hooks cannot diverge. After first
-creating it, close and reopen the launching terminal or IDE, then restart
-Claude Code. Runtime root resolution is the same everywhere — explicit
-`--root` > `MNEMO_ROOT` > `CLAUDE_PROJECT_DIR` > cwd — and indexed
-relative file identifiers always use `/`, avoiding separator-only drift
-between platforms. Resolve a wiring
-conflict by copying the portable form from the `mnemo init` refusal
+environment variable **only when it is absent** (so a hook seed's `~`
+resolves), never overwrites it, and refuses a value different from
+PowerShell `$HOME`/`%USERPROFILE%` — the engine lives under `HOME` and the
+git-tracked hook expands `~` at run time, and both break if the two
+disagree. After first creating it, close and reopen the launching terminal
+or IDE, then restart Claude Code. Root resolution for the commands that
+take one is the same everywhere — explicit `--root` > `MNEMO_ROOT` >
+`CLAUDE_PROJECT_DIR` > cwd — and indexed relative file identifiers always
+use `/`, avoiding separator-only drift between platforms. Resolve a wiring
+conflict by copying the expected form from the `mnemo init` refusal
 report.
 
 ## `mnemo` is not a human command
 
 Nobody types `mnemo` for memory. It is called by the MCP registration,
 any wired hook seed, and this skill (`install.sh --check`, `mnemo init`,
-`warmup`, `reindex`, `search` for verification). Not on `PATH`.
+`warmup`, and `status` / `search` for verification). Not on `PATH`.
+
+Note which flag each command takes: `--root` belongs to `init` (and to
+the deprecated `ingest` alias); the API-client commands — `search`,
+`tree`, `reindex`, `logs` — address a bank with `--bank`, which accepts
+an id, a name or the bank's path. Passing `--root` to `search` is an
+argparse error, not a silent fallback.
 
 v3 softens this in one direction only: the service commands
 (`service start|stop|status|restart`), `doctor` and `ui` are meant for a

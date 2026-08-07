@@ -79,12 +79,18 @@ Service (the persistent backend):
 - `src/registry.py` — banks registry (`state/banks.json`); resolve by
   id, name or nested path.
 - `src/servicelog.py` — `service.db`: query + index events, retention.
-- `src/api.py` — FastAPI/uvicorn loopback host. Two surfaces, and the
-  split is deliberate: **private** `/api/*` for the cabinet (`/search`,
-  `/reindex`, `/tree`, `/status`, `/banks`, `/fs/dirs`, `/file`, `/logs`
-  — hidden from OpenAPI), and **external** `/mcp-tools/<tool_name>`, the
-  three MCP tools as plain HTTP for a human with curl or Swagger. Bearer
-  token on both; `/mcp-tools` also takes `?token=`.
+- `src/api.py` — FastAPI/uvicorn loopback host, and the router that
+  decides which credential opens which face. **Private** `/api/*` for the
+  cabinet (`/search`, `/reindex`, `/tree`, `/status`, `/banks`,
+  `/banks/{id}/token`, `/fs/dirs`, `/file`, `/logs` — hidden from
+  OpenAPI); **external** `/mcp-tools/<tool_name>`, the tools as plain
+  HTTP for a human with curl or Swagger; and the two mounted MCP faces,
+  `/mcp` and `/mcp-admin`. Bearer token everywhere; `/mcp`, `/mcp-admin`
+  and `/mcp-tools` also take `?token=`, because an MCP client configures
+  a URL, not headers. `/api/*`, `/mcp-tools/*` and `/mcp-admin` take the
+  **service** token; `/mcp` takes a **bank** token and nothing else. A
+  leftover `/mcp/<bank>` path is a 400 pointing at `init --migrate`, not
+  a segment quietly ignored.
 - `src/workqueue.py`, `src/watcher.py` — priority queue + worker and the
   watchdog→debounce→enqueue path (**phase 3, in flight**).
 - `src/service_ctl.py` — `mnemo service …`, windowless spawn, PID/port
@@ -94,19 +100,42 @@ Service (the persistent backend):
 
 Faces:
 
-- `src/mcp_server.py` — **FastMCP** (from the official `mcp` SDK), mounted
-  into `api.py` at `/mcp`. FastAPI only hosts it; the two frameworks are
-  nested, not mixed. Tool bodies live in module-level `run_search` /
-  `run_tree` / `run_reindex` so `/mcp-tools/*` mirrors them by *calling*
-  them — the mirror cannot drift from the tool.
+- `src/mcp_server.py` — the **project** face: **FastMCP** (from the
+  official `mcp` SDK) mounted into `api.py` at `/mcp`. FastAPI only hosts
+  it; the two frameworks are nested, not mixed. **Read-only, two tools —
+  `search(query, top_k, path_prefix)` and `tree` — and no `bank`
+  parameter on either.** The bank comes from the presented token and from
+  nothing else: the URL segment, the `X-Mnemo-Bank` header and the "if
+  there is only one bank" rule are all gone, each because it was a second
+  thing saying which bank, free to disagree with the credential. Tool
+  bodies live in module-level `run_search` / `run_tree` / `run_reindex`
+  so `/mcp-tools/*` mirrors them by *calling* them — the mirror cannot
+  drift from the tool — and those keep their `bank` parameter, since the
+  mirror sits behind the service token and naming a bank is its point.
+- `src/mcp_admin.py` — the **admin** face, mounted at `/mcp-admin` under
+  a distinct server name (`mnemo-admin`, so tools namespace as
+  `mcp__mnemo-admin__reindex`). Service token only. Tools: `banks`,
+  `bank_add`, `bank_remove`, `reindex`, `status`, `logs`. `reindex` lives
+  here rather than on a project face because the watcher reindexes on its
+  own within seconds of a save.
 - `src/cli.py` — thin client of the API (`src/client.py`); `warmup`,
   `init`, `doctor` stay local. Hook targets `memory-hook` (SessionStart)
   and `hook-inject` (UserPromptSubmit) are **seeds**: working commands
   that nothing wires automatically.
 - `src/scaffold.py` — `mnemo init`: additive, idempotent, refuses on
-  conflict. Writes **no hook** unless `--with-memory-hook` /
-  `--with-inject-hook`; `--migrate` unwires what was not asked for. Owns
-  `_MEMORY_RULE`, the text that lands in adopted repos as
+  conflict. Registers the project's memory root as a bank and writes
+  **that bank's literal token** into the MCP entry, which is why
+  `.mcp.json` is generated and git-ignored (`init` adds the `.gitignore`
+  line) and why `init` **refuses** — writing nothing, printing `git rm
+  --cached .mcp.json` — when that file is already tracked. It is
+  template-aware: where `.mcp.json.template` exists it writes the
+  placeholder entry there, the variables into `.mcp.env.example` /
+  `.mcp.env`, and the matching `sed -e` lines into `mcp-setup.sh`,
+  because a missing substitution leaves `{{MNEMO_TOKEN}}` in the
+  generated file while the script still exits 0. Writes **no hook**
+  unless `--with-memory-hook` / `--with-inject-hook`; `--migrate` unwires
+  what was not asked for and rewrites the superseded `/mcp/<bank>` URL.
+  Owns `_MEMORY_RULE`, the text that lands in adopted repos as
   `.claude/rules/mnemo-memory.md`.
 
 Around it:
@@ -121,9 +150,11 @@ Around it:
   tools it mirrors. The bundled fixture corpus uses the canonical layout
   (`.claude/memory/` with `logs/`, `agents/<role>/` inside).
 - Installed engine: `~/.claude/mnemo/` (`bin/mnemo`, a real `bin\mnemo.exe`
-  on Windows, `.venv`, `model-cache`, `state/`). Project wiring: `.mcp.json`,
-  `.claude/settings.json`. Adoption skill + its bundled templates:
-  `.claude/skills/mnemo-adopt/`.
+  on Windows, `.venv`, `model-cache`, `state/`). Project wiring:
+  `.mcp.json` — **git-ignored**, since it holds a bank token — or the
+  `.mcp.json.template` / `.mcp.env` / `mcp-setup.sh` layer where a project
+  uses that convention, plus `.claude/settings.json`. Adoption skill + its
+  bundled templates: `.claude/skills/mnemo-adopt/`.
 
 ## Commands
 
@@ -144,7 +175,11 @@ mnemo embed-server                  resident model daemon (auto-started)
 ```
 
 There is no `mnemo mcp`: MCP is HTTP inside the running service, so a session
-connects instead of spawning. Poke it by hand at `/mcp-tools/*` (Swagger at
+connects instead of spawning. Two faces, keyed by which token is presented —
+`/mcp?token=<bank-token>` (project, read-only: `search`, `tree`) and
+`/mcp-admin?token=<service-token>` (`banks`, `bank_add`, `bank_remove`,
+`reindex`, `status`, `logs`). Neither credential opens the other's face.
+Poke the read tools by hand at `/mcp-tools/*` (Swagger at
 `http://127.0.0.1:8918/docs`, token from `~/.claude/mnemo/state/api.token`).
 
 Service control (`mnemo serve`, `mnemo service start|stop|status|restart`,
@@ -193,7 +228,10 @@ Extra steps only when:
   `~/.claude/mnemo/bin/mnemo warmup` and let the index rebuild;
 - the wiring schema changed (hooks / `.mcp.json` shape) → re-run
   `~/.claude/mnemo/bin/mnemo init` in each adopted project (additive,
-  idempotent — it only adds mnemo's own keys).
+  idempotent — it only adds mnemo's own keys), with `--migrate` where the
+  project still carries an older mnemo-authored entry. If `.mcp.json` is
+  git-tracked there, `init` refuses until `git rm --cached .mcp.json` —
+  it will not write a bank token into a tracked file.
 
 **While v3 is being built, re-mirroring is not a free action.** The
 engine is shared by every project on this machine, and the v3 store

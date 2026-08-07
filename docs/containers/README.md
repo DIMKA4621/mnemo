@@ -1,5 +1,20 @@
 # Running mnemo inside containers
 
+> **⚠ SUPERSEDED — do not follow these instructions as written.**
+>
+> Everything below describes the **v2** model, in which the CLI drove the
+> engine directly inside the container. It no longer does: `mnemo search`,
+> `tree`, `reindex` and `logs` are now clients of the running service, and
+> they address a bank with `--bank`, not `--root` — `mnemo search … --root
+> <path>` fails outright with an argparse error, and `mnemo ingest --root
+> <path>` answers `bank_not_found`. So a container built to this recipe has
+> no service to talk to and the commands shown will not work.
+>
+> The container story is being redesigned; how a container gets a service
+> and a bank is an open decision. Until that lands, treat this page as
+> historical context for the engine/state split — which is still accurate —
+> and not as a working recipe.
+
 Goal: dev/worker containers (spun up by the dozen, killed and recreated daily)
 that can read and search project memory **without** dragging the 2.2 GB model
 into every image and **without** littering the host with orphan index files.

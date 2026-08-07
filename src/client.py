@@ -268,6 +268,13 @@ class Client:
             json={"root": str(root), "name": name, "provider": provider},
         )
 
+    def bank_token(self, bank_id: str) -> dict:
+        """This bank's own MCP credential (§9.5). Never part of a bank list."""
+        return self._request("GET", f"/api/banks/{bank_id}/token")
+
+    def regenerate_bank_token(self, bank_id: str) -> dict:
+        return self._request("POST", f"/api/banks/{bank_id}/token")
+
     def remove_bank(self, bank_id: str, *, drop_index: bool = True) -> None:
         self._request("DELETE", f"/api/banks/{bank_id}",
                       params={"drop_index": str(drop_index).lower()})
