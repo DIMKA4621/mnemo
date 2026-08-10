@@ -47,6 +47,32 @@ do want every markdown file in it. Need memory kept apart — per agent,
 say? Use a **separate bank**, not a scope. `--path-prefix` narrows a
 search to a subfolder, but that is navigation, not isolation.
 
+## Getting started
+
+Two commands, and they are at two different levels. The installer sets up
+**the machine**; `init` attaches **one project**, and only you know which
+directory that is.
+
+```bash
+git clone https://github.com/DIMKA4621/mnemo.git && cd mnemo
+./install.sh                     # or: .\install.ps1 on Windows
+
+cd /path/to/your/project
+~/.claude/mnemo/bin/mnemo init   # or: & "$HOME\.claude\mnemo\bin\mnemo.exe" init
+```
+
+The installer creates the virtualenv, installs dependencies, writes the
+launcher, exports the API token, registers `mnemo` in your shell profile,
+registers autostart, offers to fetch the embedding model (~2.2 GB, asked
+once), starts the service, and finishes by running `doctor` — so the last
+thing on screen is the engine reporting its own state rather than a claim
+that it worked. Re-running it is the update path, too: it stops the
+service, re-mirrors the code, and brings it back.
+
+If you want the steps back, they are all still there: `--no-model`,
+`--model` (skip the prompt, for scripts), `--no-start`, `--check`,
+`--deps-only`, `--no-autostart`, `--home DIR`.
+
 The engine installs on Linux, macOS and native Windows — `install.sh` on
 POSIX, `install.ps1` (built-in PowerShell 5.1+, 64-bit Python 3.10+, no
 WSL/PATH needed) on Windows. On Windows the installer sets the user

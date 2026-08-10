@@ -124,14 +124,29 @@ def main() -> int:
         venv_python = engine / ".venv" / "Scripts" / "python.exe"
         assert launcher.is_file(), launcher
         assert venv_python.is_file(), venv_python
-        assert "model is NOT downloaded" in first.stdout
+        # A default install now warms the model, starts the service and runs
+        # doctor — one command takes a clean machine all the way. An isolated
+        # -InstallHome must do NONE of that: it is a manual or test copy, and
+        # this suite is the reason. A 2.2 GB download, a second process
+        # claiming port 8918, or a `doctor` reporting the *real* engine would
+        # each be a test reaching out and touching the machine.
+        assert "skipped the model, the service and the check" in first.stdout
+        assert "verifying --" not in first.stdout
         # The banner is a claim; this is the behaviour. "The model is
         # downloaded only by an explicit warmup" is a binding invariant, so
         # assert the cache is genuinely bare rather than trusting the text.
         cache_dir = engine / "model-cache"
         stray = [p for p in cache_dir.rglob("*") if p.is_file()] if cache_dir.exists() else []
         assert not stray, f"install downloaded model files: {stray[:5]}"
-        ok("fresh Windows install downloads no model")
+        # Nothing was spawned either: an isolated home writes no service state.
+        assert not (engine / "state" / "service.pid").exists()
+        ok("isolated install downloads no model and starts nothing")
+
+        # The prompt must never fire without a terminal — a scheduled task or
+        # a piped run would otherwise hang forever, or read one byte of the
+        # caller's data as the answer.
+        assert "download it now?" not in first.stdout
+        ok("no interactive prompt in a non-interactive run")
 
         checked = run(install + ["-Check"])
         assert "python deps   present" in checked.stdout

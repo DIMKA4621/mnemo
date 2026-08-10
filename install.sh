@@ -1,23 +1,32 @@
 #!/usr/bin/env bash
 # mnemo engine installer — system scope, once per machine.
 #
-# Installs the runtime (engine code + virtualenv + launcher) under a
-# single user-home directory shared by every project. Deterministic and
-# idempotent: safe to re-run to refresh code and dependencies. It NEVER
-# downloads the embedding model (that is the explicit `mnemo warmup`
-# step) and NEVER touches the per-project index state or the model cache.
+# This is THE machine-level command: one run takes a clean machine to a
+# working, verified engine. Afterwards there is exactly one thing left, and
+# only you can do it — `mnemo init` inside the project you want memory for,
+# because the installer cannot know which directory that is.
 #
-#   ./install.sh              install or refresh the engine
+# Deterministic and idempotent: safe to re-run to refresh code and deps. It
+# NEVER touches the per-project index state, and it asks before downloading
+# the embedding model.
+#
+#   ./install.sh              install or refresh, then warm, start, verify
 #   ./install.sh --check      report engine state, change nothing
 #   ./install.sh --deps-only  refresh venv packages only, leave src/ alone
 #   ./install.sh --no-autostart  skip the systemd --user registration
+#   ./install.sh --no-model   skip the model download
+#   ./install.sh --model      download it without asking (scripts)
+#   ./install.sh --no-start   do not start the service
 #   ./install.sh --home DIR   install into DIR instead of the default
 #
 # Default location: $HOME/.claude/mnemo  (override with $MNEMO_HOME).
 set -euo pipefail
 
 usage() {
-	sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^#\{0,1\} \{0,1\}//'
+	# Prints the header block above, however long it grows. It used to be a
+	# fixed line range, which silently truncated the moment a flag was added.
+	awk 'NR == 1 { next } /^#/ { sub(/^# ?/, ""); print; next } { exit }' \
+		"${BASH_SOURCE[0]}"
 }
 
 say() { printf 'install.sh: %s\n' "$1"; }
@@ -31,11 +40,17 @@ MNEMO_HOME="${MNEMO_HOME:-$DEFAULT_HOME}"
 CHECK_ONLY=0
 DEPS_ONLY=0
 NO_AUTOSTART=0
+NO_MODEL=0
+WANT_MODEL=0
+NO_START=0
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--check) CHECK_ONLY=1 ;;
 		--deps-only) DEPS_ONLY=1 ;;
 		--no-autostart) NO_AUTOSTART=1 ;;
+		--no-model) NO_MODEL=1 ;;
+		--model) WANT_MODEL=1 ;;
+		--no-start) NO_START=1 ;;
 		--home) shift; MNEMO_HOME="${1:?--home needs a directory}" ;;
 		--home=*) MNEMO_HOME="${1#--home=}" ;;
 		-h|--help) usage; exit 0 ;;
@@ -258,10 +273,17 @@ say "launcher written: $LAUNCHER"
 # User-scope registrations belong to the real engine only: a custom --home is
 # an isolated/manual copy (and the test suite uses one), so it must never
 # reach out and edit the user's shell profile or systemd units.
+# It also gets no 2.2 GB download, no service claiming the port and no
+# verification of something that is not the machine's engine — it only
+# restores a service this same run stopped.
 if [ "$MNEMO_HOME" != "$DEFAULT_HOME" ]; then
 	say "isolated home: skipped token export, profile and autostart"
-	say "done. The embedding model is NOT downloaded by install."
-	say "warm it once with:  $LAUNCHER warmup"
+	if [ "$SERVICE_WAS_RUNNING" -eq 1 ]; then
+		"$LAUNCHER" service start || \
+			say "the service did not come back up; start it with: $LAUNCHER service start"
+	fi
+	say "isolated home: skipped the model, the service and the check"
+	say "done."
 	exit 0
 fi
 
@@ -314,12 +336,59 @@ if [ "$NO_AUTOSTART" -eq 0 ]; then
 		say "autostart registration failed (run: $LAUNCHER autostart enable)"
 fi
 
-# --- 8. bring the service back if it was running -----------------------
-if [ "$SERVICE_WAS_RUNNING" -eq 1 ]; then
-	"$LAUNCHER" service start || \
-		say "the service did not come back up; start it with: $LAUNCHER service start"
+# --- 8. the model ------------------------------------------------------
+# Asks the engine whether the cache is complete: a half-downloaded snapshot
+# must read as absent, or the installer skips the warmup that repairs it.
+model_cached() {
+	MNEMO_HOME="$MNEMO_HOME" "$PY_BIN" -c '
+import os, sys
+home = sys.argv[1]
+os.environ["MNEMO_HOME"] = home
+sys.path.insert(0, home)
+from src.embedder import is_model_cached
+raise SystemExit(0 if is_model_cached() else 1)
+' "$MNEMO_HOME" 2>/dev/null
+}
+
+want_model() {
+	[ "$NO_MODEL" -eq 1 ] && return 1
+	[ "$WANT_MODEL" -eq 1 ] && return 0
+	# Nobody is there to answer in CI, a unit or a piped run, and a prompt
+	# nobody sees would either hang or read the caller's data as the answer.
+	if [ ! -t 0 ]; then
+		say "the embedding model is not cached; skipping the download (non-interactive run — pass --model to fetch it)"
+		return 1
+	fi
+	say "the embedding model is not cached yet (~2.2 GB, one time)."
+	printf 'install.sh: download it now? [Y/n] '
+	read -r reply
+	case "$reply" in
+		""|y|Y|yes|YES) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+if model_cached; then
+	say "model already cached"
+elif want_model; then
+	"$LAUNCHER" warmup || say "the model download failed; retry with: $LAUNCHER warmup"
+else
+	say "skipped the model. Search will not work until you run:"
+	say "  $LAUNCHER warmup"
 fi
 
-# --- 9. done (model is intentionally NOT downloaded) -------------------
-say "done. The embedding model is NOT downloaded by install."
-say "warm it once with:  $LAUNCHER warmup"
+# --- 9. start the service ----------------------------------------------
+# Started even when nothing was running before — that is the whole point on
+# a clean machine. Registering a logon unit and then leaving the service down
+# until the next reboot is the kind of half-install that reads as "broken".
+if [ "$NO_START" -eq 0 ]; then
+	"$LAUNCHER" service start || \
+		say "the service did not start; try: $LAUNCHER service start"
+fi
+
+# --- 10. end on evidence, not on a promise -----------------------------
+say "verifying --"
+"$LAUNCHER" doctor || true
+
+say "done. One thing left, and only you know where:"
+say "  cd <your project> && $LAUNCHER init"

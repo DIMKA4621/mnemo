@@ -98,7 +98,12 @@ def _cmd_doctor() -> int:
     print(f"state dir        {config.STATE_DIR}")
     print(f"python           {Path(sys.executable).as_posix()}")
     print(f"model cached     {is_model_cached()}")
-    print(f"embed resident   {'up' if server_is_up() else 'down'} "
+    # "down" is the normal state of a machine that has not searched yet — the
+    # resident is started on demand and holds ~1.5 GB, so it does not sit
+    # there from boot. Saying only "down" right after an install reads as a
+    # broken install, and that is the first thing a new user sees.
+    resident = ("up" if server_is_up() else "down (starts on first search)")
+    print(f"embed resident   {resident} "
           f"({config.EMBED_HOST}:{config.EMBED_PORT})")
 
     client = _client(timeout=3.0)

@@ -212,6 +212,42 @@ hooks and MCP always use the portable form (`~`/`${HOME}` resolved per
 user; the extensionless path resolves to `.exe` on Windows), so they work
 regardless.
 
+## Installing from scratch
+
+Two levels, and they cannot collapse into one: the installer sets up **the
+machine**, `init` attaches **one project**, and only you know which
+directory that is.
+
+```powershell
+git clone https://github.com/DIMKA4621/mnemo.git   # native Windows
+cd mnemo
+& .\install.ps1        # venv, deps, launcher, token, profile, autostart,
+                       # then: model (asks) -> service start -> doctor
+cd <your project>
+& "$HOME\.claude\mnemo\bin\mnemo.exe" init
+```
+```bash
+git clone https://github.com/DIMKA4621/mnemo.git   # Linux / macOS
+cd mnemo && ./install.sh
+cd <your project> && ~/.claude/mnemo/bin/mnemo init
+```
+
+The installer ends on **evidence, not a promise**: it runs `doctor` and
+prints the result, so the last thing on screen is the engine reporting its
+own state. Escape hatches for anyone who wants the steps back:
+`-NoModel`/`--no-model`, `-Model`/`--model` (no prompt, for scripts),
+`-NoStart`/`--no-start`, plus `-Check`, `-DepsOnly`, `-NoAutostart`.
+
+The model prompt is how the "never downloaded implicitly" invariant
+survives a one-command install: consent stays explicit, it just happens in
+the same sitting. **A non-interactive run never prompts** — it skips and
+prints the command, because a prompt nobody sees either hangs forever or
+reads a byte of piped data as the answer.
+
+A custom `-InstallHome`/`--home` is an isolated copy (the test suite uses
+one) and gets **none** of the user-scope part: no token export, no profile,
+no autostart, no model, no service, no `doctor`.
+
 ## Updating the engine (after pulling new code)
 
 The engine (`~/.claude/mnemo/`) is a mirror of this repo's `src/`, shared
@@ -257,9 +293,12 @@ opens, and indexes keyed by a *project* root are simply orphaned — never
 opened, never auto-deleted. `mnemo doctor` counts them and `mnemo
 clean-orphans` removes them, after showing the list and asking; nothing
 deletes an index on its own.
-Refresh dependencies alone with `install.ps1 -DepsOnly`. From phase 5 the
-order becomes **stop → refresh → start**, because the running backend
-holds the venv's `python.exe`.
+Refresh dependencies alone with `install.ps1 -DepsOnly`.
+
+**Do not stop the service by hand first** — the installer already does
+`stop → refresh → start` itself, because the running backend holds the
+venv's `python.exe`. It restores a service that was up, and on a clean
+machine starts one that never was.
 
 ## Locked decisions (see the v3 docs for full rationale)
 

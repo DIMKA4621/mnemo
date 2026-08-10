@@ -1,10 +1,17 @@
 # mnemo engine installer for native Windows (PowerShell 5.1+).
-# Installs or refreshes the user-scope engine without downloading the model.
 #
-#   .\install.ps1                install or refresh the engine
+# This is THE machine-level command: one run takes a clean machine to a
+# working, verified engine. Afterwards there is exactly one more thing to do,
+# and only you can do it -- `mnemo init` inside the project you want memory
+# for, because the installer cannot know which directory that is.
+#
+#   .\install.ps1                install or refresh, then warm, start, verify
 #   .\install.ps1 -Check         report engine state, change nothing
-#   .\install.ps1 -DepsOnly      refresh venv packages only, leave src/ alone
+#   .\install.ps1 -DepsOnly      refresh venv packages only, leave src\ alone
 #   .\install.ps1 -InstallHome D install into D instead of the default
+#   .\install.ps1 -NoModel       skip the model download
+#   .\install.ps1 -Model         download it without asking (scripts)
+#   .\install.ps1 -NoStart       do not start the service
 #
 # state\ (per-project indexes) and model-cache\ are never touched.
 [CmdletBinding()]
@@ -12,6 +19,9 @@ param(
     [switch]$Check,
     [switch]$DepsOnly,
     [switch]$NoAutostart,
+    [switch]$NoModel,
+    [switch]$Model,
+    [switch]$NoStart,
     [string]$InstallHome,
     [string]$Python
 )
@@ -115,6 +125,25 @@ function Resolve-PythonCommand {
     throw "Python 3.10+ x64 was not found. Install 64-bit Python and retry."
 }
 
+function Test-ModelCached {
+    param(
+        [string]$EngineHome,
+        [string]$VenvPython
+    )
+
+    # Asks the engine itself rather than looking for files: `is_model_cached`
+    # knows what a *complete* snapshot is, and a half-downloaded one must read
+    # as absent or the installer would skip the warmup that repairs it.
+    if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+        return $false
+    }
+    $probe = "import os,sys; home=sys.argv[1]; os.environ['MNEMO_HOME']=home; " +
+        "sys.path.insert(0,home); from src.embedder import is_model_cached; " +
+        "raise SystemExit(0 if is_model_cached() else 1)"
+    & $VenvPython -c $probe $EngineHome 2>$null
+    return $LASTEXITCODE -eq 0
+}
+
 function Show-CheckReport {
     param(
         [string]$EngineHome,
@@ -142,9 +171,7 @@ function Show-CheckReport {
 
     $modelCached = $false
     if ($deps -eq "present") {
-        $modelProbe = "import os,sys; home=sys.argv[1]; os.environ['MNEMO_HOME']=home; sys.path.insert(0,home); from src.embedder import is_model_cached; raise SystemExit(0 if is_model_cached() else 1)"
-        & $VenvPython -c $modelProbe $EngineHome 2>$null
-        $modelCached = $LASTEXITCODE -eq 0
+        $modelCached = Test-ModelCached $EngineHome $VenvPython
     }
     Write-Report "model cache" $(if ($modelCached) { "present (warmed)" } else { "empty / incomplete (run: mnemo warmup)" })
 
@@ -291,6 +318,45 @@ function Install-Launcher {
             }
         }
     }
+}
+
+function Confirm-ModelDownload {
+    # Decide whether to fetch the model. Flags win; otherwise ask; never guess.
+    if ($script:NoModel) { return $false }
+    if ($script:Model) { return $true }
+
+    # Nobody is there to answer in CI, a scheduled task or a piped run, and a
+    # prompt nobody sees would either hang or read one character of the
+    # caller's data as the answer. Non-interactive means: skip, and say the
+    # command that finishes the job.
+    $interactive = [Environment]::UserInteractive
+    try {
+        if ([Console]::IsInputRedirected) { $interactive = $false }
+    }
+    catch {
+        # No console at all (hosted runspace) -- treat as non-interactive.
+        $interactive = $false
+    }
+    if (-not $interactive) {
+        Write-Status ("the embedding model is not cached; skipping the " +
+            "download (non-interactive run -- pass -Model to fetch it)")
+        return $false
+    }
+
+    Write-Status "the embedding model is not cached yet (~2.2 GB, one time)."
+    $answer = Read-Host "install.ps1: download it now? [Y/n]"
+    return ($answer.Trim() -eq "") -or ($answer.Trim().ToLowerInvariant() -in @("y", "yes"))
+}
+
+function Invoke-ModelWarmup {
+    param([string]$Launcher)
+
+    & $Launcher warmup
+    if ($LASTEXITCODE -ne 0) {
+        Write-Status "the model download failed; retry with '$Launcher' warmup"
+        return $false
+    }
+    return $true
 }
 
 function Get-LiveServicePid {
@@ -572,15 +638,54 @@ function Invoke-Install {
         Write-Status "isolated home: skipped token export, profile and autostart"
     }
 
-    if ($serviceWasRunning) {
+    # An isolated -InstallHome is a manual or test copy (the suite uses one),
+    # so it gets none of this: no 2.2 GB download, no service claiming the
+    # port, no verification of a thing that is not the machine's engine. It
+    # only ever restores a service that this same run stopped.
+    if (-not $usingDefaultHome) {
+        if ($serviceWasRunning) {
+            & $launcher service start
+            if ($LASTEXITCODE -ne 0) {
+                Write-Status "the service did not come back up; start it with '$launcher service start'"
+            }
+        }
+        Write-Status "isolated home: skipped the model, the service and the check"
+        Write-Status "done."
+        return
+    }
+
+    # Model before service: the resident loads it on first use, so warming
+    # now is the difference between a service that answers and one that
+    # answers in two minutes.
+    if (Test-ModelCached $engineHome $venvPython) {
+        Write-Status "model already cached"
+    }
+    elseif (Confirm-ModelDownload) {
+        [void](Invoke-ModelWarmup $launcher)
+    }
+    else {
+        Write-Status "skipped the model. Search will not work until you run:"
+        Write-Status "  & '$launcher' warmup"
+    }
+
+    # Started even when nothing was running before -- that is the whole point
+    # on a clean machine. Registering a logon task and then leaving the
+    # service down until the next reboot is the kind of half-install that
+    # reads as "it does not work".
+    if (-not $NoStart) {
         & $launcher service start
         if ($LASTEXITCODE -ne 0) {
-            Write-Status "the service did not come back up; start it with '$launcher service start'"
+            Write-Status "the service did not start; try '$launcher service start'"
         }
     }
 
-    Write-Status "done. The embedding model is NOT downloaded by install."
-    Write-Status "warm it once with:  & '$launcher' warmup"
+    # End on evidence, not on a promise: the last thing on screen should be
+    # the engine reporting its own state.
+    Write-Status "verifying --"
+    & $launcher doctor
+
+    Write-Status "done. One thing left, and only you know where:"
+    Write-Status "  cd <your project>;  & '$launcher' init"
 }
 
 # Dot-sourcing (`. .\install.ps1`) loads the functions without installing -
