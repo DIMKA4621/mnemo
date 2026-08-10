@@ -173,9 +173,21 @@ mnemo status | logs | tree | ui     service state, journal, tree, cabinet
 mnemo doctor                        engine, model, tokens, ports, banks, orphan count
 mnemo clean-orphans [--dry-run]     delete index files no bank claims; asks first
      [--yes]                        skip the prompt (scripts)
-mnemo memory-hook | hook-inject     hook seeds, not typed by hand
-mnemo embed-server                  resident model daemon (auto-started)
 ```
+
+Six more are **hidden from `--help` but still work**, because nothing types
+them and something calls them: `serve` (what `service start` spawns),
+`embed-server` (what the backend spawns), `memory-hook` / `hook-inject` /
+`hook-postedit` (what a wired hook runs — `hook-postedit` exists *only* so an
+already-wired v2 hook does not fail) and `ingest` (deprecated alias, still
+warns). Hidden by omitting `help=` on the subparser: `argparse.SUPPRESS`
+there prints `==SUPPRESS==` instead of hiding.
+
+A bank defaults to the current directory, resolved **both ways** — the bank
+containing it, or the one bank it contains, so `mnemo search` works from a
+project root even though memory lives at `<project>/.claude/memory`. Several
+banks under one path is an error naming them, never a guess. A relative
+`--bank` path is made absolute by the CLI, since the backend's cwd is its own.
 
 There is no `mnemo mcp`: MCP is HTTP inside the running service, so a session
 connects instead of spawning. Two faces, keyed by which token is presented —

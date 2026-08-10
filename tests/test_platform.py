@@ -1073,6 +1073,96 @@ def test_orphan_indexes() -> None:
                   "index as an orphan", refused)
 
 
+def test_bank_resolution() -> None:
+    """`resolve` looks both ways: up for the bank containing a path, down for
+    the bank a project root contains. The canonical layout puts memory *below*
+    the project, so without the second direction the obvious invocation —
+    `mnemo search` from the project root — matched nothing."""
+    from src import registry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state = Path(tmp) / "state"
+        state.mkdir()
+        with patch.object(config, "STATE_DIR", state):
+            proj = Path(tmp) / "proj"
+            bank_root = proj / ".claude" / "memory"
+            bank_root.mkdir(parents=True)
+            (bank_root / "logs").mkdir()
+            bank = registry.add(bank_root, name="proj-bank")
+
+            check("a path inside the bank resolves upwards",
+                  registry.resolve(str(bank_root / "logs")).id == bank.id)
+            check("the bank root itself resolves",
+                  registry.resolve(str(bank_root)).id == bank.id)
+            check("the PROJECT root resolves downwards to its one bank",
+                  registry.resolve(str(proj)).id == bank.id)
+            check("an intermediate folder resolves downwards too",
+                  registry.resolve(str(proj / ".claude")).id == bank.id)
+
+            # Two banks under one folder: refuse, never guess.
+            other_root = Path(tmp) / "proj" / "second" / "mem"
+            other_root.mkdir(parents=True)
+            registry.add(other_root, name="second")
+            ambiguous = False
+            try:
+                registry.resolve(str(proj))
+            except registry.AmbiguousBankRef:
+                ambiguous = True
+            check("a folder holding several banks refuses instead of guessing",
+                  ambiguous)
+            check("naming one of them still works",
+                  registry.resolve("second").name == "second")
+
+            # The service's cwd is not the caller's, so `resolve` treats only
+            # an absolute path as a path. Making a relative ref absolute is
+            # `cli._bank_ref`'s job, and a bare word must survive it as a name
+            # — otherwise a mistyped name becomes `<cwd>/typo` and, from inside
+            # some bank's tree, resolves to that bank: the wrong memory,
+            # silently.
+            from src.cli import _bank_ref
+
+            relative = False
+            typo_stays_a_name = False
+            cwd = os.getcwd()
+            try:
+                os.chdir(bank_root / "logs")
+                relative = Path(_bank_ref("..")).is_absolute()
+                typo_stays_a_name = _bank_ref("proj-bnak") == "proj-bnak"
+                check("a bare cwd default is sent absolute",
+                      Path(_bank_ref(None)).is_absolute())
+            finally:
+                os.chdir(cwd)
+            check("the client makes a relative path absolute", relative)
+            check("a bare word is left as a name, not joined to the cwd",
+                  typo_stays_a_name)
+
+            unresolved = False
+            try:
+                registry.resolve("proj-bnak")
+            except registry.BankNotFound:
+                unresolved = True
+            check("a mistyped bank name resolves to nothing", unresolved)
+
+            relative_refused = False
+            try:
+                registry.resolve(".claude/memory")
+            except registry.BankNotFound:
+                relative_refused = True
+            check("the service never interprets a relative ref as a path",
+                  relative_refused)
+
+            # A disabled bank stays addressable by name, invisible to paths.
+            registry.update(bank.id, enabled=False)
+            check("a disabled bank still resolves by name",
+                  registry.resolve("proj-bank").id == bank.id)
+            gone = False
+            try:
+                registry.resolve(str(bank_root / "logs"))
+            except registry.BankNotFound:
+                gone = True
+            check("a disabled bank is invisible to the path form", gone)
+
+
 def main() -> int:
     test_scaffold()
     test_scaffold_template_project()
@@ -1084,6 +1174,7 @@ def main() -> int:
     test_project_resolution()
     test_index_paths()
     test_orphan_indexes()
+    test_bank_resolution()
     test_model_cache_validation()
     print(
         f"\n{_passed} passed, {_failed} failed, "

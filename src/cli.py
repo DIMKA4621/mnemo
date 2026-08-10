@@ -59,8 +59,20 @@ def _run_api(fn) -> int:
 
 def _bank_ref(explicit: str | None) -> str:
     """What to send as `bank`. Defaults to cwd — the backend resolves a path
-    to the deepest bank containing it."""
-    return explicit or str(Path.cwd())
+    to the bank containing it, or to the one bank it contains.
+
+    A path-looking ref is made absolute **here**, because the backend's cwd is
+    its own: `--bank .claude/memory` is meaningful only where the user typed
+    it. A bare word is left alone — it is a bank name, and joining a mistyped
+    name to the cwd would turn a typo into a confident answer about whichever
+    bank happens to enclose that directory.
+    """
+    if explicit is None:
+        return str(Path.cwd())
+    looks_like_path = explicit in (".", "..") or any(s in explicit for s in "/\\")
+    if looks_like_path and not Path(explicit).expanduser().is_absolute():
+        return str(Path(explicit).expanduser().resolve())
+    return explicit
 
 
 # ------------------------------------------------------------ local commands
@@ -632,17 +644,33 @@ def _cmd_memory_hook() -> int:
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="mnemo",
-        description="Project memory: .md -> chunk -> embed -> sqlite-vec -> search.",
+        description="Project memory: .md -> chunk -> embed -> sqlite-vec -> "
+                    "search. Curated markdown is the source of truth; the "
+                    "index is derived, disposable and rebuilt automatically.",
+        epilog="A bank defaults to the current directory: mnemo finds the "
+               "bank containing it, or the one bank it contains. Say --bank "
+               "<name> when a folder holds several.",
     )
-    sub = parser.add_subparsers(dest="cmd", required=True)
+    sub = parser.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     # --- local ----------------------------------------------------------
-    sub.add_parser("warmup", help="One-time explicit model download + check.")
-    sub.add_parser("doctor", help="Diagnose venv, model, token, ports, banks.")
+    sub.add_parser(
+        "warmup",
+        help="Download the embedding model (~2.2 GB). The ONLY thing that "
+             "does — no hook, service or search ever downloads it for you.",
+    )
+    sub.add_parser(
+        "doctor",
+        help="Answer 'why is memory not working': engine, venv, model cache, "
+             "embedding resident, token, backend, banks, orphan indexes. "
+             "Reads only — it never changes anything.",
+    )
 
     co = sub.add_parser(
         "clean-orphans",
-        help="Delete index files in state/ that belong to no registered bank.",
+        help="Delete index files in state/ that belong to no registered bank "
+             "— left behind by removed banks, edited roots and v2. Shows the "
+             "list and asks first; nothing is ever deleted automatically.",
     )
     co.add_argument(
         "--dry-run", action="store_true",
@@ -652,13 +680,24 @@ def _build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true",
         help="Skip the confirmation prompt (for scripts).",
     )
-    sub.add_parser("embed-server", help="Resident embedding helper (internal).")
-    sub.add_parser("hook-postedit", help="v2 shim: exits 0 (watcher reindexes).")
-    sub.add_parser("hook-inject", help="UserPromptSubmit seed: inject top-N.")
-    sub.add_parser("memory-hook",
-                   help="SessionStart seed: inject MEMORY.md + the layout.")
+    # Spawn targets and hook entry points. Hidden from `--help`, not removed:
+    # nothing types them, but something calls them. `serve` is what `service
+    # start` spawns; `embed-server` is what the backend spawns; the three hook
+    # commands are what a wired Claude Code hook runs. `hook-postedit` is a
+    # v2 shim whose entire job is to keep an already-wired hook from failing,
+    # so deleting it would cause exactly what it exists to prevent.
+    sub.add_parser("embed-server")
+    sub.add_parser("hook-postedit")
+    sub.add_parser("hook-inject")
+    sub.add_parser("memory-hook")
 
-    pn = sub.add_parser("init", help="Wire mnemo into a project (additive).")
+    pn = sub.add_parser(
+        "init",
+        help="Wire mnemo into a project: seed .claude/memory + the memory "
+             "rule, register the bank, mint its token and write the MCP "
+             "entry. Additive and idempotent; refuses rather than write a "
+             "token into a git-tracked file, and writes NOTHING when it does.",
+    )
     pn.add_argument("--root", default=None, help="Project root (default: cwd).")
     pn.add_argument(
         "--migrate", action="store_true",
@@ -679,53 +718,132 @@ def _build_parser() -> argparse.ArgumentParser:
              "memory already gathered.",
     )
 
-    pv = sub.add_parser("serve", help="Run the backend in the foreground.")
-    pv.add_argument("--host", default=None)
-    pv.add_argument("--port", type=int, default=None)
+    pv = sub.add_parser("serve")
+    pv.add_argument("--host", default=None, help="Bind address (default: loopback).")
+    pv.add_argument("--port", type=int, default=None, help="Port (default: 8918).")
 
-    psv = sub.add_parser("service", help="start | stop | status | restart.")
-    psv.add_argument("action", choices=("start", "stop", "status", "restart"))
-    psv.add_argument("--foreground", action="store_true")
+    psv = sub.add_parser(
+        "service",
+        help="Manage the backend process: start it detached and windowless, "
+             "stop it, or report who is holding the port.",
+    )
+    psv.add_argument(
+        "action", choices=("start", "stop", "status", "restart"),
+        help="start: spawn it detached · stop: end it · status: who serves "
+             "and since when · restart: stop then start.",
+    )
+    psv.add_argument(
+        "--foreground", action="store_true",
+        help="start only: run the backend in THIS terminal instead. Writes no "
+             "state files and is invisible to stop/status on purpose — "
+             "Ctrl-C is the control. For debugging.",
+    )
 
-    pas = sub.add_parser("autostart", help="enable | disable | status.")
-    pas.add_argument("action", choices=("enable", "disable", "status"))
+    pas = sub.add_parser(
+        "autostart",
+        help="Bring the backend up at logon, silently (a hidden Task "
+             "Scheduler task on Windows, systemd --user on Linux).",
+    )
+    pas.add_argument(
+        "action", choices=("enable", "disable", "status"),
+        help="enable: register it · disable: remove it · status: is it "
+             "registered and what does it run.",
+    )
 
     # --- API clients ----------------------------------------------------
-    ps = sub.add_parser("search", help="Semantic search over a bank.")
-    ps.add_argument("query")
-    ps.add_argument("--bank", default=None, help="Bank id, name or path.")
-    ps.add_argument("--path-prefix", default=None)
-    ps.add_argument("-k", "--top-k", type=int, default=TOP_K)
+    _BANK_HELP = ("Bank id, name, or an absolute path in or above one. "
+                  "Default: the current directory.")
 
-    pr = sub.add_parser("reindex", help="Queue a reindex.")
-    pr.add_argument("--bank", default=None)
-    pr.add_argument("--path", default=None, help="One file, relative to root.")
-    pr.add_argument("--full", action="store_true", help="Rebuild from scratch.")
+    ps = sub.add_parser(
+        "search",
+        help="Search a bank. Vectors find meaning, FTS5 finds words, and RRF "
+             "blends both. Never blocks: prints the index status alongside "
+             "the hits, so 'nothing found' and 'still building' stay "
+             "distinguishable.",
+    )
+    ps.add_argument("query", help="What to look for. Any language.")
+    ps.add_argument("--bank", default=None, help=_BANK_HELP)
+    ps.add_argument(
+        "--path-prefix", default=None,
+        help="Narrow to a subfolder, e.g. logs or topics. Navigation, not an "
+             "access boundary.",
+    )
+    ps.add_argument("-k", "--top-k", type=int, default=TOP_K,
+                    help=f"How many sections to return (default: {TOP_K}).")
 
-    pb = sub.add_parser("banks", help="list | add | remove.")
-    pb.add_argument("action", choices=("list", "add", "remove"))
+    pr = sub.add_parser(
+        "reindex",
+        help="Queue a reindex. Rarely needed by hand — the watcher picks up "
+             "a saved file within seconds. This forces the issue.",
+    )
+    pr.add_argument("--bank", default=None, help=_BANK_HELP)
+    pr.add_argument("--path", default=None,
+                    help="One file, relative to the bank root. Default: the "
+                         "whole bank.")
+    pr.add_argument(
+        "--full", action="store_true",
+        help="Wipe the index and rebuild it — minutes, proportional to bank "
+             "size. Without this only changed files are re-embedded.",
+    )
+
+    pb = sub.add_parser(
+        "banks",
+        help="The registry of memory roots this machine serves.",
+    )
+    pb.add_argument(
+        "action", choices=("list", "add", "remove"),
+        help="list: name, status, files, chunks, root · add: register a "
+             "folder of .md · remove: unregister it (the .md are never "
+             "touched).",
+    )
     pb.add_argument("path", nargs="?", default=None,
-                    help="add: the root; remove: a name or id.")
-    pb.add_argument("--name", default=None)
-    pb.add_argument("--provider", default=None)
-    pb.add_argument("--keep-index", action="store_true")
+                    help="add: the root folder; remove: a name or id.")
+    pb.add_argument("--name", default=None,
+                    help="add: what to call it. Default: derived from the "
+                         "path; a clash gets a -2 suffix.")
+    pb.add_argument("--provider", default=None,
+                    help="add: embedding provider override (default: local).")
+    pb.add_argument("--keep-index", action="store_true",
+                    help="remove: unregister but leave the index file behind. "
+                         "It becomes an orphan — see clean-orphans.")
 
-    pt = sub.add_parser("tree", help="Show a bank's memory tree.")
-    pt.add_argument("--bank", default=None)
-    pt.add_argument("--depth", type=int, default=0)
+    pt = sub.add_parser(
+        "tree",
+        help="Print a bank's layout with each file's headings — the map that "
+             "tells you what is worth searching for.",
+    )
+    pt.add_argument("--bank", default=None, help=_BANK_HELP)
+    pt.add_argument("--depth", type=int, default=0,
+                    help="Levels to descend. 0 (default) means all.")
 
-    sub.add_parser("status", help="Service, queue and bank status.")
-    sub.add_parser("ui", help="Open the local web cabinet.")
+    sub.add_parser(
+        "status",
+        help="One screen: backend pid, port and uptime, provider, queue "
+             "depth, and every bank's index state.",
+    )
+    sub.add_parser(
+        "ui",
+        help="Open the local cabinet in a browser — banks, file tree, chunk "
+             "boundaries, reindex buttons, journal. Fills the token in.",
+    )
 
-    pl = sub.add_parser("logs", help="Service journal.")
-    pl.add_argument("--kind", choices=("query", "index"), default="query")
-    pl.add_argument("--bank", default=None)
+    pl = sub.add_parser(
+        "logs",
+        help="The service journal: what was searched and what was indexed, "
+             "newest first.",
+    )
+    pl.add_argument("--kind", choices=("query", "index"), default="query",
+                    help="query: searches (default) · index: indexing runs.")
+    pl.add_argument("--bank", default=None, help="Only this bank. " + _BANK_HELP)
     pl.add_argument("--since", default=None, help="ISO-8601 or epoch seconds.")
-    pl.add_argument("-n", type=int, default=50)
+    pl.add_argument("-n", type=int, default=50,
+                    help="How many events (default: 50).")
 
     # --- deprecated -----------------------------------------------------
-    pi = sub.add_parser("ingest", help="Deprecated alias for `reindex`.")
-    pi.add_argument("--root", default=None)
+    # Hidden rather than deleted: it still works, and still says it is
+    # deprecated when used.
+    pi = sub.add_parser("ingest")
+    pi.add_argument("--root", default=None, help="Bank root. Default: cwd.")
     return parser
 
 

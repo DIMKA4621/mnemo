@@ -412,10 +412,23 @@ def unique_name(
 
 
 def resolve(ref: str) -> Bank:
-    """Find a bank by id, by name, or by a path inside it (§6.4).
+    """Find a bank by id, by name, or by a path (§6.4).
 
-    The path form is what the auto-inject hook uses: it knows only a ``cwd``,
-    so the deepest bank whose root is an ancestor of that path wins.
+    The path form is what a bare CLI invocation and the auto-inject hook both
+    use: they know only a ``cwd``. It looks in **both directions**, and the
+    order matters.
+
+    *Upwards first* — the deepest bank whose root is an ancestor of the path.
+    A path inside a bank's memory is that bank's, and a nested bank is more
+    specific than the one enclosing it.
+
+    *Then downwards* — a bank whose root lies **under** the path. Without this
+    the canonical layout defeats the default: memory lives at
+    ``<project>/.claude/memory``, so running ``mnemo search`` from the project
+    root — the obvious place to run it — matched nothing and exited 1, while
+    the same command two directories down worked. Ambiguity is refused rather
+    than guessed: a path containing several banks (a folder full of projects)
+    raises instead of silently picking one.
     """
     ref = (ref or "").strip()
     if not ref:
@@ -436,20 +449,26 @@ def resolve(ref: str) -> Bank:
     if by_name:
         return by_name[0]
 
+    # Only an ABSOLUTE path is a path here, and that is a contract, not an
+    # oversight: this runs inside the service, whose cwd is its own and has
+    # nothing to do with the caller's. Joining a relative ref to *this*
+    # process's cwd would answer confidently about a folder the user never
+    # named. Making a relative ref absolute is the client's job, done once, in
+    # `cli._bank_ref`.
     path = Path(ref).expanduser()
     if path.is_absolute():
         # Disabled banks are invisible to the PATH form only. A path has to
         # route somewhere useful: if a nested bank is switched off, the
         # enclosing bank still holds that file's memory and must win, or
-        # disabling a child silently blinds the parent for that subtree.
-        # An explicit id or name still resolves a disabled bank — otherwise
-        # there would be no way to address one in order to re-enable it.
+        # disabling a child silently blinds the parent for that subtree. An
+        # explicit id or name still resolves a disabled bank — otherwise there
+        # would be no way to address one in order to re-enable it.
         target = _canonical(path)
+        live = [b for b in banks if b.enabled]
+
         best: Bank | None = None
         best_len = -1
-        for bank in banks:
-            if not bank.enabled:
-                continue
+        for bank in live:
             root = _canonical(bank.root)
             if target == root:
                 return bank
@@ -457,6 +476,18 @@ def resolve(ref: str) -> Bank:
                 best, best_len = bank, len(root)
         if best is not None:
             return best
+
+        # Nothing encloses the path — look for banks it contains.
+        prefix = target.rstrip("/") + "/"
+        inside = [b for b in live if _canonical(b.root).startswith(prefix)]
+        if len(inside) == 1:
+            return inside[0]
+        if len(inside) > 1:
+            names = ", ".join(sorted(b.name for b in inside))
+            raise AmbiguousBankRef(
+                f"{len(inside)} banks live under {ref!r} ({names}) — "
+                f"name one with --bank"
+            )
 
     raise BankNotFound(f"no bank matches {ref!r}")
 
