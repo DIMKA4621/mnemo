@@ -79,12 +79,12 @@ carries the old shape and needs `mnemo init --migrate`:
   seconds of a save. Neither token opens the other's face. **Do not wire
   a project's `.mcp.json` at `/mcp-admin`** — that would hand a project
   the credential that reaches every bank on the machine.
-- **`init` wires no hooks at all.** The reindexing hooks are gone (the
-  watcher does that job) and auto-inject is now opt-in
-  (`--with-memory-hook` / `--with-inject-hook`). Memory is reached by
+- **`init` wires no hooks at all, and there is no flag that makes it.**
+  The reindexing hooks are gone (the watcher does that job) and both
+  injection seeds have been removed outright. Memory is reached by
   **searching** — `search` — and the discipline lives in
-  `.claude/rules/mnemo-memory.md`. `--migrate` unwires hooks earlier
-  versions added.
+  `.claude/rules/mnemo-memory.md`, which is now its only home. `--migrate`
+  unwires every hook earlier versions added.
 - **`/mcp-tools/<tool_name>`** mirrors the read tools as plain HTTP for
   hand-checking (Swagger at `/docs`); `/api/*` is the cabinet's private
   channel and is not published.

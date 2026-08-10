@@ -463,7 +463,7 @@ def _cmd_ingest(args: argparse.Namespace) -> int:
     failing a session: exiting 3 because the backend happens to be down
     would show the user an error at every single session start, which is how
     a tool gets ripped out. So this reports and returns 0, exactly like
-    `hook-inject` and `hook-postedit`.
+    `hook-postedit`.
 
     `mnemo init --migrate` removes the hook; until a project runs it, this
     path stays and stays harmless.
@@ -495,152 +495,6 @@ def _cmd_hook_postedit() -> int:
     """
     return EXIT_OK
 
-
-def _cmd_hook_inject() -> int:
-    """UserPromptSubmit target: surface relevant memory, or get out of the way.
-
-    A thin HTTP call now — no model, no index, no embedding in this process.
-    Every failure path exits 0 in silence: a hook that blocks or errors costs
-    the user their turn, and no memory is strictly better than that.
-
-    **Sends `CLAUDE_PROJECT_DIR`, never `cwd`.** `registry.resolve()` maps a
-    path to the *deepest* bank containing it, so a session whose cwd is a
-    subdirectory would resolve to a plausible but wrong bank, silently — the
-    worst failure available here, because the answers look real.
-    """
-    from .config import INJECT_TOP_N
-
-    try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        return EXIT_OK
-
-    prompt = (payload.get("prompt") or payload.get("user_prompt") or "").strip()
-    if not prompt:
-        return EXIT_OK
-
-    root = (
-        os.environ.get("CLAUDE_PROJECT_DIR")
-        or payload.get("project_dir")
-        or payload.get("cwd")
-    )
-    if not root:
-        return EXIT_OK
-
-    from .client import Client
-
-    try:
-        # Short timeout on purpose: this sits in front of a human waiting for
-        # a reply. Late memory is worse than none.
-        #
-        # autostart=False here, unlike every other face: bringing a cold
-        # backend up takes seconds, and this prompt would spend all of them
-        # waiting. Instead kick a start off in the background and return
-        # empty — this turn gets no memory, the next one does.
-        body = Client(timeout=5.0, autostart=False).search(
-            str(root), prompt, top_k=INJECT_TOP_N, face="hook",
-        )
-    except Exception:  # noqa: BLE001 - never let a hook surface anything
-        from .client import ensure_backend
-
-        try:
-            ensure_backend(wait=False)
-        except Exception:  # noqa: BLE001
-            pass
-        return EXIT_OK
-
-    hits = body.get("hits") or []
-    if not hits:
-        return EXIT_OK
-    out = ['<project-memory source="mnemo">',
-           "Curated project memory relevant to this prompt:"]
-    for hit in hits:
-        snippet = " ".join((hit.get("content") or "").split())
-        out.append(f"\n### {hit['path']} · {hit['heading'] or '(no heading)'}\n"
-                   f"{snippet}")
-    out.append("</project-memory>")
-    print("\n".join(out))
-    return EXIT_OK
-
-
-# Names the memory index may carry, in the order they are tried.
-_INDEX_NAMES = ("MEMORY.md", "memory.md")
-# What the hook is willing to paste into a session. `MEMORY.md` is meant to be
-# an index under ~200 lines; if somebody let it grow into a store, the hook
-# refuses to dump the whole thing and says where to look instead. A truncated
-# index would be worse than none: it reads complete while missing entries.
-_INDEX_MAX_BYTES = 32_768
-
-
-def _cmd_memory_hook() -> int:
-    """SessionStart target: hand over the memory index and the layout.
-
-    This replaces the native `MEMORY.md` auto-load that a bank inside the
-    repository does not get. Deliberately **not** a search: it injects a *map*,
-    which tells the agent to go look, where injected search results read as
-    memory already gathered.
-
-    Reads the file **straight off the disk** — no HTTP, no backend, no model.
-    So it cannot hang the start of a session and cannot fail because the
-    service happens to be down. Every failure path exits 0 in silence, for the
-    same reason `hook-inject` does: a hook that errors costs the user a turn.
-    """
-    try:
-        payload = json.load(sys.stdin)
-    except (json.JSONDecodeError, ValueError):
-        payload = {}
-
-    root = (
-        os.environ.get("CLAUDE_PROJECT_DIR")
-        or payload.get("project_dir")
-        or payload.get("cwd")
-        or os.getcwd()
-    )
-    mem = Path(root) / ".claude" / "memory"
-    if not mem.is_dir():
-        return EXIT_OK
-
-    index: Path | None = None
-    for name in _INDEX_NAMES:
-        candidate = mem / name
-        if candidate.is_file():
-            index = candidate
-            break
-
-    out = ['<project-memory source="mnemo">']
-    if index is None:
-        out.append(f"Memory bank: {mem.as_posix()} — no index file yet. "
-                   f"Create `MEMORY.md` there as a thin index (links + quick "
-                   f"facts) when you first record something.")
-    else:
-        try:
-            size = index.stat().st_size
-            text = index.read_text(encoding="utf-8") if size <= _INDEX_MAX_BYTES else None
-        except OSError:
-            return EXIT_OK
-        if text is None:
-            out.append(f"Memory index {index.as_posix()} is {size // 1024} KB — "
-                       f"too large to inject, and too large to be an index. "
-                       f"Read it directly, and move its detail into "
-                       f"`topics/`.")
-        else:
-            out.append(f"Index of this project's curated memory "
-                       f"({index.as_posix()}):")
-            out.append(text.rstrip())
-
-    # The map, always — even when the index is missing or oversized, because
-    # knowing the layout is what lets an agent search usefully.
-    out.append(
-        "\nLayout: `logs/YYYY-MM-DD.md` (day notes), `topics/<name>.md` (one "
-        "concept per file), `agents/<role>/` (per-role memory). This index is "
-        "a map, NOT the memory: search the bank with the `search` MCP "
-        "tool before planning, changing architecture, debugging, or answering "
-        "\"why is this like this\". Record what you learn back into these "
-        "files."
-    )
-    out.append("</project-memory>")
-    print("\n".join(out))
-    return EXIT_OK
 
 
 # -------------------------------------------------------------------- main
@@ -685,16 +539,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--yes", action="store_true",
         help="Skip the confirmation prompt (for scripts).",
     )
-    # Spawn targets and hook entry points. Hidden from `--help`, not removed:
-    # nothing types them, but something calls them. `serve` is what `service
-    # start` spawns; `embed-server` is what the backend spawns; the three hook
-    # commands are what a wired Claude Code hook runs. `hook-postedit` is a
-    # v2 shim whose entire job is to keep an already-wired hook from failing,
-    # so deleting it would cause exactly what it exists to prevent.
+    # Spawn targets. Hidden from `--help`, not removed: nothing types them,
+    # but something calls them. `serve` is what `service start` spawns;
+    # `embed-server` is what the backend spawns. `hook-postedit` is a shim
+    # whose entire job is to keep an already-wired hook from failing, so
+    # deleting it would cause exactly what it exists to prevent — it is the
+    # last hook entry point left, and it does nothing but exit 0.
     sub.add_parser("embed-server")
     sub.add_parser("hook-postedit")
-    sub.add_parser("hook-inject")
-    sub.add_parser("memory-hook")
 
     pn = sub.add_parser(
         "init",
@@ -707,20 +559,8 @@ def _build_parser() -> argparse.ArgumentParser:
     pn.add_argument(
         "--migrate", action="store_true",
         help="Also rewrite mnemo's OWN legacy wiring to the current form, and "
-             "unwire hooks it no longer writes. Never touches a key mnemo did "
-             "not author.",
-    )
-    # No hook is wired without one of these. Off by default because the
-    # primary access to memory is MCP and the discipline lives in the rule.
-    pn.add_argument(
-        "--with-memory-hook", action="store_true",
-        help="Wire the SessionStart seed: injects MEMORY.md + the layout.",
-    )
-    pn.add_argument(
-        "--with-inject-hook", action="store_true",
-        help="Wire the UserPromptSubmit seed: injects top-N search hits. Note "
-             "it delivers memory before the task is stated, which reads as "
-             "memory already gathered.",
+             "unwire every hook it used to write. Never touches a key mnemo "
+             "did not author.",
     )
 
     pv = sub.add_parser("serve")
@@ -887,15 +727,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
     if cmd == "hook-postedit":
         return _cmd_hook_postedit()
-    if cmd == "hook-inject":
-        return _cmd_hook_inject()
-    if cmd == "memory-hook":
-        return _cmd_memory_hook()
     if cmd == "init":
         from .scaffold import init_project
-        seeds = (["memory"] if args.with_memory_hook else []) + \
-                (["inject"] if args.with_inject_hook else [])
-        return init_project(args.root, migrate=args.migrate, hooks=seeds)
+        return init_project(args.root, migrate=args.migrate)
     if cmd == "serve":
         from .api import run
         run(host=args.host, port=args.port)

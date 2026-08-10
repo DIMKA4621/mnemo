@@ -49,9 +49,8 @@ git:
 - `.claude/rules/mnemo-memory.md` — the **binding memory rule** if
   absent. `mnemo init` owns this text; it is the single source.
   Git-tracked.
-- `.claude/settings.json` — **untouched unless a hook seed is asked for**
-  (`--with-memory-hook` / `--with-inject-hook`, portable shell form).
-  Git-tracked.
+- `.claude/settings.json` — **never touched by a plain `init`**. Only
+  `--migrate` edits it, and only to remove hooks. Git-tracked.
 - The MCP entry — **not** git-tracked, because it holds a live token.
   See below.
 
@@ -168,22 +167,24 @@ additively, after insisting it is needed for the model to work.
 
 ## The hooks — seeds, and nothing is wired for you
 
-`mnemo init` writes **no hook**. Memory is reached by calling
-`search`; the discipline lives in `.claude/rules/mnemo-memory.md`,
-which loads for the team lead and every subagent. Two seeds exist and are
-wired only on request:
+`mnemo init` writes **no hook**, and no flag makes it write one. Memory is
+reached by calling `search`; the discipline lives in
+`.claude/rules/mnemo-memory.md`, which loads for the team lead and every
+subagent and is the **only** place that states it.
 
-- **`--with-memory-hook` → SessionStart → `mnemo memory-hook`** — injects
-  the bank's `MEMORY.md` and the folder layout. A **map**, which tells an
-  agent to go and look; it cannot be mistaken for having searched. Reads
-  the file off disk, so it works with the service down and cannot hang a
-  session start. This is the recommended one, and it replaces the native
-  `MEMORY.md` auto-load that a bank inside the repo does not get.
-- **`--with-inject-hook` → UserPromptSubmit → `mnemo hook-inject`** —
-  embeds the prompt, gated search, injects the few most relevant sections.
-  Best-effort, never blocks. Off by default for a reason worth repeating to
-  the user: it delivers memory **before** the task is stated, and an agent
+Two seeds used to exist behind flags. Both are gone, together with their
+commands, and it is worth being able to say why if a user asks:
+
+- **`hook-inject` (UserPromptSubmit)** injected the few most relevant
+  sections. It delivers memory **before** the task is stated, and an agent
   that sees sections in its context concludes it has already searched.
+- **`memory-hook` (SessionStart)** injected `MEMORY.md` and the layout — a
+  **map**, not answers, which is why it survived longer. Removed because the
+  `tree` tool answers exactly that on demand, and a map arriving unasked
+  competes with the rule that says go and look.
+
+The general form: two mechanisms stating one rule can drift, and the one
+nobody edits wins by accident.
 
 **The two v2 reindexing hooks are gone.** A watcher inside the service
 reindexes on its own; `hook-postedit` is an exit-0 shim and `ingest` a

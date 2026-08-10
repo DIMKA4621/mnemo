@@ -127,15 +127,15 @@ a credential and therefore must not.
   for the main session and every subagent. Its body is deliberately
   portable: paste it into any agent's system prompt, point that agent at
   the MCP server, and the discipline travels.
-- **`.claude/settings.json` — no hooks.** Reindexing is the watcher's job,
-  and memory is found by searching, not by injection. The two hook seeds
-  stay available but are never wired for you:
-  - `mnemo init --with-memory-hook` → `SessionStart`: injects the bank's
-    `MEMORY.md` and the layout — a **map**, which tells an agent to go
-    look. Reads the file off disk, so it works with the service down.
-  - `mnemo init --with-inject-hook` → `UserPromptSubmit`: injects top-N
-    search hits. Off for a reason worth knowing — it delivers memory
-    *before* the task is stated, which reads as memory already gathered.
+- **`.claude/settings.json` — no hooks, and no way to ask for one.**
+  Reindexing is the watcher's job, and memory is found by **searching, not
+  by injection**. The two seeds that used to be available behind flags are
+  gone: `hook-inject` delivered memory *before* the task was stated, which
+  reads as memory already gathered, and `memory-hook` delivered an honest
+  map — but the `tree` tool answers that on demand, and a map that arrives
+  unasked competes with the rule telling the agent to go and look. The
+  discipline now lives in exactly one place, which is the point: two
+  mechanisms stating the same rule are two that can drift apart.
 
   `mnemo init --migrate` is the upgrade path for a project adopted under an
   older shape: it unwires hooks earlier versions added, and rewrites a
@@ -204,8 +204,8 @@ string). Swagger for it: `http://127.0.0.1:8918/docs` — click **Authorize**
 and paste the token. The cabinet's own `/api/*` is private and deliberately
 absent from that page.
 
-`memory-hook`, `hook-inject`, `hook-postedit` and `embed-server` exist too but
-are not typed by hand. `$MNEMO_ROOT` overrides the bank root; `--root`
+`serve`, `embed-server`, `hook-postedit` and `ingest` exist too but are
+hidden from `--help`: nothing types them, something calls them. `$MNEMO_ROOT` overrides the bank root; `--root`
 defaults to the current directory.
 
 The v2 `--scope project|agent` / `--agent NAME` flags are **gone**: banks

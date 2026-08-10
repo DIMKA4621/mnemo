@@ -36,7 +36,12 @@ The curated markdown is the **single source of truth**. The vector index is
 derived from it, disposable, and rebuilt automatically — never edit the index,
 and never treat it as a place where something is stored.
 
-## Searching — the part that is not optional
+## Searching — first, before anything else
+
+**The order is: search, read, then answer.** Never answer first and check
+afterwards. A reply composed before the search is one the search cannot
+repair — the best you can do then is paste a correction underneath it, and
+the user has already read the wrong thing.
 
 The MCP tool is **`search`**. Narrow with `path_prefix` when you know
 roughly where to look (`logs`, `topics`, `agents/reviewer`); leave it out to
@@ -49,13 +54,38 @@ search result: it may be stale, it may be about something else, and it is not
 evidence that anything was checked. Do not reason from "I think I already have
 this".
 
-Search **before**:
+### Searching is the default, not a trigger you look for
 
+Every user message that asks, decides or changes something **begins** with a
+search. Not a subset of them:
+
+- any question at all — including one that looks like general knowledge;
 - planning, or proposing an approach;
 - changing architecture, an interface, or a schema;
 - debugging anything that is not a one-line typo;
-- answering "why is this like this?" or "did we try X?";
-- re-investigating anything that smells like it was decided before.
+- "why is this like this?", "did we try X?", "what did we decide about Y?";
+- anything that smells like it was settled before.
+
+**Do not answer out of your own knowledge until you have looked.** Your
+training does not contain this project. What you recall from earlier in this
+conversation is not evidence either — it may be stale, it may describe a
+different part of the system, and nothing checked it against the record.
+Feeling certain is not the same as having looked.
+
+The only messages that need no search are the ones with no question and no
+decision in them: "run the tests", "commit that", "yes". The moment such a
+message turns into a judgement call, search before making it.
+
+The asymmetry settles it. A search that finds nothing costs you a second. A
+skipped search costs the project a contradiction — and the user has to be the
+one who notices.
+
+### Say that you searched
+
+State what you looked for and what came back, in a line. Not ceremony: it is
+what lets the person reading tell an answer grounded in the record from one
+that merely sounds confident — and it is the difference they cannot check any
+other way.
 
 Read what comes back. A recorded decision is not a suggestion — if you intend
 to go against one, say so explicitly and say why.

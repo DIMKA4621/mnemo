@@ -119,9 +119,9 @@ Faces:
   here rather than on a project face because the watcher reindexes on its
   own within seconds of a save.
 - `src/cli.py` — thin client of the API (`src/client.py`); `warmup`,
-  `init`, `doctor` stay local. Hook targets `memory-hook` (SessionStart)
-  and `hook-inject` (UserPromptSubmit) are **seeds**: working commands
-  that nothing wires automatically.
+  `init`, `doctor`, `clean-orphans` stay local. **No hook targets any
+  more** beyond the `hook-postedit` no-op shim: the discipline lives in
+  the rule, not in an injection.
 - `src/scaffold.py` — `mnemo init`: additive, idempotent, refuses on
   conflict. Registers the project's memory root as a bank and writes
   **that bank's literal token** into the MCP entry, which is why
@@ -132,9 +132,9 @@ Faces:
   placeholder entry there, the variables into `.mcp.env.example` /
   `.mcp.env`, and the matching `sed -e` lines into `mcp-setup.sh`,
   because a missing substitution leaves `{{MNEMO_TOKEN}}` in the
-  generated file while the script still exits 0. Writes **no hook**
-  unless `--with-memory-hook` / `--with-inject-hook`; `--migrate` unwires
-  what was not asked for and rewrites the superseded `/mcp/<bank>` URL.
+  generated file while the script still exits 0. Writes **no hook at
+  all**, and no flag makes it write one; `--migrate` unwires every hook
+  mnemo ever wrote and rewrites the superseded `/mcp/<bank>` URL.
   Owns `_MEMORY_RULE`, the text that lands in adopted repos as
   `.claude/rules/mnemo-memory.md`.
 
@@ -163,9 +163,7 @@ Landed and working today:
 ```
 mnemo warmup                        one-time explicit ~2.2 GB model download + check
 mnemo init [--root DIR]             additive, idempotent project wiring; NO hook
-     [--migrate]                    also unwire hooks mnemo no longer writes
-     [--with-memory-hook]           wire the SessionStart seed (MEMORY.md + layout)
-     [--with-inject-hook]           wire the UserPromptSubmit seed (top-N hits)
+     [--migrate]                    also unwire every hook mnemo ever wrote
 mnemo search "q" [--path-prefix P]  hybrid search over a bank
 mnemo reindex [--bank B] [--full]   queue a reindex (`ingest` is a deprecated alias)
 mnemo banks list|add|remove         registry, through the API
@@ -177,10 +175,10 @@ mnemo clean-orphans [--dry-run]     delete index files no bank claims; asks firs
 
 Six more are **hidden from `--help` but still work**, because nothing types
 them and something calls them: `serve` (what `service start` spawns),
-`embed-server` (what the backend spawns), `memory-hook` / `hook-inject` /
-`hook-postedit` (what a wired hook runs — `hook-postedit` exists *only* so an
-already-wired v2 hook does not fail) and `ingest` (deprecated alias, still
-warns). Hidden by omitting `help=` on the subparser: `argparse.SUPPRESS`
+`embed-server` (what the backend spawns), `hook-postedit` (a no-op that
+exists *only* so an already-wired v2 hook does not fail) and `ingest`
+(deprecated alias, still warns). The two hook seeds are **gone**, not
+hidden. Hidden by omitting `help=` on the subparser: `argparse.SUPPRESS`
 there prints `==SUPPRESS==` instead of hiding.
 
 A bank defaults to the current directory, resolved **both ways** — the bank

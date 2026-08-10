@@ -231,22 +231,19 @@ CHUNK_CAPACITY: tuple[int, int] = (200, 1200)
 TOP_K: int = 5
 RRF_K: int = 60
 # Neighbor expansion: pull ±N adjacent chunks from the same file around
-# each hit and merge overlapping windows into one block. Wider context
-# helps both the auto-inject path (model has a head start) and agent /
-# CLI searches (one query returns a self-contained excerpt). 0 = off.
+# each hit and merge overlapping windows into one block, so one query
+# returns a self-contained excerpt instead of a fragment. 0 = off.
 NEIGHBOR_WINDOW: int = 1
 
-# Auto-inject seed (UserPromptSubmit) — how many sections to surface. Only
-# `hook-inject` reads this, and that hook is off unless explicitly wired.
-INJECT_TOP_N: int = 3
-# The JSONL inject telemetry (`INJECT_LOG_*`, `state/logs/<bank_id>.log`) is
-# gone, together with `inject_log.py`: the service journal (`service.db`,
-# §7.5) records the same calls as ordinary `query_events`, and each hit now
-# carries its `sim` in `hits_json` — which is what the telemetry existed to
-# expose. `INJECT_BUDGET_S` went with it; the client's HTTP timeout is the
-# real deadline, and two competing budgets only disagree.
-# Weak-match gate (auto-inject path only; manual search is never gated).
-# Cosine-similarity floor on the vector leg + a minimum query length.
+# `INJECT_TOP_N` is gone with the auto-inject hook itself (design #27). The
+# JSONL inject telemetry (`INJECT_LOG_*`) and `INJECT_BUDGET_S` went earlier,
+# with `inject_log.py`: the service journal (`service.db`, §7.5) records the
+# same calls as ordinary `query_events` and each hit carries its `sim` in
+# `hits_json`, which is what that telemetry existed to expose.
+#
+# Weak-match gate, opt-in per call — `search.py` gates only when asked, and
+# the manual/tool path never asks. Cosine floor on the vector leg + a minimum
+# query length.
 # e5 has a high baseline similarity (anisotropy); measured on the test
 # corpus: relevant top hits ~0.84-0.87, junk/off-topic ~0.78-0.81. 0.83
 # keeps every relevant top-1 and cuts all junk — but the margin is narrow

@@ -165,78 +165,42 @@ def _check_mcp_shape(entry: dict, *, placeholders: bool) -> None:
           re.fullmatch(r"[0-9a-f]{48}", token) is not None, detail=token)
 
 
-def _check_hook_wiring(settings: dict) -> None:
-    """Every event named explicitly — a hook group dropped from the source
-    must fail here, not vanish along with the loop that iterated it.
+def _check_no_hooks(settings_text: str | None, migrated: dict) -> None:
+    """`init` writes no hook, and `--migrate` removes every hook it ever wrote.
 
-    Called with the plan for a run that **asked for both seeds**: `init`
-    itself writes no hook (asserted separately), so this checks the shape a
-    seed takes once requested.
-
-    `ingest` and `hook-postedit` were the v2 wiring and indexed inline, inside
-    the user's session; phase 4 retired them in favour of the watcher. Their
-    absence is asserted below and is the more valuable half of this function:
-    it is what catches a regression that quietly reintroduces synchronous
-    indexing.
+    Both halves matter. The first is what keeps a hook out of somebody's
+    git-tracked `settings.json`; the second is what actually takes the old
+    ones out of projects that already carry them. All four generations are
+    named explicitly — a pair dropped from `_RETIRED_HOOKS` must fail here
+    rather than vanish along with the loop that iterated it.
     """
-    expected = {
-        "SessionStart": ("memory-hook", None),
-        "UserPromptSubmit": ("hook-inject", None),
-    }
-    retired = {
-        "SessionStart": "ingest",
-        "PostToolUse": "hook-postedit",
-    }
-    hooks = settings.get("hooks")
-    hooks = hooks if isinstance(hooks, dict) else {}
+    check(
+        "a plain init plans no settings change at all",
+        settings_text is None,
+        detail=str(settings_text),
+    )
 
-    for event, subcmd in retired.items():
+    retired = [
+        ("SessionStart", "ingest"),          # v2: indexed inline, in-session
+        ("PostToolUse", "hook-postedit"),    # v2: same
+        ("UserPromptSubmit", "hook-inject"), # early v3: injected before the task
+        ("SessionStart", "memory-hook"),     # mid v3: injected the index
+    ]
+    hooks = migrated.get("hooks")
+    hooks = hooks if isinstance(hooks, dict) else {}
+    for event, subcmd in retired:
         commands = [
             h.get("command")
             for g in hooks.get(event, []) or [] if isinstance(g, dict)
             for h in g.get("hooks", []) or [] if isinstance(h, dict)
         ]
         check(
-            f"retired hook {event} -> mnemo {subcmd} is NOT generated",
+            f"--migrate unwires {event} -> mnemo {subcmd}",
             not any(
                 isinstance(c, str) and "mnemo" in c and c.split()[-1:] == [subcmd]
                 for c in commands
             ),
             detail=str(commands),
-        )
-
-    for event, (subcmd, matcher) in expected.items():
-        groups = [g for g in hooks.get(event, []) or [] if isinstance(g, dict)]
-        commands = [
-            h.get("command")
-            for g in groups
-            for h in g.get("hooks", []) or []
-            if isinstance(h, dict)
-        ]
-        ours = [
-            c for c in commands
-            if isinstance(c, str) and "mnemo" in c and c.split()[-1:] == [subcmd]
-        ]
-        check(
-            f"hook {event} runs mnemo {subcmd}",
-            len(ours) == 1,
-            detail=str(commands),
-        )
-        if matcher is not None:
-            check(
-                f"hook {event} matches {matcher}",
-                any(g.get("matcher") == matcher for g in groups),
-                detail=str([g.get("matcher") for g in groups]),
-            )
-        check(
-            f"hook {event} command carries no machine-specific path",
-            all(
-                str(Path.home()) not in c
-                and Path.home().as_posix() not in c
-                and _WIN_DRIVE_RE.search(c) is None
-                for c in ours
-            ),
-            detail=str(ours),
         )
 
 
@@ -258,15 +222,12 @@ def test_scaffold() -> None:
         )
 
         mcp_text = _plan_mcp(mcp_path, [], token=_FAKE_TOKEN)
-        # A default `init` wires NO hook (design #15): nothing to plan, so the
-        # file is not even rewritten. Asserted before anything else, because a
-        # regression here puts a hook into somebody's git-tracked settings.
+        # `init` wires NO hook and has no flag that makes one (design #27):
+        # nothing to plan, so the file is not even rewritten. Asserted before
+        # anything else, because a regression here puts a hook into somebody's
+        # git-tracked settings.
         default_settings_text = _plan_settings(settings_path, [])
-        # The seeded shape is what the rest of the hook checks look at.
-        settings_text = _plan_settings(settings_path, [], False,
-                                       frozenset({"memory", "inject"}))
         mcp = json.loads(mcp_text or "{}")
-        settings = json.loads(settings_text or "{}")
 
         entry = mcp.get("mcpServers", {}).get("mnemo")
         check("mnemo MCP server written", isinstance(entry, dict), detail=str(mcp))
@@ -297,20 +258,56 @@ def test_scaffold() -> None:
             "foreign" in mcp.get("mcpServers", {}),
             detail=str(mcp),
         )
+        # Every hook mnemo ever wrote, wired the way a real project would
+        # carry it — so `--migrate` is asked to remove something that is
+        # actually there, not to no-op past an empty file.
+        settings_path.write_text(json.dumps({
+            "permissions": {"allow": ["Read"]},
+            "hooks": {
+                "SessionStart": [
+                    {"hooks": [
+                        {"type": "command", "command": "~/.claude/mnemo/bin/mnemo ingest"},
+                        {"type": "command", "command": "~/.claude/mnemo/bin/mnemo memory-hook"},
+                        {"type": "command", "command": "/usr/bin/somebody-elses-hook"},
+                    ]},
+                ],
+                "PostToolUse": [
+                    {"hooks": [{"type": "command",
+                                "command": "~/.claude/mnemo/bin/mnemo hook-postedit"}]},
+                ],
+                "UserPromptSubmit": [
+                    {"hooks": [{"type": "command",
+                                "command": "~/.claude/mnemo/bin/mnemo hook-inject"}]},
+                ],
+            },
+        }), encoding="utf-8")
+        migrated_text = _plan_settings(settings_path, [], True)
+        migrated = json.loads(migrated_text or "{}")
+        _check_no_hooks(default_settings_text, migrated)
         check(
-            "foreign settings preserved",
-            settings.get("permissions") == {"allow": ["Read"]},
-            detail=str(settings),
+            "foreign settings preserved through --migrate",
+            migrated.get("permissions") == {"allow": ["Read"]},
+            detail=str(migrated),
         )
+        # Surgical, not a broom: a hook mnemo did not author shares the
+        # SessionStart event and must come through untouched.
+        foreign = [
+            h.get("command")
+            for g in migrated.get("hooks", {}).get("SessionStart", []) or []
+            for h in g.get("hooks", []) or []
+        ]
         check(
-            "default init plans no hook at all",
-            default_settings_text is None,
-            detail=str(default_settings_text),
+            "a foreign hook sharing the event survives",
+            foreign == ["/usr/bin/somebody-elses-hook"],
+            detail=str(foreign),
         )
-        _check_hook_wiring(settings)
+        settings_path.write_text(migrated_text or "", encoding="utf-8")
+        check(
+            "--migrate is idempotent once the hooks are gone",
+            _plan_settings(settings_path, [], True) is None,
+        )
 
         mcp_path.write_text(mcp_text or "", encoding="utf-8")
-        settings_path.write_text(settings_text or "", encoding="utf-8")
         check("MCP idempotent",
               _plan_mcp(mcp_path, [], token=_FAKE_TOKEN) is None)
         # A rotated token is not a conflict — it is the same entry with a new
@@ -323,16 +320,17 @@ def test_scaffold() -> None:
             and "b" * 48 in json.loads(rotated)["mcpServers"]["mnemo"]["url"],
             detail=str(rotated),
         )
+        # A plain re-run never touches hooks — not to add one, and not to
+        # remove one behind the user's back either. Removal is `--migrate`,
+        # and only that.
+        settings_path.write_text(json.dumps({
+            "hooks": {"UserPromptSubmit": [
+                {"hooks": [{"type": "command",
+                            "command": "~/.claude/mnemo/bin/mnemo hook-inject"}]},
+            ]},
+        }), encoding="utf-8")
         check(
-            "hooks idempotent",
-            _plan_settings(settings_path, [], False,
-                           frozenset({"memory", "inject"})) is None,
-        )
-        # A seeded project is not un-seeded by a plain re-run: `init` without
-        # the flags must leave an already-wired hook alone, never remove it
-        # behind the user's back. Removal is `--migrate`, and only that.
-        check(
-            "plain re-run does not unwire an existing seed",
+            "a plain re-run leaves an existing hook alone",
             _plan_settings(settings_path, []) is None
             and "hook-inject" in settings_path.read_text(encoding="utf-8"),
         )

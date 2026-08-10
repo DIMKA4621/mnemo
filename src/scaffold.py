@@ -28,14 +28,14 @@ backend which bank this connection is for — there is no bank name and no path
 segment in anything `init` writes. The service-wide token belongs to the
 cabinet, the CLI and the admin face, and never to a project file.
 
-**No hook is written unless asked for.** `settings.json` is left alone by a
-default `init` — the seeds are wired only by `--with-memory-hook` /
-`--with-inject-hook`, and `--migrate` unwires whatever was not asked for.
+**No hook is written, and no flag makes one appear.** `settings.json` is
+left alone entirely; `--migrate` only *removes* hooks earlier generations
+wrote. The discipline lives in `.claude/rules/mnemo-memory.md` and nowhere
+else, because two mechanisms stating the same rule are two that can drift.
 
-The git-tracked layer stays portable by construction: hook seeds use the shell
-form so `~` expands per-user at run time, and both varying values in the MCP
-entry — port and token — are `{{VAR}}` in the template, resolved from a
-git-ignored `.mcp.env`. No machine-specific path and no secret is written into
+The git-tracked layer stays portable by construction: both varying values in
+the MCP entry — port and token — are `{{VAR}}` in the template, resolved from
+a git-ignored `.mcp.env`. No machine-specific path and no secret is written into
 a git-tracked file.
 """
 from __future__ import annotations
@@ -164,52 +164,36 @@ def _is_legacy_mcp(entry: object) -> str | None:
         return "L2"
     return None
 
-# Hook seeds. Shell form (a bare `command` string, no `args`) so the shell
-# expands `~` at run time.
+# `init` writes NO hook. Not "none by default" — there is no longer a flag
+# that makes it write one, and the two seeds it used to offer are gone
+# (design #15, #27).
 #
-# **`init` writes NO hook unless asked** (design #15). The mechanism stays
-# whole — that is what a seed is — but nothing lands in somebody's
-# git-tracked `settings.json` by default, because the primary access to memory
-# is MCP and the discipline is carried by the rule, not by an injection.
+# Both were injections, and injection is the wrong shape for this. Memory has
+# to be *fetched under a question* to mean anything: `hook-inject` handed over
+# top-N sections before the task was even stated, which reads as memory
+# already gathered, and `memory-hook` handed over the index — useful, but the
+# `tree` tool answers the same question on demand, and a map that arrives
+# unasked competes with the rule that says go and look.
 #
-# The two seeds differ in kind, and the difference is the reason only one of
-# them is recommended:
+# So the discipline lives in exactly one place, `.claude/rules/mnemo-memory.md`,
+# and nothing else states it. Two mechanisms saying the same thing is two
+# mechanisms that can disagree, and the one nobody edits wins by accident.
 #
-#   * `memory-hook` hands over the bank's `MEMORY.md` plus the layout — a
-#     **map**, which says "search for the detail". It cannot be mistaken for
-#     having searched.
-#   * `hook-inject` hands over top-N sections **before** the task is even
-#     stated, which reads as memory already gathered. That false sense of
-#     coverage is why it is off.
-#
-# seed name -> (event, subcommand, hook group)
-_HOOK_SEEDS: dict[str, tuple[str, str, dict]] = {
-    "memory": ("SessionStart", "memory-hook", {
-        "hooks": [
-            {"type": "command",
-             "command": f"{_LAUNCHER} memory-hook", "timeout": 10},
-        ],
-    }),
-    "inject": ("UserPromptSubmit", "hook-inject", {
-        "hooks": [
-            {"type": "command",
-             "command": f"{_LAUNCHER} hook-inject", "timeout": 30},
-        ],
-    }),
-}
-
-# Hooks earlier generations wrote that `--migrate` removes. Pairs, not a dict
-# keyed by event: `SessionStart` appears twice with different subcommands (v2's
-# `ingest`, v3's `memory-hook` seed), and a dict would silently lose one.
+# Hooks earlier generations wrote, which `--migrate` removes. Pairs, not a
+# dict keyed by event: `SessionStart` appears twice with different
+# subcommands, and a dict would silently lose one.
 #
 #   * v2: `SessionStart -> ingest`, `PostToolUse -> hook-postedit` — both did
 #     work the watcher now does, and did it *inside* the session, which is the
 #     blocking behaviour v3 exists to remove.
-#   * early v3: `UserPromptSubmit -> hook-inject` was wired automatically.
-#     Now it is opt-in, so `--migrate` unwires it unless it was asked for.
+#   * early v3: `UserPromptSubmit -> hook-inject`, wired automatically; then
+#     opt-in; now gone entirely.
+#   * mid v3: `SessionStart -> memory-hook`, the opt-in map seed. Also gone.
 _RETIRED_HOOKS: tuple[tuple[str, str], ...] = (
     ("SessionStart", "ingest"),
     ("PostToolUse", "hook-postedit"),
+    ("UserPromptSubmit", "hook-inject"),
+    ("SessionStart", "memory-hook"),
 )
 
 # The strict, universal project-memory rule. `.claude/rules/*.md`
@@ -256,7 +240,12 @@ The curated markdown is the **single source of truth**. The vector index is
 derived from it, disposable, and rebuilt automatically — never edit the index,
 and never treat it as a place where something is stored.
 
-## Searching — the part that is not optional
+## Searching — first, before anything else
+
+**The order is: search, read, then answer.** Never answer first and check
+afterwards. A reply composed before the search is one the search cannot
+repair — the best you can do then is paste a correction underneath it, and
+the user has already read the wrong thing.
 
 The MCP tool is **`search`**. Narrow with `path_prefix` when you know
 roughly where to look (`logs`, `topics`, `agents/reviewer`); leave it out to
@@ -269,13 +258,38 @@ search result: it may be stale, it may be about something else, and it is not
 evidence that anything was checked. Do not reason from "I think I already have
 this".
 
-Search **before**:
+### Searching is the default, not a trigger you look for
 
+Every user message that asks, decides or changes something **begins** with a
+search. Not a subset of them:
+
+- any question at all — including one that looks like general knowledge;
 - planning, or proposing an approach;
 - changing architecture, an interface, or a schema;
 - debugging anything that is not a one-line typo;
-- answering "why is this like this?" or "did we try X?";
-- re-investigating anything that smells like it was decided before.
+- "why is this like this?", "did we try X?", "what did we decide about Y?";
+- anything that smells like it was settled before.
+
+**Do not answer out of your own knowledge until you have looked.** Your
+training does not contain this project. What you recall from earlier in this
+conversation is not evidence either — it may be stale, it may describe a
+different part of the system, and nothing checked it against the record.
+Feeling certain is not the same as having looked.
+
+The only messages that need no search are the ones with no question and no
+decision in them: "run the tests", "commit that", "yes". The moment such a
+message turns into a judgement call, search before making it.
+
+The asymmetry settles it. A search that finds nothing costs you a second. A
+skipped search costs the project a contradiction — and the user has to be the
+one who notices.
+
+### Say that you searched
+
+State what you looked for and what came back, in a line. Not ceremony: it is
+what lets the person reading tell an answer grounded in the record from one
+that merely sounds confident — and it is the difference they cannot check any
+other way.
 
 Read what comes back. A recorded decision is not a suggestion — if you intend
 to go against one, say so explicitly and say why.
@@ -906,21 +920,6 @@ def _is_mnemo_cmd(command: object, subcmd: str) -> bool:
     return bool(toks) and "mnemo" in command and toks[-1] == subcmd
 
 
-def _retired_for(wanted: frozenset[str]) -> tuple[tuple[str, str], ...]:
-    """`(event, subcmd)` pairs `--migrate` should unwire from this project.
-
-    The retired v2 hooks, plus any **seed the caller did not ask for** — that
-    is what makes `--migrate` bring an early-v3 project (auto-wired
-    `hook-inject`) in line with "no hook unless asked", while
-    `--with-inject-hook` keeps the one it was asked to keep.
-    """
-    return _RETIRED_HOOKS + tuple(
-        (event, subcmd)
-        for seed, (event, subcmd, _group) in _HOOK_SEEDS.items()
-        if seed not in wanted
-    )
-
-
 def _drop_retired_hooks(hooks: dict, path: Path, log: list[str],
                         retired: tuple[tuple[str, str], ...]) -> bool:
     """`--migrate` only: unwire hooks this generation no longer writes.
@@ -963,16 +962,17 @@ def _drop_retired_hooks(hooks: dict, path: Path, log: list[str],
     return changed
 
 
-def _plan_settings(path: Path, log: list[str], migrate: bool = False,
-                   hooks_wanted: frozenset[str] = frozenset()) -> str | None:
+def _plan_settings(path: Path, log: list[str],
+                   migrate: bool = False) -> str | None:
     """Return the new `.claude/settings.json` text, or None if already
-    correct. Raises _Refuse on a conflicting mnemo hook.
+    correct.
 
-    With no seed requested and no `--migrate`, this returns None without
-    reading a thing into the file — a default `init` leaves `settings.json`
-    absent rather than creating one that says nothing.
+    `init` never *writes* a hook any more, so this function has exactly one
+    job left: with `--migrate`, unwire the ones earlier generations wrote.
+    Without it, it returns None without reading a thing — a default `init`
+    leaves `settings.json` alone, and never creates one to say nothing.
     """
-    if not hooks_wanted and not migrate:
+    if not migrate:
         return None
 
     data = _load_json(path)
@@ -982,50 +982,7 @@ def _plan_settings(path: Path, log: list[str], migrate: bool = False,
     elif not isinstance(hooks, dict):
         raise _Refuse(f"{path}: 'hooks' is not an object; left untouched")
 
-    changed = (
-        _drop_retired_hooks(hooks, path, log, _retired_for(hooks_wanted))
-        if migrate else False
-    )
-    for seed in sorted(hooks_wanted):
-        event, subcmd, group = _HOOK_SEEDS[seed]
-        desired_cmd = group["hooks"][0]["command"]
-        arr = hooks.get(event)
-        if arr is None:
-            arr = []
-        elif not isinstance(arr, list):
-            raise _Refuse(f"{path}: 'hooks.{event}' is not an array; "
-                          f"left untouched")
-
-        found_exact = False
-        for grp in arr:
-            if not isinstance(grp, dict):
-                continue
-            for h in grp.get("hooks", []) or []:
-                if not isinstance(h, dict):
-                    continue
-                cmd = h.get("command")
-                if not _is_mnemo_cmd(cmd, subcmd):
-                    continue
-                if cmd == desired_cmd:
-                    found_exact = True
-                else:
-                    raise _Refuse(
-                        f"{path}: hooks.{event} already has a different "
-                        f"mnemo {subcmd} hook.\n      found:    {cmd}\n"
-                        f"      expected: {desired_cmd}\n"
-                        f"      (left untouched — resolve via the adopt "
-                        f"skill)")
-        if found_exact:
-            log.append(f"  settings.json        {event} hook already present")
-            continue
-
-        # Additive: foreign hook groups in this event stay as-is.
-        arr.append(group)
-        hooks[event] = arr
-        log.append(f"  settings.json        +hooks.{event}")
-        changed = True
-
-    if not changed:
+    if not _drop_retired_hooks(hooks, path, log, _RETIRED_HOOKS):
         return None
     data["hooks"] = hooks
     return _dump_json(data)
@@ -1226,13 +1183,13 @@ def _register_bank(bank_root: Path, report: list[str]) -> str:
     return registry.token_for(bank.id)
 
 
-def init_project(root: str | None, *, migrate: bool = False,
-                 hooks: Iterable[str] = ()) -> int:
+def init_project(root: str | None, *, migrate: bool = False) -> int:
     """Wire mnemo into a project. Returns 0 on success, 1 on refusal
     (in which case NOTHING was written).
 
-    ``hooks`` names the seeds to wire (``"memory"``, ``"inject"``); empty — the
-    default — writes none.
+    **No hook is written, and there is no flag that makes one appear.** The
+    discipline is carried by `.claude/rules/mnemo-memory.md` alone. With
+    `--migrate`, hooks earlier generations wrote are unwired.
 
     Two passes, and the split is what keeps the refusal guarantee honest. The
     first plans everything with a probe token purely to find out whether
@@ -1244,16 +1201,11 @@ def init_project(root: str | None, *, migrate: bool = False,
     paths = resolve(root)
     proj = paths.root
     settings_path = proj / ".claude" / "settings.json"
-    wanted = frozenset(hooks)
-    unknown = wanted - set(_HOOK_SEEDS)
-    if unknown:
-        print(f"mnemo init: unknown hook seed(s): {', '.join(sorted(unknown))}")
-        return 1
 
     # Pass 1 — validation only. Nothing is written and no bank is registered.
     try:
         _plan_wiring(proj, token=_TOKEN_PROBE, migrate=migrate)
-        _plan_settings(settings_path, [], migrate, wanted)
+        _plan_settings(settings_path, [], migrate)
     except _Refuse as exc:
         print(f"mnemo init: refused — {exc}")
         print("mnemo init: NOTHING was written.")
@@ -1278,7 +1230,7 @@ def init_project(root: str | None, *, migrate: bool = False,
 
     # Pass 2 — the same plan, rendered with the real token.
     wiring = _plan_wiring(proj, token=token, migrate=migrate)
-    new_settings = _plan_settings(settings_path, wiring.log, migrate, wanted)
+    new_settings = _plan_settings(settings_path, wiring.log, migrate)
     for path, text in wiring.writes:
         _write(path, text)
     if new_settings is not None:
