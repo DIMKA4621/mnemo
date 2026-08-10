@@ -669,3 +669,115 @@ def update(bank_id: str, **fields: Any) -> Bank:
         banks[idx] = updated
         save(banks)
         return updated
+
+
+# ----------------------------------------------------------- orphaned indexes
+#
+# An index is named ``sha1(canonical root)[:16].db``, so a bank finds its file
+# by derivation and nothing links the file back to a bank. That is what makes
+# a bank's index unambiguous, and it is also why files are left behind: drop
+# the registry entry and the derivation has no one left to run.
+#
+# Three ways it happens, all normal:
+#   * a bank unregistered with ``drop_index=False``;
+#   * a hand-edited ``root`` in banks.json — the id is re-derived from the new
+#     root on purpose (``_from_json``), and the old file is the price;
+#   * v2 keyed an index by the *project* root, v3 by the *bank* root, so every
+#     v2 index orphaned itself the moment v3 first ran.
+#
+# Nothing scans this directory during normal operation, so an orphan is inert:
+# never opened, never searched, never listed. It only costs disk. Cleaning is
+# therefore a deliberate act (`mnemo clean-orphans`), never a startup chore —
+# an index that is wrongly deleted costs a full rebuild to get back.
+
+# ``service.db`` is the journal, not a bank index. Excluded by name because
+# deriving "not a bank" from its content would be one inference away from
+# deleting the service's own log.
+_NON_BANK_DB = frozenset({"service"})
+
+
+@dataclass(frozen=True)
+class OrphanIndex:
+    """An index file in ``state/`` that no registered bank claims."""
+
+    path: Path
+    id: str
+    size: int                  # the .db plus its -wal / -shm siblings
+    root: str | None           # root recorded in ``meta``; None before v3
+    root_exists: bool          # ...and whether that root is still on disk
+    schema: str | None         # ``schema_version``; None means "pre-meta"
+    files: int | None          # indexed files, when the table is readable
+    last_indexed: str | None
+    error: str | None          # set when the file could not be read at all
+
+
+def _index_size(path: Path) -> int:
+    """The database plus its WAL/SHM siblings — what deleting it frees."""
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        with contextlib.suppress(OSError):
+            total += path.with_name(path.name + suffix).stat().st_size
+    return total
+
+
+def _inspect_index(path: Path) -> OrphanIndex:
+    from . import store
+
+    probed = store.probe(path)
+    meta = probed["meta"]
+    root = meta.get("bank_root") or None
+    return OrphanIndex(
+        path=path,
+        id=path.stem,
+        size=_index_size(path),
+        root=root,
+        root_exists=bool(root) and Path(root).is_dir(),
+        schema=meta.get("schema_version"),
+        files=probed["files"],
+        last_indexed=meta.get("last_indexed_at"),
+        error=probed["error"],
+    )
+
+
+def orphan_indexes() -> list[OrphanIndex]:
+    """Every index file in ``state/`` that belongs to no registered bank.
+
+    The registry is read first and **its failure is allowed to propagate**.
+    Treating an unreadable ``banks.json`` as "no banks" would report every
+    live index as an orphan — and that is the one mistake here the ``.md``
+    cannot undo cheaply, since agreeing to the list would delete indexes that
+    then cost a full rebuild.
+    """
+    live = {bank.id for bank in load(force=True)}
+    return [
+        _inspect_index(path)
+        for path in sorted(state_dir().glob("*.db"))
+        if path.stem not in _NON_BANK_DB and path.stem not in live
+    ]
+
+
+def delete_index(index_id: str) -> tuple[int, list[Path]]:
+    """Delete one orphaned index and its siblings. Returns ``(removed, failed)``.
+
+    The registry is re-read here rather than trusted from the caller's earlier
+    listing: between listing and confirming, a bank may have been registered
+    on exactly this root — by the cabinet, by another session, by `init`. A
+    stale list must not be able to delete a live index.
+    """
+    if index_id in _NON_BANK_DB:
+        raise ValueError(f"{index_id}.db is not a bank index")
+    if index_id in {bank.id for bank in load(force=True)}:
+        raise ValueError(f"{index_id} belongs to a registered bank")
+
+    base = state_dir() / f"{index_id}.db"
+    removed, failed = 0, []
+    for suffix in ("", "-wal", "-shm"):
+        candidate = base.with_name(base.name + suffix)
+        try:
+            candidate.unlink()
+            removed += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            failed.append(candidate)
+    return removed, failed

@@ -986,6 +986,93 @@ def test_model_cache_validation() -> None:
             check("complete model cache is warmed", embedder.is_model_cached())
 
 
+def test_orphan_indexes() -> None:
+    """`state/` holds index files keyed by a hash of a root; nothing links one
+    back to a bank. These checks pin the two properties that make deleting
+    them safe: only unclaimed files are listed, and an unreadable registry
+    refuses rather than declaring everything unclaimed."""
+    from src import registry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state = Path(tmp) / "state"
+        state.mkdir()
+        with patch.object(config, "STATE_DIR", state):
+            bank_root = Path(tmp) / "bank"
+            bank_root.mkdir()
+            bank = registry.add(bank_root, name="live")
+
+            bank.db_path.write_bytes(b"")
+            (state / "service.db").write_bytes(b"")
+            orphan = state / "deadbeefdeadbeef.db"
+            orphan.write_bytes(b"y" * 64)
+
+            found = registry.orphan_indexes()
+            ids = {o.id for o in found}
+            check("only the unclaimed index is an orphan",
+                  ids == {"deadbeefdeadbeef"}, f"got {sorted(ids)}")
+            check("an orphan's reported size is its on-disk size",
+                  next(o.size for o in found) == 64)
+            check("listing deletes nothing", orphan.exists())
+
+            # Siblings are created after the listing on purpose: opening a
+            # database makes SQLite clear a stale -wal (see `store.probe`), so
+            # a junk sibling would not survive the probe to be counted here.
+            orphan.with_name(orphan.name + "-wal").write_bytes(b"x" * 10)
+            orphan.with_name(orphan.name + "-shm").write_bytes(b"x" * 10)
+
+            # The journal is excluded by name. Deriving "not a bank" from its
+            # contents would be one inference away from deleting the log.
+            failed_service = False
+            try:
+                registry.delete_index("service")
+            except ValueError:
+                failed_service = True
+            check("delete_index refuses service.db", failed_service)
+
+            refused_live = False
+            try:
+                registry.delete_index(bank.id)
+            except ValueError:
+                refused_live = True
+            check("delete_index refuses a registered bank", refused_live)
+            check("the registered bank's index survives", bank.db_path.exists())
+
+            removed, locked = registry.delete_index("deadbeefdeadbeef")
+            check("deleting an orphan takes its siblings too",
+                  removed == 3 and not locked
+                  and not orphan.exists()
+                  and not orphan.with_name(orphan.name + "-wal").exists()
+                  and not orphan.with_name(orphan.name + "-shm").exists(),
+                  f"removed={removed} locked={locked}")
+            check("service.db is still there", (state / "service.db").exists())
+            check("nothing is orphaned once it is gone",
+                  registry.orphan_indexes() == [])
+
+            # A bank registered between listing and deleting must survive a
+            # stale list — delete_index re-reads the registry for this.
+            second_root = Path(tmp) / "second"
+            second_root.mkdir()
+            later = registry.add(second_root, name="later")
+            later.db_path.write_bytes(b"")
+            stale = False
+            try:
+                registry.delete_index(later.id)
+            except ValueError:
+                stale = True
+            check("a stale list cannot delete a newly registered bank",
+                  stale and later.db_path.exists())
+
+            # Fail-safe: unparseable registry -> raise, never "no banks".
+            registry.banks_file().write_text("{ not json", encoding="utf-8")
+            refused = False
+            try:
+                registry.orphan_indexes()
+            except Exception:  # noqa: BLE001 - any refusal will do
+                refused = True
+            check("an unreadable registry refuses instead of listing every "
+                  "index as an orphan", refused)
+
+
 def main() -> int:
     test_scaffold()
     test_scaffold_template_project()
@@ -996,6 +1083,7 @@ def main() -> int:
     test_git_index_probe()
     test_project_resolution()
     test_index_paths()
+    test_orphan_indexes()
     test_model_cache_validation()
     print(
         f"\n{_passed} passed, {_failed} failed, "

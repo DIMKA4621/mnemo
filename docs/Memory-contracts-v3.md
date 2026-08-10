@@ -305,7 +305,19 @@ def chunk_count(conn) -> int
 def file_count(conn) -> int
 def list_files(conn) -> list[sqlite3.Row]
 def chunk_map(conn, path: str) -> list[sqlite3.Row]   # for the UI chunk-viz
+
+def probe(db_path: Path) -> dict   # {'meta': dict, 'files': int|None, 'error': str|None}
 ```
+
+`probe` — єдиний спосіб подивитися на індексний файл **не відкриваючи його для
+роботи**: `mode=ro`, без sqlite-vec, без `journal_mode=WAL` (виставлення
+journal mode — це запис, тобто діагностика лишала б свіжий `-wal` біля файлу,
+який саме збирається назвати сміттям, і падала б на справді read-only базі).
+Помилки **повертає, а не кидає**: викликач — діагностика (`doctor`,
+`clean-orphans`), і нечитаний файл там факт для друку, а не привід обірвати
+список. Застереження, яке варте окремого рядка: `mode=ro` ≠ «нічого не
+чіпає» — SQLite при відкритті бази прибирає протухлий `-wal` як частину
+recovery, тож розмір файлу треба міряти **до** `probe`, а не після. **[NEW]**
 
 `needs_rebuild` повертає `True`, якщо `meta.schema_version != '3'`, або
 `meta.provider_key` ≠ активний, або `meta.embedding_dim` ≠ `dim`. Реакція —
@@ -710,7 +722,25 @@ def remove(bank_id: str, *, drop_index: bool = True) -> None
 def update(bank_id: str, **fields) -> Bank       # raises BankExists on a name clash
 def unique_name(candidate: str) -> str           # 'notes' -> 'notes-2' -> 'notes-3'
 def save(banks: list[Bank]) -> None              # atomic: tmp + os.replace
+
+@dataclass(frozen=True)
+class OrphanIndex:
+    path: Path;  id: str;  size: int            # .db + its -wal / -shm siblings
+    root: str | None;  root_exists: bool        # from meta.bank_root, None pre-v3
+    schema: str | None;  files: int | None
+    last_indexed: str | None;  error: str | None
+
+def orphan_indexes() -> list[OrphanIndex]        # raises if banks.json is unreadable
+def delete_index(index_id: str) -> tuple[int, list[Path]]   # (removed, locked)
 ```
+
+**Осиротілі індекси (design #25).** `orphan_indexes()` — це `state/*.db` мінус
+`service.db` мінус id живих банків. Реєстр читається **першим, і його помилка
+летить далі**: вважати нечитаний `banks.json` за «банків немає» означало б
+назвати орфаном кожен живий індекс. `delete_index` перечитує реєстр **у момент
+видалення** — між показом списку й підтвердженням банк міг зʼявитися (кабінет,
+інша сесія, `init`), і застарілий список не має його зітерти. `service.db`
+виключено **за іменем**, не за вмістом. **[NEW]**
 
 ### 6.4 Семантика `resolve(ref)` **[NEW]**
 
@@ -1728,7 +1758,8 @@ ASCII-імені інстансу, яке обираємо ми.
 | `mnemo init [--root] [--migrate] [--with-memory-hook] [--with-inject-hook]` | **локальна** | вирівнює `.mcp.json` / `.claude/` проєкту; **без прапорців хуків не пише жодного хука** **[NEW]** |
 | `mnemo service start\|stop\|status\|restart` | **локальна** | FR-9, розділ 11.2 |
 | `mnemo embed-server` | **локальна** | резидент моделі (руками не запускають) |
-| `mnemo doctor` | **локальна** | діагностика: venv, deps, модель, токени, порти, банки; **осиротілі індекси** з-під v2 — показує й прибирає **лише на явну команду**, ніколи сам **[NEW]** |
+| `mnemo doctor` | **локальна** | діагностика: venv, deps, модель, токени, порти, банки; **осиротілі індекси** — лише рядок-підсумок `orphan indexes N (розмір)` і вказівка на команду; **нічого не видаляє** **[NEW]** |
+| `mnemo clean-orphans [--dry-run] [--yes]` | **локальна** | єдине, що видаляє осиротілі індекси: друкує повний список (id, корінь із `meta`, розмір, `[root still on disk]`) і чекає підтвердження. Локальна навмисно — має працювати з **лежачим бекендом**, бо саме тоді дивляться на диск. Нечитаний `banks.json` → **відмова**, код 1 **[NEW]** |
 | `mnemo memory-hook` | **локальна** | SessionStart-насіння: віддає `MEMORY.md` банку + карту структури; читає файл **з диска**, тому не залежить від бекенда й не може підвісити старт **[NEW]** |
 | `mnemo hook-inject` | **локальна обгортка** | UserPromptSubmit-насіння: читає hook-JSON, шле `POST /api/search`; `init` його **не додає** |
 | `mnemo hook-postedit` | **shim** | завжди exit 0 (реіндекс робить watcher), див. 11.3 **[NEW]** |

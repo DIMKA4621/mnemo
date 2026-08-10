@@ -170,6 +170,9 @@ mnemo search "q" [--path-prefix P]  hybrid search over a bank
 mnemo reindex [--bank B] [--full]   queue a reindex (`ingest` is a deprecated alias)
 mnemo banks list|add|remove         registry, through the API
 mnemo status | logs | tree | ui     service state, journal, tree, cabinet
+mnemo doctor                        engine, model, tokens, ports, banks, orphan count
+mnemo clean-orphans [--dry-run]     delete index files no bank claims; asks first
+     [--yes]                        skip the prompt (scripts)
 mnemo memory-hook | hook-inject     hook seeds, not typed by hand
 mnemo embed-server                  resident model daemon (auto-started)
 ```
@@ -185,8 +188,10 @@ Poke the read tools by hand at `/mcp-tools/*` (Swagger at
 Service control (`mnemo serve`, `mnemo service start|stop|status|restart`,
 `mnemo autostart enable|disable|status`) is **phase 5, in flight** — the
 subcommands exist before the lifecycle is verified. The API-client command
-set (`banks`, `reindex`, `tree`, `status`, `logs`, `ui`, `doctor`) arrives
-with phase 4; `docs/Memory-contracts-v3.md` §11.1 is the full target list.
+set (`banks`, `reindex`, `tree`, `status`, `logs`, `ui`) arrives with phase
+4; `doctor` and `clean-orphans` are **local** — they read this machine's
+state directory and must still work with the backend down.
+`docs/Memory-contracts-v3.md` §11.1 is the full target list.
 
 `mnemo` is the launcher at `~/.claude/mnemo/bin/mnemo` (`bin\mnemo.exe` on
 Windows) — it is NOT on PATH by default. Either call it by full path, or
@@ -237,8 +242,9 @@ Extra steps only when:
 engine is shared by every project on this machine, and the v3 store
 schema is incompatible: the first v3 run drops and rebuilds an index it
 opens, and indexes keyed by a *project* root are simply orphaned — never
-opened, never auto-deleted (a later `mnemo doctor` will list them for
-explicit cleanup; until then they just sit there).
+opened, never auto-deleted. `mnemo doctor` counts them and `mnemo
+clean-orphans` removes them, after showing the list and asking; nothing
+deletes an index on its own.
 Refresh dependencies alone with `install.ps1 -DepsOnly`. From phase 5 the
 order becomes **stop → refresh → start**, because the running backend
 holds the venv's `python.exe`.

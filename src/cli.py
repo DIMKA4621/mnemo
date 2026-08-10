@@ -3,8 +3,10 @@
 v3 splits the commands in two, and the split is the point (§11.1):
 
 * **local**: `warmup`, `init`, `service *`, `autostart *`, `serve`,
-  `embed-server`, `doctor`. These either set the machine up or *are* the
-  service, so they cannot go through it.
+  `embed-server`, `doctor`, `clean-orphans`. These either set the machine up,
+  *are* the service, or operate on this machine's state directory — so they
+  cannot go through it. `clean-orphans` in particular must work with the
+  backend down, which is when someone goes looking at disk usage.
 * **everything else** talks HTTP to the backend via `client.py`. There is one
   writer to an index and one search implementation, and this is a caller of
   both — not a second copy.
@@ -128,7 +130,123 @@ def _cmd_doctor() -> int:
             flags.append("ROOT MISSING")
         suffix = f"  [{', '.join(flags)}]" if flags else ""
         print(f"  {bank.name:<20} {bank.root.as_posix()}{suffix}")
+
+    # Reported, never cleaned here: `doctor` is a diagnosis. A diagnostic that
+    # also deletes is one a user stops running when they only want to look.
+    try:
+        orphans = registry.orphan_indexes()
+    except Exception as exc:  # noqa: BLE001 - diagnostics never fail
+        print(f"orphan indexes   UNKNOWN — {exc}")
+        return EXIT_OK
+    if orphans:
+        total = _human_bytes(sum(o.size for o in orphans))
+        print(f"orphan indexes   {len(orphans)} ({total}) — "
+              f"run `mnemo clean-orphans`")
+    else:
+        print("orphan indexes   none")
     return EXIT_OK
+
+
+def _human_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB"):
+        if value < 1024:
+            return f"{value:.0f} B" if unit == "B" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GiB"
+
+
+def _abbreviate(path: str) -> str:
+    """Shorten a recorded root with ``~`` — these lines get long and the
+    interesting part of a temp path is always its tail."""
+    home = Path.home().as_posix()
+    return f"~{path[len(home):]}" if path.startswith(home) else path
+
+
+def _orphan_line(orphan) -> str:
+    if orphan.error:
+        where = f"(unreadable — {orphan.error})"
+    elif orphan.root:
+        where = _abbreviate(orphan.root)
+        if orphan.root_exists:
+            # Worth saying out loud: the folder is still there, so this may be
+            # a bank someone meant to keep. Deleting only costs a reindex, but
+            # the user should get to make that call knowingly.
+            where += "   [root still on disk]"
+    elif orphan.files is None:
+        # No ``files`` table at all — not merely an old schema but a database
+        # nothing ever finished writing. Worth distinguishing: it says the
+        # index was abandoned mid-creation, not superseded.
+        where = "(empty file — no index was ever written)"
+    elif orphan.schema is None:
+        where = "(pre-v3 index — no root recorded)"
+    else:
+        where = "(no root recorded)"
+    files = "?" if orphan.files is None else str(orphan.files)
+    unit = "file " if orphan.files == 1 else "files"
+    return f"  {orphan.id}  {_human_bytes(orphan.size):>9}  {files:>3} {unit}  {where}"
+
+
+def _cmd_clean_orphans(args: argparse.Namespace) -> int:
+    """Delete index files that belong to no registered bank (§13, decision 25).
+
+    Local, not an API call: the files live in this machine's state directory,
+    nothing holds them open, and the command must work when the backend is
+    down — which is exactly when someone goes looking at disk usage.
+    """
+    from . import registry
+
+    try:
+        orphans = registry.orphan_indexes()
+    except Exception as exc:  # noqa: BLE001 - one refusal, one reason
+        print(f"mnemo: cannot read the bank registry: {exc}\n"
+              f"       refusing to guess which indexes are orphaned.",
+              file=sys.stderr)
+        return EXIT_ERROR
+
+    if not orphans:
+        print("no orphan indexes — every index file belongs to a registered bank")
+        return EXIT_OK
+
+    total = _human_bytes(sum(o.size for o in orphans))
+    verb = "would remove" if args.dry_run else "will remove"
+    print(f"{verb} {len(orphans)} orphan index"
+          f"{'es' if len(orphans) != 1 else ''} ({total}):")
+    for orphan in orphans:
+        print(_orphan_line(orphan))
+
+    if args.dry_run:
+        return EXIT_OK
+
+    if not args.yes:
+        try:
+            answer = input("proceed? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("nothing removed")
+            return EXIT_OK
+
+    removed, freed, failures = 0, 0, []
+    for orphan in orphans:
+        try:
+            _, failed = registry.delete_index(orphan.id)
+        except ValueError as exc:
+            # Raised when the registry gained this bank between listing and
+            # confirming. Skipped, and said out loud.
+            print(f"  skipped {orphan.id}: {exc}")
+            continue
+        if failed:
+            failures.extend(failed)
+        else:
+            removed += 1
+            freed += orphan.size
+    # Counted from what was actually deleted, not from what was listed: a
+    # skipped or locked file must not be reported as space recovered.
+    print(f"removed {removed} of {len(orphans)} ({_human_bytes(freed)} freed)")
+    for path in failures:
+        print(f"  locked: {path.as_posix()}", file=sys.stderr)
+    return EXIT_ERROR if failures else EXIT_OK
 
 
 # -------------------------------------------------------------- API commands
@@ -521,6 +639,19 @@ def _build_parser() -> argparse.ArgumentParser:
     # --- local ----------------------------------------------------------
     sub.add_parser("warmup", help="One-time explicit model download + check.")
     sub.add_parser("doctor", help="Diagnose venv, model, token, ports, banks.")
+
+    co = sub.add_parser(
+        "clean-orphans",
+        help="Delete index files in state/ that belong to no registered bank.",
+    )
+    co.add_argument(
+        "--dry-run", action="store_true",
+        help="List what would be deleted and stop. Never asks, never deletes.",
+    )
+    co.add_argument(
+        "--yes", action="store_true",
+        help="Skip the confirmation prompt (for scripts).",
+    )
     sub.add_parser("embed-server", help="Resident embedding helper (internal).")
     sub.add_parser("hook-postedit", help="v2 shim: exits 0 (watcher reindexes).")
     sub.add_parser("hook-inject", help="UserPromptSubmit seed: inject top-N.")
@@ -625,6 +756,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_warmup()
     if cmd == "doctor":
         return _cmd_doctor()
+    if cmd == "clean-orphans":
+        return _cmd_clean_orphans(args)
     if cmd == "embed-server":
         from .embed_server import serve
         serve()

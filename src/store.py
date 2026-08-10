@@ -17,6 +17,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 import sqlite_vec
 
@@ -216,6 +217,57 @@ def _set(conn: sqlite3.Connection, key: str, value: str) -> None:
 def get_meta(conn: sqlite3.Connection) -> dict[str, str]:
     """All index metadata as a flat dict."""
     return _read_meta(conn)
+
+
+def probe(db_path: Path) -> dict[str, Any]:
+    """Read what an index file says about itself, without opening it for use.
+
+    Triage, not use — which is why this does not go through ``connect``. That
+    one loads sqlite-vec and sets ``journal_mode=WAL``, and setting the
+    journal mode is a *write*: it would leave a fresh ``-wal`` beside a file
+    the caller is about to report as debris, and it would fail outright on a
+    database that is genuinely read-only. Here the file is opened ``mode=ro``
+    and only two things are asked of it — what ``meta`` records, and how many
+    files it indexed.
+
+    ``mode=ro`` is not the same as "touches nothing", and the difference is
+    observable: opening a database whose ``-wal`` is stale or malformed makes
+    SQLite remove that sibling as part of recovery, read-only or not. It is
+    not a new hazard — every ordinary search opens the same file and does the
+    same thing — but a caller that measures a file's on-disk footprint must
+    measure it *before* probing, or it will report a size that the probe
+    itself changed.
+
+    Every failure is returned rather than raised. The callers are diagnostics
+    (``doctor``, ``clean-orphans``); an unreadable file is a fact to print,
+    not a reason to abort the listing. Keys: ``meta`` (possibly empty — a v2
+    database has no ``meta`` table at all), ``files`` (``None`` when the table
+    is missing) and ``error``.
+    """
+    meta: dict[str, str] = {}
+    files: int | None = None
+    error: str | None = None
+    try:
+        conn = sqlite3.connect(f"file:{db_path.as_posix()}?mode=ro", uri=True)
+        try:
+            tables = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                )
+            }
+            if "meta" in tables:
+                meta = {
+                    str(k): str(v)
+                    for k, v in conn.execute("SELECT key, value FROM meta")
+                }
+            if "files" in tables:
+                files = int(conn.execute("SELECT count(*) FROM files").fetchone()[0])
+        finally:
+            conn.close()
+    except (sqlite3.Error, OSError) as exc:
+        error = str(exc)
+    return {"meta": meta, "files": files, "error": error}
 
 
 def init_meta(

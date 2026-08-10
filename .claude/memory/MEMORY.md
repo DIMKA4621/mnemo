@@ -32,9 +32,15 @@ detail lives in `topics/`, day notes in `logs/`.
 - `.mcp.json` **генерований і gitignored** — у git їде `.mcp.json.template` +
   `.mcp.env.example` + `mcp-setup.sh`. `mnemo init` template-aware і
   **відмовляється** писати літеральний токен у відстежений git-ом файл.
+- Індекс зветься `sha1(корінь)[:16].db` — звʼязок односторонній, тож зняті
+  банки лишають **осиротілі** файли в `state/`. `doctor` їх рахує,
+  `clean-orphans` видаляє (питає перед тим); автоматично — ніколи.
 
 ## Logs
 
+- [2026-08-10](logs/2026-08-10.md) — осиротілі індекси: `store.probe`,
+  `doctor` рахує, `clean-orphans` прибирає з підтвердженням; `mode=ro` не
+  означає «нічого не чіпає».
 - [2026-07-31](logs/2026-07-31.md) — **токен став адресою банку** (`/mcp` без
   сегмента); токен на банк; обличчя `/mcp-admin`; імена тулів без префікса;
   `.mcp.json` генерований і gitignored; template-aware `init`.
