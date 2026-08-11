@@ -435,9 +435,29 @@ function bankCard(bank) {
 
   // Human-facing address is the name, never the hash (lead amendment); the id
   // stays available as a tooltip for debugging.
+  //
+  // Every action lives in the menu at the end of this row. Buttons used to sit
+  // in a row of their own at the bottom of the card, which cost four lines of
+  // height per bank and pinned the column's width from both sides — under
+  // 287px the row wrapped, over 311px the document ended up narrower than the
+  // file list. With nothing but a glyph to fit, the column is free again.
   const head = el('div', { className: 'bank-row' }, [
     el('span', { className: 'bank-name', text: bank.name, title: 'id: ' + bank.id }),
     ...badges,
+    el('button', {
+      className: 'btn btn-menu',
+      text: '···',
+      title: 'Дії над банком',
+      attrs: { 'aria-haspopup': 'menu', 'aria-label': 'Дії над банком' },
+      // Not `stop(...)`: that wrapper calls the handler with no arguments and
+      // no `this`, and this one needs the button it fired on to place the menu.
+      on: {
+        click: (ev) => {
+          ev.stopPropagation();
+          openBankMenu(ev.currentTarget, bank);
+        },
+      },
+    }),
   ]);
 
   const stats = el('div', { className: 'bank-stats' }, [
@@ -475,29 +495,297 @@ function bankCard(bank) {
     card.appendChild(el('div', { className: 'bank-error', text: bank.last_error }));
   }
 
-  const stop = (fn) => (ev) => { ev.stopPropagation(); fn(); };
-  card.appendChild(el('div', { className: 'bank-actions' }, [
-    el('button', {
-      className: 'btn',
+  return card;
+}
+
+// ---------------------------------------------------------------------------
+// per-bank menu
+//
+// Built once and moved, rather than rebuilt per card: the bank list re-renders
+// on a timer, and a menu owned by a card would vanish mid-click.
+
+const bankMenu = { root: null, bank: null };
+
+function buildBankMenu() {
+  // `bankMenu.bank` is read at click time, not captured when the menu is
+  // built: one menu serves every card, and which bank it belongs to is
+  // whatever `openBankMenu` last pointed it at.
+  const item = (opts) => el('button', {
+    className: 'menu-item' + (opts.danger ? ' is-danger' : ''),
+    text: opts.text,
+    title: opts.title,
+    attrs: { role: 'menuitem' },
+    on: {
+      click: () => {
+        const bank = bankMenu.bank;
+        closeBankMenu();
+        if (bank) opts.run(bank);
+      },
+    },
+  });
+
+  bankMenu.root = el('div', {
+    className: 'menu',
+    attrs: { hidden: '', role: 'menu' },
+    on: { click: (ev) => ev.stopPropagation() },
+  }, [
+    item({
       text: 'Синхронізація індексу',
       title: 'Переіндексує лише файли, що змінилися, і знімає з індексу видалені',
-      on: { click: stop(() => reindex(bank, { full: false })) },
+      run: (bank) => reindex(bank, { full: false }),
     }),
-    el('button', {
-      className: 'btn',
+    item({
       text: 'Повний реіндекс',
       title: 'Стирає індекс і збирає його заново — довго, пропорційно розміру банку',
-      on: { click: stop(() => reindex(bank, { full: true })) },
+      run: (bank) => reindex(bank, { full: true }),
     }),
-    el('button', {
-      className: 'btn',
+    el('div', { className: 'menu-sep' }),
+    item({
       text: 'Доступ MCP',
       title: 'Токен цього банку і готовий фрагмент конфігурації для проєкту',
-      on: { click: stop(() => openTokenPanel(bank)) },
+      run: (bank) => openTokenPanel(bank),
+    }),
+    el('div', { className: 'menu-sep' }),
+    item({
+      text: 'Прибрати банк',
+      title: 'Зняти банк з реєстру; .md не чіпаються',
+      danger: true,
+      run: (bank) => openRemoval(bank),
+    }),
+  ]);
+  document.body.appendChild(bankMenu.root);
+
+  document.addEventListener('click', () => closeBankMenu());
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeBankMenu();
+  });
+  // A menu pinned to page coordinates does not follow its button. Rather
+  // than track the anchor, close: a menu that has drifted off its trigger is
+  // a menu whose next click lands on whatever moved underneath it.
+  window.addEventListener('scroll', () => closeBankMenu(), true);
+  window.addEventListener('resize', () => closeBankMenu());
+}
+
+function openBankMenu(anchor, bank) {
+  bankMenu.bank = bank;
+  // Laid out before it is shown: a `position: fixed` box with no coordinates
+  // paints wherever it happens to flow, so measuring it visible costs one
+  // frame of the menu sitting in the corner of the page.
+  bankMenu.root.style.visibility = 'hidden';
+  bankMenu.root.hidden = false;
+  const box = anchor.getBoundingClientRect();
+  const menu = bankMenu.root.getBoundingClientRect();
+  // Flip up, and pull left, when the default placement would leave the
+  // viewport. The bank column is at the left edge and the cards run to the
+  // bottom of a long list, so both edges are reachable in normal use.
+  const top = (box.bottom + menu.height > window.innerHeight)
+    ? box.top - menu.height - 4
+    : box.bottom + 4;
+  // Right edges aligned, because the button sits at the right end of the
+  // title row: hanging the menu off its left edge would throw it across the
+  // pane boundary into the file tree for no reason.
+  const left = Math.max(4, Math.min(box.right - menu.width,
+                                    window.innerWidth - menu.width - 4));
+  bankMenu.root.style.top = Math.max(4, top) + 'px';
+  bankMenu.root.style.left = left + 'px';
+  bankMenu.root.style.visibility = 'visible';
+}
+
+function closeBankMenu() {
+  if (!bankMenu.root || bankMenu.root.hidden) return;
+  bankMenu.root.hidden = true;
+  bankMenu.bank = null;
+}
+
+// ---------------------------------------------------------------------------
+// removing a bank (contract 9.5: DELETE /api/banks/{id})
+//
+// The only irreversible action in the cabinet, and what makes it irreversible
+// is not the index — that rebuilds — but the token. Bank ids are derived from
+// the root and come back identical on re-registration; tokens are minted, so a
+// removed bank cannot be restored to the projects that address it. That is why
+// this asks for the name to be typed, and why the dialog leads with the token
+// rather than with megabytes.
+
+const removal = {
+  root: null, box: null, body: null, submit: null,
+  bank: null, dropIndex: true, typed: '', busy: false, errorText: null,
+};
+
+function buildRemoval() {
+  removal.body = el('div', { className: 'modal-body' });
+  removal.submit = el('button', {
+    className: 'btn btn-danger',
+    text: 'Прибрати',
+    on: { click: () => submitRemoval() },
+  });
+
+  removal.box = el('div', {
+    className: 'modal-box',
+    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Прибрати банк' },
+    on: { click: (ev) => ev.stopPropagation() },
+  }, [
+    el('div', { className: 'modal-head' }, [
+      el('h2', { text: 'Прибрати банк' }),
+      el('button', {
+        className: 'btn btn-ghost',
+        text: '✕',
+        title: 'Закрити (Esc)',
+        on: { click: () => closeRemoval() },
+      }),
+    ]),
+    removal.body,
+    el('div', { className: 'modal-foot' }, [
+      el('button', { className: 'btn', text: 'Скасувати', on: { click: () => closeRemoval() } }),
+      removal.submit,
+    ]),
+  ]);
+
+  removal.root = el('div', {
+    className: 'modal',
+    attrs: { hidden: '' },
+    on: { click: () => closeRemoval() },
+  }, [removal.box]);
+  document.body.appendChild(removal.root);
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !removal.root.hidden) closeRemoval();
+  });
+}
+
+function openRemoval(bank) {
+  removal.bank = bank;
+  removal.dropIndex = true;
+  removal.typed = '';
+  removal.busy = false;
+  removal.errorText = null;
+  removal.root.hidden = false;
+  renderRemoval();
+}
+
+function closeRemoval() {
+  if (removal.busy) return;      // a request is in flight; let it land
+  removal.root.hidden = true;
+  removal.bank = null;
+  removal.typed = '';
+}
+
+function renderRemoval() {
+  const bank = removal.bank;
+  if (!bank) return;
+  clear(removal.body);
+
+  removal.body.appendChild(el('p', { className: 'rm-lead' }, [
+    document.createTextNode('Банк '),
+    el('strong', { text: bank.name }),
+    document.createTextNode(' перестане існувати для цієї машини.'),
+  ]));
+
+  removal.body.appendChild(el('dl', { className: 'rm-effects' }, [
+    el('dt', { className: 'is-loss', text: 'Зникає назавжди' }),
+    el('dd', {
+      text: 'Реєстрація банку та його токен. Токен видається випадково і не ' +
+            'відтворюється: кожен .mcp.json, який ним підключається, ' +
+            'перестане працювати, і повернути той самий токен неможливо.',
+    }),
+    el('dt', { className: 'is-safe', text: 'Лишається недоторканим' }),
+    el('dd', null, [
+      document.createTextNode('Усі .md за шляхом '),
+      el('code', { text: bank.root }),
+      document.createTextNode('. Кабінет не видаляє вміст банку — тільки те, ' +
+                              'що з нього виведено.'),
+    ]),
+  ]));
+
+  const box = el('input', {
+    attrs: { type: 'checkbox', id: 'rm-drop-index' },
+    on: { change: (ev) => { removal.dropIndex = ev.target.checked; } },
+  });
+  box.checked = removal.dropIndex;
+  box.disabled = removal.busy;
+  removal.body.appendChild(el('label', { className: 'rm-check', attrs: { for: 'rm-drop-index' } }, [
+    box,
+    el('span', {
+      text: 'видалити також індекс (' + fmtBytes(bank.db_bytes) + ') — ' +
+            'відновлюваний повним реіндексом',
     }),
   ]));
 
-  return card;
+  const confirm = el('input', {
+    className: 'fs-input',
+    attrs: {
+      type: 'text', spellcheck: 'false', autocomplete: 'off',
+      id: 'rm-confirm', placeholder: bank.name,
+    },
+    on: {
+      input: (ev) => {
+        removal.typed = ev.target.value;
+        // Only the button's own state changes, so it is updated in place: a
+        // re-render would rebuild the field and drop the caret.
+        removal.submit.disabled = !removalReady();
+      },
+      keydown: (ev) => {
+        if (ev.key === 'Enter' && removalReady()) { ev.preventDefault(); submitRemoval(); }
+      },
+    },
+  });
+  confirm.value = removal.typed;
+  confirm.disabled = removal.busy;
+  removal.body.appendChild(el('label', {
+    className: 'fs-label', attrs: { for: 'rm-confirm' },
+    text: 'Введіть назву банку, щоб підтвердити',
+  }));
+  removal.body.appendChild(confirm);
+
+  if (removal.errorText) {
+    removal.body.appendChild(el('p', { className: 'modal-error', text: removal.errorText }));
+  }
+
+  removal.submit.disabled = !removalReady();
+  removal.submit.textContent = removal.busy ? 'Прибираю…' : 'Прибрати';
+  if (!removal.busy) confirm.focus();
+}
+
+function removalReady() {
+  return !removal.busy && !!removal.bank && removal.typed.trim() === removal.bank.name;
+}
+
+async function submitRemoval() {
+  if (!removalReady()) return;
+  const bank = removal.bank;
+  removal.busy = true;
+  removal.errorText = null;
+  renderRemoval();
+  try {
+    await api('/api/banks/' + encodeURIComponent(bank.id) +
+              '?drop_index=' + (removal.dropIndex ? 'true' : 'false'),
+              { method: 'DELETE' });
+  } catch (err) {
+    removal.busy = false;
+    if (isAuthError(err)) { closeRemoval(); reportError(err); return; }
+    // `index_locked` is fixable where it is raised — the bank is still
+    // registered and nothing was lost — so it belongs inside the dialog
+    // rather than on a page-wide banner the user has to leave to read.
+    removal.errorText = err.message;
+    renderRemoval();
+    return;
+  }
+  removal.busy = false;
+  removal.root.hidden = true;
+  removal.bank = null;
+  removal.typed = '';
+  hideBanner();
+  // Drop it from the local model immediately rather than waiting for the
+  // `bank_removed` event to come back: the socket may be down, and a card
+  // that outlives the bank it describes is the one thing this dialog must
+  // not leave behind. The reload that follows is the correction, not the
+  // mechanism.
+  state.banks = state.banks.filter((b) => b.id !== bank.id);
+  if (state.selectedBankId === bank.id) state.selectedBankId = null;
+  state.progress.delete(bank.id);
+  state.notes.delete(bank.id);
+  renderBanks();
+  loadBanks().catch(() => {});
 }
 
 // A task is not always a file: `bulk`/`rebuild` work on the whole bank and
@@ -2200,6 +2488,8 @@ async function boot() {
   buildGate();
   buildPicker();
   buildTokenPanel();
+  buildBankMenu();
+  buildRemoval();
   renderService();
   if (!token) {
     // First run: nothing has been rejected, so ask before knocking.

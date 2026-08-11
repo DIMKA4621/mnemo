@@ -96,7 +96,16 @@ Service (the persistent backend):
 - `src/service_ctl.py` — `mnemo service …`, windowless spawn, PID/port
   state (**phase 5, in flight**).
 - `src/webui/` — the local cabinet served by the backend; `devserver.py`
-  answers contract shapes from fixtures and is a dev tool only.
+  answers contract shapes from fixtures and is a dev tool only, so it grows a
+  route whenever the real API does or dev mode breaks. **Every per-bank action
+  lives in one `···` menu** at the right end of the card's title row —
+  reindex, full rebuild, MCP access, remove — and the card carries no buttons
+  of its own. That row of buttons was what pinned the column's width from
+  both sides (under 287px it wrapped, over 311px the document ended up
+  narrower than the file list); with only a glyph to fit, the constraint is
+  gone and every card is four lines shorter. Removal is the only irreversible
+  action here, and its dialog leads with the **token**, not the megabytes:
+  the index rebuilds, the token is minted and cannot be reissued.
 
 Faces:
 

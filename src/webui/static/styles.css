@@ -306,6 +306,118 @@ h2 {
 
 .modal-error[hidden] { display: none; }
 
+/* ---- destructive action ------------------------------------------------
+   Red, and only ever on the button that actually destroys something. The
+   colour is the one already in use for errors, so nothing new has to be
+   learned to read it. */
+
+.btn-danger {
+  background: #6b2b28;
+  border-color: #8a3a35;
+  color: #f7ded9;
+}
+
+.btn-danger:hover:not(:disabled) { background: #7d322e; border-color: #a1443e; }
+
+/* ---- per-bank menu -----------------------------------------------------
+   Fixed rather than absolute: the bank list scrolls in its own pane, and an
+   absolutely-positioned menu would be clipped by that pane's overflow. */
+
+.menu {
+  position: fixed;
+  z-index: 40;
+  padding: 4px;
+  white-space: nowrap;
+  background: var(--bg-pane);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, .45);
+}
+
+.menu[hidden] { display: none; }
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover { background: var(--bg-hover); }
+.menu-item.is-danger { color: #f0958c; }
+.menu-item.is-danger:hover { background: #3a2020; }
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 5px;
+  background: var(--line);
+}
+
+/* `auto` on the left margin is what puts this at the far end of the title
+   row, past however many badges the bank happens to carry. */
+.btn-menu {
+  margin-left: auto;
+  padding: 0 7px 3px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 1px;
+}
+
+/* ---- removal dialog ----------------------------------------------------
+   Two columns so the loss and the survival read as a pair. What is lost is
+   the token, not the index, and the layout should not bury that. */
+
+.rm-lead { margin: 0; }
+
+.rm-effects {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 2px 0 4px;
+}
+
+.rm-effects dt {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rm-effects dt.is-loss { color: var(--err); }
+.rm-effects dt.is-safe { color: var(--ok); }
+
+.rm-effects dd {
+  margin: 0;
+  color: var(--fg-dim);
+}
+
+.rm-effects code {
+  font-family: var(--mono);
+  color: var(--fg);
+  word-break: break-all;
+}
+
+.rm-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px 9px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.rm-check input { margin: 2px 0 0; flex: 0 0 auto; }
+
 /* ---- folder browser inside the modal ---------------------------------- */
 
 .fs-label {
@@ -678,15 +790,10 @@ h2 {
   color: var(--fg-dim);
 }
 
-/* `wrap` is load-bearing, not defensive polish: `.btn` is `white-space: nowrap`,
-   so a label that does not fit cannot shrink — without wrapping the row would
-   overflow the card at the narrow breakpoint instead. */
-.bank-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 7px;
-}
+/* `.bank-actions` lived here: a wrapping row of buttons along the bottom of
+   every card. Every action moved into the `···` menu in the title row, which
+   took four lines of height off each card and freed the column's width — the
+   buttons were what pinned it between 287px and 311px. */
 
 .bank-error {
   margin-top: 6px;

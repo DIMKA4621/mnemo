@@ -1194,10 +1194,10 @@ def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
     # reverse (what this used to do) removed the bank from banks.json and
     # THEN failed to delete the file, leaving a 4 MB orphan with nothing
     # pointing at it and an `internal` error on screen.
+    q = _queue()
     if drop_index:
         # Nothing of ours may hold the file. Readers are already
         # request-scoped; the worker is not, so quiet the bank first.
-        q = _queue()
         if q is not None and not q.drop_bank(bank.id):
             # Nothing was changed, so let the bank work again — otherwise a
             # refused removal would leave it permanently frozen.
@@ -1225,6 +1225,16 @@ def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
 
     registry.remove(bank.id, drop_index=False)
     _bank_failed.pop(bank.id, None)
+    # The cancellation has to be lifted on the way out, and the reason is that
+    # a bank id is DERIVED (sha1 of the root), not minted: register the same
+    # folder again and it comes back with the same id. `drop_bank` was only
+    # ever lifted on the failure paths above, so a successful removal left
+    # that id in `_cancelled` for the life of the process -- and `enqueue`
+    # answers a cancelled bank by returning a task id and dropping the task.
+    # A re-added folder therefore reported "queued 1 task(s)", indexed
+    # nothing, and sat at `empty` with an empty queue and an empty log.
+    if q is not None:
+        q.resume_bank(bank.id)
     hub.publish("bank_removed", {"bank_id": bank.id}, bank.id)
     return {"ok": True, "index_removed": bool(drop_index)}
 

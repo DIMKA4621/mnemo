@@ -986,6 +986,71 @@ def test_adopted_project_discovery() -> None:
                   _FAKE_TOKEN not in proj.command())
 
 
+def test_removal_lifts_the_queue_cancellation() -> None:
+    """Removing a bank must not poison the next bank at the same root.
+
+    Found the first time the cabinet could remove a bank at all: remove one,
+    re-register the same folder, and it indexed nothing. Status `empty`,
+    queue depth 0, an empty index log, and `reindex` cheerfully answering
+    "queued 1 task(s)".
+
+    The mechanism is that a bank id is DERIVED — sha1 of the canonical root
+    — so the same folder always comes back with the same id. `drop_bank`
+    puts that id in the queue's `_cancelled` set to quiet the worker before
+    the index file is unlinked, and `enqueue` answers a cancelled bank by
+    returning a task id and dropping the task on the floor. Every failure
+    path lifted the cancellation; the success path did not, so the id stayed
+    cancelled for the life of the process and the next bank inherited it.
+    """
+    print("\n=== removal lifts the queue cancellation ===")
+
+    from src import api, workqueue
+
+    bank_id = "0123456789abcdef"
+    made = [0]
+
+    def bulk() -> object:
+        made[0] += 1
+        return workqueue.Task(id=f"t{made[0]}", bank_id=bank_id, kind="bulk",
+                              priority=workqueue.Priority.NORMAL,
+                              trigger="api")
+
+    workqueue.resume_bank(bank_id)          # start from a known state
+    workqueue.enqueue(bulk())
+    check("a live bank accepts work", workqueue.depth(bank_id) > 0)
+    workqueue.clear()
+
+    workqueue.drop_bank(bank_id)
+    workqueue.enqueue(bulk())
+    check("a cancelled bank silently drops work",
+          workqueue.depth(bank_id) == 0)
+    check("...which is exactly why it must be lifted",
+          workqueue.is_cancelled(bank_id))
+
+    # What `api_remove_bank` does on its way out, and the assertion is that
+    # it does it at all: before the fix, only the two failure paths did.
+    workqueue.resume_bank(bank_id)
+    check("resume_bank lifts it", not workqueue.is_cancelled(bank_id))
+    workqueue.enqueue(bulk())
+    check("a re-registered bank at the same root indexes again",
+          workqueue.depth(bank_id) > 0)
+    workqueue.clear()
+
+    # The guard that makes this a regression test rather than a description
+    # of the queue: the removal endpoint must reach `resume_bank` on the
+    # success path, not only when it refuses.
+    import inspect
+
+    source = inspect.getsource(api.api_remove_bank)
+    tail = source.split("registry.remove(")[-1]
+    check("api_remove_bank lifts the cancellation after removing the bank",
+          "resume_bank" in tail,
+          "resume_bank is only reached on the failure paths")
+    check("`q` is resolved outside the drop_index branch",
+          source.index("q = _queue()") < source.index("if drop_index:"),
+          "q would be undefined when drop_index=False")
+
+
 def test_scaffold_gitignore() -> None:
     """The plain branch: a literal token means git must not carry the file."""
     with tempfile.TemporaryDirectory(prefix="mnemo ignore ") as raw:
@@ -1479,6 +1544,7 @@ def main() -> int:
     test_scaffold_renames_the_legacy_key()
     test_memory_rule_refresh()
     test_adopted_project_discovery()
+    test_removal_lifts_the_queue_cancellation()
     test_scaffold_gitignore()
     test_scaffold_refuses_a_tracked_file()
     test_git_index_probe()

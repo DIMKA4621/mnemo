@@ -531,6 +531,40 @@ class Handler(BaseHTTPRequestHandler):
     def do_HEAD(self) -> None:  # noqa: N802 - stdlib name
         self.do_GET()
 
+    def do_DELETE(self) -> None:  # noqa: N802 - stdlib name
+        parsed = urlparse(self.path)
+        if not self.authorised():
+            self.fail(401, "unauthorized", "missing or invalid token")
+            return
+        if not parsed.path.startswith("/api/banks/"):
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+
+        ref = unquote(parsed.path[len("/api/banks/"):])
+        bank = find_bank(ref)
+        if not bank:
+            self.fail(404, "bank_not_found", "no bank matches", {"ref": ref})
+            return
+
+        # `drop_index` defaults to true, exactly as the real endpoint does.
+        query = parse_qs(parsed.query)
+        drop = (query.get("drop_index", ["true"])[0] or "true").lower() != "false"
+
+        # The one failure the dialog has to render in place. A fixture cannot
+        # hold a real file lock, so a bank still indexing stands in for it —
+        # that is the same condition the backend refuses on, and it keeps the
+        # error path reachable in dev.
+        if bank.get("indexing") or bank.get("queued"):
+            self.fail(409, "index_locked",
+                      f"bank {bank['name']!r} is still being indexed; "
+                      f"try again in a moment", {"bank_id": bank["id"]})
+            return
+
+        with _lock:
+            BANKS[:] = [b for b in BANKS if b["id"] != bank["id"]]
+        broadcast("bank_removed", bank["id"], {"bank_id": bank["id"]})
+        self.json_out(200, {"ok": True, "index_removed": drop})
+
     def do_POST(self) -> None:  # noqa: N802 - stdlib name
         parsed = urlparse(self.path)
         if not parsed.path.startswith("/api/"):
