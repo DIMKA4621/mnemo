@@ -658,6 +658,7 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/status":
             self.json_out(200, {
                 "service": {"version": SERVICE_VERSION, "pid": 0,
+                            "host": self.server.server_address[0],
                             "port": self.server.server_port,
                             "started_at": datetime.fromtimestamp(
                                 STARTED_AT, timezone.utc).astimezone().isoformat(

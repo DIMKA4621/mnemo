@@ -135,14 +135,19 @@ def _check_mcp_shape(entry: dict, *, placeholders: bool) -> None:
           detail=str(sorted(entry)))
 
     url = entry.get("url")
-    check(
-        "MCP url is loopback",
-        isinstance(url, str)
-        and re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\]):\S+", url)
-        is not None,
-        detail=str(url),
-    )
     url = url if isinstance(url, str) else ""
+    if placeholders:
+        # The host is a variable here too, so there is no literal to test
+        # against — the named-placeholder check below is what holds the shape.
+        check("template url's host is a placeholder",
+              url.startswith("http://{{MNEMO_HOST}}:"), detail=url)
+    else:
+        check(
+            "MCP url is loopback",
+            re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\]):\S+", url)
+            is not None,
+            detail=str(url),
+        )
 
     # **No path segment, in either form.** The token identifies the bank, so a
     # segment would be a second thing saying which bank — free to disagree
@@ -160,7 +165,7 @@ def _check_mcp_shape(entry: dict, *, placeholders: bool) -> None:
         # the contract between `.mcp.json.template`, `.mcp.env` and the sed
         # call in `mcp-setup.sh`, and a rename that only one of the two
         # follows produces a URL that is valid and points nowhere.
-        for var in ("{{MNEMO_PORT}}", "{{MNEMO_TOKEN}}"):
+        for var in ("{{MNEMO_HOST}}", "{{MNEMO_PORT}}", "{{MNEMO_TOKEN}}"):
             check(f"template url carries {var}", var in url, detail=url)
         check(
             "template url holds no literal secret",
@@ -604,14 +609,28 @@ def test_scaffold_drops_the_bank_segment() -> None:
         entry = (json.loads(plain.get(".mcp.json.template", "{}"))
                  .get("mcpServers", {}).get(_INSTANCE, {}))
         _check_mcp_shape(entry, placeholders=True)
-        # Nothing to add and nothing it is allowed to remove, so it plans no
-        # write to either file at all — and MNEMO_BANK is still on disk.
-        check("a plain init does NOT touch .mcp.env or mcp-setup.sh",
-              ".mcp.env" not in plain and "mcp-setup.sh" not in plain,
-              detail=str(sorted(plain)))
+        # It adds what the rewritten URL now needs, and only that. `MNEMO_HOST`
+        # is not optional here: the URL this same run plans carries
+        # `{{MNEMO_HOST}}`, and a placeholder with no variable behind it and no
+        # `sed -e` line to expand it passes through into the generated
+        # `.mcp.json` verbatim while `mcp-setup.sh` still exits 0 — the silent
+        # half-write this whole layer exists to prevent.
+        check("a plain init adds MNEMO_HOST to .mcp.env",
+              "MNEMO_HOST=" in plain.get(".mcp.env", ""),
+              detail=plain.get(".mcp.env", ""))
+        check("a plain init adds MNEMO_HOST to .mcp.env.example",
+              "MNEMO_HOST=" in plain.get(".mcp.env.example", ""),
+              detail=plain.get(".mcp.env.example", ""))
+        check("a plain init adds the MNEMO_HOST sed line",
+              "{{MNEMO_HOST}}" in plain.get("mcp-setup.sh", ""),
+              detail=plain.get("mcp-setup.sh", ""))
+        # Adding is the whole of it: the retired variable is still there,
+        # because a plain run deletes nothing. That is the property being
+        # guarded, and it did not change when a variable was added.
         check("MNEMO_BANK survives a plain init",
-              "MNEMO_BANK" in _read(proj2 / ".mcp.env")
-              and "{{MNEMO_BANK}}" in _read(proj2 / "mcp-setup.sh"))
+              "MNEMO_BANK" in plain.get(".mcp.env", _read(proj2 / ".mcp.env"))
+              and "{{MNEMO_BANK}}" in plain.get(
+                  "mcp-setup.sh", _read(proj2 / "mcp-setup.sh")))
 
         # `--migrate` is what prunes.
         written = {p.name: t for p, t in

@@ -1298,6 +1298,21 @@ function servicePort() {
   return window.location.protocol === 'https:' ? 443 : 80;
 }
 
+/**
+ * The host the service is bound to — from `/api/status`, not from the address
+ * bar.
+ *
+ * `location.hostname` answers a different question: how *this browser* reached
+ * the service. On the default loopback bind the two agree, and on any other
+ * they need not — `localhost` and a LAN address both work here while only one
+ * of them is what the service was told to bind. The snippet is going into
+ * someone else's config, so it should carry the binding.
+ */
+function serviceHost() {
+  return (state.service && state.service.host) || window.location.hostname ||
+         '127.0.0.1';
+}
+
 function maskToken(value) {
   return '•'.repeat(value.length);
 }
@@ -1444,7 +1459,7 @@ function tokenSnippets() {
     return [{
       caption: 'Для ~/.claude.json — злити з наявним «mcpServers»',
       secret: true,
-      build: (t) => mcpDocument('http://127.0.0.1:' + servicePort() +
+      build: (t) => mcpDocument('http://' + serviceHost() + ':' + servicePort() +
                                 '/mcp?token=' + t),
     }];
   }
@@ -1452,13 +1467,14 @@ function tokenSnippets() {
     {
       caption: 'Для .mcp.json.template — злити з наявним «mcpServers»',
       secret: false,
-      build: () => mcpDocument('http://127.0.0.1:{{MNEMO_PORT}}' +
+      build: () => mcpDocument('http://{{MNEMO_HOST}}:{{MNEMO_PORT}}' +
                                '/mcp?token={{MNEMO_TOKEN}}'),
     },
     {
       caption: 'Рядки для .mcp.env',
       secret: true,
-      build: (t) => 'MNEMO_PORT=' + servicePort() + '\n' +
+      build: (t) => 'MNEMO_HOST=' + serviceHost() + '\n' +
+                    'MNEMO_PORT=' + servicePort() + '\n' +
                     'MNEMO_TOKEN=' + t,
     },
   ];

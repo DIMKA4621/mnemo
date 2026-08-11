@@ -103,6 +103,13 @@ def _api_port() -> str:
     )
 
 
+def _api_host() -> str:
+    return str(
+        getattr(config, "API_HOST", None)
+        or os.environ.get("MNEMO_API_HOST", "127.0.0.1")
+    )
+
+
 def _mcp_server(token: str) -> dict:
     """The v3 MCP entry (§10.4), written straight into a `.mcp.json`.
 
@@ -131,7 +138,7 @@ def _mcp_server(token: str) -> dict:
     """
     return {
         "type": "http",
-        "url": f"http://127.0.0.1:{_api_port()}/mcp?token={token}",
+        "url": f"http://{_api_host()}:{_api_port()}/mcp?token={token}",
     }
 
 
@@ -140,14 +147,23 @@ def _mcp_server_template(instance: str) -> dict:
 
     Shape pinned by the user-scope `project-mcp-setup` skill
     (`templates/mnemo.example`) — one URL string with a placeholder at each
-    varying position, never a URL split across files. Two placeholders now,
-    not three: `{{MNEMO_BANK}}` went with the path segment.
+    varying position, never a URL split across files.
+
+    Three placeholders: host, port, token. The host was a literal `127.0.0.1`
+    until it was not — `MNEMO_API_HOST` has always been configurable, so
+    baking the default into a git-tracked template meant the one project on a
+    differently-bound service had a value it could not override without
+    editing the template itself. A placeholder at every varying position is
+    the rule this shape exists for; the host was simply the position nobody
+    had varied yet. (`{{MNEMO_BANK}}` was a fourth and went with the path
+    segment: the token addresses the bank, so a name in the environment could
+    only ever be a second opinion.)
     """
     prefix = _var_prefix(instance)
     var = lambda name: "{{" + f"{prefix}_{name}" + "}}"  # noqa: E731
     return {
         "type": "http",
-        "url": f"http://127.0.0.1:{var('PORT')}/mcp?token={var('TOKEN')}",
+        "url": f"http://{var('HOST')}:{var('PORT')}/mcp?token={var('TOKEN')}",
     }
 
 
@@ -730,8 +746,9 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
 
 
 # The variables mnemo owns in a template project's `.mcp.env`, in the order
-# they are written.
-_ENV_VARS = ("PORT", "TOKEN")
+# they are written — one per varying position in the URL, host first because
+# that is the order they appear in it.
+_ENV_VARS = ("HOST", "PORT", "TOKEN")
 # Variables mnemo wrote in an earlier generation and now prunes. `BANK` went
 # with the URL path segment: the token addresses the bank, so a name in the
 # environment could only ever be a second opinion — and one that nothing
@@ -1406,7 +1423,7 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
     example = proj / ".mcp.env.example"
     wiring.add(example, _plan_env(
         example, wiring.log, ".mcp.env.example", prefix,
-        {"PORT": _api_port(), "TOKEN": ""},
+        {"HOST": _api_host(), "PORT": _api_port(), "TOKEN": ""},
         _ENV_EXAMPLE_COMMENT.format(instance=_INSTANCE),
         update=False, migrate=migrate,
     ))
@@ -1425,7 +1442,7 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
         _refuse_if_tracked(proj, ".mcp.env")
         wiring.add(env, _plan_env(
             env, wiring.log, ".mcp.env", prefix,
-            {"PORT": _api_port(), "TOKEN": token},
+            {"HOST": _api_host(), "PORT": _api_port(), "TOKEN": token},
             _env_comment(_INSTANCE), migrate=migrate,
         ))
     else:

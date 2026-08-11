@@ -215,9 +215,10 @@ file — identical on Linux, macOS and native Windows:
   authored is renamed rather than joined, so a project never ends up with
   two entries into one bank.
 - The literal token is the reason this one file is git-ignored rather
-  than tracked; a template project keeps `{{MNEMO_PORT}}` /
-  `{{MNEMO_TOKEN}}` in git and the values in `.mcp.env`. Portability is
-  unchanged — only what gets substituted.
+  than tracked; a template project keeps `{{MNEMO_HOST}}` /
+  `{{MNEMO_PORT}}` / `{{MNEMO_TOKEN}}` in git and the values in
+  `.mcp.env` — a placeholder at every varying position of the URL, the
+  host included. Portability is unchanged — only what gets substituted.
 
 The one logical path resolves to the platform's real launcher:
 `~/.claude/mnemo/bin/mnemo` (extensionless Bash script) on Linux/macOS,

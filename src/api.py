@@ -1655,6 +1655,12 @@ def api_status() -> dict:
         "service": {
             "version": SERVICE_VERSION,
             "pid": os.getpid(),
+            # Both halves of the address, because the cabinet builds the
+            # config snippets a project pastes and cannot read the binding
+            # from anywhere else. `location.hostname` is not the same fact:
+            # it is how *this browser* reached the service, which on a
+            # non-loopback bind is one of several working answers.
+            "host": API_HOST,
             "port": API_PORT,
             "started_at": _started_iso,
             "uptime_s": round(time.time() - _started_at, 1),
