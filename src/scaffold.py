@@ -86,8 +86,17 @@ _LEGACY_INSTANCE = "mnemo"
 # `sed -e` line in `mcp-setup.sh` across every adopted project -- for no
 # readability gain, and straight into the one failure that is silent: a
 # placeholder with no matching `-e` line passes through verbatim while the
-# script still exits 0. A *second* instance still derives its own prefix from
-# its own name, which is what `_var_prefix` is for.
+# script still exits 0.
+#
+# A *second* entry, pasted by hand from the cabinet, varies **only its token
+# variable** (`MNEMO_NOTES_TOKEN`) and shares `MNEMO_HOST` / `MNEMO_PORT`. That
+# split follows what the values describe: host and port are the service's
+# address — one backend, one answer — so a per-bank copy of them would be
+# several places to edit the day the port changes, free to disagree about a
+# single fact. A token belongs to exactly one bank, so it is the one that
+# cannot be shared: a second entry reusing `MNEMO_TOKEN` would overwrite the
+# first entry's, and whichever `.mcp.env` line came last would silently win
+# for both.
 _VAR_INSTANCE = "mnemo"
 
 

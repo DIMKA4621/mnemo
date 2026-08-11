@@ -1274,7 +1274,10 @@ const bankToken = {
   value: null,         // the real token, deliberately kept out of the DOM
   revealed: false,
   scope: 'literal',    // which config shape is on screen
-  entry: 'mnemo',      // the name the config entry will carry
+  // The name the config entry will carry. Null rather than a literal: the
+  // fallback belongs in `entryName()`, next to `DEFAULT_INSTANCE`, so there is
+  // one place that decides it.
+  entry: null,
   blocks: [],          // rendered snippets, so typing can repaint them in place
   busy: false,
   confirming: false,   // the regenerate confirmation is up
@@ -1408,9 +1411,40 @@ function defaultEntryName(name) {
     .join('')
     .replace(/[^a-z0-9]+/g, '-')
     .replace(/^-+|-+$/g, '');
-  if (!slug) return 'mnemo';
+  if (!slug || slug === 'mnemo') return DEFAULT_INSTANCE;
   // A bank already called "mnemo…" must not come out as "mnemo-mnemo…".
   return slug.startsWith('mnemo') ? slug : 'mnemo-' + slug;
+}
+
+// What `mnemo init` names the project's own memory entry, and the one name
+// whose variables stay on the bare `MNEMO_` prefix. A bank called plainly
+// `mnemo` lands here rather than on the bare legacy key: suggesting `mnemo`
+// would hand back the exact name the rename moved away from, and the next
+// `init` would rename it underneath whoever pasted it.
+const DEFAULT_INSTANCE = 'mnemo-memory';
+
+/**
+ * The token variable's name — the only one that varies per entry.
+ *
+ * `MNEMO_HOST` and `MNEMO_PORT` stay shared, and that is the point: they
+ * describe the **service**, not the bank. One backend, one address, so giving
+ * each bank its own copy would mean editing every one of them the day the
+ * port changes — a set of values free to drift out of agreement about a fact
+ * that is single.
+ *
+ * The token is the opposite: it belongs to exactly one bank and to nothing
+ * else. Handing a second bank `MNEMO_TOKEN` again would overwrite the first
+ * one's — two banks, one variable, and whichever `.mcp.env` line comes last
+ * silently wins for both.
+ *
+ * The default entry keeps the bare `MNEMO_TOKEN` it already has in every
+ * adopted project; renaming it would buy nothing and risk the silent failure.
+ */
+function tokenVar() {
+  const name = entryName();
+  if (name === DEFAULT_INSTANCE || name === 'mnemo') return 'MNEMO_TOKEN';
+  return name.replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '')
+             .toUpperCase() + '_TOKEN' || 'MNEMO_TOKEN';
 }
 
 /**
@@ -1427,7 +1461,7 @@ function sanitizeEntryName(value) {
 }
 
 function entryName() {
-  return bankToken.entry || 'mnemo';
+  return bankToken.entry || DEFAULT_INSTANCE;
 }
 
 /**
@@ -1468,14 +1502,14 @@ function tokenSnippets() {
       caption: 'Для .mcp.json.template — злити з наявним «mcpServers»',
       secret: false,
       build: () => mcpDocument('http://{{MNEMO_HOST}}:{{MNEMO_PORT}}' +
-                               '/mcp?token={{MNEMO_TOKEN}}'),
+                               '/mcp?token={{' + tokenVar() + '}}'),
     },
     {
       caption: 'Рядки для .mcp.env',
       secret: true,
       build: (t) => 'MNEMO_HOST=' + serviceHost() + '\n' +
                     'MNEMO_PORT=' + servicePort() + '\n' +
-                    'MNEMO_TOKEN=' + t,
+                    tokenVar() + '=' + t,
     },
   ];
 }
@@ -1515,15 +1549,23 @@ function templateLeadNote() {
  * what following the tab's earlier text to the letter actually produced.
  */
 function manualPasteNote() {
+  // The `sed` line names the token variable, so it has to follow the entry
+  // field like the snippets do — a note showing the previous name would be
+  // worse than a generic one, because it looks specific enough to trust.
+  bankToken.sedLine = el('code', { text: sedLineText() });
   return el('p', { className: 'tok-note' }, [
     document.createTextNode('Якщо вписуєте руками, додайте до виклику '),
     el('code', { text: 'sed' }),
-    document.createTextNode(' у mcp-setup.sh по рядку '),
-    el('code', { text: '-e "s|{{VAR}}|${VAR}|g"' }),
-    document.createTextNode(' на кожну змінну. Без цього плейсхолдер потрапляє ' +
-      'в .mcp.json дослівно, а скрипт усе одно звітує про успіх — і поломка ' +
-      'виявиться аж тоді, коли сервер мовчки не підключиться.'),
+    document.createTextNode(' у mcp-setup.sh рядок '),
+    bankToken.sedLine,
+    document.createTextNode('. Без нього плейсхолдер потрапляє в .mcp.json ' +
+      'дослівно, а скрипт усе одно звітує про успіх — і поломка виявиться аж ' +
+      'тоді, коли сервер мовчки не підключиться.'),
   ]);
+}
+
+function sedLineText() {
+  return '-e "s|{{' + tokenVar() + '}}|${' + tokenVar() + '}|g"';
 }
 
 /**
@@ -1540,11 +1582,19 @@ function refreshSnippets() {
   if (bankToken.entryHint) {
     bankToken.entryHint.textContent = entryHintText();
   }
+  if (bankToken.sedLine) {
+    bankToken.sedLine.textContent = sedLineText();
+  }
 }
 
 function entryHintText() {
+  const own = tokenVar() !== 'MNEMO_TOKEN'
+    ? ' Від неї ж походить ' + tokenVar() + ': токен належить одному банку, ' +
+      'тож другий банк у тому самому проєкті не переписує токен першого. ' +
+      'MNEMO_HOST і MNEMO_PORT спільні — це адреса служби, не банку.'
+    : '';
   return 'За нею запис видно серед інших mcp-серверів; вона ж стає префіксом ' +
-         'імен інструментів — mcp__' + entryName() + '__search.';
+         'імен інструментів — mcp__' + entryName() + '__search.' + own;
 }
 
 /**
@@ -1706,6 +1756,7 @@ function renderTokenPanel() {
   // The nodes `refreshSnippets` writes into are about to be replaced.
   bankToken.blocks = [];
   bankToken.entryHint = null;
+  bankToken.sedLine = null;
   if (!bank) return;
 
   bankToken.title.textContent = 'Доступ MCP — ' + bank.name;
