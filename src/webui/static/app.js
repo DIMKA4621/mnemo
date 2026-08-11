@@ -1421,27 +1421,39 @@ function entryName() {
  * `build` takes the token to print, so one definition serves both the masked
  * line on screen and the full text a copy button produces. Nothing here needs
  * escaping any more: the token identifies the bank on its own, so the URL is
- * the bare `/mcp` endpoint and the bank name never enters it.
+ * the bare `/mcp` endpoint and the bank name never enters it — and the JSON
+ * shapes go through `JSON.stringify`, which owns the quoting outright.
  *
  * Both `entryName()` and `servicePort()` are read inside `build` rather than
  * captured around it, so a spec rendered once still follows the entry field as
  * it is typed into.
  */
+function mcpDocument(url) {
+  // Built as an object and stringified rather than concatenated, so it cannot
+  // come out as invalid JSON and the quoting is never this code's problem.
+  // The whole `mcpServers` wrapper is shown, not just the one entry: a bare
+  // `"name": {…}` line is only meaningful to someone who already knows where
+  // it goes, and this dialog is read exactly by the people who do not.
+  const servers = {};
+  servers[entryName()] = { type: 'http', url: url };
+  return JSON.stringify({ mcpServers: servers }, null, 2);
+}
+
 function tokenSnippets() {
   if (bankToken.scope === 'user') {
     return [{
-      caption: 'Запис у «mcpServers» файла ~/.claude.json',
+      caption: 'Для ~/.claude.json — злити з наявним «mcpServers»',
       secret: true,
-      build: (t) => '"' + entryName() + '": {"type": "http", "url": ' +
-                    '"http://127.0.0.1:' + servicePort() + '/mcp?token=' + t + '"}',
+      build: (t) => mcpDocument('http://127.0.0.1:' + servicePort() +
+                                '/mcp?token=' + t),
     }];
   }
   return [
     {
-      caption: 'Фрагмент для .mcp.json.template',
+      caption: 'Для .mcp.json.template — злити з наявним «mcpServers»',
       secret: false,
-      build: () => '"' + entryName() + '": {"type": "http", "url": ' +
-                   '"http://127.0.0.1:{{MNEMO_PORT}}/mcp?token={{MNEMO_TOKEN}}"}',
+      build: () => mcpDocument('http://127.0.0.1:{{MNEMO_PORT}}' +
+                               '/mcp?token={{MNEMO_TOKEN}}'),
     },
     {
       caption: 'Рядки для .mcp.env',
