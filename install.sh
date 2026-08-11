@@ -31,6 +31,24 @@ usage() {
 
 say() { printf 'install.sh: %s\n' "$1"; }
 
+file_size() {
+	# One file's size in bytes. `stat` takes different flags on GNU and BSD,
+	# and `wc -c` needs neither -- it just has to read the file.
+	wc -c < "$1" 2>/dev/null | tr -d ' ' || printf '0'
+}
+
+human() {
+	# Bytes -> a size a person reads. No `numfmt`: it is GNU-only and this
+	# has to work on macOS too.
+	awk -v b="${1:-0}" 'BEGIN {
+		split("B KiB MiB GiB TiB", u, " ")
+		i = 1
+		while (b >= 1024 && i < 5) { b /= 1024; i++ }
+		if (i == 1) printf "%d %s\n", b, u[i]
+		else printf "%.1f %s\n", b, u[i]
+	}'
+}
+
 # --- locate the repo (this script's own directory) ---------------------
 SRC_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -207,6 +225,30 @@ mkdir -p \
 	"$MNEMO_HOME/bin"
 say "engine home: $MNEMO_HOME"
 
+# --- 1a. is this a v2 engine? ------------------------------------------
+# Recognised by what v2 never had: a banks registry. v2 indexed one project
+# per invocation and named the file sha1(PROJECT root); v3 registers banks
+# and names it sha1(BANK root), so every v2 index is orphaned the moment v3
+# runs -- never opened again, and carrying no `meta` table to say whose it
+# was. Absent banks.json plus index files is therefore unambiguous, and safe:
+# with no registry, no index can belong to a live bank.
+#
+# Measured before the mirror, since the mirror is what makes this v3. Acted
+# on after the launcher exists.
+LEGACY_INDEXES=0
+LEGACY_BYTES=0
+if [ ! -f "$MNEMO_HOME/state/banks.json" ]; then
+	for db in "$MNEMO_HOME"/state/*.db; do
+		[ -f "$db" ] || continue
+		case "$(basename "$db")" in service.db) continue ;; esac
+		LEGACY_INDEXES=$((LEGACY_INDEXES + 1))
+		LEGACY_BYTES=$((LEGACY_BYTES + $(file_size "$db")))
+	done
+fi
+if [ "$LEGACY_INDEXES" -gt 0 ]; then
+	say "found a v2 engine: $LEGACY_INDEXES index file(s), $(human "$LEGACY_BYTES")"
+fi
+
 # --- 2. stop -> refresh -> start ---------------------------------------
 # A running backend holds the venv open; it must be down before the mirror,
 # and it comes back only if it was up to begin with.
@@ -268,6 +310,21 @@ exec env PYTHONPATH="$HOME_DIR" MNEMO_HOME="$HOME_DIR" \
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 say "launcher written: $LAUNCHER"
+
+# --- 5a. retire the v2 indexes -----------------------------------------
+# Not a user-scope action -- it only touches the state directory of the home
+# being installed -- so it runs for a custom --home too. `clean-orphans`
+# rather than an `rm` loop: it is the tested path, it refuses service.db, and
+# it re-reads the registry at the moment of deletion instead of trusting a
+# listing taken earlier.
+if [ "$LEGACY_INDEXES" -gt 0 ]; then
+	say "v2 keyed indexes by project root, v3 keys them by bank root:"
+	say "  none of them can be reused, and nothing else will ever open them."
+	"$LAUNCHER" clean-orphans --yes \
+		|| say "could not remove the v2 indexes; run '$LAUNCHER clean-orphans' by hand"
+	say "v2 registered no banks, so every project needs 'mnemo init' again."
+	say "the check below lists the ones this machine can still find."
+fi
 
 # --- 6. shell profile: export the token, register `mnemo` --------------
 # User-scope registrations belong to the real engine only: a custom --home is

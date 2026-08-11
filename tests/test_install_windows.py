@@ -238,6 +238,40 @@ def main() -> int:
         run([str(launcher), "--help"])
         ok("-DepsOnly refreshes packages only")
 
+        # A v2 engine, recognised by what v2 never had: a banks registry.
+        # Every v2 index is orphaned the instant v3 runs -- v2 keyed the file
+        # by PROJECT root, v3 by BANK root -- and no v2 database carries a
+        # `meta` table, so the path cannot be recovered from inside either.
+        # Nothing will ever open them again, so the installer retires them.
+        assert not (engine / "state" / "banks.json").exists()
+        legacy = [engine / "state" / f"{'ab12cd34ef567890'[:8]}{n:08x}.db"
+                  for n in range(3)]
+        for path in legacy:
+            path.write_bytes(b"SQLite format 3\x00" + b"\x00" * 512)
+        stray_wal = legacy[0].with_name(legacy[0].name + "-wal")
+        stray_wal.write_bytes(b"\x00" * 32)
+
+        upgraded = run(install)
+        assert "found a v2 engine: 3 index file(s)" in upgraded.stdout, upgraded.stdout
+        ok("installer recognises a v2 engine by its missing registry")
+
+        assert not any(p.exists() for p in legacy), \
+            [str(p) for p in legacy if p.exists()]
+        ok("v2 indexes are retired by the upgrade")
+
+        assert not stray_wal.exists()
+        ok("a v2 index takes its -wal sibling with it")
+
+        assert state_sentinel.read_text(encoding="utf-8") == "state"
+        assert cache_sentinel.read_text(encoding="utf-8") == "cache"
+        ok("retiring v2 indexes spares everything else in state/")
+
+        # And it must be a one-time event: with the indexes gone there is
+        # nothing to detect, so an ordinary reinstall says nothing about v2.
+        quiet = run(install)
+        assert "found a v2 engine" not in quiet.stdout, quiet.stdout
+        ok("a clean engine reports no v2 leftovers")
+
         # An isolated -InstallHome must not reach into user scope: no logon
         # task, no profile edit, no environment variable.
         #

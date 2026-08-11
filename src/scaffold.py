@@ -5,6 +5,11 @@ This is a SAFE primitive, not a judgement call. It only ever:
     `.claude/memory/MEMORY.md` anchor and the binding memory rule
     `.claude/rules/mnemo-memory.md` (never invents memory structure,
     never overwrites a curated or human-authored file);
+  * refreshes `.claude/rules/mnemo-memory.md` in place when its bytes hash
+    to a redaction mnemo itself wrote earlier — that text is mnemo's own and
+    has grown, and a project adopted last month would otherwise keep last
+    month's rules forever. Any digest that is not one of ours means a person
+    edited the file, and it is then left exactly as it is;
   * merges strictly ADDITIVELY into the project's MCP wiring and
     `.claude/settings.json` (adds only mnemo's own keys/hook groups, never
     touches or reorders foreign content);
@@ -40,6 +45,7 @@ a git-tracked file.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -354,6 +360,78 @@ Three answers mean three different things, and they are not interchangeable:
   force-push, rebase and amend. Never leave memory uncommitted behind a code
   commit.
 """
+
+
+# Every redaction of `_MEMORY_RULE` this program has ever written, by digest.
+#
+# The rule is mnemo's own text, and it has grown: the "search is the default,
+# not a trigger" section did not exist when the first projects were adopted.
+# Seeding it only when absent — what this used to do — meant a project got
+# whichever wording happened to be current on the day it was adopted and then
+# kept it forever, with nothing anywhere saying it was out of date.
+#
+# So `init` may replace the file, but only when it can prove the bytes are
+# still exactly one of ours. An unrecognised digest means a person edited it,
+# and their edit outranks the update.
+#
+# Two digests per redaction because the writer changed. Up to `_write`, the
+# file went out through `Path.write_text` with no `newline=`, so a project
+# adopted on Windows has CRLF where a Linux one has LF — same text, different
+# bytes. The current redaction's CRLF form is added at the bottom for the same
+# reason: it is ours, it is stale only in its line endings, and rewriting it
+# normalises the file.
+#
+# To regenerate after changing the rule text: hash the OLD constant (LF and
+# CRLF) and add both lines here. `git show <commit>:src/scaffold.py` parsed
+# with `ast` gets any past redaction back — the constant has never been built
+# by formatting, so what is in the source is exactly what reached disk.
+_RULE_SUPERSEDED: tuple[str, ...] = (
+    # v1 — 8312de3 feat: team-lead adoption model
+    "3047e5574a62de5483bd906f0e44f667f14671683e0c67ab6b3edd363b891f13",
+    "e1337da2f293fd442ad4d3d8af57f32060868ef092018343899d16c6f29b994e",
+    # v2 — 5d5fab3 docs: memory rule rides with the commit
+    "0403054c873ec08d01fa3a89990f6d544b936db146dab1403781c035dc427937",
+    "11a5d4937e01ca5722205ca37ae3f87e489785e4cf807520ee7bad962e14db2f",
+    # v3 — 4b80845 feat(service): phase 4, faces become thin clients
+    "36bee6bcfde19122d96bd211ae3b1e702000a791736dc7dade4174ffbbd63769",
+    "6b5ff2bdf2dc318a0d7f7cbb978860f0f87dc5c6783f2ee82f5e38ad1fefae73",
+    # v4 — 307c5bf feat!: make MCP the primary face
+    "a175f81f7f29c7f3862d824fb0507051d6d2e3b0909978afd7cbc14c816f9261",
+    "e8ecd514ce782bc7ba8b6c79d3ca5b91a674fe98e1a11cd7e097208eda714e38",
+    # v5 — 895208b refactor(mcp)!: drop the memory_ prefix
+    "83fe733cb9ccddb197c3643d47a7235c077701c6485da211d4950b7597726a8a",
+    "21439e14abc870183ed5477c40da74cf1c5b91d13058455a4270fdb18217760e",
+)
+# v6 — 42351ff feat!: delete the hook seeds — is the current text, so both of
+# its digests are computed from the constant rather than listed. A literal
+# would be free to fall out of step with the text it claims to describe.
+
+
+def _digest(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+_RULE_CURRENT = _digest(_MEMORY_RULE)
+_RULE_ANCESTORS: frozenset[str] = frozenset(
+    _RULE_SUPERSEDED + (_digest(_MEMORY_RULE.replace("\n", "\r\n")),)
+)
+
+
+def _rule_state(path: Path) -> str:
+    """Classify an existing `mnemo-memory.md`: current, stale or edited.
+
+    Read as bytes and hashed as bytes: the question is what is literally on
+    disk, so no decoding and no newline translation may sit in between.
+    """
+    try:
+        digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return "edited"          # unreadable is not ours to overwrite
+    if digest == _RULE_CURRENT:
+        return "current"
+    if digest in _RULE_ANCESTORS:
+        return "stale"
+    return "edited"
 
 
 class _Refuse(Exception):
@@ -1082,7 +1160,186 @@ def _seed_tree(claude: Path, log: list[str]) -> None:
         _write(rule, _MEMORY_RULE)
         log.append(f"  created              {rule}")
     else:
-        log.append(f"  kept                 {rule} (already present)")
+        # The one file here mnemo may rewrite, and only while the bytes prove
+        # nobody else has touched it. `MEMORY.md` above is curated content and
+        # is never reconsidered; this is mnemo's own instruction text, and a
+        # project left on an old redaction is a project running old rules.
+        state = _rule_state(rule)
+        if state == "current":
+            log.append(f"  kept                 {rule} (already current)")
+        elif state == "stale":
+            _write(rule, _MEMORY_RULE)
+            log.append(f"  updated              {rule} (superseded redaction)")
+        else:
+            log.append(
+                f"  kept                 {rule} (edited here — left alone; "
+                f"mnemo's current text differs)"
+            )
+
+
+class AdoptedProject:
+    """A project on this machine that carries mnemo wiring.
+
+    `migrate` records whether `init` alone can fix it. A stdio entry or a
+    retired hook is a shape mnemo will not rewrite unasked (§11.3), so those
+    need `--migrate`; anything else is mnemo's own current-generation wiring
+    and a plain `init` re-points it.
+    """
+
+    __slots__ = ("root", "findings", "migrate", "token")
+
+    def __init__(self, root: Path, findings: list[str], migrate: bool,
+                 token: str | None = None) -> None:
+        self.root = root
+        self.findings = findings
+        self.migrate = migrate
+        # The literal token the project presents, when it writes one at all.
+        # `None` covers both "no literal `.mcp.json`" and the template layer,
+        # where the file holds `{{MNEMO_TOKEN}}` and the real value lives in
+        # `.mcp.env` — nothing here should go reading a secrets file.
+        self.token = token
+
+    def command(self) -> str:
+        flag = " --migrate" if self.migrate else ""
+        return f'mnemo init{flag} --root "{self.root}"'
+
+
+def known_project_roots() -> list[Path]:
+    """Absolute project paths Claude Code keeps a per-project record for.
+
+    Read from `~/.claude.json`, whose `projects` object is **keyed by the
+    absolute path**. The sibling `~/.claude/projects/` directory is the
+    obvious-looking source and is unusable: its folder names flatten `:`,
+    `\\` and `_` all to `-`, so `E--work-projects-other-mnemo` cannot be
+    decoded back to a path — the separators are gone, not encoded.
+
+    Best-effort by design. This backs a diagnostic, and a machine with no
+    Claude Code config is not an error; it just has nothing to list.
+    """
+    path = Path.home() / ".claude.json"
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    projects = doc.get("projects")
+    if not isinstance(projects, dict):
+        return []
+    roots, seen = [], set()
+    for key in projects:
+        if not isinstance(key, str) or not key.strip():
+            continue
+        root = Path(key)
+        if not root.is_absolute():
+            continue
+        try:
+            if not root.is_dir():
+                continue                     # moved, deleted, unplugged drive
+            canonical = root.resolve()
+        except OSError:
+            continue
+        # The same tree reaches this list under both separators (`S:/x` and
+        # `S:\x` are separate keys in that file), so canonicalise before
+        # deduplicating or the same project is reported twice.
+        if canonical in seen:
+            continue
+        seen.add(canonical)
+        roots.append(canonical)
+    return roots
+
+
+def _mnemo_servers(path: Path) -> list[str]:
+    """What mnemo-authored MCP entries a config file holds, described."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    servers = doc.get("mcpServers")
+    if not isinstance(servers, dict):
+        return []
+    found = []
+    for key, entry in servers.items():
+        legacy = _is_legacy_mcp(entry)
+        if legacy:
+            found.append(f"{path.name}: {key} is a {legacy} stdio entry")
+        elif _is_mnemo_http(entry) and key in (_INSTANCE, _LEGACY_INSTANCE):
+            found.append(f"{path.name}: {key} points at this machine's service")
+    return found
+
+
+_TOKEN_IN_URL = re.compile(r"[?&]token=([0-9a-fA-F]{32,})")
+
+
+def _project_token(path: Path) -> str | None:
+    """The literal bank token a `.mcp.json` presents, if it holds one.
+
+    Only a real credential is returned: the regex wants hex, so the template
+    layer's `{{MNEMO_TOKEN}}` and `${MNEMO_TOKEN}` never match. That is the
+    point — a placeholder says nothing about whether the project can reach
+    its bank, and the value behind it sits in `.mcp.env`, which is a secrets
+    file and not something a diagnostic should open.
+    """
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    servers = doc.get("mcpServers")
+    if not isinstance(servers, dict):
+        return None
+    for key, entry in servers.items():
+        if key not in (_INSTANCE, _LEGACY_INSTANCE) or not _is_mnemo_http(entry):
+            continue
+        match = _TOKEN_IN_URL.search(entry.get("url", ""))
+        if match:
+            return match.group(1)
+    return None
+
+
+def _mnemo_hooks(path: Path) -> list[str]:
+    """Retired mnemo hooks still wired in a settings file."""
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return []
+    hooks = doc.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    found = []
+    for event, subcmd in _RETIRED_HOOKS:
+        for group in hooks.get(event, []) if isinstance(hooks.get(event), list) else []:
+            if not isinstance(group, dict):
+                continue
+            for hook in group.get("hooks", []) if isinstance(group.get("hooks"), list) else []:
+                if isinstance(hook, dict) and _is_mnemo_cmd(hook.get("command"), subcmd):
+                    found.append(f"settings.json: {event} -> {subcmd} hook")
+    return found
+
+
+def adopted_projects(roots: Iterable[Path] | None = None) -> list[AdoptedProject]:
+    """Every known project carrying mnemo wiring, with the command that fixes it.
+
+    The caller after a v2→v3 engine upgrade needs this because **v2 kept no
+    registry**: nothing on disk records which projects used it. The indexes
+    cannot answer it either — a v2 database has no `meta` table at all, and
+    the filename is `sha1(root)`, which does not invert.
+
+    Reports; never writes. Whether to run the printed commands is the user's
+    call, in a working tree that is theirs and may well be dirty.
+    """
+    out = []
+    for root in known_project_roots() if roots is None else roots:
+        findings, migrate = [], False
+        for name in (".mcp.json", ".mcp.json.template"):
+            for note in _mnemo_servers(root / name):
+                findings.append(note)
+                if "stdio" in note:
+                    migrate = True
+        for note in _mnemo_hooks(root / ".claude" / "settings.json"):
+            findings.append(note)
+            migrate = True
+        if findings:
+            out.append(AdoptedProject(root, findings, migrate,
+                                      _project_token(root / ".mcp.json")))
+    return out
 
 
 # `bank_name_for` used to live here: it worked out which name to put in the

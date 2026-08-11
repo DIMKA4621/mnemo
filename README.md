@@ -164,6 +164,39 @@ a credential and therefore must not.
   `.mcp.json` still pointing at the superseded `/mcp/<bank>?token=…` URL.
   That URL now answers 400 rather than silently routing, and says so.
 
+  `init` also refreshes `.claude/rules/mnemo-memory.md` when the file is
+  still byte-for-byte one that mnemo wrote — the rule text has grown, and a
+  project adopted months ago would otherwise keep months-old rules with
+  nothing saying so. Edit that file and it is yours: an unrecognised digest
+  is left exactly as it is.
+
+### Coming from v2
+
+Run the installer as usual. It recognises a v2 engine by what v2 never had —
+a banks registry — and retires its indexes, which are orphaned the moment v3
+runs: v2 keyed them by *project* root, v3 keys them by *bank* root, so none
+can be reused. Nothing under a project is touched.
+
+What it will not do is edit your projects. v2 kept no registry of them, and
+the list cannot be recovered from the indexes either — the filename is
+`sha1(root)`, which does not invert, and a v2 database has no `meta` table to
+ask. So `doctor` ends with a `project wiring` section that lists every project
+this machine can still find and the exact command for each:
+
+```
+project wiring   2 of 5 project(s) need rewiring
+  mnemo init --migrate --root "/home/you/work/api"
+      .mcp.json: mnemo is a L1 stdio entry +3 more
+  mnemo init --root "/home/you/work/site"
+      no registered bank covers it
+```
+
+The same section catches a subtler case after any reinstall: the project's
+wiring is current and points at a bank that exists, but the token in it is
+from a previous life. Tokens are minted rather than derived, so a rebuilt
+registry gives the same bank a new secret — and from inside that project
+nothing shows it, the session simply finds no memory tools.
+
 Memory itself lives at **`.claude/memory/`** — `MEMORY.md` as a thin index,
 `logs/` for day notes, `topics/` one concept per file, `agents/<role>/` for
 per-role memory. Everything nests under that one root, which is why the bank

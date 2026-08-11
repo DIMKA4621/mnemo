@@ -32,14 +32,21 @@ for _stream in (sys.stdout, sys.stderr):
 
 from src import config, embedder  # noqa: E402
 from src.index import scan_bank  # noqa: E402
+from src import scaffold  # noqa: E402
 from src.scaffold import (  # noqa: E402
     _INSTANCE,
     _LEGACY_INSTANCE,
+    _MEMORY_RULE,
+    _RULE_ANCESTORS,
+    _RULE_CURRENT,
+    _RULE_SUPERSEDED,
     _Refuse,
     _git_tracked,
     _plan_mcp,
     _plan_settings,
     _plan_wiring,
+    _rule_state,
+    _seed_tree,
 )
 
 # Stands in for a real bank token: 48 hex, the shape every mnemo credential
@@ -750,6 +757,235 @@ def test_scaffold_renames_the_legacy_key() -> None:
               detail=str(servers))
 
 
+def test_memory_rule_refresh() -> None:
+    """`init` refreshes its own rule text, and only its own.
+
+    The rule is the one seeded file mnemo may rewrite: it is mnemo's own
+    instruction text and it has grown, so a project adopted months ago would
+    otherwise keep months-old rules with nothing saying so. The boundary is
+    the digest — bytes that hash to a redaction mnemo wrote are replaceable,
+    anything else is somebody's edit and outranks the update.
+    """
+    print("\n=== memory rule refresh ===")
+
+    def seed(existing: bytes | None) -> tuple[str, bytes]:
+        """Run `_seed_tree` over a project whose rule starts as `existing`."""
+        with tempfile.TemporaryDirectory() as tmp:
+            claude = Path(tmp) / "proj" / ".claude"
+            rule = claude / "rules" / "mnemo-memory.md"
+            if existing is not None:
+                rule.parent.mkdir(parents=True)
+                rule.write_bytes(existing)
+            log: list[str] = []
+            _seed_tree(claude, log)
+            line = next((ln for ln in log if "mnemo-memory.md" in ln), "")
+            return line, rule.read_bytes()
+
+    current = _MEMORY_RULE.encode("utf-8")
+
+    line, out = seed(None)
+    check("absent  -> created", "created" in line)
+    check("absent  -> exact current bytes", out == current)
+
+    line, out = seed(current)
+    check("current -> kept", "already current" in line)
+    check("current -> byte-identical", out == current)
+
+    # The current text with CRLF is an ancestor by construction: that is how
+    # every pre-`_write` Windows adoption landed. It is the one stale case
+    # this test can build without reaching into git.
+    line, out = seed(_MEMORY_RULE.replace("\n", "\r\n").encode("utf-8"))
+    check("CRLF    -> updated", "updated" in line)
+    check("CRLF    -> normalised to LF", out == current)
+    check("CRLF    -> no CR survives", b"\r" not in out)
+
+    edited = current + b"\n<!-- project-specific addition -->\n"
+    line, out = seed(edited)
+    check("edited  -> left alone", "edited here" in line)
+    check("edited  -> bytes untouched", out == edited)
+
+    line, out = seed(b"something else entirely\n")
+    check("foreign -> left alone", "edited here" in line)
+    check("foreign -> bytes untouched", out == b"something else entirely\n")
+
+    # A curated file must never be swept up by this. `MEMORY.md` carries the
+    # user's own content and is only ever created when missing.
+    with tempfile.TemporaryDirectory() as tmp:
+        claude = Path(tmp) / "proj" / ".claude"
+        index = claude / "memory" / "MEMORY.md"
+        index.parent.mkdir(parents=True)
+        index.write_text("# my notes\n", encoding="utf-8")
+        _seed_tree(claude, [])
+        check("MEMORY.md is never rewritten",
+              index.read_text(encoding="utf-8") == "# my notes\n")
+
+    # Structural guards on the digest list itself. A duplicate or a pasted
+    # current hash would not fail anything visibly: the rule would simply be
+    # rewritten with identical bytes on every run, forever.
+    check("superseded digests are distinct",
+          len(set(_RULE_SUPERSEDED)) == len(_RULE_SUPERSEDED),
+          f"{len(_RULE_SUPERSEDED)} listed, {len(set(_RULE_SUPERSEDED))} unique")
+    check("current is not listed as superseded",
+          _RULE_CURRENT not in _RULE_SUPERSEDED)
+    check("ancestors = superseded + current-CRLF",
+          len(_RULE_ANCESTORS) == len(_RULE_SUPERSEDED) + 1)
+
+    # Bind the hardcoded digests to the history they claim to describe. This
+    # is what makes the list verifiable rather than a set of magic numbers —
+    # but it needs git and this checkout, so a missing commit is reported and
+    # skipped rather than failed.
+    import ast
+    import subprocess
+
+    commits = ("8312de3", "5d5fab3", "4b80845", "307c5bf", "895208b")
+    matched, missing = 0, []
+    for commit in commits:
+        try:
+            blob = subprocess.run(
+                ["git", "show", f"{commit}:src/scaffold.py"],
+                capture_output=True, check=True,
+                cwd=Path(__file__).resolve().parent.parent,
+            ).stdout.decode("utf-8")
+        except (OSError, subprocess.CalledProcessError):
+            missing.append(commit)
+            continue
+        text = None
+        for node in ast.parse(blob).body:
+            if (isinstance(node, ast.Assign)
+                    and any(getattr(t, "id", None) == "_MEMORY_RULE"
+                            for t in node.targets)
+                    and isinstance(node.value, ast.Constant)):
+                text = node.value.value
+        if text is None:
+            missing.append(commit)
+            continue
+        with tempfile.TemporaryDirectory() as tmp:
+            for ending in ("\n", "\r\n"):
+                path = Path(tmp) / "rule.md"
+                path.write_bytes(text.replace("\n", ending).encode("utf-8"))
+                if _rule_state(path) == "stale":
+                    matched += 1
+    if missing:
+        print(f"note  history check skipped for {', '.join(missing)} "
+              f"(commit or constant not reachable from this checkout)")
+    expected = 2 * (len(commits) - len(missing))
+    if expected:
+        check("every reachable past redaction classifies as stale",
+              matched == expected, f"{matched}/{expected}")
+
+
+def test_adopted_project_discovery() -> None:
+    """Finding the projects a v2→v3 upgrade leaves stranded.
+
+    v2 kept no registry, so nothing records which projects used mnemo, and
+    the indexes cannot be asked: a v2 database has no `meta` table and its
+    filename is `sha1(root)`, which does not invert. Claude Code's own
+    `~/.claude.json` is the only source that holds absolute project paths.
+    """
+    print("\n=== adopted project discovery ===")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        home = Path(tmp) / "home"
+        home.mkdir()
+
+        live = Path(tmp) / "live"
+        (live / ".claude").mkdir(parents=True)
+        gone = Path(tmp) / "gone"          # recorded, then deleted or unplugged
+
+        (home / ".claude.json").write_text(json.dumps({
+            "projects": {
+                str(live): {},
+                str(live).replace("\\", "/"): {},   # same tree, other separator
+                str(gone): {},
+                "relative/path": {},
+                "": {},
+            }
+        }), encoding="utf-8")
+
+        with patch.object(Path, "home", staticmethod(lambda: home)):
+            roots = scaffold.known_project_roots()
+        check("a missing project root is dropped", gone.resolve() not in roots)
+        check("a relative key is dropped",
+              all(r.is_absolute() for r in roots))
+        check("the same tree under both separators counts once",
+              len(roots) == 1, f"got {[str(r) for r in roots]}")
+
+        # An unreadable config is a machine with nothing to report, not a
+        # crash: this backs a diagnostic that must survive a broken file.
+        (home / ".claude.json").write_text("{ not json", encoding="utf-8")
+        with patch.object(Path, "home", staticmethod(lambda: home)):
+            check("unreadable config yields nothing, not an error",
+                  scaffold.known_project_roots() == [])
+
+    def project(name: str, *, mcp: dict | None = None,
+                template: dict | None = None,
+                hooks: dict | None = None) -> Path:
+        root = Path(tmp_root) / name
+        (root / ".claude").mkdir(parents=True)
+        if mcp is not None:
+            (root / ".mcp.json").write_text(json.dumps(mcp), encoding="utf-8")
+        if template is not None:
+            (root / ".mcp.json.template").write_text(json.dumps(template),
+                                                     encoding="utf-8")
+        if hooks is not None:
+            (root / ".claude" / "settings.json").write_text(json.dumps(hooks),
+                                                            encoding="utf-8")
+        return root
+
+    with tempfile.TemporaryDirectory() as tmp_root:
+        current = project("current", mcp={"mcpServers": {_INSTANCE: {
+            "type": "http",
+            "url": f"http://127.0.0.1:8918/mcp?token={_FAKE_TOKEN}",
+        }}})
+        legacy_stdio = project("legacy", template={"mcpServers": {
+            _LEGACY_INSTANCE: {"type": "stdio",
+                               "command": "${HOME}/.claude/mnemo/bin/mnemo",
+                               "args": ["mcp"]},
+        }})
+        hooked = project("hooked", mcp={"mcpServers": {_INSTANCE: {
+            "type": "http", "url": "http://127.0.0.1:8918/mcp?token=" + _FAKE_TOKEN,
+        }}}, hooks={"hooks": {"PostToolUse": [
+            {"hooks": [{"type": "command",
+                        "command": "~/.claude/mnemo/bin/mnemo hook-postedit"}]}
+        ]}})
+        placeholder = project("placeholder", template={"mcpServers": {
+            _INSTANCE: {"type": "http",
+                        "url": "http://127.0.0.1:{{MNEMO_PORT}}"
+                               "/mcp?token={{MNEMO_TOKEN}}"},
+        }})
+        foreign = project("foreign", mcp={"mcpServers": {
+            "some-other-server": {"type": "stdio", "command": "node",
+                                  "args": ["server.js"]},
+        }})
+        bare = project("bare")
+
+        roots = [current, legacy_stdio, hooked, placeholder, foreign, bare]
+        found = {p.root.name: p for p in scaffold.adopted_projects(roots)}
+
+        check("a project with no wiring is not reported", "bare" not in found)
+        check("somebody else's MCP server is not mnemo's",
+              "foreign" not in found)
+        check("a current HTTP entry is found", "current" in found)
+        check("a current HTTP entry needs no --migrate",
+              "current" in found and not found["current"].migrate)
+        check("an L2 stdio entry demands --migrate",
+              "legacy" in found and found["legacy"].migrate)
+        check("a retired hook demands --migrate",
+              "hooked" in found and found["hooked"].migrate)
+        check("--migrate shows up in the printed command",
+              "legacy" in found and "--migrate" in found["legacy"].command())
+        check("a current project's command has no --migrate",
+              "current" in found and "--migrate" not in found["current"].command())
+
+        check("the literal token is read back",
+              "current" in found and found["current"].token == _FAKE_TOKEN)
+        check("a placeholder is never mistaken for a token",
+              "placeholder" in found and found["placeholder"].token is None)
+        for name, proj in found.items():
+            check(f"{name}: no token in the printed command",
+                  _FAKE_TOKEN not in proj.command())
+
+
 def test_scaffold_gitignore() -> None:
     """The plain branch: a literal token means git must not carry the file."""
     with tempfile.TemporaryDirectory(prefix="mnemo ignore ") as raw:
@@ -1241,6 +1477,8 @@ def main() -> int:
     test_scaffold_drops_the_bank_segment()
     test_scaffold_hand_edited_sed_line()
     test_scaffold_renames_the_legacy_key()
+    test_memory_rule_refresh()
+    test_adopted_project_discovery()
     test_scaffold_gitignore()
     test_scaffold_refuses_a_tracked_file()
     test_git_index_probe()

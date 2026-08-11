@@ -161,7 +161,73 @@ def _cmd_doctor() -> int:
               f"run `mnemo clean-orphans`")
     else:
         print("orphan indexes   none")
+
+    _report_project_wiring(banks)
     return EXIT_OK
+
+
+def _report_project_wiring(banks) -> None:
+    """Projects whose mnemo wiring no longer matches this machine.
+
+    Two ways a project ends up here, and both are invisible from inside it:
+
+      * it carries a shape from an older generation — a stdio entry, a hook
+        the watcher replaced — which only `--migrate` rewrites;
+      * its wiring is current, but no registered bank covers it. That is the
+        state every project is in after a v2→v3 upgrade or a reinstall:
+        `banks.json` is the one thing that does not rebuild from the `.md`,
+        so the token in the project's config addresses a bank that is gone.
+
+    Deliberately a report. The commands touch someone else's working tree,
+    which may be dirty, mid-rebase, or simply not something they want edited
+    today — printing them keeps that decision where it belongs.
+    """
+    try:
+        from .scaffold import adopted_projects
+
+        projects = adopted_projects()
+    except Exception as exc:  # noqa: BLE001 - diagnostics never fail
+        print(f"project wiring   UNKNOWN — {exc}")
+        return
+
+    def covering(root: Path):
+        for bank in banks:
+            try:
+                if bank.root.is_relative_to(root):
+                    return bank
+            except (OSError, ValueError):
+                continue
+        return None
+
+    def why(proj) -> str | None:
+        """Why this project needs rewiring, or None if it is fine."""
+        if proj.migrate:
+            extra = (f" +{len(proj.findings) - 1} more"
+                     if len(proj.findings) > 1 else "")
+            return f"{proj.findings[0]}{extra}"
+        bank = covering(proj.root)
+        if bank is None:
+            return "no registered bank covers it"
+        # A registered bank is not enough. Tokens are minted, never derived,
+        # so a reinstall gives the same bank a new secret while the project's
+        # config keeps the old one — the wiring looks right, points at a live
+        # bank, and is rejected at the door. Nothing inside the project can
+        # tell; the session just finds no memory tools.
+        if proj.token and proj.token != bank.token:
+            return f"its token is not the one bank {bank.name!r} now carries"
+        return None
+
+    reasons = [(p, why(p)) for p in projects]
+    stale = [(p, r) for p, r in reasons if r is not None]
+    if not stale:
+        print(f"project wiring   {len(projects)} project(s), all current")
+        return
+
+    print(f"project wiring   {len(stale)} of {len(projects)} project(s) "
+          f"need rewiring")
+    for proj, reason in stale:
+        print(f"  {proj.command()}")
+        print(f"      {reason}")
 
 
 def _human_bytes(size: int) -> str:

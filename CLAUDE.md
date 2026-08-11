@@ -141,7 +141,15 @@ Faces:
   plain run when the entry is already HTTP, by `--migrate` when it is still
   stdio. A server somebody else called `mnemo` is left alone.
   Owns `_MEMORY_RULE`, the text that lands in adopted repos as
-  `.claude/rules/mnemo-memory.md`.
+  `.claude/rules/mnemo-memory.md` — and **refreshes it in place** when the
+  file's sha256 is one mnemo itself wrote (`_RULE_SUPERSEDED`, two digests per
+  redaction because pre-`_write` Windows adoptions got CRLF). An unrecognised
+  digest is somebody's edit and outranks the update; `MEMORY.md` is curated
+  content and is never reconsidered. Also owns `adopted_projects()` /
+  `known_project_roots()`, which find the projects on this machine carrying
+  mnemo wiring — from `~/.claude.json`'s `projects` map, since
+  `~/.claude/projects/` folder names flatten `:`, `\` and `_` all to `-` and
+  cannot be decoded back.
 
 Around it:
 
@@ -173,7 +181,8 @@ mnemo search "q" [--path-prefix P]  hybrid search over a bank
 mnemo reindex [--bank B] [--full]   queue a reindex (`ingest` is a deprecated alias)
 mnemo banks list|add|remove         registry, through the API
 mnemo status | logs | tree | ui     service state, journal, tree, cabinet
-mnemo doctor                        engine, model, tokens, ports, banks, orphan count
+mnemo doctor                        engine, model, tokens, ports, banks, orphans,
+                                    and the projects whose wiring needs rewiring
 mnemo clean-orphans [--dry-run]     delete index files no bank claims; asks first
      [--yes]                        skip the prompt (scripts)
 ```
@@ -323,6 +332,19 @@ Extra steps only when:
   project still carries an older mnemo-authored entry. If `.mcp.json` is
   git-tracked there, `init` refuses until `git rm --cached .mcp.json` —
   it will not write a bank token into a tracked file.
+
+**Coming from v2, the installer notices and says so.** A v2 engine is
+recognised by what v2 never had — a banks registry — so an absent
+`state/banks.json` next to `.db` files is unambiguous, and safe to act on:
+with no registry, no index can belong to a live bank. Those indexes are
+orphaned the instant v3 runs (v2 keyed them by *project* root, v3 by *bank*
+root) and go via `clean-orphans --yes`. Projects it only **names**: `doctor`
+ends with a `project wiring` section listing each one and the exact command,
+because they are someone else's working trees. Three ways in: a legacy shape
+(stdio entry, retired hook) needing `--migrate`; no registered bank covering
+the project; or a token from a previous life — tokens are minted, so a
+reinstall gives the same bank a new secret while the project keeps the old
+one, and from inside that project nothing shows it.
 
 **While v3 is being built, re-mirroring is not a free action.** The
 engine is shared by every project on this machine, and the v3 store

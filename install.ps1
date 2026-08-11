@@ -247,6 +247,55 @@ function Show-CheckReport {
     Write-Report "autostart" $autostart
 }
 
+function Format-Bytes {
+    param([long]$Bytes)
+    if ($Bytes -lt 1024) { return "$Bytes B" }
+    $units = @("KiB", "MiB", "GiB", "TiB")
+    $value = [double]$Bytes
+    foreach ($unit in $units) {
+        $value = $value / 1024.0
+        if ($value -lt 1024.0) {
+            return ("{0:0.#} {1}" -f $value, $unit)
+        }
+    }
+    return ("{0:0.#} PiB" -f ($value / 1024.0))
+}
+
+function Get-LegacyEngineState {
+    # A v2 engine, recognised by what v2 never had: a banks registry.
+    #
+    # v2 had no registry at all - it indexed one project per invocation and
+    # named the file sha1(PROJECT root). v3 registers banks and names the
+    # file sha1(BANK root), so every v2 index is orphaned the moment v3 runs:
+    # nothing will ever open it again, and nothing in it says whose it was.
+    # A v2 database has no `meta` table either, so the path cannot even be
+    # recovered from the inside.
+    #
+    # Absent banks.json plus index files is therefore unambiguous, and it is
+    # also safe: with no registry, no index can belong to a live bank.
+    param([string]$EngineHome)
+
+    $stateDir = Join-Path $EngineHome "state"
+    if (-not (Test-Path -LiteralPath $stateDir -PathType Container)) { return $null }
+    if (Test-Path -LiteralPath (Join-Path $stateDir "banks.json") -PathType Leaf) { return $null }
+
+    # service.db is the v3 journal, not a bank index. It cannot be here on a
+    # real v2 engine, but excluding it by name costs nothing and keeps this
+    # from ever counting the engine's own log as user data.
+    $indexes = @(
+        Get-ChildItem -LiteralPath $stateDir -Filter "*.db" -File -ErrorAction SilentlyContinue |
+            Where-Object { $_.BaseName -ne "service" }
+    )
+    if ($indexes.Count -eq 0) { return $null }
+
+    $total = 0
+    foreach ($index in $indexes) { $total += $index.Length }
+    return [pscustomobject]@{
+        Count = $indexes.Count
+        Bytes = [long]$total
+    }
+}
+
 function Sync-EngineCode {
     param(
         [string]$RepoRoot,
@@ -565,6 +614,13 @@ function Invoke-Install {
     }
     Write-Status "engine home: $engineHome"
 
+    # Taken before the mirror, because the mirror is what makes this a v3
+    # engine. Acted on further down, once the launcher exists to act with.
+    $legacyEngine = Get-LegacyEngineState $engineHome
+    if ($null -ne $legacyEngine) {
+        Write-Status "found a v2 engine: $($legacyEngine.Count) index file(s), $(Format-Bytes $legacyEngine.Bytes)"
+    }
+
     # stop -> refresh -> start. The running backend is the likeliest holder
     # of a lock on the venv, so it must be down before the mirror, and it is
     # only brought back if it was up in the first place.
@@ -618,6 +674,22 @@ function Invoke-Install {
 
     Install-Launcher $venvPython $engineHome $launcher
     Write-Status "launcher written: $launcher"
+
+    # The v2 indexes go now. Not a user-scope action - this only ever touches
+    # the state directory of the home being installed - so it runs for a
+    # custom -InstallHome too. `clean-orphans` rather than a Remove-Item loop
+    # here: it is the tested path, it refuses service.db, and it re-reads the
+    # registry at the moment of deletion instead of trusting a stale listing.
+    if ($null -ne $legacyEngine) {
+        Write-Status "v2 keyed indexes by project root, v3 keys them by bank root:"
+        Write-Status "  none of them can be reused, and nothing else will ever open them."
+        & $launcher clean-orphans --yes
+        if ($LASTEXITCODE -ne 0) {
+            Write-Status "could not remove the v2 indexes; run '$launcher clean-orphans' by hand"
+        }
+        Write-Status "v2 registered no banks, so every project needs 'mnemo init' again."
+        Write-Status "the check below lists the ones this machine can still find."
+    }
 
     # User-scope registrations (env var, shell profile, logon task) belong to
     # the real engine only. A custom -InstallHome is an isolated/manual copy
