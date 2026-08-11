@@ -48,8 +48,9 @@ carries the old shape and needs `mnemo init --migrate`:
   one at once. The superseded `/mcp/<bank>?token=…` form now answers 400
   telling the caller to run `mnemo init --migrate`. If you find yourself
   wanting to add the bank name back "for readability" — do not. What
-  identifies the bank to a reader is the `mcpServers` key (`mnemo`,
-  `mnemo-notes`); a path component that routing ignores gets read as
+  identifies the bank to a reader is the `mcpServers` key
+  (`mnemo-memory`, `mnemo-notes`); a path component that routing ignores
+  gets read as
   routing by the next person.
 - **`.mcp.json` is generated and git-ignored**, because the token in it
   is literal. `mnemo init` adds the `.gitignore` line itself. If the file

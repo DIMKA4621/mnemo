@@ -210,8 +210,10 @@ file — identical on Linux, macOS and native Windows:
   succeeds against the wrong bank looks entirely normal. The
   `X-Mnemo-Bank` header is gone for the same reason, as is the "if there
   is only one bank it must be that one" fallback. What tells a reader
-  which bank an entry serves is the `mcpServers` key (`mnemo`,
-  `mnemo-notes`).
+  which bank an entry serves is the `mcpServers` key (`mnemo-memory`,
+  `mnemo-notes`). `init` writes `mnemo-memory`; an older `mnemo` key it
+  authored is renamed rather than joined, so a project never ends up with
+  two entries into one bank.
 - The literal token is the reason this one file is git-ignored rather
   than tracked; a template project keeps `{{MNEMO_PORT}}` /
   `{{MNEMO_TOKEN}}` in git and the values in `.mcp.env`. Portability is

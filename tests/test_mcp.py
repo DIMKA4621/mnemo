@@ -41,7 +41,9 @@ import urllib.request
 from pathlib import Path
 
 from mcp import ClientSession
-from mcp.client.streamable_http import streamablehttp_client
+# SDK 2.0 renamed this (`streamablehttp_client` -> `streamable_http_client`),
+# the client-side half of the same rename that moved `FastMCP` to `MCPServer`.
+from mcp.client.streamable_http import streamable_http_client
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -187,7 +189,7 @@ async def main() -> int:
     query = "як деплоїмо на прод і робимо rollback"
     plain_tools: set[str] = set()
 
-    async with streamablehttp_client(url) as (read, write, _):
+    async with streamable_http_client(url) as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
 
@@ -207,7 +209,11 @@ async def main() -> int:
             # which defeats per-connection addressing and, with per-bank
             # tokens, would make one bank's token a key to any bank.
             for tool in listed:
-                props = (tool.inputSchema or {}).get("properties", {})
+                # `input_schema` in SDK 2.0, `inputSchema` in 1.x. Only the
+                # Python attribute moved — the field still serialises under
+                # its old name through a pydantic alias, so the wire, and
+                # therefore every client, is unaffected.
+                props = (tool.input_schema or {}).get("properties", {})
                 check(f"`{tool.name}` takes no bank argument",
                       "bank" not in props, detail=str(sorted(props)))
 
@@ -229,9 +235,7 @@ async def main() -> int:
                   detail=tree_text[:120])
 
     # ------------------------------------------------------- the admin face
-    async with streamablehttp_client(f"{BASE}/mcp-admin?token={token}") as (
-        read, write, _,
-    ):
+    async with streamable_http_client(f"{BASE}/mcp-admin?token={token}") as (read, write):
         async with ClientSession(read, write) as session:
             await session.initialize()
             admin_tools = {t.name for t in (await session.list_tools()).tools}
@@ -328,9 +332,7 @@ async def main() -> int:
         # Both tokens are now valid on the same URL — the URL says nothing.
         # So this is the check that the token, and only the token, decides
         # which bank answers.
-        async with streamablehttp_client(f"{BASE}/mcp?token={theirs}") as (
-            read, write, _,
-        ):
+        async with streamable_http_client(f"{BASE}/mcp?token={theirs}") as (read, write):
             async with ClientSession(read, write) as session:
                 await session.initialize()
                 reached = _text(await session.call_tool("tree", {"depth": 0}))

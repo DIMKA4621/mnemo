@@ -3,7 +3,7 @@
 Everything below the divider is **portable**: it is the whole instruction for
 working with this project's memory, and it stands on its own. If an agent or a
 platform has no notion of rule files, paste that part into its system prompt,
-give it the `mnemo` MCP server, and it has what it needs.
+give it the `mnemo-memory` MCP server, and it has what it needs.
 
 **This part is Claude Code specific.** The file lives at
 `.claude/rules/mnemo-memory.md` and auto-loads for everyone in the session —

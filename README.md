@@ -107,12 +107,12 @@ Adoption leaves a little wiring in the project. Most of it is git-tracked
 and travels with the repo; the exception is `.mcp.json`, which now carries
 a credential and therefore must not.
 
-- **`.mcp.json`** — registers the `mnemo` MCP server over **HTTP**:
+- **`.mcp.json`** — registers the `mnemo-memory` MCP server over **HTTP**:
   `http://127.0.0.1:8918/mcp?token=<bank-token>`. A session *connects* to
   the running service — nothing is spawned, so no console flashes on
   Windows. Tools: `search(query, top_k, path_prefix)` and `tree` — short
   names on purpose, since Claude Code already namespaces them as
-  `mcp__mnemo__search`. The project face is **read-only**; `reindex` lives
+  `mcp__mnemo-memory__search`. The project face is **read-only**; `reindex` lives
   on the admin face, because the watcher reindexes within seconds of a save
   and a button nobody presses is a tool slot spent in every session.
 

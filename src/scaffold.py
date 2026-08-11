@@ -55,12 +55,34 @@ from .config import resolve
 _LAUNCHER = "~/.claude/mnemo/bin/mnemo"
 
 
-# The MCP server key `init` writes, and the thing every variable name is
-# derived from. Never the bank name: bank names are human labels that hold
-# spaces and Cyrillic, which no shell variable name may contain. Keeping the
-# name on the *value* side means the instance name — ASCII, ours — is the only
-# thing that has to be shell-safe.
-_INSTANCE = "mnemo"
+# The `mcpServers` key `init` writes, and the one thing in the file that says
+# which bank this entry is for -- a person reads the key, not a URL full of
+# hex. `-memory` is in it because a project may well grow a second entry
+# (`mnemo-notes`, `mnemo-specs`) pointed at another bank, and a first entry
+# called plainly `mnemo` would then read as "the mnemo one" among siblings
+# that are equally mnemo. Tools namespace from it: `mcp__mnemo-memory__search`.
+_INSTANCE = "mnemo-memory"
+
+# What that key used to be. Kept so `--migrate` can rename it rather than
+# leaving a project with two entries authenticating into the same bank, which
+# is what a plain re-`init` would otherwise produce.
+_LEGACY_INSTANCE = "mnemo"
+
+# Variable names are never derived from the *bank* name: bank names are human
+# labels that hold spaces and Cyrillic, which no shell variable name may
+# contain. Keeping the bank on the value side means the instance name — ASCII,
+# ours — is the only thing that has to be shell-safe.
+#
+# The env-var prefix for the default entry stays `MNEMO_`, deliberately out of
+# step with `_INSTANCE`. The key is what a human reads; the variables are the
+# template convention's private plumbing, and renaming them to
+# `MNEMO_MEMORY_*` would rewrite `.mcp.env`, `.mcp.env.example` and every
+# `sed -e` line in `mcp-setup.sh` across every adopted project -- for no
+# readability gain, and straight into the one failure that is silent: a
+# placeholder with no matching `-e` line passes through verbatim while the
+# script still exits 0. A *second* instance still derives its own prefix from
+# its own name, which is what `_var_prefix` is for.
+_VAR_INSTANCE = "mnemo"
 
 
 def _var_prefix(instance: str) -> str:
@@ -390,6 +412,45 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
     elif not isinstance(servers, dict):
         raise _Refuse(f"{path}: 'mcpServers' is not an object; left untouched")
 
+    # The key was renamed (`mnemo` -> `mnemo-memory`). A project wired before
+    # that carries the old one, and simply writing the new key beside it would
+    # leave two entries authenticating into the same bank -- two connections,
+    # duplicate tools, and no hint which is which. So the old key is *renamed*
+    # under `--migrate`, and a plain run refuses and says so.
+    #
+    # Only ever a key mnemo itself authored: a server somebody else called
+    # `mnemo` is left exactly where it is, like any foreign key.
+    renamed = False
+    legacy_key = servers.get(_LEGACY_INSTANCE)
+    if legacy_key is not None and _is_mnemo_http(legacy_key):
+        # Ours, in HTTP form, under the former key. Renamed by a plain `init`,
+        # no `--migrate` needed -- the same line the stale `/mcp/<bank>` URL
+        # already sits on: the entry is unambiguously mnemo's own and the fix
+        # is unambiguous, so demanding a flag would only strand every adopted
+        # project on a refusal. What `--migrate` is for is the *stdio*
+        # generations below, whose shape mnemo will not rewrite unasked.
+        del servers[_LEGACY_INSTANCE]
+        renamed = True
+        log.append(f"  {label:<20} renamed mcpServers.{_LEGACY_INSTANCE} "
+                   f"-> {_INSTANCE}")
+    elif legacy_key is not None and _is_legacy_mcp(legacy_key) is not None:
+        if not migrate:
+            raise _Refuse(
+                f"{path}: 'mcpServers.{_LEGACY_INSTANCE}' is the legacy "
+                f"{_is_legacy_mcp(legacy_key)} stdio form under mnemo's former "
+                f"key, and calls `mnemo mcp` — a subcommand that no longer "
+                f"exists.\n"
+                f"      found:    {json.dumps(legacy_key)}\n"
+                f"      expected: {_redacted(target)} under '{_INSTANCE}'\n"
+                f"      (left untouched — re-run with `--migrate`)")
+        del servers[_LEGACY_INSTANCE]
+        renamed = True
+        log.append(f"  {label:<20} migrated mnemo server "
+                   f"{_is_legacy_mcp(legacy_key)} -> http, renamed "
+                   f"{_LEGACY_INSTANCE} -> {_INSTANCE}")
+    # Anything else under `mnemo` is somebody else's server that happens to
+    # share the name. Left exactly where it is, like any foreign key.
+
     existing = servers.get(_INSTANCE)
     if existing is not None and not _is_mnemo_http(existing):
         generation = _is_legacy_mcp(existing)
@@ -409,12 +470,18 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
                 f"      expected: {_redacted(target)}\n"
                 f"      (left untouched — re-run with `--migrate`)")
         log.append(f"  {label:<20} migrated mnemo server {generation} -> http")
-    elif existing == target:
+    elif existing == target and not renamed:
         log.append(f"  {label:<20} mnemo server already present")
         return None
+    elif existing == target:
+        # Both keys were present; the new one is already right, but the old
+        # one has just been dropped, so this is still a write.
+        log.append(f"  {label:<20} dropped the superseded duplicate")
     elif existing is not None:
         log.append(f"  {label:<20} updated mcpServers.{_INSTANCE}")
-    else:
+    elif not renamed:
+        # After a rename the "renamed X -> Y" line already said this; a second
+        # line reads as two entries having appeared.
         log.append(f"  {label:<20} +mcpServers.{_INSTANCE}")
 
     # Additive: keep every other server and key, replace only ours.
@@ -459,7 +526,7 @@ def _plan_mcp_template(path: Path, log: list[str], *,
     placeholders, and it is why validation can run before a bank exists.
     """
     return _plan_servers(path, ".mcp.json.template", log,
-                         _mcp_server_template(_INSTANCE), migrate=migrate)
+                         _mcp_server_template(_VAR_INSTANCE), migrate=migrate)
 
 
 # ------------------------------------------------- the template convention
@@ -1062,7 +1129,7 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
     template exists survives exactly until the next `bash mcp-setup.sh`.
     """
     wiring = _Wiring()
-    prefix = _var_prefix(_INSTANCE)
+    prefix = _var_prefix(_VAR_INSTANCE)
     template = proj / ".mcp.json.template"
 
     if not template.exists():

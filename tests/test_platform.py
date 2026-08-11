@@ -33,6 +33,8 @@ for _stream in (sys.stdout, sys.stderr):
 from src import config, embedder  # noqa: E402
 from src.index import scan_bank  # noqa: E402
 from src.scaffold import (  # noqa: E402
+    _INSTANCE,
+    _LEGACY_INSTANCE,
     _Refuse,
     _git_tracked,
     _plan_mcp,
@@ -229,7 +231,7 @@ def test_scaffold() -> None:
         default_settings_text = _plan_settings(settings_path, [])
         mcp = json.loads(mcp_text or "{}")
 
-        entry = mcp.get("mcpServers", {}).get("mnemo")
+        entry = mcp.get("mcpServers", {}).get(_INSTANCE)
         check("mnemo MCP server written", isinstance(entry, dict), detail=str(mcp))
         entry_text = json.dumps(entry, ensure_ascii=False)
 
@@ -317,7 +319,7 @@ def test_scaffold() -> None:
         check(
             "a rotated bank token is rewritten, not refused",
             rotated is not None
-            and "b" * 48 in json.loads(rotated)["mcpServers"]["mnemo"]["url"],
+            and "b" * 48 in json.loads(rotated)["mcpServers"][_INSTANCE]["url"],
             detail=str(rotated),
         )
         # A plain re-run never touches hooks — not to add one, and not to
@@ -364,7 +366,7 @@ def test_scaffold() -> None:
             )
             text = _plan_mcp(mcp_path, [], token=_FAKE_TOKEN,
                              migrate=True)
-            return json.loads(text or "{}").get("mcpServers", {}).get("mnemo", {})
+            return json.loads(text or "{}").get("mcpServers", {}).get(_INSTANCE, {})
 
         check("legacy L1 (/bin/sh wrapper) is an explicit conflict", refuses(l1))
         # L2 is still the LIVE value today, so plain `init` correctly treats
@@ -442,11 +444,11 @@ def test_scaffold_template_project() -> None:
 
         entry = (json.loads(written.get(".mcp.json.template", "{}"))
                  .get("mcpServers", {}))
-        check("mnemo entry lands in the template", "mnemo" in entry,
+        check("mnemo entry lands in the template", _INSTANCE in entry,
               detail=str(sorted(entry)))
         check("foreign template entry preserved", "chrome" in entry,
               detail=str(sorted(entry)))
-        _check_mcp_shape(entry.get("mnemo", {}), placeholders=True)
+        _check_mcp_shape(entry.get(_INSTANCE, {}), placeholders=True)
 
         env_text = written.get(".mcp.env", "")
         check("real values land in .mcp.env",
@@ -528,7 +530,7 @@ def test_scaffold_template_project() -> None:
         fixed = _plan_wiring(proj, token=_FAKE_TOKEN, migrate=True)
         migrated = {p.name: t for p, t in fixed.writes}
         entry = (json.loads(migrated.get(".mcp.json.template", "{}"))
-                 .get("mcpServers", {}).get("mnemo", {}))
+                 .get("mcpServers", {}).get(_INSTANCE, {}))
         check("--migrate fixes the legacy entry inside the template",
               entry.get("type") == "http" and "{{MNEMO_TOKEN}}" in entry.get("url", ""),
               detail=str(entry))
@@ -559,7 +561,7 @@ def test_scaffold_drops_the_bank_segment() -> None:
                         "X-Mnemo-Bank": "some bank"},
         }}}, indent=2))
         text = _plan_mcp(mcp, [], token=_FAKE_TOKEN)
-        entry = json.loads(text or "{}").get("mcpServers", {}).get("mnemo", {})
+        entry = json.loads(text or "{}").get("mcpServers", {}).get(_INSTANCE, {})
         check("a stale /mcp/<bank> entry is rewritten without --migrate",
               text is not None, detail=str(text))
         _check_mcp_shape(entry, placeholders=False)
@@ -593,7 +595,7 @@ def test_scaffold_drops_the_bank_segment() -> None:
         plain = {p.name: t for p, t in
                  _plan_wiring(proj2, token=_FAKE_TOKEN, migrate=False).writes}
         entry = (json.loads(plain.get(".mcp.json.template", "{}"))
-                 .get("mcpServers", {}).get("mnemo", {}))
+                 .get("mcpServers", {}).get(_INSTANCE, {}))
         _check_mcp_shape(entry, placeholders=True)
         # Nothing to add and nothing it is allowed to remove, so it plans no
         # write to either file at all — and MNEMO_BANK is still on disk.
@@ -674,6 +676,78 @@ def test_scaffold_hand_edited_sed_line() -> None:
         check("and it is reported rather than silently kept",
               any("did not write" in n for n in wiring.notes),
               detail=str(wiring.notes))
+
+
+def test_scaffold_renames_the_legacy_key() -> None:
+    """The `mcpServers` key moved: `mnemo` -> `mnemo-memory`.
+
+    A project wired before the rename carries the old key. Writing the new one
+    beside it would leave two entries authenticating into the SAME bank — two
+    connections, duplicate tools, no hint which is which — so the old key is
+    renamed rather than joined. The line for whether that needs `--migrate` is
+    the one already in force: mnemo's own HTTP entry is unambiguous and moves
+    on a plain run, an stdio generation still waits to be asked.
+
+    And the boundary that matters most: a server somebody ELSE called `mnemo`
+    is not mnemo's to rename, delete, or read as legacy.
+    """
+    with tempfile.TemporaryDirectory(prefix="mnemo rename ") as raw:
+        current = {
+            "type": "http",
+            "url": f"http://127.0.0.1:8918/mcp?token={_FAKE_TOKEN}",
+        }
+        stdio = {
+            "type": "stdio",
+            "command": "${HOME}/.claude/mnemo/bin/mnemo",
+            "args": ["mcp"],
+        }
+
+        def plan(doc: dict, *, migrate: bool = False):
+            path = Path(raw) / f"mcp-{abs(hash(json.dumps(doc, sort_keys=True)))}.json"
+            _write(path, json.dumps(doc, indent=2))
+            text = _plan_mcp(path, [], token=_FAKE_TOKEN, migrate=migrate)
+            return json.loads(text or "{}").get("mcpServers", {})
+
+        servers = plan({"mcpServers": {_LEGACY_INSTANCE: current,
+                                       "foreign": {"command": "other"}}})
+        check("a plain init renames the legacy key",
+              _INSTANCE in servers and _LEGACY_INSTANCE not in servers,
+              detail=str(sorted(servers)))
+        check("the rename keeps a foreign server untouched",
+              servers.get("foreign") == {"command": "other"},
+              detail=str(servers.get("foreign")))
+
+        try:
+            plan({"mcpServers": {_LEGACY_INSTANCE: stdio}})
+            refused = False
+        except _Refuse:
+            refused = True
+        check("an stdio entry under the old key still needs --migrate", refused)
+
+        servers = plan({"mcpServers": {_LEGACY_INSTANCE: stdio}}, migrate=True)
+        check("--migrate rewrites the shape AND moves the key",
+              servers.get(_INSTANCE) == current
+              and _LEGACY_INSTANCE not in servers,
+              detail=str(sorted(servers)))
+
+        # Both keys present: the new one is already correct, but leaving the
+        # old one would be exactly the duplicate this rename exists to avoid,
+        # so the plan is a write even though the target entry does not change.
+        servers = plan({"mcpServers": {_LEGACY_INSTANCE: current,
+                                       _INSTANCE: current}})
+        check("a duplicate old key is dropped even when the new one is right",
+              servers.get(_INSTANCE) == current
+              and _LEGACY_INSTANCE not in servers,
+              detail=str(sorted(servers)))
+
+        # Somebody else's server that happens to be called `mnemo`. Not ours
+        # to touch -- mnemo adds its own key beside it and leaves it alone.
+        stranger = {"type": "stdio", "command": "mnemo-cli", "args": ["serve"]}
+        servers = plan({"mcpServers": {_LEGACY_INSTANCE: stranger}})
+        check("a foreign server named 'mnemo' is never renamed or removed",
+              servers.get(_LEGACY_INSTANCE) == stranger
+              and servers.get(_INSTANCE) == current,
+              detail=str(servers))
 
 
 def test_scaffold_gitignore() -> None:
@@ -1166,6 +1240,7 @@ def main() -> int:
     test_scaffold_template_project()
     test_scaffold_drops_the_bank_segment()
     test_scaffold_hand_edited_sed_line()
+    test_scaffold_renames_the_legacy_key()
     test_scaffold_gitignore()
     test_scaffold_refuses_a_tracked_file()
     test_git_index_probe()

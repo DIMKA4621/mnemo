@@ -45,7 +45,7 @@ install model and is mid-transition (see its header).
 
 Project decision history, research and rationale live in **this repo's own
 bank**: `.claude/memory/` (`MEMORY.md` index, `logs/`, `topics/`), served by
-the `mnemo` MCP server in `.mcp.json`. **Search it with the `search` tool
+the `mnemo-memory` MCP server in `.mcp.json`. **Search it with the `search` tool
 before planning** — do not re-investigate what is already recorded.
 
 It used to sit in Claude Code's per-project store
@@ -134,7 +134,12 @@ Faces:
   because a missing substitution leaves `{{MNEMO_TOKEN}}` in the
   generated file while the script still exits 0. Writes **no hook at
   all**, and no flag makes it write one; `--migrate` unwires every hook
-  mnemo ever wrote and rewrites the superseded `/mcp/<bank>` URL.
+  mnemo ever wrote and rewrites the superseded `/mcp/<bank>` URL. The
+  `mcpServers` key it writes is **`mnemo-memory`** (tools namespace as
+  `mcp__mnemo-memory__search`), leaving room for a second entry on another
+  bank; an older `mnemo` key it authored is **renamed, not joined** — by a
+  plain run when the entry is already HTTP, by `--migrate` when it is still
+  stdio. A server somebody else called `mnemo` is left alone.
   Owns `_MEMORY_RULE`, the text that lands in adopted repos as
   `.claude/rules/mnemo-memory.md`.
 
