@@ -416,3 +416,13 @@ SERVICE_STOP_TIMEOUT: float = float(
 SERVICE_START_GRACE: float = float(
     os.environ.get("MNEMO_SERVICE_START_GRACE", "1.5")
 )
+
+# How long `service start` then waits for /health to answer, so that
+# "started" means "serving" rather than "spawned". A cold first start pays
+# for importing FastAPI, both MCP faces and the store before it binds, which
+# on a clean machine measured well past the grace above -- long enough that
+# the installer's closing `doctor` reported the backend DOWN on a perfectly
+# good install. Set to 0 to return as soon as the process exists.
+SERVICE_READY_TIMEOUT: float = float(
+    os.environ.get("MNEMO_SERVICE_READY_TIMEOUT", "45.0")
+)

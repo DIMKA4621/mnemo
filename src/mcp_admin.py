@@ -18,7 +18,7 @@ somewhere else on the machine or drop one. That check lives in
 ``api.auth_middleware``, which reads ``/mcp-admin`` before ``/mcp`` for
 exactly this reason.
 
-The two tool sets are kept in **separate FastMCP instances** rather than one
+The two tool sets are kept in **separate MCPServer instances** rather than one
 instance filtered per request: a tool list is what a client caches at
 handshake time, so "declared but refused later" would show an agent six tools
 it can never call. Nothing here is registered on the plain face and nothing
@@ -34,11 +34,11 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 log = logging.getLogger("mnemo.mcp.admin")
 
-_mcp: FastMCP | None = None
+_mcp: MCPServer | None = None
 
 
 # ------------------------------------------------------------ tool bodies
@@ -227,7 +227,7 @@ def run_logs(kind: str = "index", bank: str | None = None, n: int = 20) -> str:
 # ---------------------------------------------------------------- register
 
 
-def _register(mcp: FastMCP) -> None:
+def _register(mcp: MCPServer) -> None:
     """The six admin tools. Declarations only — the bodies are above.
 
     Every one of them takes the bank as an **argument**, which is the opposite
@@ -266,8 +266,8 @@ def _register(mcp: FastMCP) -> None:
         return run_logs(kind, bank, n)
 
 
-def server() -> FastMCP:
-    """The single admin FastMCP instance, built once.
+def server() -> MCPServer:
+    """The single admin MCPServer instance, built once.
 
     A different server name from the plain face (`mnemo-admin`, not `mnemo`):
     a client namespaces tools by server name, so this is what keeps
@@ -275,9 +275,7 @@ def server() -> FastMCP:
     """
     global _mcp
     if _mcp is None:
-        _mcp = FastMCP(
-            "mnemo-admin", stateless_http=True, streamable_http_path="/"
-        )
+        _mcp = MCPServer("mnemo-admin")
         _register(_mcp)
     return _mcp
 
@@ -297,5 +295,11 @@ def build_app() -> Any:
     ``/mcp-admin/anything`` and answer it as if it were the root, which is the
     same "a path component that does not mean what it says" problem the plain
     face's segment removal exists to end.
+
+    ``stateless_http`` / ``streamable_http_path`` live on this call rather than
+    on the constructor: the 2.0 SDK moved them here (see `mcp_server.build_app`
+    for the ordering consequence).
     """
-    return server().streamable_http_app()
+    return server().streamable_http_app(
+        streamable_http_path="/", stateless_http=True
+    )

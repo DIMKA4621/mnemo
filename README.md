@@ -73,6 +73,28 @@ If you want the steps back, they are all still there: `--no-model`,
 `--model` (skip the prompt, for scripts), `--no-start`, `--check`,
 `--deps-only`, `--no-autostart`, `--home DIR`.
 
+Removal is the mirror image, and a separate script:
+
+```bash
+./uninstall.sh                   # or: .\uninstall.ps1 on Windows
+```
+
+It takes away exactly what the installer put on the machine — the service,
+the autostart registration, the shell-profile block, `MNEMO_API_TOKEN`, and
+the engine home with `state/` and `model-cache/` inside it — after printing
+the list and asking. `--dry-run` shows that list and stops; `--keep-model`
+and `--keep-state` spare the expensive parts; `--yes` skips the prompt for
+scripts, and without a terminal it removes nothing rather than guessing.
+
+Your markdown is never touched: it is the source of truth, and everything
+that goes is derived from it. Two things survive on purpose — the `HOME`
+variable (the installer only ever sets it when absent, and other tools may
+rely on it now) and Linux lingering. One thing does not survive and cannot
+be rebuilt from the `.md`: `state/banks.json`, the registry. After
+reinstalling, run `mnemo init` again in each project, since the tokens in
+their `.mcp.json` name a registry that no longer exists — which is why the
+uninstaller prints every registered bank and its root before deleting it.
+
 The engine installs on Linux, macOS and native Windows — `install.sh` on
 POSIX, `install.ps1` (built-in PowerShell 5.1+, 64-bit Python 3.10+, no
 WSL/PATH needed) on Windows. On Windows the installer sets the user

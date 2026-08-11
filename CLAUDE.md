@@ -100,7 +100,7 @@ Service (the persistent backend):
 
 Faces:
 
-- `src/mcp_server.py` — the **project** face: **FastMCP** (from the
+- `src/mcp_server.py` — the **project** face: **`MCPServer`** (from the
   official `mcp` SDK) mounted into `api.py` at `/mcp`. FastAPI only hosts
   it; the two frameworks are nested, not mixed. **Read-only, two tools —
   `search(query, top_k, path_prefix)` and `tree` — and no `bank`
@@ -245,6 +245,41 @@ reads a byte of piped data as the answer.
 A custom `-InstallHome`/`--home` is an isolated copy (the test suite uses
 one) and gets **none** of the user-scope part: no token export, no profile,
 no autostart, no model, no service, no `doctor`.
+
+## Removing it (the mirror image)
+
+```powershell
+& .\uninstall.ps1        # or: ./uninstall.sh on POSIX
+```
+
+Takes away exactly what the installer put on the machine — service and
+resident, autostart, the profile block, `MNEMO_API_TOKEN`, and the engine
+home with `state/` and `model-cache/` — after printing the list and asking.
+`-DryRun`/`--dry-run` shows the list and stops; `-KeepModel`/`--keep-model`
+and `-KeepState`/`--keep-state` spare the expensive parts; `-Yes`/`--yes`
+skips the prompt, and **without a terminal it removes nothing** rather than
+guessing (same reasoning as the model prompt, opposite default).
+
+Every step is independent and best-effort, because an uninstaller is reached
+for when something is already broken: a missing task, a missing launcher or a
+half-deleted venv is reported, not fatal; exit 1 only if something that
+exists could not be removed. Stopping goes **through the launcher**
+(`service stop` knows the fingerprint check); signalling the recorded PIDs is
+the fallback for an engine too broken to have one.
+
+Nothing under a project is touched — the `.md` are the source of truth and
+only derived state goes. Deliberate survivors: `HOME` (the installer only
+sets it when absent and keeps no record, so git or ssh may rely on it now)
+and Linux lingering. The one thing that does not survive and cannot be
+rebuilt from the `.md` is `state/banks.json`, so the uninstaller prints every
+bank and its root first, and each project needs `mnemo init` again after a
+reinstall.
+
+**A from-scratch install is the only thing that tests the from-scratch
+promise.** Re-running the installer over an existing engine proves nothing
+about a clean machine: it keeps the venv that was already resolved. That is
+how an unbounded `mcp>=1.0.0` shipped a broken fresh install while every
+existing machine kept working (design decision #29).
 
 ## Updating the engine (after pulling new code)
 

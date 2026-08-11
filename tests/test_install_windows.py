@@ -10,6 +10,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 INSTALLER = REPO / "install.ps1"
+UNINSTALLER = REPO / "uninstall.ps1"
 
 _passed = 0
 
@@ -41,34 +42,34 @@ def run(command: list[str], *, cwd: Path | None = None) -> subprocess.CompletedP
     return result
 
 
-def check_installer_encoding() -> None:
-    """install.ps1 must stay pure ASCII, and must parse.
+def check_script_encoding(script: Path) -> None:
+    """A shipped .ps1 must stay pure ASCII, and must parse.
 
     Windows PowerShell 5.1 decodes a BOM-less .ps1 as the system ANSI
     codepage, so a single em dash in a double-quoted string breaks the
-    quoting and the whole installer fails to parse. That happened; this is
-    the guard.
+    quoting and the whole script fails to parse. That happened; this is
+    the guard, and it covers the uninstaller for the same reason.
     """
-    text = INSTALLER.read_text(encoding="utf-8")
+    text = script.read_text(encoding="utf-8")
     offenders = [
         (number, line.strip())
         for number, line in enumerate(text.splitlines(), start=1)
         if any(ord(char) > 127 for char in line)
     ]
-    assert not offenders, f"non-ASCII in install.ps1: {offenders[:3]}"
-    ok("install.ps1 is pure ASCII (PowerShell 5.1 reads it as ANSI)")
+    assert not offenders, f"non-ASCII in {script.name}: {offenders[:3]}"
+    ok(f"{script.name} is pure ASCII (PowerShell 5.1 reads it as ANSI)")
 
     parse = run([
         "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
         "$errors = $null; "
-        f"$null = [System.Management.Automation.Language.Parser]::ParseFile('{INSTALLER}',"
+        f"$null = [System.Management.Automation.Language.Parser]::ParseFile('{script}',"
         " [ref]$null, [ref]$errors); "
         "if ($errors -and $errors.Count -gt 0) { "
         "$errors | ForEach-Object { Write-Host $_.Message }; exit 1 } "
         "else { Write-Host 'parses cleanly' }",
     ])
     assert "parses cleanly" in parse.stdout, parse.stdout
-    ok("install.ps1 parses with zero errors")
+    ok(f"{script.name} parses with zero errors")
 
 
 def main() -> int:
@@ -76,7 +77,8 @@ def main() -> int:
         print("SKIP  native Windows installer test")
         return 0
 
-    check_installer_encoding()
+    check_script_encoding(INSTALLER)
+    check_script_encoding(UNINSTALLER)
 
     with tempfile.TemporaryDirectory(prefix="mnemo install ") as raw:
         mismatched_env = {
@@ -260,6 +262,87 @@ def main() -> int:
 
         assert (engine / "bin" / "mnemow.exe").is_file()
         ok("both launchers installed (console + windowless)")
+
+        # ---- uninstall, against the same isolated engine -----------------
+        # Last, because it destroys what every check above needs. The user
+        # scope is captured first: an isolated uninstall must leave the real
+        # machine's registrations exactly as it found them, and "exactly" is
+        # only checkable against a before-value.
+        def user_scope() -> tuple[str, str]:
+            probe = run([
+                "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-Command",
+                "$token = [Environment]::GetEnvironmentVariable("
+                "'MNEMO_API_TOKEN', 'User'); "
+                "$profileText = ''; "
+                "if (Test-Path -LiteralPath $PROFILE.CurrentUserAllHosts) { "
+                "$profileText = Get-Content -LiteralPath "
+                "$PROFILE.CurrentUserAllHosts -Raw }; "
+                "Write-Host ('TOKEN:' + [bool]$token); "
+                "Write-Host ('PROFILE:' + "
+                "[bool]($profileText -match 'mnemo'))",
+            ])
+            lines = dict(
+                line.split(":", 1)
+                for line in probe.stdout.splitlines()
+                if ":" in line
+            )
+            return lines.get("TOKEN", ""), lines.get("PROFILE", "")
+
+        before_scope = user_scope()
+
+        uninstall = [
+            "powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass",
+            "-File", str(UNINSTALLER), "-InstallHome", str(engine),
+        ]
+
+        dry = run(uninstall + ["-DryRun"])
+        assert "dry run: nothing was removed" in dry.stdout, dry.stdout
+        assert "isolated home" in dry.stdout, dry.stdout
+        assert launcher.is_file(), "a dry run deleted the engine"
+        ok("uninstall -DryRun reports and changes nothing")
+
+        # No terminal and no -Yes: a prompt nobody can see would hang or read
+        # one byte of the caller's data as consent. For a delete, refusing is
+        # the only safe reading -- and the engine must survive it intact.
+        unattended = run(uninstall)
+        assert "non-interactive run and no -Yes" in unattended.stdout
+        assert launcher.is_file(), "an unconfirmed uninstall deleted the engine"
+        ok("uninstall refuses to delete without a terminal or -Yes")
+
+        kept = run(uninstall + ["-KeepModel", "-KeepState", "-Yes"])
+        assert not (engine / ".venv").exists(), kept.stdout
+        assert not launcher.exists(), kept.stdout
+        assert state_sentinel.read_text(encoding="utf-8") == "state"
+        assert cache_sentinel.read_text(encoding="utf-8") == "cache"
+        ok("-KeepModel -KeepState removes the engine but not the data")
+
+        final = run(uninstall + ["-Yes"])
+        assert not engine.exists(), final.stdout
+        assert "mnemo is gone from this machine" in final.stdout
+        ok("full uninstall removes the engine home")
+
+        assert user_scope() == before_scope, (
+            "an isolated uninstall reached into user scope"
+        )
+        ok("isolated uninstall left the token and profile untouched")
+
+        task_after = subprocess.run(
+            ["schtasks", "/Query", "/TN", "mnemo service"],
+            capture_output=True, text=True, encoding="utf-8",
+            errors="replace", timeout=60,
+        )
+        if task.returncode == 0:
+            assert task_after.returncode == 0, (
+                "an isolated uninstall removed the real machine's logon task"
+            )
+            ok("isolated uninstall left the real logon task alone")
+        else:
+            ok("no logon task existed either side of the isolated uninstall")
+
+        absent = run(uninstall + ["-Yes"])
+        assert "no engine installed there" in absent.stdout, absent.stdout
+        ok("uninstalling twice is not an error")
 
     print(f"\n{_passed} passed, 0 failed")
     return 0

@@ -52,7 +52,11 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from . import config
-from .config import SERVICE_START_GRACE, SERVICE_STOP_TIMEOUT
+from .config import (
+    SERVICE_READY_TIMEOUT,
+    SERVICE_START_GRACE,
+    SERVICE_STOP_TIMEOUT,
+)
 
 
 def state_dir() -> Path:
@@ -681,10 +685,62 @@ def _exclusive_start():
             pass
 
 
+def _handed_off(spawned_pid: int, info: dict) -> bool:
+    """True when the PID we spawned was a stub that handed off to a live one.
+
+    This is the redirector rule again, in a new place: on Windows the venv's
+    ``pythonw.exe`` is a launcher stub, so the PID returned by the spawn is
+    not the PID that ends up serving, and the stub is free to exit once the
+    real interpreter is running. Treating that exit as "the service died"
+    would kill a healthy backend's state file moments after it came up.
+
+    The backend's own ``service.json`` is what settles it: it is written by
+    the process actually serving, so a different, live PID there means the
+    handover happened rather than the service failing.
+    """
+    other = info.get("pid")
+    try:
+        other_pid = int(other) if other else 0
+    except (TypeError, ValueError):
+        return False
+    if other_pid <= 0 or other_pid == spawned_pid:
+        return False
+    return _pid_state(other_pid) == ALIVE
+
+
+def _await_ready(pid: int, timeout: float) -> tuple[bool, bool, str | None]:
+    """Wait until the backend answers ``/health``.
+
+    Returns ``(ready, died, endpoint)``. The endpoint stays None while the
+    backend has not published one yet, which is a normal early state and not
+    a failure: on a cold start the process spends seconds importing FastAPI,
+    both MCP faces and the store before it binds a port at all.
+
+    ``/health`` is the authority on readiness, never the liveness of the PID
+    we spawned -- see ``_handed_off``. ``died`` is reported only when that PID
+    is gone *and* nothing else is serving, which is the one case where waiting
+    out the timeout would name the wrong problem.
+    """
+    deadline = time.monotonic() + timeout
+    endpoint: str | None = None
+    while time.monotonic() < deadline:
+        info = read_service_info() or {}
+        host, port = info.get("host"), info.get("port")
+        if host and port:
+            endpoint = f"http://{host}:{port}"
+            if _health(info):
+                return True, False, endpoint
+        if _pid_state(pid) != ALIVE and not _handed_off(pid, info):
+            return False, True, endpoint
+        time.sleep(0.25)
+    return False, False, endpoint
+
+
 def start(
     *,
     foreground: bool = False,
     target: Sequence[str] | None = None,
+    wait_ready: bool | None = None,
 ) -> int:
     """Start the service unless it is already running.
 
@@ -694,8 +750,15 @@ def start(
 
     ``target`` is an additive convenience over the contract signature: it lets
     the lifecycle be exercised against any long-running command.
+
+    ``wait_ready`` decides whether "started" has to mean "answering". It
+    defaults to *whether we know what ready means*: the real backend publishes
+    an endpoint and serves ``/health``, an arbitrary ``target`` does neither,
+    so waiting on one would be waiting for something that is never coming.
     """
     argv = list(target) if target is not None else _default_target()
+    if wait_ready is None:
+        wait_ready = target is None
     if foreground:
         return subprocess.call(argv)
 
@@ -744,8 +807,30 @@ def start(
                     "argv": argv,
                 }
             )
-            print(f"mnemo service: started (pid {pid})")
-            return EXIT_OK
+            if not wait_ready or SERVICE_READY_TIMEOUT <= 0:
+                print(f"mnemo service: started (pid {pid})")
+                return EXIT_OK
+
+            # "started" now means "serving". Anything that runs a command
+            # straight after this -- the installer's closing `doctor`, a
+            # scripted `start && search` -- used to race the bind and report a
+            # healthy backend as DOWN.
+            ready, died, endpoint = _await_ready(pid, SERVICE_READY_TIMEOUT)
+            if ready:
+                print(f"mnemo service: started (pid {pid}, {endpoint})")
+                return EXIT_OK
+            if died:
+                _reap(pid)
+                _clear_identity()
+                print("mnemo service: the process exited while starting")
+                return EXIT_DOWN
+            where = endpoint or "no endpoint published"
+            print(
+                f"mnemo service: started (pid {pid}) but not answering at "
+                f"{where} after {SERVICE_READY_TIMEOUT:.0f}s"
+            )
+            print("mnemo service: check `mnemo service status`; it may still be coming up")
+            return EXIT_UNHEALTHY
     except RuntimeError as exc:
         print(f"mnemo service: {exc}")
         return EXIT_UNHEALTHY

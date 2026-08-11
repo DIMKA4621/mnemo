@@ -43,7 +43,7 @@ import contextvars
 import logging
 from typing import Any
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 log = logging.getLogger("mnemo.mcp")
 
@@ -58,7 +58,7 @@ current_bank_id: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "mnemo_current_bank_id", default=None
 )
 
-_mcp: FastMCP | None = None
+_mcp: MCPServer | None = None
 
 
 # ------------------------------------------------------------------ tools
@@ -248,7 +248,7 @@ def run_reindex(
             f"{payload['queued']} waiting.")
 
 
-def _register(mcp: FastMCP) -> None:
+def _register(mcp: MCPServer) -> None:
     """The plain face: two read-only tools, and the bank is not an argument.
 
     **`bank` is gone from the tool schemas on purpose.** A connection pinned
@@ -296,15 +296,11 @@ def _register(mcp: FastMCP) -> None:
         return run_tree(path_prefix, depth)
 
 
-def server() -> FastMCP:
-    """The single FastMCP instance, built once."""
+def server() -> MCPServer:
+    """The single MCPServer instance, built once."""
     global _mcp
     if _mcp is None:
-        # stateless_http: every request is self-contained, which is what lets
-        # one mounted app serve many banks and many sessions with no session
-        # affinity — each request carries its own bank in its own token.
-        # streamable_http_path="/" because the mount point is the whole path.
-        _mcp = FastMCP("mnemo", stateless_http=True, streamable_http_path="/")
+        _mcp = MCPServer("mnemo")
         _register(_mcp)
     return _mcp
 
@@ -346,5 +342,19 @@ class AuthenticatedBankASGI:
 
 
 def build_app() -> Any:
-    """The ASGI app to mount at ``/mcp``."""
-    return AuthenticatedBankASGI(server().streamable_http_app())
+    """The ASGI app to mount at ``/mcp``.
+
+    ``stateless_http``: every request is self-contained, which is what lets one
+    mounted app serve many banks and many sessions with no session affinity —
+    each request carries its own bank in its own token.
+    ``streamable_http_path="/"`` because the mount point is the whole path.
+
+    Both settings sit here rather than on the constructor: the 2.0 SDK moved
+    them out of ``MCPServer(...)`` and into this call. That also fixes their
+    order for good — ``session_manager`` raises until this has run, and
+    ``api.lifespan`` reads it, so the mount must be built first. It is:
+    ``api`` mounts at import, the lifespan runs at startup.
+    """
+    return AuthenticatedBankASGI(
+        server().streamable_http_app(streamable_http_path="/", stateless_http=True)
+    )
