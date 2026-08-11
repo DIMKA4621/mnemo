@@ -1273,7 +1273,7 @@ const bankToken = {
   bank: null,          // the BankInfo this panel was opened for
   value: null,         // the real token, deliberately kept out of the DOM
   revealed: false,
-  scope: 'user',       // which config shape is on screen
+  scope: 'literal',    // which config shape is on screen
   entry: 'mnemo',      // the name the config entry will carry
   blocks: [],          // rendered snippets, so typing can repaint them in place
   busy: false,
@@ -1455,9 +1455,9 @@ function mcpDocument(url) {
 }
 
 function tokenSnippets() {
-  if (bankToken.scope === 'user') {
+  if (bankToken.scope === 'literal') {
     return [{
-      caption: 'Для ~/.claude.json — злити з наявним «mcpServers»',
+      caption: 'Для .mcp.json проєкту або ~/.claude.json — злити з «mcpServers»',
       secret: true,
       build: (t) => mcpDocument('http://' + serviceHost() + ':' + servicePort() +
                                 '/mcp?token=' + t),
@@ -1481,7 +1481,7 @@ function tokenSnippets() {
 }
 
 /**
- * Project scope leads with the command, not with the paste.
+ * The template form leads with the command, not with the paste.
  *
  * `mnemo init` writes all three pieces — the fragment into the template, the
  * variables into `.mcp.env`, and the substitution lines into `mcp-setup.sh` —
@@ -1490,14 +1490,19 @@ function tokenSnippets() {
  * stay below it because seeing what will land is worth having, and because
  * they are the way out when `init` cannot be run in that project.
  */
-function projectLeadNote() {
+function templateLeadNote() {
   return el('p', { className: 'tok-lead' }, [
-    document.createTextNode('У проєкті це робить '),
+    document.createTextNode('Усі три файли заповнює '),
     el('code', { text: 'mnemo init' }),
-    document.createTextNode(' — він сам вписує фрагмент у .mcp.json.template, ' +
-      'змінні у .mcp.env і рядки підстановки в mcp-setup.sh. Нижче — те саме, ' +
-      'що він запише: щоб побачити наперед або вписати руками, якщо запустити ' +
-      'init у цьому проєкті не можна.'),
+    document.createTextNode(' — фрагмент у .mcp.json.template, змінні у ' +
+      '.mcp.env, рядки підстановки в mcp-setup.sh. Сам .mcp.env він не ' +
+      'створює: це файл із секретами, тож спершу '),
+    el('code', { text: 'cp .mcp.env.example .mcp.env' }),
+    document.createTextNode(', потім init ще раз, і в кінці '),
+    el('code', { text: 'bash mcp-setup.sh' }),
+    document.createTextNode(' — він і збирає .mcp.json зі значеннями. Нижче — ' +
+      'те саме, що запише init: щоб побачити наперед або вписати руками, якщо ' +
+      'запустити його в цьому проєкті не можна.'),
   ]);
 }
 
@@ -1542,10 +1547,28 @@ function entryHintText() {
          'імен інструментів — mcp__' + entryName() + '__search.';
 }
 
+/**
+ * The two tabs split by FORM, not by scope, and the labels used to say scope.
+ *
+ * That was wrong in a way that reliably misled: a project keeping a plain
+ * `.mcp.json` needs the literal form, and it was sitting behind a tab labelled
+ * "user scope · ~/.claude.json" — which reads as "not about projects". So that
+ * person opened "project scope", met `{{MNEMO_HOST}}`, and had no way to know
+ * where the braces were supposed to come from.
+ *
+ * There is really one question here: does this project substitute values from
+ * `.mcp.env`, or hold them directly? `SCOPE_HINT` below is what answers it,
+ * because the cabinet cannot look at the project and see for itself.
+ */
 const SCOPE_TABS = [
-  ['user', 'user scope · ~/.claude.json'],
-  ['project', 'project scope · .mcp.json.template'],
+  ['literal', 'зі значеннями · .mcp.json або ~/.claude.json'],
+  ['template', 'з плейсхолдерами · .mcp.json.template'],
 ];
+
+const SCOPE_HINT =
+  'Друга — якщо в проєкті є .mcp.json.template і mcp-setup.sh: там значення ' +
+  'підставляються з .mcp.env, а в git їде тільки шаблон. Інакше перша: ' +
+  '.mcp.json тримає значення прямо і лежить у .gitignore.';
 
 function buildTokenPanel() {
   bankToken.title = el('h2', { text: 'Доступ MCP' });
@@ -1604,7 +1627,7 @@ function openTokenPanel(bank) {
   bankToken.value = null;
   bankToken.revealed = false;
   bankToken.confirming = false;
-  bankToken.scope = 'user';
+  bankToken.scope = 'literal';
   bankToken.entry = defaultEntryName(bank.name);
   bankToken.errorText = null;
   bankToken.note = null;
@@ -1767,8 +1790,9 @@ function renderTokenPanel() {
     }));
   }
   body.appendChild(tabs);
+  body.appendChild(el('p', { className: 'tok-note', text: SCOPE_HINT }));
 
-  if (bankToken.scope === 'project') body.appendChild(projectLeadNote());
+  if (bankToken.scope === 'template') body.appendChild(templateLeadNote());
 
   for (const spec of tokenSnippets()) {
     const copy = copyButton(() => spec.build(bankToken.value), 'Скопіювати у буфер');
@@ -1782,7 +1806,7 @@ function renderTokenPanel() {
     bankToken.blocks.push({ spec: spec, pre: pre });
   }
 
-  if (bankToken.scope === 'project') {
+  if (bankToken.scope === 'template') {
     body.appendChild(el('p', {
       className: 'tok-note',
       text: '.mcp.json — згенерований файл: він у .gitignore, і mcp-setup.sh ' +
