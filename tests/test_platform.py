@@ -40,6 +40,7 @@ from src.scaffold import (  # noqa: E402
     _RULE_ANCESTORS,
     _RULE_CURRENT,
     _RULE_SUPERSEDED,
+    _NeedsUntrack,
     _Refuse,
     _git_tracked,
     _plan_mcp,
@@ -1070,6 +1071,127 @@ def test_removal_lifts_the_queue_cancellation() -> None:
           "q would be undefined when drop_index=False")
 
 
+def test_setup_scripts_agree() -> None:
+    """The two regeneration scripts must produce identical bytes.
+
+    They exist as a pair because the shell half needs bash, which a native
+    Windows machine has no reason to have. A pair is also how they drift: two
+    implementations of one substitution, edited at different times. This is
+    the check that notices.
+
+    The values are chosen to break naive implementations — a `|` would end a
+    `sed` expression, a `$1` would be read as a capture reference by
+    PowerShell's `-replace`, and both halves deliberately use neither.
+    """
+    print("\n=== setup scripts agree ===")
+    import subprocess
+
+    from src.scaffold import _SETUP_MARKER, _SETUP_PS1, _SETUP_SH
+
+    check("both scripts carry the marker",
+          _SETUP_MARKER in _SETUP_SH and _SETUP_MARKER in _SETUP_PS1)
+
+    template = json.dumps({"mcpServers": {
+        "mnemo-memory": {"type": "http",
+                         "url": "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}"
+                                "/mcp?token={{MNEMO_TOKEN}}"},
+        "mnemo-notes": {"type": "http",
+                        "url": "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}"
+                               "/mcp?token={{MNEMO_NOTES_TOKEN}}"},
+        "foreign": {"type": "stdio", "command": "{{ODD_VALUE}}"},
+    }}, indent=2) + "\n"
+    env = (
+        "# a comment\n"
+        "\n"
+        "MNEMO_HOST=127.0.0.1\n"
+        "  MNEMO_PORT = 8918  \n"                       # spaces both sides
+        f'MNEMO_TOKEN="{_FAKE_TOKEN}"\n'                # double quoted
+        f"MNEMO_NOTES_TOKEN='{_FAKE_TOKEN}'\n"          # single quoted
+        "ODD_VALUE=a|b&c$1d/e\n"                        # hostile to sed/regex
+        "MNEMO_TOKEN=later-definition-must-lose\n"
+    )
+
+    def render(script: str, name: str, runner: list[str]) -> bytes | None:
+        with tempfile.TemporaryDirectory(prefix="mnemo setup ") as raw:
+            proj = Path(raw)
+            _write(proj / ".mcp.json.template", template)
+            _write(proj / ".mcp.env", env)
+            _write(proj / name, script)
+            try:
+                done = subprocess.run(runner + [str(proj / name)], cwd=str(proj),
+                                      capture_output=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            if done.returncode != 0:
+                print(f"note  {name} exited {done.returncode}: "
+                      f"{done.stderr.decode('utf-8', 'replace').strip()[:120]}")
+                return None
+            out = proj / ".mcp.json"
+            return out.read_bytes() if out.exists() else b""
+
+    from_sh = render(_SETUP_SH, "mcp-setup.sh", ["bash"])
+    from_ps = render(_SETUP_PS1, "mcp-setup.ps1",
+                     ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                      "-File"])
+
+    if from_sh is None or from_ps is None:
+        missing = "bash" if from_sh is None else "powershell"
+        print(f"note  parity check skipped: no usable {missing}")
+    else:
+        check("both halves write byte-identical output", from_sh == from_ps,
+              detail=f"{len(from_sh)} vs {len(from_ps)} bytes")
+
+    survivor = from_sh if from_sh is not None else from_ps
+    if survivor is not None:
+        doc = json.loads(survivor.decode("utf-8"))
+        url = doc["mcpServers"]["mnemo-memory"]["url"]
+        check("a value padded around `=` is trimmed", ":8918/" in url,
+              detail=url)
+        check("a quoted value loses exactly its quotes",
+              url.endswith(_FAKE_TOKEN), detail=url)
+        check("a single-quoted value too",
+              doc["mcpServers"]["mnemo-notes"]["url"].endswith(_FAKE_TOKEN))
+        check("the first definition wins", "later-definition" not in
+              survivor.decode("utf-8"))
+        check("a value full of metacharacters survives intact",
+              doc["mcpServers"]["foreign"]["command"] == "a|b&c$1d/e",
+              detail=doc["mcpServers"]["foreign"]["command"])
+        check("no placeholder is left behind",
+              not re.search(r"\{\{[A-Z0-9_]+\}\}", survivor.decode("utf-8")))
+
+    # The failure that matters: a placeholder with no value must be loud. The
+    # generation before this listed substitutions by hand, so a forgotten one
+    # was copied through verbatim while the script still exited 0.
+    def render_missing(script: str, name: str, runner: list[str]):
+        with tempfile.TemporaryDirectory(prefix="mnemo setup ") as raw:
+            proj = Path(raw)
+            _write(proj / ".mcp.json.template", template)
+            _write(proj / ".mcp.env", "MNEMO_HOST=127.0.0.1\n")
+            _write(proj / name, script)
+            try:
+                done = subprocess.run(runner + [str(proj / name)], cwd=str(proj),
+                                      capture_output=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                return None
+            return done.returncode, (proj / ".mcp.json").exists(), \
+                done.stderr.decode("utf-8", "replace")
+
+    for script, name, runner in (
+        (_SETUP_SH, "mcp-setup.sh", ["bash"]),
+        (_SETUP_PS1, "mcp-setup.ps1",
+         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]),
+    ):
+        result = render_missing(script, name, runner)
+        if result is None:
+            continue
+        code, wrote, stderr = result
+        check(f"{name} fails on a missing variable", code != 0, detail=str(code))
+        check(f"{name} writes nothing when it fails", not wrote)
+        check(f"{name} names every missing variable",
+              "MNEMO_PORT" in stderr and "MNEMO_TOKEN" in stderr
+              and "ODD_VALUE" in stderr, detail=stderr.strip()[:160])
+
+
 def test_scaffold_gitignore() -> None:
     """The plain branch: a literal token means git must not carry the file."""
     with tempfile.TemporaryDirectory(prefix="mnemo ignore ") as raw:
@@ -1081,21 +1203,30 @@ def test_scaffold_gitignore() -> None:
         wiring = _plan_wiring(proj, token=_FAKE_TOKEN,
                               migrate=False)
         written = {path.name: text for path, text in wiring.writes}
-        check(".mcp.json is written when there is no template",
-              ".mcp.json" in written, detail=str(sorted(written)))
+        # `init` builds the template layer now, in every project. `.mcp.json`
+        # is a build product from here on and is never written directly.
+        check("the template layer is seeded",
+              {".mcp.json.template", "mcp-setup.sh", "mcp-setup.ps1",
+               ".mcp.env", ".mcp.env.example"} <= set(written),
+              detail=str(sorted(written)))
+        check(".mcp.json itself is never written",
+              ".mcp.json" not in written, detail=str(sorted(written)))
 
         text = written.get(".gitignore", "")
-        check(".gitignore gains .mcp.json",
-              any(line.strip() == ".mcp.json" for line in text.splitlines()),
-              detail=text)
-        # Exactly one entry added, and the existing lines untouched in place:
-        # a .gitignore is human-curated and git-tracked, so the smallest
-        # possible edit is the only acceptable one.
+        ignored = {line.strip() for line in text.splitlines()}
+        # BOTH files can end up holding a literal token: `.mcp.env` because
+        # that is where it lives, and `.mcp.json` because the setup scripts
+        # substitute it in.
+        check(".gitignore gains .mcp.json", ".mcp.json" in ignored, detail=text)
+        check(".gitignore gains .mcp.env", ".mcp.env" in ignored, detail=text)
+        # Only those, and the existing lines untouched in place: a .gitignore
+        # is human-curated and git-tracked, so the smallest possible edit is
+        # the only acceptable one.
         added = [l for l in text.splitlines()
                  if l.strip() and not l.startswith("#")
                  and l not in ("venv/", "*.pyc")]
         check("no other .gitignore line is added or reordered",
-              added == [".mcp.json"]
+              added == [".mcp.json", ".mcp.env"]
               and text.startswith("venv/\n*.pyc\n"),
               detail=text)
 
@@ -1139,41 +1270,51 @@ def test_scaffold_refuses_a_tracked_file() -> None:
               _git_tracked(proj, ".mcp.json") is False,
               detail=str(_git_tracked(proj, ".mcp.json")))
         wiring = _plan_wiring(proj, token=_FAKE_TOKEN, migrate=False)
-        check("init writes into an untracked .mcp.json",
-              any(p.name == ".mcp.json" for p, _ in wiring.writes),
+        check("init plans the template layer in an untracked repo",
+              any(p.name == ".mcp.json.template" for p, _ in wiring.writes),
               detail=str([p.name for p, _ in wiring.writes]))
 
-        # Now track it, and the same call must refuse.
+        # Now track it. `.mcp.json` is a build product — the setup scripts
+        # substitute the literal token into it — so a tracked one is a token
+        # about to be committed by the next regeneration.
         _write(proj / ".mcp.json", '{"mcpServers": {}}\n')
         git(proj, "add", "-f", ".mcp.json")
         check("a tracked file reads as tracked",
               _git_tracked(proj, ".mcp.json") is True)
 
+        # It raises `_NeedsUntrack`, not `_Refuse`: the outcomes differ. A
+        # refusal ends the run; this is a question `init` can answer itself
+        # with one reversible git command, once someone has said yes. What has
+        # NOT changed is that planning writes nothing until it is settled.
         for label, migrate in (("init", False), ("--migrate", True)):
+            raised, name, wrong = None, "", ""
             try:
                 _plan_wiring(proj, token=_FAKE_TOKEN, migrate=migrate)
-                refused, message = False, ""
+            except _NeedsUntrack as exc:
+                raised, name = "untrack", exc.name
             except _Refuse as exc:
-                refused, message = True, str(exc)
-            check(f"{label} REFUSES a tracked .mcp.json", refused)
-            check(f"{label}'s refusal names `git rm --cached`",
-                  "git rm --cached .mcp.json" in message,
-                  detail=message[:200])
-            check(f"{label}'s refusal leaks no token",
-                  _FAKE_TOKEN not in message, detail=message[:200])
+                raised, wrong = "refuse", str(exc)
+            check(f"{label} stops on a tracked .mcp.json",
+                  raised == "untrack", detail=f"{raised} {wrong[:120]}")
+            check(f"{label} names the file it must untrack",
+                  name == ".mcp.json", detail=name)
 
-        # The template branch has its own file that gets a literal token.
+        # The other file that gets a literal token, and it is the file the
+        # token actually lives in.
         _write(proj / ".mcp.json.template", '{"mcpServers": {}}\n')
+        git(proj, "rm", "--cached", "-q", ".mcp.json")
         _write(proj / ".mcp.env", "MNEMO_PORT=8918\n")
         git(proj, "add", "-f", ".mcp.env")
+        raised, name = None, ""
         try:
             _plan_wiring(proj, token=_FAKE_TOKEN, migrate=False)
-            refused, message = False, ""
-        except _Refuse as exc:
-            refused, message = True, str(exc)
-        check("a tracked .mcp.env is refused too", refused, detail=message[:160])
-        check("that refusal names `git rm --cached .mcp.env`",
-              "git rm --cached .mcp.env" in message, detail=message[:200])
+        except _NeedsUntrack as exc:
+            raised, name = "untrack", exc.name
+        except _Refuse:
+            raised = "refuse"
+        check("a tracked .mcp.env stops it too", raised == "untrack",
+              detail=str(raised))
+        check("and names .mcp.env", name == ".mcp.env", detail=name)
 
 
 def test_git_index_probe() -> None:
@@ -1564,6 +1705,7 @@ def main() -> int:
     test_memory_rule_refresh()
     test_adopted_project_discovery()
     test_removal_lifts_the_queue_cancellation()
+    test_setup_scripts_agree()
     test_scaffold_gitignore()
     test_scaffold_refuses_a_tracked_file()
     test_git_index_probe()

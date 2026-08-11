@@ -133,15 +133,22 @@ Faces:
   the rule, not in an injection.
 - `src/scaffold.py` — `mnemo init`: additive, idempotent, refuses on
   conflict. Registers the project's memory root as a bank and writes
-  **that bank's literal token** into the MCP entry, which is why
-  `.mcp.json` is generated and git-ignored (`init` adds the `.gitignore`
-  line) and why `init` **refuses** — writing nothing, printing `git rm
-  --cached .mcp.json` — when that file is already tracked. It is
-  template-aware: where `.mcp.json.template` exists it writes the
-  placeholder entry there, the variables into `.mcp.env.example` /
-  `.mcp.env`, and the matching `sed -e` lines into `mcp-setup.sh`,
-  because a missing substitution leaves `{{MNEMO_TOKEN}}` in the
-  generated file while the script still exits 0. Writes **no hook at
+  **that bank's literal token** into the wiring. It **builds the template
+  layer in every project**: `.mcp.json.template` (placeholders, tracked),
+  `.mcp.env` + `.mcp.env.example`, and both `mcp-setup.sh` and
+  `mcp-setup.ps1` — two halves because bash is not a thing a native
+  Windows machine has, held to byte-identical output by a test. Those
+  scripts **discover** their substitutions from the template instead of
+  listing one `sed -e` per placeholder, which is what removes the layer's
+  only silent failure: a placeholder with no value is now a named error
+  and no file written, where it used to be copied through verbatim while
+  the script exited 0. A new bank is therefore an entry in the template
+  plus a token in `.mcp.env`, nothing else. The template **starts as the
+  project's existing `.mcp.json`**, or converting to the layer would drop
+  every other server it had. A tracked `.mcp.json` / `.mcp.env` is not a
+  refusal any more: `init` explains, asks, and runs `git rm --cached`
+  itself (`--yes` for scripts; **without a terminal it does nothing** and
+  prints the command). Writes **no hook at
   all**, and no flag makes it write one; `--migrate` unwires every hook
   mnemo ever wrote and rewrites the superseded `/mcp/<bank>` URL. The
   `mcpServers` key it writes is **`mnemo-memory`** (tools namespace as
@@ -184,7 +191,7 @@ Landed and working today:
 
 ```
 mnemo warmup                        one-time explicit ~2.2 GB model download + check
-mnemo init [--root DIR]             additive, idempotent project wiring; NO hook
+mnemo init [--root DIR] [--yes]     additive, idempotent project wiring; NO hook
      [--migrate]                    also unwire every hook mnemo ever wrote
 mnemo search "q" [--path-prefix P]  hybrid search over a bank
 mnemo reindex [--bank B] [--full]   queue a reindex (`ingest` is a deprecated alias)

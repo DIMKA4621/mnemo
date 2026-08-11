@@ -623,6 +623,13 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     pn.add_argument("--root", default=None, help="Project root (default: cwd).")
     pn.add_argument(
+        "--yes", action="store_true",
+        help="Answer yes to the one question init can ask: taking a "
+             "git-tracked .mcp.json / .mcp.env out of the index so a bank "
+             "token may be written into it. Without a terminal, init never "
+             "assumes it.",
+    )
+    pn.add_argument(
         "--migrate", action="store_true",
         help="Also rewrite mnemo's OWN legacy wiring to the current form, and "
              "unwire every hook it used to write. Never touches a key mnemo "
@@ -795,7 +802,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_hook_postedit()
     if cmd == "init":
         from .scaffold import init_project
-        return init_project(args.root, migrate=args.migrate)
+        return init_project(args.root, migrate=args.migrate,
+                            yes=args.yes)
     if cmd == "serve":
         from .api import run
         run(host=args.host, port=args.port)

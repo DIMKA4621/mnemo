@@ -49,6 +49,7 @@ import hashlib
 import json
 import os
 import re
+import sys
 from pathlib import Path
 from typing import Iterable
 
@@ -459,6 +460,20 @@ def _rule_state(path: Path) -> str:
     return "edited"
 
 
+class _NeedsUntrack(Exception):
+    """A file that must hold a literal token is tracked by git.
+
+    Separate from `_Refuse` because the outcomes differ: a refusal is the end
+    of the run, and this is a question with a one-command answer that `init`
+    can carry out itself. The token still never reaches a tracked file — the
+    untracking happens first, and nothing is written until it has.
+    """
+
+    def __init__(self, name: str) -> None:
+        super().__init__(name)
+        self.name = name
+
+
 class _Refuse(Exception):
     """A different mnemo entry already exists — migration is a judgement
     call for the adopt skill, not for this primitive."""
@@ -496,7 +511,7 @@ def _redacted(entry: dict) -> str:
 
 
 def _plan_servers(path: Path, label: str, log: list[str], target: dict,
-                  *, migrate: bool) -> str | None:
+                  *, migrate: bool, base: dict | None = None) -> str | None:
     """Merge mnemo's entry into an `.mcp.json`-shaped document.
 
     Shared by the plain file and the template, because the two differ only in
@@ -508,7 +523,13 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
     fetched a token: every refusal below is a property of what is already in
     the file.
     """
-    data = _load_json(path)
+    # `base` is what the document starts as when the file is not there yet:
+    # the template being created from an existing `.mcp.json`. Planning is
+    # side-effect free, so the seed cannot be written first and read back --
+    # it has to arrive as a value, or the merge would run against `{}` and
+    # every other server the project had would be dropped on the next
+    # regeneration.
+    data = _load_json(path) if path.exists() else dict(base or {})
     servers = data.get("mcpServers")
     if servers is None:
         servers = {}
@@ -616,7 +637,8 @@ def _plan_mcp(path: Path, log: list[str], *, token: str = "",
 
 
 def _plan_mcp_template(path: Path, log: list[str], *,
-                       migrate: bool = False) -> str | None:
+                       migrate: bool = False,
+                       base: dict | None = None) -> str | None:
     """Return the new `.mcp.json.template` text, or None if already correct.
 
     The **template** form. Where a project carries one, `.mcp.json` is a
@@ -629,7 +651,8 @@ def _plan_mcp_template(path: Path, log: list[str], *,
     placeholders, and it is why validation can run before a bank exists.
     """
     return _plan_servers(path, ".mcp.json.template", log,
-                         _mcp_server_template(_VAR_INSTANCE), migrate=migrate)
+                         _mcp_server_template(_VAR_INSTANCE), migrate=migrate,
+                         base=base)
 
 
 # ------------------------------------------------- the template convention
@@ -752,6 +775,176 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
                + ("+" if missing else "updated ")
                + ", ".join(sorted(wanted)))
     return text
+
+
+# The regeneration scripts mnemo writes when it creates the template layer
+# itself. Two of them, and that is the point: the shell half needs bash,
+# which a native Windows machine has no reason to have, and this project is
+# native-Windows-clean everywhere else.
+#
+# **Substitutions are discovered, not listed.** The generation before this
+# carried one `sed -e` line per placeholder, which meant adding a bank meant
+# editing the script -- and forgetting to left the placeholder in the
+# generated `.mcp.json` verbatim while the script still exited 0. That was
+# the only silent failure in this layer, and discovery removes the class:
+# a placeholder with no value is now a named error and no file written.
+#
+# The marker is how `init` tells its own script from the one the user's
+# `project-mcp-setup` skill wrote. Ours needs no `-e` lines appended; a
+# foreign one still gets them, and its structure is never touched.
+_SETUP_MARKER = "mnemo:dynamic-setup/1"
+
+_SETUP_SH = """\
+#!/usr/bin/env bash
+# Regenerate .mcp.json from .mcp.json.template + .mcp.env.
+#
+# mnemo:dynamic-setup/1
+# Substitutions are DISCOVERED from the template, never listed here. Adding a
+# server means editing the template and .mcp.env; this file never changes.
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+TEMPLATE="$SCRIPT_DIR/.mcp.json.template"
+ENV_FILE="$SCRIPT_DIR/.mcp.env"
+OUTPUT="$SCRIPT_DIR/.mcp.json"
+
+[ -f "$TEMPLATE" ] || { echo "mcp-setup: missing $TEMPLATE" >&2; exit 1; }
+if [ ! -f "$ENV_FILE" ]; then
+	echo "mcp-setup: missing .mcp.env -- run: cp .mcp.env.example .mcp.env" >&2
+	exit 1
+fi
+
+# Look one variable up in .mcp.env. The file is READ, never sourced: it holds
+# credentials, and `source` would execute whatever a stray line happens to be.
+# First definition wins, which is how the file reads top-down.
+lookup() {
+	local key="$1" line value
+	line="$(grep -m1 -E "^[[:space:]]*${key}[[:space:]]*=" "$ENV_FILE" || true)"
+	[ -n "$line" ] || return 1
+	value="${line#*=}"
+	# Trim, then unquote. Spaces are tolerated around the `=` on the key side,
+	# so tolerating them on the value side is the only consistent reading --
+	# and `PORT = 8918` otherwise yields a port with spaces in it. A value that
+	# genuinely wants padding says so by quoting.
+	value="${value#"${value%%[![:space:]]*}"}"
+	value="${value%"${value##*[![:space:]]}"}"
+	# One layer of surrounding quotes, if the value carries them.
+	case "$value" in
+		\\"*\\") value="${value#\\"}"; value="${value%\\"}" ;;
+		\\'*\\') value="${value#\\'}"; value="${value%\\'}" ;;
+	esac
+	printf '%s' "$value"
+}
+
+content="$(cat "$TEMPLATE")"
+missing=""
+
+# Every placeholder the template actually contains, deduplicated. `-E` rather
+# than a BRE with `\\+`: BSD grep on macOS does not read that the same way.
+for name in $(grep -oE '\\{\\{[A-Za-z0-9_]+\\}\\}' "$TEMPLATE" | tr -d '{}' | sort -u); do
+	if value="$(lookup "$name")"; then
+		# Quoted pattern, so the braces are literal and not a glob. This is
+		# also why the substitution is not `sed`: a value holding the
+		# delimiter would break the expression, and a token is opaque.
+		content="${content//"{{$name}}"/"$value"}"
+	else
+		missing="$missing $name"
+	fi
+done
+
+if [ -n "$missing" ]; then
+	echo "mcp-setup: no value in .mcp.env for:$missing" >&2
+	echo "mcp-setup: .mcp.json NOT written" >&2
+	exit 1
+fi
+
+printf '%s\\n' "$content" > "$OUTPUT"
+echo "mcp-setup: wrote .mcp.json"
+"""
+
+_SETUP_PS1 = """\
+# Regenerate .mcp.json from .mcp.json.template + .mcp.env.
+#
+# mnemo:dynamic-setup/1
+# Substitutions are DISCOVERED from the template, never listed here. Adding a
+# server means editing the template and .mcp.env; this file never changes.
+#
+# The Windows half of mcp-setup.sh, and it must produce byte-identical output:
+# same discovery, same lookup rules, same failure. Windows PowerShell 5.1.
+Set-StrictMode -Version 2.0
+$ErrorActionPreference = "Stop"
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$template  = Join-Path $scriptDir ".mcp.json.template"
+$envFile   = Join-Path $scriptDir ".mcp.env"
+$output    = Join-Path $scriptDir ".mcp.json"
+
+if (-not (Test-Path -LiteralPath $template -PathType Leaf)) {
+    [Console]::Error.WriteLine("mcp-setup: missing $template")
+    exit 1
+}
+if (-not (Test-Path -LiteralPath $envFile -PathType Leaf)) {
+    [Console]::Error.WriteLine("mcp-setup: missing .mcp.env -- run: Copy-Item .mcp.env.example .mcp.env")
+    exit 1
+}
+
+# Read KEY=VALUE. The file is READ, never executed: it holds credentials.
+# First definition wins, matching how the shell half reads the file top-down.
+$values = @{}
+foreach ($line in [IO.File]::ReadAllLines($envFile)) {
+    $trimmed = $line.Trim()
+    if ($trimmed -eq "" -or $trimmed.StartsWith("#")) { continue }
+    $split = $line.IndexOf("=")
+    if ($split -lt 1) { continue }
+    $key = $line.Substring(0, $split).Trim()
+    $value = $line.Substring($split + 1)
+    # Trim, then unquote. Spaces are tolerated around the `=` on the key side,
+    # so tolerating them on the value side is the only consistent reading --
+    # and `PORT = 8918` otherwise yields a port with spaces in it. A value that
+    # genuinely wants padding says so by quoting.
+    $value = $value.Trim()
+    # One layer of surrounding quotes, if the value carries them.
+    if ($value.Length -ge 2) {
+        if (($value.StartsWith('"') -and $value.EndsWith('"')) -or
+            ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+    }
+    if (-not $values.ContainsKey($key)) { $values[$key] = $value }
+}
+
+$content = [IO.File]::ReadAllText($template)
+
+# Every placeholder the template actually contains, deduplicated and sorted -
+# the same set the shell half derives, so a missing-variable message lists
+# them in the same order.
+$names = [regex]::Matches($content, '\\{\\{([A-Za-z0-9_]+)\\}\\}') |
+    ForEach-Object { $_.Groups[1].Value } |
+    Sort-Object -Unique
+
+$missing = @()
+foreach ($name in $names) {
+    if ($values.ContainsKey($name)) {
+        # `.Replace` and not `-replace`: the latter reads the pattern as a
+        # regex and `$` in a token would be taken as a capture reference.
+        $content = $content.Replace("{{$name}}", $values[$name])
+    }
+    else {
+        $missing += $name
+    }
+}
+
+if ($missing.Count -gt 0) {
+    [Console]::Error.WriteLine("mcp-setup: no value in .mcp.env for: " + ($missing -join " "))
+    [Console]::Error.WriteLine("mcp-setup: .mcp.json NOT written")
+    exit 1
+}
+
+# LF and a single trailing newline, so both halves write the same bytes.
+$content = $content.Replace("`r`n", "`n").TrimEnd("`n") + "`n"
+[IO.File]::WriteAllText($output, $content, (New-Object Text.UTF8Encoding $false))
+Write-Host "mcp-setup: wrote .mcp.json"
+"""
 
 
 # The variables mnemo owns in a template project's `.mcp.env`, in the order
@@ -1052,12 +1245,12 @@ def _refuse_if_tracked(proj: Path, name: str) -> None:
     """
     tracked = _git_tracked(proj, name)
     if tracked:
-        raise _Refuse(
-            f"{proj / name} is TRACKED by git, and `mnemo init` would write a "
-            f"literal bank token into it.\n"
-            f"      Untrack it first:  git rm --cached {name}\n"
-            f"      then re-run `mnemo init`.\n"
-            f"      (`init` never runs git — that command is yours to run.)")
+        # Fixable, and the fix is exactly one command — so this is raised as a
+        # question rather than a verdict. `init` still writes nothing until it
+        # has been answered; what changed is that the answer can be "yes, do
+        # it", instead of the run ending and the user typing the command that
+        # was printed for them.
+        raise _NeedsUntrack(name)
     if tracked is None:
         raise _Refuse(
             f"cannot tell whether {proj / name} is tracked by git: an index "
@@ -1388,10 +1581,177 @@ class _Wiring:
         self.writes: list[tuple[Path, str]] = []
         self.log: list[str] = []
         self.notes: list[str] = []
+        # Paths that must end up with the executable bit — the shell script
+        # mnemo seeds. Recorded rather than chmod-ed here because this whole
+        # object is a *plan*: nothing has touched the disk yet, and the
+        # validation pass builds one and throws it away.
+        self.executable: list[Path] = []
+        # Whether this run seeds mnemo's own regeneration scripts. The
+        # setup-script branch below has to know, because it reads the disk
+        # and the disk does not yet show what the plan is about to write.
+        self.seeded_setup = False
+        # What a not-yet-existing `.mcp.json.template` starts as: the
+        # project's current `.mcp.json`, so converting to the template layer
+        # keeps every server it already had.
+        self.template_base: dict | None = None
 
     def add(self, path: Path, text: str | None) -> None:
         if text is not None:
             self.writes.append((path, text))
+
+
+def _interactive() -> bool:
+    """Is there a person at the other end of stdin?
+
+    `sys.stdin.isatty()` is not enough, and the gap is not theoretical: under
+    Git Bash on Windows it answers **True** with stdin redirected from
+    `/dev/null`, so the "no terminal, do nothing" branch never runs and a
+    prompt is issued into a stream nobody is reading. With a pipe that has
+    data in it, the first byte would then be taken as the answer.
+
+    So on Windows the handle is asked what it actually is —
+    `FILE_TYPE_CHAR` (2) is a console, a file (1) or a pipe (3) is not. This
+    is the same distinction `install.ps1` draws with
+    `[Console]::IsInputRedirected`. Everywhere else `isatty` is honest.
+    """
+    try:
+        if sys.stdin is None or not sys.stdin.isatty():
+            return False
+    except (AttributeError, ValueError):
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes  # noqa: PLC0415 - Windows-only path
+
+        kernel32 = ctypes.windll.kernel32          # type: ignore[attr-defined]
+        handle = kernel32.GetStdHandle(-10)        # STD_INPUT_HANDLE
+        if handle in (0, -1, ctypes.c_void_p(-1).value):
+            return False
+        return kernel32.GetFileType(handle) == 2   # FILE_TYPE_CHAR
+    except Exception:  # noqa: BLE001 - a failed probe is not a terminal
+        return False
+
+
+def _untrack(proj: Path, name: str, *, assume_yes: bool) -> bool:
+    """Ask, then take one file out of git's index. Returns whether to go on.
+
+    `git rm --cached` removes the entry from the index and **leaves the file
+    on disk** — that is why this is offered at all rather than only printed.
+    It is reversible with `git add`, and the alternative is a run that ends
+    having done nothing so the user can type the same command themselves.
+
+    **Without a terminal it does nothing** and says so, which is the rule
+    already in force for the model download and the uninstaller: a prompt
+    nobody can see either hangs forever or reads a byte of piped input as
+    consent. `--yes` is how a script says it meant it.
+    """
+    import subprocess  # noqa: PLC0415 - only this path needs it
+
+    print(f"mnemo init: {proj / name} is TRACKED by git, and the wiring "
+          f"mnemo writes into it contains a literal bank token.")
+    print(f"            A token in a tracked file cannot be un-leaked: by the "
+          f"time anyone notices it is in somebody else's clone.")
+    print(f"            The fix is to keep the file but stop tracking it — "
+          f"`git rm --cached {name}` — and let .gitignore hold it out.")
+    print(f"            The file itself is not touched, and `git add {name}` "
+          f"puts it back.")
+
+    if not assume_yes:
+        if not _interactive():
+            print(f"mnemo init: not a terminal, so nothing was changed. "
+                  f"Run `git rm --cached {name}` yourself, or re-run with "
+                  f"`--yes`.")
+            return False
+        try:
+            answer = input(f"untrack {name}? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            print("mnemo init: left it tracked.")
+            return False
+
+    try:
+        done = subprocess.run(
+            ["git", "rm", "--cached", "--quiet", "--", name],
+            cwd=str(proj), capture_output=True, text=True, timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        print(f"mnemo init: could not run git ({exc}). "
+              f"Run `git rm --cached {name}` yourself.")
+        return False
+    if done.returncode != 0:
+        detail = (done.stderr or done.stdout or "").strip().splitlines()
+        print(f"mnemo init: `git rm --cached {name}` failed"
+              f"{': ' + detail[0] if detail else ''}")
+        return False
+    print(f"  untracked            {name} (still on disk)")
+    return True
+
+
+def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
+    """Seed the template layer in a project that has none.
+
+    Only the pieces that are missing, and only the ones with no content of
+    their own to lose: an empty `.mcp.json.template` (the entry is merged into
+    it afterwards, by the same code that merges into an existing one) and the
+    two regeneration scripts.
+
+    **Two scripts, not one.** The shell half needs bash, which a native
+    Windows machine has no reason to have — and this project is native-Windows
+    clean everywhere else, so requiring Git Bash to finish an `init` would be
+    the one place it is not. They are held to producing identical bytes.
+
+    A pre-existing `.mcp.json` is left exactly where it is. It is a build
+    product from here on: the next run of either script overwrites it from the
+    template, which is the whole point of the layer.
+    """
+    # The template starts as whatever `.mcp.json` already held, because from
+    # here on `.mcp.json` is a build product and the next run of either script
+    # overwrites it from the template. Seeding an empty template would delete
+    # every other server the project had configured, at the moment the user
+    # ran a command called `init` — silently, one step later.
+    existing = proj / ".mcp.json"
+    carried = False
+    if existing.is_file():
+        try:
+            doc = json.loads(existing.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            doc = None
+        if isinstance(doc, dict) and isinstance(doc.get("mcpServers"), dict):
+            # Handed back as a value for `_plan_mcp_template` to merge into,
+            # not written here. Writing it would be overwritten moments later:
+            # that merge reads the template off disk, finds nothing, and plans
+            # a second write to the same path which wins by being last.
+            wiring.template_base = doc
+            carried = bool(doc["mcpServers"])
+
+    files = [
+        (proj / "mcp-setup.sh", _SETUP_SH),
+        (proj / "mcp-setup.ps1", _SETUP_PS1),
+    ]
+    if carried:
+        # Said, never guessed at. The template is the file that goes into git,
+        # and mnemo cannot tell which of somebody else's values is a secret —
+        # a port is fine, an API key in the next entry is not, and both look
+        # like strings. Moving them is a judgement only the owner can make.
+        wiring.notes.append(
+            "the existing .mcp.json servers were carried into "
+            ".mcp.json.template, which IS tracked by git.\n"
+            "  mnemo's own entry uses placeholders; the others were copied "
+            "verbatim.\n"
+            "  If any of them holds a literal secret, move it to .mcp.env and "
+            "leave a {{PLACEHOLDER}} behind."
+        )
+    for path, text in files:
+        if path.exists():
+            continue
+        wiring.add(path, text)
+        wiring.log.append(f"  {'created':<20} {path.name}")
+    wiring.executable.extend(
+        p for p, _ in files if p.name.endswith(".sh") and not p.exists()
+    )
+    wiring.seeded_setup = not (proj / "mcp-setup.sh").exists()
 
 
 def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
@@ -1416,18 +1776,25 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
     template = proj / ".mcp.json.template"
 
     if not template.exists():
-        mcp_path = proj / ".mcp.json"
-        _refuse_if_tracked(proj, ".mcp.json")
-        # Not tracked — safe to write, and git must keep it that way.
-        wiring.add(mcp_path, _plan_mcp(mcp_path, wiring.log, token=token,
-                                       migrate=migrate))
-        gitignore = proj / ".gitignore"
-        wiring.add(gitignore,
-                   _plan_gitignore(gitignore, wiring.log, [".mcp.json"]))
-        return wiring
+        _bootstrap_layer(proj, wiring)
 
     wiring.add(template, _plan_mcp_template(template, wiring.log,
-                                            migrate=migrate))
+                                            migrate=migrate,
+                                            base=wiring.template_base))
+
+    # Both files that can hold a literal token must be ignored, and the
+    # `.gitignore` edit is planned before either is written — an ignore rule
+    # that lands after the secret is a rule that arrived too late.
+    #
+    # `.mcp.json` is checked even though `init` no longer writes it: the
+    # scripts do, from the template, and what they write carries the literal
+    # token. A tracked `.mcp.json` is therefore a token about to be committed
+    # by the next `bash mcp-setup.sh` — a leak with mnemo's fingerprints on it
+    # and nothing in the run that would have mentioned it.
+    _refuse_if_tracked(proj, ".mcp.json")
+    gitignore = proj / ".gitignore"
+    wiring.add(gitignore, _plan_gitignore(gitignore, wiring.log,
+                                          [".mcp.json", ".mcp.env"]))
 
     example = proj / ".mcp.env.example"
     wiring.add(example, _plan_env(
@@ -1437,36 +1804,42 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
         update=False, migrate=migrate,
     ))
 
-    # `.mcp.env` holds the real values and is git-ignored. Written only when
-    # it already exists: creating it would be creating a secrets file the
-    # project never asked for, and `mcp-setup.sh` already tells the user to
-    # copy the example when it is missing.
+    # `.mcp.env` holds the real values and is git-ignored. It is now written
+    # unconditionally, where it used to be skipped when absent.
+    #
+    # The old reason — "creating it would be creating a secrets file the
+    # project never asked for" — stopped holding once `init` builds the whole
+    # layer: a project carrying `.mcp.env.example` and a script that reads
+    # `.mcp.env` has asked for it, in the only way a convention can. What it
+    # cost was a second `mnemo init` after a manual `cp`, for no decision the
+    # user was actually making.
     env = proj / ".mcp.env"
-    if env.exists():
-        # Same rule as `.mcp.json` in the other branch, for the same reason:
-        # this is where the literal token goes in a template project. The
-        # lead's rule was written about `.mcp.json`, but it is a rule about
-        # literal bank tokens in tracked files, and this is the other file
-        # that gets one.
-        _refuse_if_tracked(proj, ".mcp.env")
-        wiring.add(env, _plan_env(
-            env, wiring.log, ".mcp.env", prefix,
-            {"HOST": _api_host(), "PORT": _api_port(), "TOKEN": token},
-            _env_comment(_INSTANCE), migrate=migrate,
-        ))
-    else:
-        wiring.notes.append(
-            ".mcp.env does not exist, so the real values were not written.\n"
-            "  Run:  cp .mcp.env.example .mcp.env  then re-run `mnemo init`"
-        )
+    # The rule that does still hold: never a literal bank token in a tracked
+    # file. Written about `.mcp.json`, but it is a rule about tokens, and this
+    # is the other file that gets one.
+    _refuse_if_tracked(proj, ".mcp.env")
+    wiring.add(env, _plan_env(
+        env, wiring.log, ".mcp.env", prefix,
+        {"HOST": _api_host(), "PORT": _api_port(), "TOKEN": token},
+        _env_comment(_INSTANCE), migrate=migrate,
+    ))
 
     setup = proj / "mcp-setup.sh"
-    if not setup.exists():
+    if wiring.seeded_setup:
+        pass                    # just written by `_bootstrap_layer`, and ours
+    elif not setup.exists():
         wiring.notes.append(
             "there is a .mcp.json.template but no mcp-setup.sh, so nothing "
             "regenerates .mcp.json.\n"
             "  Add these lines to whatever does:\n"
             + "\n".join(f"    {line}" for line in _sed_lines(prefix))
+        )
+    elif _SETUP_MARKER in _read_text(setup):
+        # mnemo's own script: it discovers its substitutions from the
+        # template, so there is nothing to append and never will be.
+        wiring.log.append(
+            f"  {'mcp-setup.sh':<20} discovers substitutions itself "
+            f"(nothing to add)"
         )
     else:
         planned = _plan_setup_sh(setup, wiring.log, prefix, wiring.notes,
@@ -1533,7 +1906,8 @@ def _register_bank(bank_root: Path, report: list[str]) -> str:
     return registry.token_for(bank.id)
 
 
-def init_project(root: str | None, *, migrate: bool = False) -> int:
+def init_project(root: str | None, *, migrate: bool = False,
+                 yes: bool = False) -> int:
     """Wire mnemo into a project. Returns 0 on success, 1 on refusal
     (in which case NOTHING was written).
 
@@ -1553,11 +1927,26 @@ def init_project(root: str | None, *, migrate: bool = False) -> int:
     settings_path = proj / ".claude" / "settings.json"
 
     # Pass 1 — validation only. Nothing is written and no bank is registered.
-    try:
-        _plan_wiring(proj, token=_TOKEN_PROBE, migrate=migrate)
-        _plan_settings(settings_path, [], migrate)
-    except _Refuse as exc:
-        print(f"mnemo init: refused — {exc}")
+    #
+    # Looped because one answered question can uncover the next: `.mcp.json`
+    # and `.mcp.env` are checked at different points, and a project can have
+    # both tracked. Bounded by the number of files that can raise it, so a
+    # `git rm` that silently fails cannot spin here.
+    for _ in range(4):
+        try:
+            _plan_wiring(proj, token=_TOKEN_PROBE, migrate=migrate)
+            _plan_settings(settings_path, [], migrate)
+            break
+        except _NeedsUntrack as exc:
+            if not _untrack(proj, exc.name, assume_yes=yes):
+                print("mnemo init: NOTHING was written.")
+                return 1
+        except _Refuse as exc:
+            print(f"mnemo init: refused — {exc}")
+            print("mnemo init: NOTHING was written.")
+            return 1
+    else:
+        print("mnemo init: refused — could not settle which files git tracks.")
         print("mnemo init: NOTHING was written.")
         return 1
 
@@ -1583,6 +1972,15 @@ def init_project(root: str | None, *, migrate: bool = False) -> int:
     new_settings = _plan_settings(settings_path, wiring.log, migrate)
     for path, text in wiring.writes:
         _write(path, text)
+    for path in wiring.executable:
+        # POSIX-only in effect; on Windows this is a no-op, and there the
+        # PowerShell half is what runs anyway. Best-effort: a shell script
+        # without its bit is still runnable as `bash mcp-setup.sh`, so a
+        # filesystem that refuses the mode is not a reason to fail an init.
+        try:
+            path.chmod(path.stat().st_mode | 0o111)
+        except OSError:
+            pass
     if new_settings is not None:
         _write(settings_path, new_settings)
 
@@ -1592,21 +1990,32 @@ def init_project(root: str | None, *, migrate: bool = False) -> int:
     for note in wiring.notes:
         print(f"  NOTE                 {note}")
     if (proj / ".mcp.json.template").exists():
-        # The second sentence costs one line and covers a failure that is
-        # otherwise silent. `init` writes the `-e` lines itself, so this run
-        # is safe — but the same fragment gets hand-pasted (from the cabinet,
-        # from the skill's example), and `sed` copies an unmatched
-        # `{{PLACEHOLDER}}` through verbatim: the script prints its success
-        # tick, exits 0, and leaves a `.mcp.json` that simply never connects.
-        # Saying what that looks like is what makes it findable.
-        print("mnemo init: the entry went into .mcp.json.template — run "
-              "`bash mcp-setup.sh` to regenerate .mcp.json.")
-        print("            If a URL in .mcp.json still shows {{MNEMO_TOKEN}} "
-              "afterwards, mcp-setup.sh\n"
-              "            is missing that placeholder's `-e` line — sed "
-              "copies unmatched ones through\n"
-              "            and still exits 0. `mnemo init` adds them; "
-              "hand-pasting the fragment does not.")
+        setup = proj / "mcp-setup.sh"
+        ours = setup.exists() and _SETUP_MARKER in _read_text(setup)
+        print("mnemo init: the entry went into .mcp.json.template — "
+              "regenerate .mcp.json with either of:")
+        print("              bash mcp-setup.sh")
+        print("              powershell -NoProfile -File .\\mcp-setup.ps1")
+        if ours:
+            # Nothing else to say: this script derives its substitutions from
+            # the template, so there is no list to keep in step and no way to
+            # forget an entry. Adding a bank is the template plus `.mcp.env`.
+            print("            Both discover their substitutions from the "
+                  "template, so adding another")
+            print("            bank later means editing only "
+                  ".mcp.json.template and .mcp.env.")
+        else:
+            # A script from an older generation lists one `-e` per
+            # placeholder, and `sed` copies an unmatched `{{PLACEHOLDER}}`
+            # through verbatim: it prints its success tick, exits 0, and
+            # leaves a `.mcp.json` that simply never connects. `init` adds the
+            # lines for its own variables; a hand-pasted fragment gets none.
+            print("            If a URL in .mcp.json still shows "
+                  "{{MNEMO_TOKEN}} afterwards, mcp-setup.sh\n"
+                  "            is missing that placeholder's `-e` line — sed "
+                  "copies unmatched ones through\n"
+                  "            and still exits 0. `mnemo init` adds them; "
+                  "hand-pasting the fragment does not.")
     print("mnemo init: done. Review the changes, then commit them "
           "(and trust the project in Claude Code).")
     return 0
