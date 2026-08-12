@@ -455,6 +455,45 @@ def test_provider_change_rebuilds() -> None:
             conn.close()
 
 
+def test_missing_extension_support_is_explained() -> None:
+    """A Python that cannot load extensions must say so, not AttributeError.
+
+    This is not hypothetical: the macOS build actions/setup-python installs
+    is exactly such a Python, and `import sqlite_vec` succeeds on it, so the
+    installer's import probe reported a clean install and the first search
+    was what finally failed -- eight frames deep, as
+    `'sqlite3.Connection' object has no attribute 'enable_load_extension'`.
+    """
+    print("\n=== extension support is reported, not discovered ===")
+
+    class NoExtensions:
+        """An interpreter's connection without the attribute, exactly."""
+
+    try:
+        store.load_vec(NoExtensions())
+    except store.VectorExtensionUnavailable as exc:
+        message = str(exc)
+    except Exception as exc:  # noqa: BLE001 - any other type is the failure
+        message = ""
+        check("the missing capability raises our own error", False,
+              detail=f"{type(exc).__name__}: {exc}")
+    else:
+        message = ""
+        check("the missing capability raises at all", False)
+
+    if message:
+        check("the missing capability raises our own error", True)
+        check("the message says what is wrong",
+              "loadable SQLite extensions" in message, detail=message)
+        check("and what to do about it",
+              "Homebrew" in message and "installer" in message,
+              detail=message)
+
+    # The machine running this must, of course, be able to load it.
+    check("this interpreter can load sqlite-vec",
+          store.vector_support() is None, detail=str(store.vector_support()))
+
+
 def main() -> int:
     test_index_and_chunks()
     test_both_retrieval_lanes()
@@ -462,6 +501,7 @@ def main() -> int:
     test_incremental_reindex()
     test_prune_follows_the_files()
     test_provider_change_rebuilds()
+    test_missing_extension_support_is_explained()
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 
