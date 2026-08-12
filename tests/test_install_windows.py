@@ -8,6 +8,14 @@ import sys
 import tempfile
 from pathlib import Path
 
+# The engine is installed into a Cyrillic path on purpose, so the installer's
+# own output carries Cyrillic — and printing it on a cp1252 console raises
+# instead of printing. A developer console is UTF-8 and never showed this; a
+# CI runner's is not. Same guard as test_platform.py, same reason.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+
 REPO = Path(__file__).resolve().parent.parent
 INSTALLER = REPO / "install.ps1"
 UNINSTALLER = REPO / "uninstall.ps1"
