@@ -145,6 +145,12 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-12 (пʼяте)](logs/2026-08-12-installers.md) — `install.sh` /
+  `uninstall.sh` **вперше виконуються** (`tests/test_install_posix.py`, крок CI
+  на Linux і macOS): доти установку ганяв лише Windows, а POSIX-пара їхала на
+  підставі прочитання. Ще до прогону знайдено `uninstall.sh` з режимом
+  `100644` — `./uninstall.sh` впало б із `Permission denied`, і в diff це
+  невидимо.
 - [2026-08-12 (четверте)](logs/2026-08-12-refresh.md) — `init` тепер **оновлює**
   свій `mcp-setup.*`, а не лише створює: маркер `/2` + `_SETUP_SUPERSEDED`
   (дайджести попередніх редакцій, як у правила), `edited` не перезаписується.

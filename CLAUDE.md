@@ -173,8 +173,13 @@ Around it:
 - `install.ps1` — same for native Windows (`-Check`/`-InstallHome`/
   `-Python`/`-DepsOnly`; PowerShell 5.1+, 64-bit Python 3.10+).
 - `tests/test_search.py` — labeled recall eval (regression floor);
-  `tests/test_platform.py`, `tests/test_install_windows.py` — wiring and
-  installer; `tests/test_mcp.py` — MCP over HTTP against the running
+  `tests/test_platform.py` — wiring and scaffold plans;
+  `tests/test_pipeline.py` — the whole `.md → chunks → vectors → search`
+  path on a throwaway bank behind a hash provider, so CI exercises it
+  without the 2.2 GB model; `tests/test_install_windows.py` and
+  `tests/test_install_posix.py` — each installer/uninstaller pair run for
+  real against a throwaway `--home`, one per platform because they share
+  no code; `tests/test_mcp.py` — MCP over HTTP against the running
   service, plus the check that `/mcp-tools/*` is byte-identical to the
   tools it mirrors. The bundled fixture corpus uses the canonical layout
   (`.claude/memory/` with `logs/`, `agents/<role>/` inside).

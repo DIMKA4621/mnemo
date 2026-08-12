@@ -54,3 +54,12 @@ jobs:
       - name: Run native Windows installer smoke test
         if: runner.os == 'Windows'
         run: python tests/test_install_windows.py
+      # install.sh and uninstall.sh had never been executed by anything,
+      # anywhere: the steps above install the dependencies straight into the
+      # runner and test the engine's internals, so the POSIX pair shipped on
+      # the strength of a reading. This runs them for real against a
+      # throwaway --home -- install, --check, launcher, reinstall,
+      # --deps-only, the v2 upgrade path, then uninstall down to nothing.
+      - name: Run POSIX installer smoke test
+        if: runner.os != 'Windows'
+        run: python tests/test_install_posix.py

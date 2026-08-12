@@ -250,9 +250,15 @@ This repository **is** the system. `install.sh` / `install.ps1` mirrors
 
 ```powershell
 py -3 -m venv .venv; .\.venv\Scripts\pip install -r requirements.txt
-.\.venv\Scripts\python tests\test_platform.py   # wiring, installer, scaffold
+.\.venv\Scripts\python tests\test_platform.py   # wiring and scaffold plans
+.\.venv\Scripts\python tests\test_pipeline.py   # .md -> vectors -> search
 .\.venv\Scripts\python tests\test_search.py     # labeled recall eval
 ```
+
+The installer suites are per-platform and each runs the real thing into a
+throwaway engine home: `tests\test_install_windows.py` on Windows,
+`tests/test_install_posix.py` on Linux and macOS. CI runs all of the above
+except `test_search.py`, which needs the model.
 
 Design source of truth (Ukrainian): `docs/Memory-design-v3.md` (what and
 why), `docs/Memory-requirements-v3.md` (FR/NFR),
