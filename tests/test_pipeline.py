@@ -264,6 +264,18 @@ def test_both_retrieval_lanes() -> None:
                   bool(fts_ids) and path_of(fts_ids[0]) == "topics/deployment.md",
                   detail=path_of(fts_ids[0]) if fts_ids else "nothing")
 
+            # A real question, not a keyword. The lexical lane used to quote
+            # the whole query, and a quoted string in FTS5 is a PHRASE — so
+            # anything longer than one word matched nothing and RRF was
+            # fusing the vector ranking with an empty list.
+            question = _fts_ranked(conn, "how do we roll a release back", 10, None)
+            check("the lexical lane answers a whole question, not just a term",
+                  bool(question), "a multi-word query returned nothing")
+            check("a query of only punctuation asks the lexical lane nothing",
+                  _fts_ranked(conn, "?? -- **", 10, None) == [])
+            check("FTS operators in a question stay literal",
+                  bool(_fts_ranked(conn, "rollback AND NOT *", 10, None)))
+
             hits = search(conn, "rollback strategy", provider=provider, top_k=3)
             check("the fused search answers",
                   bool(hits) and hits[0].path == "topics/deployment.md",

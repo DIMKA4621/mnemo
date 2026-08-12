@@ -15,6 +15,7 @@ depends on the work queue, which lives in the API layer.
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 from dataclasses import dataclass
 
@@ -84,16 +85,58 @@ def _vector_ranked(conn: sqlite3.Connection, qvec: list[float], limit: int) -> l
     return [r["rowid"] for r in rows]
 
 
-def _fts_escape(query: str) -> str:
-    """Treat the whole query as one quoted phrase — robust against operators."""
-    return '"' + query.replace('"', '""') + '"'
+# A query term, for the lexical leg. `\w+` keeps letters, digits and `_` in
+# any script and drops everything FTS5 would read as syntax (`*`, `^`, `:`,
+# parentheses, `-`), which is what makes the result injection-proof without
+# quoting the whole thing.
+_FTS_TERM = re.compile(r"\w+", re.UNICODE)
+
+
+def _fts_query(query: str) -> str | None:
+    """Build the MATCH expression: OR over the query's terms.
+
+    This used to wrap the whole query in quotes, and a quoted string in FTS5
+    is a PHRASE — the words had to appear consecutively, in order. On a real
+    question that matches nothing: measured on this repo's own bank,
+    "чому індексація повільна" and "watcher debounce" both returned zero
+    rows, while the same terms OR-ed returned 12 and 6. So RRF was fusing a
+    full vector ranking with an empty list, and the hybrid search was
+    vector-only for anything longer than a single word.
+
+    The intent behind the quoting was sound — a user's question must never be
+    read as FTS5 syntax — so each term is still quoted individually. A quoted
+    term is a literal, so a stray ``AND`` / ``NEAR`` / ``*`` in the question
+    cannot become an operator.
+
+    OR rather than AND because this is a CANDIDATE POOL for RRF, not an
+    answer: bm25() does the ranking, and a term that matches everything
+    (a stopword) earns a low IDF and contributes almost nothing to the score.
+    AND would reproduce the old failure — measured, it also returned zero on
+    the same questions.
+
+    Prefix matching (``term*``, for Ukrainian's suffix inflection) was tried
+    and is not worth it here: 18 rows against 17 on the query where it helped
+    most. Real stemming is not available — FTS5 ships `porter`, which is
+    English-only.
+
+    Returns None when the query holds no usable term, so the caller can skip
+    the lexical leg instead of building a malformed expression.
+    """
+    terms = [t for t in _FTS_TERM.findall(query) if len(t) > 1]
+    if not terms:
+        return None
+    # `\w+` cannot contain a double quote, so the terms need no escaping.
+    return " OR ".join(f'"{t}"' for t in terms)
 
 
 def _fts_ranked(
     conn: sqlite3.Connection, query: str, limit: int, prefix: str | None
 ) -> list[int]:
+    match = _fts_query(query)
+    if match is None:
+        return []
     sql = "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ?"
-    params: list[object] = [_fts_escape(query)]
+    params: list[object] = [match]
     if prefix is not None:
         # The lexical leg can narrow in SQL (unlike kNN), so it does. LIKE is
         # ASCII-case-insensitive in SQLite, which may over-select — harmless,
