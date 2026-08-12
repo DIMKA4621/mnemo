@@ -801,13 +801,45 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
 # The marker is how `init` tells its own script from the one the user's
 # `project-mcp-setup` skill wrote. Ours needs no `-e` lines appended; a
 # foreign one still gets them, and its structure is never touched.
-_SETUP_MARKER = "mnemo:dynamic-setup/1"
+_SETUP_MARKER = "mnemo:dynamic-setup/2"
+
+# Any revision mnemo ever wrote, current or not. The distinction matters in
+# two different places and they must not be confused: "is this file mine?"
+# (this prefix) decides whether `sed -e` lines get appended, while "is it my
+# CURRENT text?" (the marker above) decides whether it gets refreshed.
+_SETUP_MARKER_ANY = "mnemo:dynamic-setup/"
+
+# sha256 of every script text mnemo has shipped and has since replaced --
+# the same mechanism as `_RULE_SUPERSEDED`, and for the same reason. The
+# marker alone says which KIND of file this is, never which REVISION, so a
+# project adopted before a fix would keep the broken script forever: `init`
+# looks at the marker, says "mine, nothing to add", and moves on.
+#
+# Recognised bytes are refreshed in place. Bytes that match nothing here are
+# somebody's edit and outrank the update -- they are reported, not
+# overwritten. Two digests per redaction, because a file written before
+# `_write` existed went through `write_text` and picked up CRLF on Windows.
+_SETUP_SUPERSEDED = frozenset({
+    # mcp-setup.sh v1 -- the first dynamic script. Its quoted replacement in
+    # `${var//"pat"/"repl"}` is left literal by bash 3.2, so on macOS it wrote
+    # a .mcp.json that was not valid JSON.
+    "8143cbc56aa5c49ef056634b53b8d78e79a530f2df092424ff47bc554a6f7ebf",
+    "c549aa0adb79ceea5d5e8c9bc771d4353c339c2c47b517cec3cc0f64db731085",
+    # mcp-setup.sh v2 -- literal `substitute()`, correct everywhere, but still
+    # marked /1 and therefore indistinguishable from v1 by marker alone.
+    "3dab5699e0903aa39a3a2d20ad4372f4d0a4644f44e0847c824270e803f6bd43",
+    "edbecb2b3def4be0bbebcd19bf38bf551ad6643efe35a561566beecfcbc0e97c",
+    # mcp-setup.ps1 v1 -- unchanged since the layer landed; superseded only by
+    # the marker bump, so the two halves keep saying the same revision.
+    "46cef1ac9847237ee89a67a098ab7da740c38a580960c40abc1772ee858cdc3f",
+    "2c563b3d12567e146149b58307b2bbceab7da42f2fa8150b872cfdc979745d85",
+})
 
 _SETUP_SH = """\
 #!/usr/bin/env bash
 # Regenerate .mcp.json from .mcp.json.template + .mcp.env.
 #
-# mnemo:dynamic-setup/1
+# mnemo:dynamic-setup/2
 # Substitutions are DISCOVERED from the template, never listed here. Adding a
 # server means editing the template and .mcp.env; this file never changes.
 set -euo pipefail
@@ -901,7 +933,7 @@ echo "mcp-setup: wrote .mcp.json"
 _SETUP_PS1 = """\
 # Regenerate .mcp.json from .mcp.json.template + .mcp.env.
 #
-# mnemo:dynamic-setup/1
+# mnemo:dynamic-setup/2
 # Substitutions are DISCOVERED from the template, never listed here. Adding a
 # server means editing the template and .mcp.env; this file never changes.
 #
@@ -1017,6 +1049,33 @@ def _sed_line(prefix: str, name: str) -> str:
 def _sed_lines(prefix: str) -> list[str]:
     """The substitutions `mcp-setup.sh` needs, one per placeholder."""
     return [_sed_line(prefix, name) for name in _ENV_VARS]
+
+
+def _setup_state(path: Path, current: str) -> str:
+    """How a `mcp-setup.*` on disk relates to the one mnemo would write now.
+
+    ``absent`` | ``current`` | ``stale`` (a revision mnemo wrote and has since
+    replaced) | ``edited`` (mnemo's marker, bytes mnemo never wrote) |
+    ``foreign`` (somebody else's script entirely).
+
+    Compared as **bytes**, and a CRLF copy of the current text counts as
+    current: rewriting a file to change nothing but its line endings would
+    show up as a change in every diff and fix nothing.
+    """
+    if not path.exists():
+        return "absent"
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return "foreign"
+    if raw in (current.encode("utf-8"),
+               current.replace("\n", "\r\n").encode("utf-8")):
+        return "current"
+    if hashlib.sha256(raw).hexdigest() in _SETUP_SUPERSEDED:
+        return "stale"
+    return ("edited"
+            if _SETUP_MARKER_ANY in raw.decode("utf-8", "replace")
+            else "foreign")
 
 
 def _plan_setup_sh(path: Path, log: list[str], prefix: str,
@@ -1762,10 +1821,6 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
             wiring.template_base = doc
             carried = bool(doc["mcpServers"])
 
-    files = [
-        (proj / "mcp-setup.sh", _SETUP_SH),
-        (proj / "mcp-setup.ps1", _SETUP_PS1),
-    ]
     if carried:
         # Said, never guessed at. The template is the file that goes into git,
         # and mnemo cannot tell which of somebody else's values is a secret —
@@ -1779,13 +1834,48 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
             "  If any of them holds a literal secret, move it to .mcp.env and "
             "leave a {{PLACEHOLDER}} behind."
         )
-    for path, text in files:
-        if path.exists():
-            continue
-        wiring.add(path, text)
-        wiring.log.append(f"  {'created':<20} {path.name}")
+def _plan_setup_scripts(proj: Path, wiring: _Wiring) -> None:
+    """Write the two regeneration scripts, or refresh an older revision.
+
+    **Two scripts, not one.** The shell half needs bash, which a native
+    Windows machine has no reason to have — and this project is native-Windows
+    clean everywhere else, so requiring Git Bash to finish an `init` would be
+    the one place it is not. They are held to producing identical bytes.
+
+    Runs on EVERY init, not only when the layer is being seeded — which is the
+    whole point. A project carrying a script mnemo has since fixed is, by
+    definition, one whose template already exists, so a refresh that only ran
+    at bootstrap would reach exactly the projects that never needed it.
+    """
+    files = [
+        (proj / "mcp-setup.sh", _SETUP_SH),
+        (proj / "mcp-setup.ps1", _SETUP_PS1),
+    ]
+    states = [(path, text, _setup_state(path, text)) for path, text in files]
+    for path, text, state in states:
+        if state == "absent":
+            wiring.add(path, text)
+            wiring.log.append(f"  {'created':<20} {path.name}")
+        elif state == "stale":
+            wiring.add(path, text)
+            wiring.log.append(
+                f"  {'refreshed':<20} {path.name} (an older revision mnemo "
+                f"wrote)"
+            )
+        elif state == "edited":
+            # Recognised marker, unrecognised bytes. That is somebody's edit,
+            # and it outranks the refresh: overwriting it is the one outcome
+            # that cannot be undone from here.
+            wiring.notes.append(
+                f"{path.name} carries mnemo's marker but not text mnemo "
+                "wrote, so it was left untouched.\n"
+                "  If that is your edit, keep it. If it is a stale copy, "
+                f"delete {path.name} and re-run `mnemo init` for the current "
+                "one."
+            )
     wiring.executable.extend(
-        p for p, _ in files if p.name.endswith(".sh") and not p.exists()
+        p for p, _, state in states
+        if p.name.endswith(".sh") and state in ("absent", "stale")
     )
     wiring.seeded_setup = not (proj / "mcp-setup.sh").exists()
 
@@ -1809,6 +1899,10 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
 
     if not template.exists():
         _bootstrap_layer(proj, wiring)
+    # Outside the branch above on purpose: the scripts are reviewed on every
+    # run, so a fix reaches a project that was adopted long ago — the only
+    # kind that can be carrying an old one.
+    _plan_setup_scripts(proj, wiring)
 
     wiring.add(template, _plan_mcp_template(template, wiring.log,
                                             migrate=migrate,
@@ -1866,9 +1960,13 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
             "  Add these lines to whatever does:\n"
             + "\n".join(f"    {line}" for line in _sed_lines(prefix))
         )
-    elif _SETUP_MARKER in _read_text(setup):
-        # mnemo's own script: it discovers its substitutions from the
-        # template, so there is nothing to append and never will be.
+    elif _SETUP_MARKER_ANY in _read_text(setup):
+        # mnemo's own script, of ANY revision: it discovers its substitutions
+        # from the template, so there is nothing to append and never will be.
+        # Keyed on the prefix rather than the current marker on purpose — with
+        # the exact one, bumping the revision would drop an older script into
+        # the branch below and start appending `sed -e` lines to a file that
+        # has no sed call in it.
         wiring.log.append(
             f"  {'mcp-setup.sh':<20} discovers substitutions itself "
             f"(nothing to add)"
@@ -2023,7 +2121,7 @@ def init_project(root: str | None, *, migrate: bool = False,
         print(f"  NOTE                 {note}")
     if (proj / ".mcp.json.template").exists():
         setup = proj / "mcp-setup.sh"
-        ours = setup.exists() and _SETUP_MARKER in _read_text(setup)
+        ours = setup.exists() and _SETUP_MARKER_ANY in _read_text(setup)
         print("mnemo init: the entry went into .mcp.json.template — "
               "regenerate .mcp.json with either of:")
         print("              bash mcp-setup.sh")

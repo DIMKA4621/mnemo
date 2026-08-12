@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Regenerate .mcp.json from .mcp.json.template + .mcp.env.
 #
-# mnemo:dynamic-setup/2
+# mnemo:dynamic-setup/1
 # Substitutions are DISCOVERED from the template, never listed here. Adding a
 # server means editing the template and .mcp.env; this file never changes.
 set -euo pipefail
@@ -39,32 +39,6 @@ lookup() {
 	printf '%s' "$value"
 }
 
-# Replace every literal occurrence of $2 in $1 with $3, into $REPLACED.
-#
-# `${var//pattern/replacement}` cannot do this job on every bash we have to
-# run on, and the two failures point opposite ways: bash 3.2 -- still
-# `/bin/bash` on macOS -- keeps the quotes of a QUOTED replacement as literal
-# characters, while bash 5.2 expands an `&` in an UNQUOTED one to whatever
-# the pattern just matched. Splitting the string on the needle has neither
-# behaviour: nothing here is ever read as a pattern or as a reference.
-#
-# It assigns rather than prints because `$(...)` eats trailing newlines, and
-# a template is entitled to end in as many as it likes.
-REPLACED=""
-substitute() {
-	local hay="$1" needle="$2" repl="$3" out="" head
-	while :; do
-		case "$hay" in
-			*"$needle"*) ;;
-			*) break ;;
-		esac
-		head="${hay%%"$needle"*}"
-		out="$out$head$repl"
-		hay="${hay#"$head$needle"}"
-	done
-	REPLACED="$out$hay"
-}
-
 content="$(cat "$TEMPLATE")"
 missing=""
 
@@ -72,11 +46,10 @@ missing=""
 # than a BRE with `\+`: BSD grep on macOS does not read that the same way.
 for name in $(grep -oE '\{\{[A-Za-z0-9_]+\}\}' "$TEMPLATE" | tr -d '{}' | sort -u); do
 	if value="$(lookup "$name")"; then
-		# Literal in, literal out (see `substitute`). This is also why the
-		# substitution is not `sed`: a value holding the delimiter would
-		# break the expression, and a token is opaque.
-		substitute "$content" "{{$name}}" "$value"
-		content="$REPLACED"
+		# Quoted pattern, so the braces are literal and not a glob. This is
+		# also why the substitution is not `sed`: a value holding the
+		# delimiter would break the expression, and a token is opaque.
+		content="${content//"{{$name}}"/"$value"}"
 	else
 		missing="$missing $name"
 	fi

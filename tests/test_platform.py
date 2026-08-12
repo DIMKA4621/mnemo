@@ -667,6 +667,127 @@ def test_scaffold_drops_the_bank_segment() -> None:
               not again.writes, detail=str([p.name for p, _ in again.writes]))
 
 
+def test_setup_script_refresh() -> None:
+    """An older revision of mnemo's own script is replaced; an edit is not.
+
+    The marker says which KIND of file this is, never which REVISION — so
+    before this, `init` looked at a script it had written a year ago, said
+    "mine, nothing to add", and left a known-broken file in place forever.
+    That is exactly how the bash 3.2 fix would have failed to reach any
+    project already adopted.
+    """
+    # Imported under another name deliberately: the module-level `_SETUP_SH`
+    # in this file is the *user skill's* sed-based script, and confusing the
+    # two would test the wrong file entirely.
+    import hashlib
+
+    from src.scaffold import _SETUP_SH as MNEMO_SH
+    from src.scaffold import _SETUP_SUPERSEDED, _setup_state
+
+    print("\n=== setup script refresh ===")
+
+    def plan(text: str | None, name: str = "mcp-setup.sh",
+             *, adopted: bool = False) -> tuple:
+        """`adopted` = the project already has a template layer.
+
+        Which is the case that matters and the one this test first missed:
+        the refresh initially lived in the seed-the-layer branch, so it ran
+        only where no old script could exist. Every stale-script assertion
+        below is made in BOTH shapes for that reason.
+        """
+        with tempfile.TemporaryDirectory(prefix="mnemo refresh ") as raw:
+            proj = Path(raw) / "proj"
+            (proj / ".claude").mkdir(parents=True)
+            if text is not None:
+                _write(proj / name, text)
+            if adopted:
+                _write(proj / ".mcp.json.template", json.dumps(
+                    {"mcpServers": {"foreign": {"command": "npx"}}}, indent=2))
+                _write(proj / ".mcp.env", "FOREIGN=1\n")
+            wiring = _plan_wiring(proj, token=_FAKE_TOKEN, migrate=False)
+            written = {p.name: t for p, t in wiring.writes}
+            return written, wiring.notes, wiring.log
+
+    # The digests are the mechanism; a typo in one silently removes a whole
+    # generation of projects from updates, exactly as it would for the rule.
+    check("every superseded digest is a sha256",
+          all(len(d) == 64 and not set(d) - set("0123456789abcdef")
+              for d in _SETUP_SUPERSEDED),
+          detail=str(sorted(_SETUP_SUPERSEDED)[:1]))
+    check("the current text is not among them",
+          hashlib.sha256(MNEMO_SH.encode("utf-8")).hexdigest()
+          not in _SETUP_SUPERSEDED)
+
+    with tempfile.TemporaryDirectory(prefix="mnemo state ") as raw:
+        probe = Path(raw) / "mcp-setup.sh"
+        check("an absent script reads as absent",
+              _setup_state(probe, MNEMO_SH) == "absent")
+        _write(probe, MNEMO_SH)
+        check("our current text reads as current",
+              _setup_state(probe, MNEMO_SH) == "current")
+        # A checkout on Windows can hand back CRLF. Rewriting the file to
+        # change nothing but line endings is a whole-file diff for nothing.
+        _write(probe, MNEMO_SH.replace("\n", "\r\n"))
+        check("a CRLF copy of it still reads as current",
+              _setup_state(probe, MNEMO_SH) == "current")
+        _write(probe, MNEMO_SH + "\n# hand edit\n")
+        check("our marker with foreign bytes reads as edited",
+              _setup_state(probe, MNEMO_SH) == "edited")
+        _write(probe, "#!/bin/sh\nsed -e 's|{{X}}|1|g' t > o\n")
+        check("somebody else's script reads as foreign",
+              _setup_state(probe, MNEMO_SH) == "foreign")
+
+    written, _, log = plan(None)
+    check("a project with no script gets one",
+          written.get("mcp-setup.sh") == MNEMO_SH)
+    check("and it is announced as created",
+          any("created" in line and "mcp-setup.sh" in line for line in log),
+          detail=str([l for l in log if "mcp-setup" in l]))
+
+    written, notes, log = plan(MNEMO_SH)
+    check("the current script is left alone",
+          "mcp-setup.sh" not in written, detail=str(sorted(written)))
+    check("and says nothing about it", not any("mcp-setup.sh" in n
+                                               for n in notes))
+
+    # The real case: v1 of the dynamic script, the one broken on bash 3.2.
+    old = _read(Path(__file__).parent / "fixtures" / "mcp-setup-v1.sh")
+    check("the v1 fixture is a recognised revision",
+          hashlib.sha256(old.encode("utf-8")).hexdigest() in _SETUP_SUPERSEDED,
+          detail="fixture drifted from the digest list")
+    written, notes, log = plan(old)
+    check("an older revision is refreshed",
+          written.get("mcp-setup.sh") == MNEMO_SH,
+          detail=str(sorted(written)))
+    check("and the refresh is announced, not silent",
+          any("refreshed" in line and "mcp-setup.sh" in line for line in log),
+          detail=str([l for l in log if "mcp-setup" in l]))
+
+    # The case the whole feature exists for, and the one the first version of
+    # this test could not have caught: a project that was adopted long ago.
+    written, notes, log = plan(old, adopted=True)
+    check("an older revision is refreshed in an ALREADY-adopted project",
+          written.get("mcp-setup.sh") == MNEMO_SH,
+          detail=str(sorted(written)))
+    check("the foreign template entry survives the refresh",
+          "foreign" in json.loads(
+              written.get(".mcp.json.template", "{}")).get("mcpServers", {}),
+          detail=written.get(".mcp.json.template", "")[:120])
+
+    written, notes, log = plan(MNEMO_SH, adopted=True)
+    check("and an already-current one is still left alone",
+          "mcp-setup.sh" not in written, detail=str(sorted(written)))
+
+    for shape in (False, True):
+        written, notes, _ = plan(old + "\n# my own line\n", adopted=shape)
+        where = "adopted" if shape else "fresh"
+        check(f"an edited copy is NOT overwritten ({where})",
+              "mcp-setup.sh" not in written, detail=str(sorted(written)))
+        check(f"and the user is told why ({where})",
+              any("mcp-setup.sh" in n and "left untouched" in n for n in notes),
+              detail=str(notes))
+
+
 def test_scaffold_hand_edited_sed_line() -> None:
     """A retired sed line mnemo did NOT write is left alone, and reported.
 
@@ -1744,6 +1865,7 @@ def main() -> int:
     test_scaffold()
     test_scaffold_template_project()
     test_scaffold_drops_the_bank_segment()
+    test_setup_script_refresh()
     test_scaffold_hand_edited_sed_line()
     test_scaffold_renames_the_legacy_key()
     test_memory_rule_refresh()

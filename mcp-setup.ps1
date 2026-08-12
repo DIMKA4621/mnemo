@@ -1,6 +1,6 @@
 # Regenerate .mcp.json from .mcp.json.template + .mcp.env.
 #
-# mnemo:dynamic-setup/1
+# mnemo:dynamic-setup/2
 # Substitutions are DISCOVERED from the template, never listed here. Adding a
 # server means editing the template and .mcp.env; this file never changes.
 #
