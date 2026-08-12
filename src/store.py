@@ -51,6 +51,55 @@ def chunk_uid(path: str, chunk_index: int) -> str:
     ).hexdigest()[:16]
 
 
+class VectorExtensionUnavailable(RuntimeError):
+    """This interpreter cannot load SQLite extensions, so sqlite-vec cannot.
+
+    Not something a retry or a reinstall fixes: the interpreter was built
+    without ``--enable-loadable-sqlite-extensions``, and then
+    ``enable_load_extension`` does not exist at all. Observed on the
+    python.org / actions-setup-python macOS builds; Homebrew's python and the
+    ordinary Linux and Windows builds are fine.
+
+    It has to be said in full because `import sqlite_vec` still SUCCEEDS on
+    such a Python — so an installer that probes by importing reports a clean
+    install, and the first search is what finally fails, several layers deep.
+    """
+
+
+def load_vec(conn: sqlite3.Connection) -> None:
+    """Load sqlite-vec into an open connection, or say why it cannot."""
+    if not hasattr(conn, "enable_load_extension"):
+        raise VectorExtensionUnavailable(
+            "this Python was built without loadable SQLite extensions, so "
+            "sqlite-vec cannot load and no bank can be opened. Install mnemo "
+            "under a Python that has them (on macOS: Homebrew's "
+            "`python@3.12` -- the python.org build does not), then re-run "
+            "the installer."
+        )
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+
+
+def vector_support() -> str | None:
+    """``None`` when a bank can be opened here, else the reason it cannot.
+
+    For `doctor` and both installers: a check that answers before an index
+    exists, on a throwaway in-memory database, so it costs nothing and works
+    on a machine that has never indexed anything.
+    """
+    conn = sqlite3.connect(":memory:")
+    try:
+        load_vec(conn)
+    except VectorExtensionUnavailable as exc:
+        return str(exc)
+    except Exception as exc:  # a broken wheel, a missing .so, anything else
+        return f"{type(exc).__name__}: {exc}"
+    finally:
+        conn.close()
+    return None
+
+
 def connect(
     db_path: Path, *, ensure: bool = True, dim: int | None = None
 ) -> sqlite3.Connection:
@@ -77,9 +126,7 @@ def connect(
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA busy_timeout=5000")
-    conn.enable_load_extension(True)
-    sqlite_vec.load(conn)
-    conn.enable_load_extension(False)
+    load_vec(conn)
     conn.row_factory = sqlite3.Row
     if ensure:
         ensure_schema(conn, dim=dim)

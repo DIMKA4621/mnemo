@@ -98,6 +98,14 @@ def _cmd_doctor() -> int:
     print(f"state dir        {config.STATE_DIR}")
     print(f"python           {Path(sys.executable).as_posix()}")
     print(f"model cached     {is_model_cached()}")
+    # Asked before anything else that could fail, because when this is the
+    # answer nothing else in the report matters: no bank can be opened at all.
+    from .store import vector_support
+
+    unsupported = vector_support()
+    print(f"sqlite-vec       {'ok' if unsupported is None else 'UNAVAILABLE'}")
+    if unsupported is not None:
+        print(f"                 {unsupported}")
     # "down" is the normal state of a machine that has not searched yet — the
     # resident is started on demand and holds ~1.5 GB, so it does not sit
     # there from boot. Saying only "down" right after an install reads as a

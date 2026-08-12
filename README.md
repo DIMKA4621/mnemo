@@ -121,7 +121,11 @@ re-mirrors the code and brings it back. `.\uninstall.ps1` / `./uninstall.sh`
 is the mirror image.
 
 <sub>Windows 10/11 with built-in PowerShell 5.1+, or Linux/macOS. 64-bit
-Python 3.10+. No Docker, no WSL, no PATH changes. Flags for scripts and CI:
+Python 3.10+ — and on macOS specifically, a Python built with **loadable
+SQLite extensions**: Homebrew's has them, the python.org build does not, and
+without them the vector index cannot load at all. The installer checks and
+says so, rather than letting it surface at your first search. No Docker, no
+WSL, no PATH changes. Flags for scripts and CI:
 `--no-model`, `--model`, `--no-start`, `--check`, `--deps-only`,
 `--no-autostart`, `--home DIR`.</sub>
 

@@ -29,6 +29,13 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
+# Can this interpreter actually LOAD sqlite-vec, not merely import it? See
+# Write-Report "sqlite-vec" below for why the two are different questions.
+$VecProbe = "import sqlite3, sqlite_vec; " +
+    "conn = sqlite3.connect(':memory:'); " +
+    "conn.enable_load_extension(True); " +
+    "sqlite_vec.load(conn)"
+
 function Write-Status {
     param([string]$Message)
     Write-Host "install.ps1: $Message"
@@ -168,6 +175,19 @@ function Show-CheckReport {
         }
     }
     Write-Report "python deps" $deps
+
+    # Importing sqlite_vec is not the same as being able to load it: a Python
+    # built without loadable SQLite extensions imports it happily and then
+    # cannot open a single bank. Every ordinary Windows build has them, so
+    # this line is expected to read "loadable" -- it is here because the
+    # POSIX half needs it (macOS python.org builds do not) and a check that
+    # exists on one side only is a check that quietly drifts.
+    $vec = "UNAVAILABLE (this Python cannot load extensions)"
+    if (Test-Path -LiteralPath $VenvPython -PathType Leaf) {
+        & $VenvPython -c $VecProbe 2>$null
+        if ($LASTEXITCODE -eq 0) { $vec = "loadable" }
+    }
+    Write-Report "sqlite-vec" $vec
 
     $modelCached = $false
     if ($deps -eq "present") {
@@ -691,6 +711,15 @@ function Invoke-Install {
     Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
     Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $engineHome "requirements.txt")) "Failed to install Python dependencies"
     Write-Status "python deps installed"
+
+    # Fail here rather than at the user's first search: everything below this
+    # builds an engine that could not open a bank.
+    & $venvPython -c $VecProbe 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw ("This Python cannot load SQLite extensions, so sqlite-vec " +
+               "cannot load and no bank can be opened: $venvPython. " +
+               "Re-run with -Python pointing at a build that has them.")
+    }
 
     Install-Launcher $venvPython $engineHome $launcher
     Write-Status "launcher written: $launcher"

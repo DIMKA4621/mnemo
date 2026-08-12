@@ -86,6 +86,16 @@ line() { printf 'install.sh:   %-13s %s\n' "$1" "$2"; }
 DEP_PROBE='import fastembed, sqlite_vec, semantic_text_splitter, mcp
 import fastapi, uvicorn, watchdog, httpx'
 
+# Importing sqlite_vec is NOT the same as being able to load it. A Python
+# built without loadable SQLite extensions imports the package happily and
+# then cannot open a single bank -- the failure surfaces at the first search,
+# as an AttributeError from inside the store. So ask the question that
+# actually matters, here, where the answer is still cheap to act on.
+VEC_PROBE='import sqlite3, sqlite_vec
+conn = sqlite3.connect(":memory:")
+conn.enable_load_extension(True)
+sqlite_vec.load(conn)'
+
 # report <test-flag> <path> <label> — kept inside `if` so a failing
 # test never trips `set -e`.
 report() {
@@ -133,6 +143,12 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 		line "python deps" present
 	else
 		line "python deps" "MISSING / incomplete"
+	fi
+	if [ -x "$PY_BIN" ] \
+		&& "$PY_BIN" -c "$VEC_PROBE" 2>/dev/null; then
+		line "sqlite-vec" loadable
+	else
+		line "sqlite-vec" "UNAVAILABLE (this Python cannot load extensions)"
 	fi
 	if [ -d "$MNEMO_HOME/model-cache" ] \
 		&& find "$MNEMO_HOME/model-cache" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
@@ -293,6 +309,22 @@ fi
 "$PY_BIN" -m pip install --quiet --upgrade pip
 "$PY_BIN" -m pip install --quiet -r "$MNEMO_HOME/requirements.txt"
 say "python deps installed"
+
+# Fail here rather than at the user's first search. Everything below this
+# line builds an engine that could not open a bank.
+if ! "$PY_BIN" -c "$VEC_PROBE" 2>/dev/null; then
+	printf 'install.sh: ERROR: this Python cannot load SQLite extensions, so\n' >&2
+	printf '            sqlite-vec cannot load and no bank can be opened:\n' >&2
+	printf '              %s\n' "$PY_BIN" >&2
+	printf '            The venv is built from whichever python3 is on PATH,\n' >&2
+	printf '            so put one that has them in front of it. On macOS:\n' >&2
+	printf '              brew install python@3.12\n' >&2
+	printf '              PATH="$(brew --prefix python@3.12)/libexec/bin:$PATH" \\\n' >&2
+	printf '                ./install.sh\n' >&2
+	printf '            (Homebrew python has loadable extensions; the\n' >&2
+	printf '            python.org build does not.)\n' >&2
+	exit 1
+fi
 
 # --- 5. launcher: self-locating, no hardcoded home ---------------------
 cat > "$LAUNCHER" <<'LAUNCHER_EOF'
