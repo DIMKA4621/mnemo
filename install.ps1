@@ -324,6 +324,26 @@ function Sync-EngineCode {
     }
 }
 
+function Get-Sha256 {
+    param([string]$Path)
+
+    # Not Get-FileHash. That cmdlet ships in Microsoft.PowerShell.Utility, and
+    # reaching it depends on PSModulePath -- so a Windows PowerShell started
+    # BY PowerShell 7 inherits PowerShell 7's PSModulePath, never finds the
+    # module, and reports "The term 'Get-FileHash' is not recognized". That is
+    # not exotic: it is every CI runner (pwsh is the default shell there) and
+    # anyone whose own shell is pwsh. The .NET class needs no module at all.
+    $sha = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [System.IO.File]::OpenRead($Path)
+        try {
+            return [System.BitConverter]::ToString($sha.ComputeHash($stream)).Replace("-", "")
+        }
+        finally { $stream.Dispose() }
+    }
+    finally { $sha.Dispose() }
+}
+
 function Install-Launcher {
     param(
         [string]$VenvPython,
@@ -354,8 +374,8 @@ function Install-Launcher {
         $target = [string]$pair.Target
         $copyRequired = $true
         if (Test-Path -LiteralPath $target -PathType Leaf) {
-            $generatedHash = (Get-FileHash -LiteralPath $generated -Algorithm SHA256).Hash
-            $launcherHash = (Get-FileHash -LiteralPath $target -Algorithm SHA256).Hash
+            $generatedHash = Get-Sha256 -Path $generated
+            $launcherHash = Get-Sha256 -Path $target
             $copyRequired = $generatedHash -ne $launcherHash
         }
         if ($copyRequired) {
