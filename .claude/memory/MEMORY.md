@@ -8,6 +8,11 @@ detail lives in `topics/`, day notes in `logs/`.
 
 - [Native Windows support](topics/windows-native-support.md) — PowerShell 5.1
   installer, canonical launcher contract, portable wiring, and verification.
+- [Пропускна здатність ембедингу](topics/embedding-throughput.md) — наш
+  CPU-резидент проти bge-m3 на GPU через Ollama, на однакових 35 571 токені:
+  **8.8× на пакеті, але лише 1.8× на одному запиті**. Болить рівно повна
+  перезбірка банку; шляхи до GPU (DirectML, провайдер `ollama`) і чому їх
+  поки не беруть.
 
 ## Quick facts
 
