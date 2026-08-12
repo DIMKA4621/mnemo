@@ -27,6 +27,24 @@ function resolveToken() {
 let token = resolveToken();
 
 // ---------------------------------------------------------------------------
+// theme
+// ---------------------------------------------------------------------------
+
+/** What the inline bootstrap script in <head> already decided, read back for
+ *  our own bookkeeping (dark is the default — no stored 'light' means dark). */
+function resolveTheme() {
+  return localStorage.getItem('mnemo_theme') === 'light' ? 'light' : 'dark';
+}
+
+/** Sets the attribute the CSS keys off and syncs the segmented control. */
+function applyTheme(theme) {
+  document.documentElement.dataset.theme = theme;
+  for (const button of $('theme-toggle').querySelectorAll('.seg')) {
+    button.classList.toggle('is-active', button.dataset.theme === theme);
+  }
+}
+
+// ---------------------------------------------------------------------------
 // state
 // ---------------------------------------------------------------------------
 
@@ -2527,6 +2545,14 @@ function bindControls() {
     on: { click: () => openPicker() },
   }), refresh);
 
+  for (const button of $('theme-toggle').querySelectorAll('.seg')) {
+    button.addEventListener('click', () => {
+      const theme = button.dataset.theme;
+      applyTheme(theme);
+      localStorage.setItem('mnemo_theme', theme);
+    });
+  }
+
   $('log-refresh').addEventListener('click', () => loadLogs().catch(reportError));
 
   $('chunkviz-toggle').addEventListener('change', (ev) => {
@@ -2587,6 +2613,7 @@ async function start() {
 }
 
 async function boot() {
+  applyTheme(resolveTheme());
   bindControls();
   buildGate();
   buildPicker();

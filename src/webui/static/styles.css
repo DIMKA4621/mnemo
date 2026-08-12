@@ -1,11 +1,17 @@
 /* mnemo web cabinet — deliberately plain: no framework, no external font. */
 
+/* Dark is the default palette (`:root`, no attribute needed); light lives in
+   the override block right below it, one variable per line so the two stay
+   easy to diff against each other. Every color used anywhere in this file
+   is named here — nothing past this point should contain a literal hex. */
 :root {
   --bg: #14161a;
   --bg-pane: #1b1e24;
   --bg-sunken: #101216;
   --bg-hover: #23272f;
   --line: #2c313a;
+  --line-sunken: #191c22;
+  --line-table: #23262c;
   --fg: #dfe3ea;
   --fg-dim: #949cab;
   --fg-mute: #6b7382;
@@ -17,6 +23,138 @@
   --radius: 6px;
   --mono: ui-monospace, "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
   --sans: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+
+  --btn-bg: #2a2f38;
+  --btn-bg-hover: #333a45;
+  --btn-border-hover: #3d444f;
+  --track-bg: #2a2f38;
+
+  --btn-primary-bg: #2c4d7d;
+  --btn-primary-border: #3a5f95;
+  --btn-primary-fg: #e8f0fb;
+  --btn-primary-bg-hover: #35598e;
+  --btn-primary-border-hover: #47709f;
+
+  --btn-danger-bg: #6d2e2a;
+  --btn-danger-border: #8a3d38;
+  --btn-danger-fg: #f7dedb;
+  --btn-danger-bg-hover: #7d3631;
+  --btn-danger-border-hover: #9c4741;
+
+  --danger-bg: #3a2020;
+  --danger-bg-soft: #33201f;
+  --danger-border: #5a2f2c;
+  --danger-fg: #f3c3bf;
+  --danger-fg-strong: #f0aaa3;
+  --danger-fg-soft: #eda9a3;
+  --menu-danger-fg: #f0958c;
+
+  --success-bg: #1d2b21;
+  --success-border: #2e4d3a;
+  --success-fg: #a9dcbc;
+
+  --sel-bg: #232c3a;
+  --sel-fg: #cfe1ff;
+  --seg-active-bg: #2f3742;
+
+  --badge-git-fg: #9ecb8a;
+  --badge-git-border: #35482f;
+  --badge-git-bg: #212b1e;
+  --badge-off-fg: #d0a0a0;
+  --badge-off-border: #4a3030;
+  --badge-off-bg: #2c2020;
+  --badge-ready-fg: #8ee0ac;
+  --badge-ready-border: #2e4d3a;
+  --badge-ready-bg: #1c2b23;
+  --badge-indexing-fg: #f0c37a;
+  --badge-indexing-border: #574427;
+  --badge-indexing-bg: #2e2618;
+  --badge-empty-fg: #9fb2cc;
+  --badge-empty-border: #33415a;
+  --badge-empty-bg: #1d2531;
+
+  --shadow-card: 0 18px 40px rgba(0, 0, 0, .38);
+  --shadow-modal: 0 18px 40px rgba(0, 0, 0, .45);
+  --shadow-menu: 0 8px 22px rgba(0, 0, 0, .45);
+  --overlay: rgba(8, 9, 12, .62);
+
+  --chunk-line: #3c536f;
+  --flash-bg: #2a3b2c;
+}
+
+:root[data-theme="light"] {
+  --bg: #f4f5f7;
+  --bg-pane: #ffffff;
+  --bg-sunken: #eef0f3;
+  --bg-hover: #e6e9ee;
+  --line: #d8dce3;
+  --line-sunken: #dfe3ea;
+  --line-table: #e4e7ec;
+  --fg: #1c2027;
+  --fg-dim: #52596a;
+  --fg-mute: #7c8494;
+  --accent: #2f6fe0;
+  --ok: #2f9e5c;
+  --busy: #b3790f;
+  --idle: #9aa1b0;
+  --err: #d1453a;
+
+  --btn-bg: #eef0f3;
+  --btn-bg-hover: #e2e6ec;
+  --btn-border-hover: #c7cdd8;
+  --track-bg: #e4e7ec;
+
+  --btn-primary-bg: #2f6fe0;
+  --btn-primary-border: #2559bd;
+  --btn-primary-fg: #ffffff;
+  --btn-primary-bg-hover: #2559bd;
+  --btn-primary-border-hover: #1f4a9e;
+
+  --btn-danger-bg: #d1453a;
+  --btn-danger-border: #b23a30;
+  --btn-danger-fg: #ffffff;
+  --btn-danger-bg-hover: #b23a30;
+  --btn-danger-border-hover: #9c322a;
+
+  --danger-bg: #fbeceb;
+  --danger-bg-soft: #f7e3e1;
+  --danger-border: #eec2bd;
+  --danger-fg: #8a2f27;
+  --danger-fg-strong: #7a281f;
+  --danger-fg-soft: #9c473d;
+  --menu-danger-fg: #b23a30;
+
+  --success-bg: #e4f7ec;
+  --success-border: #a9e0bf;
+  --success-fg: #1f6b3f;
+
+  --sel-bg: #dbe7fb;
+  --sel-fg: #12386b;
+  --seg-active-bg: #dfe7f7;
+
+  --badge-git-fg: #2f6b1e;
+  --badge-git-border: #b9dba0;
+  --badge-git-bg: #e9f6e1;
+  --badge-off-fg: #8a3a3a;
+  --badge-off-border: #eab3b3;
+  --badge-off-bg: #fbe9e9;
+  --badge-ready-fg: #1f6b3f;
+  --badge-ready-border: #a9e0bf;
+  --badge-ready-bg: #e4f7ec;
+  --badge-indexing-fg: #8a5b12;
+  --badge-indexing-border: #f0cf94;
+  --badge-indexing-bg: #fdf1da;
+  --badge-empty-fg: #35507a;
+  --badge-empty-border: #b9c8e0;
+  --badge-empty-bg: #e9eef8;
+
+  --shadow-card: 0 12px 28px rgba(30, 41, 59, .12);
+  --shadow-modal: 0 16px 34px rgba(30, 41, 59, .16);
+  --shadow-menu: 0 6px 16px rgba(30, 41, 59, .16);
+  --overlay: rgba(30, 34, 44, .4);
+
+  --chunk-line: #a9c6e8;
+  --flash-bg: #dff3e4;
 }
 
 * { box-sizing: border-box; }
@@ -106,9 +244,9 @@ h2 {
 .banner {
   flex: none;
   padding: 8px 14px;
-  background: #3a2020;
-  border-bottom: 1px solid #5a2f2c;
-  color: #f3c3bf;
+  background: var(--danger-bg);
+  border-bottom: 1px solid var(--danger-border);
+  color: var(--danger-fg);
   font-size: 12px;
   font-family: var(--mono);
 }
@@ -137,10 +275,10 @@ h2 {
   background: var(--bg-pane);
   border: 1px solid var(--line);
   border-radius: 10px;
-  box-shadow: 0 18px 40px rgba(0, 0, 0, .38);
+  box-shadow: var(--shadow-card);
 }
 
-.gate-card.is-error { border-color: #5a2f2c; }
+.gate-card.is-error { border-color: var(--danger-border); }
 
 .gate-brand {
   font-weight: 700;
@@ -156,7 +294,7 @@ h2 {
   color: var(--fg);
 }
 
-.gate-card.is-error .gate-title { color: #f0aaa3; }
+.gate-card.is-error .gate-title { color: var(--danger-fg-strong); }
 
 .gate-text {
   margin: 0 0 16px;
@@ -217,7 +355,7 @@ h2 {
 
 .gate-note {
   margin: 8px 0 0;
-  color: #eda9a3;
+  color: var(--danger-fg-soft);
   font-size: 12px;
 }
 
@@ -234,7 +372,7 @@ h2 {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  background: rgba(8, 9, 12, .62);
+  background: var(--overlay);
 }
 
 .modal[hidden] { display: none; }
@@ -250,7 +388,7 @@ h2 {
   background: var(--bg-pane);
   border: 1px solid var(--line);
   border-radius: 10px;
-  box-shadow: 0 18px 40px rgba(0, 0, 0, .45);
+  box-shadow: var(--shadow-modal);
 }
 
 /* The config snippets are one long URL each; the extra width buys a line or
@@ -285,39 +423,18 @@ h2 {
   border-top: 1px solid var(--line);
 }
 
-.btn-primary {
-  background: #2c4d7d;
-  border-color: #3a5f95;
-  color: #e8f0fb;
-}
-
-.btn-primary:hover:not(:disabled) { background: #35598e; border-color: #47709f; }
-
 .modal-error {
   margin: 0;
   padding: 7px 9px;
-  background: #3a2020;
-  border: 1px solid #5a2f2c;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
   border-radius: var(--radius);
-  color: #f3c3bf;
+  color: var(--danger-fg);
   font-size: 12px;
   font-family: var(--mono);
 }
 
 .modal-error[hidden] { display: none; }
-
-/* ---- destructive action ------------------------------------------------
-   Red, and only ever on the button that actually destroys something. The
-   colour is the one already in use for errors, so nothing new has to be
-   learned to read it. */
-
-.btn-danger {
-  background: #6b2b28;
-  border-color: #8a3a35;
-  color: #f7ded9;
-}
-
-.btn-danger:hover:not(:disabled) { background: #7d322e; border-color: #a1443e; }
 
 /* ---- per-bank menu -----------------------------------------------------
    Fixed rather than absolute: the bank list scrolls in its own pane, and an
@@ -331,7 +448,7 @@ h2 {
   background: var(--bg-pane);
   border: 1px solid var(--line);
   border-radius: var(--radius);
-  box-shadow: 0 8px 22px rgba(0, 0, 0, .45);
+  box-shadow: var(--shadow-menu);
 }
 
 .menu[hidden] { display: none; }
@@ -350,8 +467,8 @@ h2 {
 }
 
 .menu-item:hover { background: var(--bg-hover); }
-.menu-item.is-danger { color: #f0958c; }
-.menu-item.is-danger:hover { background: #3a2020; }
+.menu-item.is-danger { color: var(--menu-danger-fg); }
+.menu-item.is-danger:hover { background: var(--danger-bg); }
 
 .menu-sep {
   height: 1px;
@@ -439,7 +556,7 @@ h2 {
   cursor: pointer;
 }
 
-.chip:hover { color: var(--fg); border-color: #3d444f; background: var(--bg-hover); }
+.chip:hover { color: var(--fg); border-color: var(--btn-border-hover); background: var(--bg-hover); }
 
 .fs-input,
 .tok-value {
@@ -482,7 +599,7 @@ h2 {
   color: var(--fg);
   background: transparent;
   border: none;
-  border-bottom: 1px solid #191c22;
+  border-bottom: 1px solid var(--line-sunken);
   cursor: pointer;
 }
 
@@ -553,10 +670,10 @@ h2 {
 .tok-ok {
   margin: 0;
   padding: 7px 9px;
-  background: #1d2b21;
-  border: 1px solid #2e4d3a;
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
   border-radius: var(--radius);
-  color: #a9dcbc;
+  color: var(--success-fg);
   font-size: 12px;
 }
 
@@ -602,14 +719,14 @@ h2 {
 .tok-confirm {
   margin-top: 4px;
   padding: 10px 11px;
-  background: #33201f;
-  border: 1px solid #5a2f2c;
+  background: var(--danger-bg-soft);
+  border: 1px solid var(--danger-border);
   border-radius: var(--radius);
 }
 
 .tok-confirm-text {
   margin: 0 0 9px;
-  color: #f3c3bf;
+  color: var(--danger-fg);
   font-size: 12px;
   line-height: 1.55;
 }
@@ -618,14 +735,6 @@ h2 {
 
 /* `.modal-foot` pushes everything right; this one belongs on the other side. */
 .tok-regen { margin-right: auto; }
-
-.btn-danger {
-  background: #6d2e2a;
-  border-color: #8a3d38;
-  color: #f7dedb;
-}
-
-.btn-danger:hover:not(:disabled) { background: #7d3631; border-color: #9c4741; }
 
 /* Off-screen sink for the pre-clipboard-API copy path. Not `display: none`:
    a hidden textarea cannot be selected, and the selection is the whole point. */
@@ -708,7 +817,7 @@ h2 {
   font: inherit;
   font-size: 12px;
   color: var(--fg);
-  background: #2a2f38;
+  background: var(--btn-bg);
   border: 1px solid var(--line);
   border-radius: var(--radius);
   padding: 3px 9px;
@@ -716,11 +825,39 @@ h2 {
   white-space: nowrap;
 }
 
-.btn:hover:not(:disabled) { background: #333a45; border-color: #3d444f; }
+.btn:hover:not(:disabled) { background: var(--btn-bg-hover); border-color: var(--btn-border-hover); }
 .btn:disabled { opacity: .4; cursor: default; }
 
 .btn-ghost { background: transparent; border-color: transparent; color: var(--fg-dim); }
 .btn-ghost:hover:not(:disabled) { background: var(--bg-hover); }
+
+.btn-primary {
+  background: var(--btn-primary-bg);
+  border-color: var(--btn-primary-border);
+  color: var(--btn-primary-fg);
+}
+
+.btn-primary:hover:not(:disabled) { background: var(--btn-primary-bg-hover); border-color: var(--btn-primary-border-hover); }
+
+/* ---- destructive action ------------------------------------------------
+   Red, and only ever on the button that actually destroys something. The
+   colour is the one already in use for errors, so nothing new has to be
+   learned to read it.
+
+   Placed after the plain `.btn` above rather than up near the modal CSS it
+   originally sat next to: `.btn`/`.btn-danger` are equal specificity, so
+   whichever rule is later in the file wins when an element carries both
+   classes. `.btn-danger` used to sit before `.btn` and silently lost every
+   property to it — the button rendered as a plain grey `.btn` no matter
+   what this rule said. */
+
+.btn-danger {
+  background: var(--btn-danger-bg);
+  border-color: var(--btn-danger-border);
+  color: var(--btn-danger-fg);
+}
+
+.btn-danger:hover:not(:disabled) { background: var(--btn-danger-bg-hover); border-color: var(--btn-danger-border-hover); }
 
 .segmented { display: flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
 
@@ -736,7 +873,7 @@ h2 {
 
 .seg + .seg { border-left: 1px solid var(--line); }
 .seg:hover { background: var(--bg-hover); }
-.seg.is-active { background: #2f3742; color: var(--fg); }
+.seg.is-active { background: var(--seg-active-bg); color: var(--fg); }
 
 .toggle {
   display: flex;
@@ -757,7 +894,7 @@ h2 {
 }
 
 .bank:hover { background: var(--bg-hover); }
-.bank.is-selected { background: #232c3a; box-shadow: inset 2px 0 0 var(--accent); }
+.bank.is-selected { background: var(--sel-bg); box-shadow: inset 2px 0 0 var(--accent); }
 .bank.is-disabled .bank-name { color: var(--fg-mute); }
 
 .bank-row {
@@ -799,8 +936,8 @@ h2 {
   margin-top: 6px;
   padding: 4px 6px;
   border-radius: var(--radius);
-  background: #33201f;
-  color: #eda9a3;
+  background: var(--danger-bg-soft);
+  color: var(--danger-fg-soft);
   font-family: var(--mono);
   font-size: 11px;
   word-break: break-word;
@@ -820,13 +957,13 @@ h2 {
   white-space: nowrap;
 }
 
-.badge-git    { color: #9ecb8a; border-color: #35482f; background: #212b1e; }
+.badge-git    { color: var(--badge-git-fg); border-color: var(--badge-git-border); background: var(--badge-git-bg); }
 .badge-nogit  { color: var(--fg-mute); }
-.badge-off    { color: #d0a0a0; border-color: #4a3030; background: #2c2020; }
+.badge-off    { color: var(--badge-off-fg); border-color: var(--badge-off-border); background: var(--badge-off-bg); }
 
-.badge-ready    { color: #8ee0ac; border-color: #2e4d3a; background: #1c2b23; }
-.badge-indexing { color: #f0c37a; border-color: #574427; background: #2e2618; }
-.badge-empty    { color: #9fb2cc; border-color: #33415a; background: #1d2531; }
+.badge-ready    { color: var(--badge-ready-fg); border-color: var(--badge-ready-border); background: var(--badge-ready-bg); }
+.badge-indexing { color: var(--badge-indexing-fg); border-color: var(--badge-indexing-border); background: var(--badge-indexing-bg); }
+.badge-empty    { color: var(--badge-empty-fg); border-color: var(--badge-empty-border); background: var(--badge-empty-bg); }
 
 /* live progress bar on a bank card -------------------------------------- */
 
@@ -837,7 +974,7 @@ h2 {
 .bar {
   height: 4px;
   border-radius: 2px;
-  background: #2a2f38;
+  background: var(--track-bg);
   overflow: hidden;
 }
 
@@ -883,7 +1020,7 @@ h2 {
 
 .tree-node.is-file { cursor: pointer; }
 .tree-node.is-file:hover { background: var(--bg-hover); }
-.tree-node.is-selected { background: #232c3a; color: #cfe1ff; }
+.tree-node.is-selected { background: var(--sel-bg); color: var(--sel-fg); }
 
 .tree-dir { color: var(--fg-dim); }
 
@@ -945,7 +1082,7 @@ h2 {
   content: "";
   flex: 1 1 auto;
   height: 0;
-  border-top: 1px dashed #3c536f;
+  border-top: 1px dashed var(--chunk-line);
 }
 
 .chunk-divider.is-end::after { border-top-style: solid; }
@@ -1007,7 +1144,7 @@ h2 {
 
 .log-table td {
   padding: 3px 10px;
-  border-bottom: 1px solid #23262c;
+  border-bottom: 1px solid var(--line-table);
   color: var(--fg-dim);
   vertical-align: top;
 }
@@ -1021,7 +1158,7 @@ h2 {
 .log-table .is-live td { animation: flash 1.2s ease-out; }
 
 @keyframes flash {
-  from { background: #2a3b2c; }
+  from { background: var(--flash-bg); }
   to   { background: transparent; }
 }
 
