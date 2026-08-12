@@ -1861,6 +1861,59 @@ def test_bank_resolution() -> None:
             check("a disabled bank is invisible to the path form", gone)
 
 
+def test_env_file() -> None:
+    """``<state>/mnemo.env`` reaches a process that inherited no environment.
+
+    The bug it fixes is invisible from a shell: ``systemd --user`` and a
+    launchd LaunchAgent start the service with a bare environment and never
+    read ``~/.profile``, so every ``MNEMO_*`` override was silently ignored
+    by the one process that reads most of them. Asserted in a subprocess
+    because config evaluates its knobs once, at import.
+    """
+    import subprocess
+
+    def knobs(state: Path, extra: dict[str, str] | None = None) -> dict[str, str]:
+        env = dict(os.environ)
+        env.pop("MNEMO_BATCH_SIZE", None)
+        env["MNEMO_STATE_DIR"] = str(state)
+        env.update(extra or {})
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, json; sys.path.insert(0, sys.argv[1]);"
+             "from src import config;"
+             "print(json.dumps({'batch': config.BATCH_SIZE,"
+             " 'file': str(config.ENV_FILE) if config.ENV_FILE else ''}))",
+             str(Path(__file__).resolve().parent.parent)],
+            capture_output=True, text=True, env=env,
+        )
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    with tempfile.TemporaryDirectory(prefix="mnemo env ") as raw:
+        state = Path(raw)
+        (state / "mnemo.env").write_text(
+            '# a comment, and a blank line follow\n\n'
+            'MNEMO_BATCH_SIZE="64"\n',
+            encoding="utf-8",
+        )
+
+        seen = knobs(state)
+        check("mnemo.env is read when nothing set the variable",
+              seen["batch"] == 64, f"batch={seen['batch']}")
+        check("the file that was read is reported",
+              seen["file"].endswith("mnemo.env"), seen["file"])
+
+        # Precedence: exporting a variable for one run must still win, or a
+        # stored default would quietly override a deliberate override.
+        seen = knobs(state, {"MNEMO_BATCH_SIZE": "7"})
+        check("a real environment variable beats the file",
+              seen["batch"] == 7, f"batch={seen['batch']}")
+
+        seen = knobs(state / "absent")
+        check("an absent mnemo.env is not an error",
+              seen["batch"] == 16 and seen["file"] == "",
+              f"batch={seen['batch']} file={seen['file']!r}")
+
+
 def main() -> int:
     test_scaffold()
     test_scaffold_template_project()
@@ -1880,6 +1933,7 @@ def main() -> int:
     test_orphan_indexes()
     test_bank_resolution()
     test_model_cache_validation()
+    test_env_file()
     print(
         f"\n{_passed} passed, {_failed} failed, "
         f"{_xfailed} xfailed (awaiting a later phase), {_xpassed} xpassed"

@@ -19,6 +19,66 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+
+# --- environment file (preamble, owned by nobody's section) -------------
+#
+# Every knob below reads ``os.environ``. That works for a hand-run command,
+# which inherits the shell — and silently does NOT work for the service the
+# installer registers, which is the process that reads most of them:
+#
+# * ``systemd --user`` never sources ``~/.profile``, and the unit we write
+#   carries neither ``Environment=`` nor ``EnvironmentFile=``;
+# * a launchd LaunchAgent likewise starts with a bare environment.
+#
+# So on Linux and macOS every ``MNEMO_*`` override was invisible to the
+# autostarted backend — set it, restart, nothing changes, no error. (Windows
+# escaped by accident: the installer writes a *user-scope* variable and the
+# logon task inherits it.)
+#
+# The fix is deliberately not a second per-OS unit template. One optional
+# file next to the rest of the writable state is read here, before any knob
+# is evaluated, so systemd, launchd, Task Scheduler and a plain shell all see
+# the same values. Real environment WINS over the file: exporting a variable
+# for one run must still beat the stored default.
+#
+# Format: ``KEY=value`` per line, ``#`` comments, blank lines ignored.
+# Optional by design — its absence is the normal case and is not an error.
+ENV_FILE_NAME = "mnemo.env"
+
+
+def _load_env_file() -> Path | None:
+    """Merge ``<state>/mnemo.env`` into ``os.environ`` without overriding it.
+
+    Resolved from the *real* environment only (``MNEMO_STATE_DIR`` /
+    ``MNEMO_HOME``), because the constants that would normally answer this
+    are defined below and do not exist yet.
+    """
+    state = os.environ.get("MNEMO_STATE_DIR")
+    path = Path(state) if state else Path(
+        os.environ.get("MNEMO_HOME", Path.home() / ".claude" / "mnemo")
+    ) / "state"
+    path = path / ENV_FILE_NAME
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        # A value may be quoted the way a shell would quote it; anything
+        # else is taken literally, spaces included.
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+    return path
+
+
+ENV_FILE: Path | None = _load_env_file()
+
+
 # --- paths & state ------------------------------  engine-dev
 
 # User-scope home: installed once, shared by all banks.
