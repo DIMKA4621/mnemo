@@ -1088,6 +1088,41 @@ def test_setup_scripts_agree() -> None:
 
     from src.scaffold import _SETUP_MARKER, _SETUP_PS1, _SETUP_SH
 
+    def usable_bash() -> list[str] | None:
+        """A bash that runs a script — not merely the name `bash` on PATH.
+
+        On a GitHub Windows runner `bash` resolves to the WSL launcher in
+        System32, ahead of Git's own. With no distribution installed it exits
+        1 and writes nothing to stderr, which is indistinguishable from the
+        script failing: two checks below then passed vacuously and a third
+        failed for a reason that was never about the script. So probe it —
+        a bash that cannot echo cannot test anything.
+        """
+        candidates = [["bash"]]
+        if os.name == "nt":
+            candidates.append([r"C:\Program Files\Git\bin\bash.exe"])
+        for cand in candidates:
+            try:
+                probe = subprocess.run(cand + ["-c", "printf ok"],
+                                       capture_output=True, timeout=60)
+            except (OSError, subprocess.SubprocessError):
+                continue
+            if probe.returncode == 0 and probe.stdout.strip() == b"ok":
+                try:
+                    ver = subprocess.run(cand + ["--version"],
+                                         capture_output=True, timeout=60)
+                    first = ver.stdout.decode("utf-8", "replace").splitlines()
+                except (OSError, subprocess.SubprocessError):
+                    first = []
+                print(f"note  shell half via {cand[0]}"
+                      f"{' — ' + first[0] if first else ''}")
+                return cand
+        return None
+
+    bash = usable_bash()
+    if bash is None:
+        print("note  no bash on this machine runs a script — sh half skipped")
+
     check("both scripts carry the marker",
           _SETUP_MARKER in _SETUP_SH and _SETUP_MARKER in _SETUP_PS1)
 
@@ -1129,7 +1164,7 @@ def test_setup_scripts_agree() -> None:
             out = proj / ".mcp.json"
             return out.read_bytes() if out.exists() else b""
 
-    from_sh = render(_SETUP_SH, "mcp-setup.sh", ["bash"])
+    from_sh = render(_SETUP_SH, "mcp-setup.sh", bash) if bash else None
     from_ps = render(_SETUP_PS1, "mcp-setup.ps1",
                      ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                       "-File"])
@@ -1176,11 +1211,12 @@ def test_setup_scripts_agree() -> None:
             return done.returncode, (proj / ".mcp.json").exists(), \
                 done.stderr.decode("utf-8", "replace")
 
-    for script, name, runner in (
-        (_SETUP_SH, "mcp-setup.sh", ["bash"]),
-        (_SETUP_PS1, "mcp-setup.ps1",
-         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]),
-    ):
+    halves = [(_SETUP_PS1, "mcp-setup.ps1",
+               ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                "-File"])]
+    if bash:
+        halves.insert(0, (_SETUP_SH, "mcp-setup.sh", bash))
+    for script, name, runner in halves:
         result = render_missing(script, name, runner)
         if result is None:
             continue
@@ -1412,7 +1448,15 @@ def test_index_paths() -> None:
             p.parent.mkdir(parents=True, exist_ok=True)
             p.write_text("# vendor\n", encoding="utf-8")
 
-        walk = scan_bank(config.resolve(root).root)
+        # `config.resolve` calls `Path.resolve()`, so the bank root the walk
+        # actually sees is the real path — which is NOT `root` wherever the
+        # temp directory is reached through a link or a short name (macOS
+        # `/var` → `/private/var`, a CI runner's `RUNNER~1`). Compare against
+        # the resolved root, or the identifier check fails on those machines
+        # and passes on the developer's.
+        bank_root = config.resolve(root).root
+
+        walk = scan_bank(bank_root)
         check(
             "vendor directories are excluded at any depth",
             not [rel for rel in vendored if rel in walk],
@@ -1427,7 +1471,7 @@ def test_index_paths() -> None:
             (root / rel).unlink()
 
         # Back to just the curated fixture for the strict identifier list.
-        walk = scan_bank(config.resolve(root).root)
+        walk = scan_bank(bank_root)
         identifiers = sorted(walk)
         check(
             "flat walk takes every .md under the bank root",
@@ -1452,7 +1496,7 @@ def test_index_paths() -> None:
         check(
             "stored identifiers are relative to the bank root",
             all(not Path(value).is_absolute() for value in identifiers)
-            and all(walk[v].abs_path == root / v for v in identifiers),
+            and all(walk[v].abs_path == bank_root / v for v in identifiers),
             detail=str(identifiers),
         )
         # `scan_bank` sorts Path objects, so key order is normcase-folded on
@@ -1461,7 +1505,7 @@ def test_index_paths() -> None:
         # itself, so assert that, not a cross-platform order.
         check(
             "walk order is stable across calls",
-            list(scan_bank(config.resolve(root).root)) == list(walk),
+            list(scan_bank(bank_root)) == list(walk),
             detail=str(list(walk)),
         )
 
