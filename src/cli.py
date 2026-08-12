@@ -508,13 +508,17 @@ def _cmd_logs(args: argparse.Namespace) -> int:
 
 
 def _cmd_ui() -> int:
-    """Open the cabinet, handing the token over in the URL once (§9.1)."""
-    import webbrowser
+    """Print the cabinet's URL, token filled in (§9.1). Opens nothing.
 
+    It used to call `webbrowser.open` as well. Which browser that reaches is
+    not a decision this command gets to make: it is whatever the OS has
+    registered, in whatever profile happens to be signed in, and the URL
+    carries the service token — the widest credential on the machine. A
+    printed line goes exactly where the user is already looking, and they
+    click it, or paste it into the browser they meant.
+    """
     client = _client()
-    url = f"{client.base_url}/ui/?token={client.token}"
-    print(url)
-    webbrowser.open(url)
+    print(f"{client.base_url}/ui/?token={client.token}")
     return EXIT_OK
 
 
@@ -741,8 +745,9 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "ui",
-        help="Open the local cabinet in a browser — banks, file tree, chunk "
-             "boundaries, reindex buttons, journal. Fills the token in.",
+        help="Print the link to the local cabinet — banks, file tree, chunk "
+             "boundaries, reindex buttons, journal. Token filled in; opens "
+             "no browser.",
     )
 
     pl = sub.add_parser(

@@ -1858,7 +1858,7 @@ git-трекнутому шаблоні означав, що єдиний про
 | `mnemo tree [--bank] [--depth]` | API | `GET /api/tree` |
 | `mnemo status` | API | `GET /api/status` |
 | `mnemo logs [--kind] [--bank] [--since] [-n]` | API | `GET /api/logs` |
-| `mnemo ui` | API | читає токен і відкриває браузер на `/ui/?token=…` |
+| `mnemo ui` | API | читає токен і **друкує** посилання `/ui/?token=…`; браузер не відкриває — який саме браузер і який профіль отримав би сервісний токен, ця команда не вирішує |
 
 Зникають: `mnemo mcp` (stdio MCP — MCP тепер HTTP), `mnemo projects`
 (заміняє `banks list`).

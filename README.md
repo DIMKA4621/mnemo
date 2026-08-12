@@ -8,6 +8,12 @@ You write `.md`. A background service notices the save, re-indexes it within
 seconds, and any agent in the project can find it by meaning — not by
 remembering which file it was in.
 
+<img src="docs/cabinet.png" width="620" alt="The mnemo cabinet: banks with their index state, the file tree, a document with its chunk boundaries drawn in, and the journal of searches and indexing">
+
+<sub>The local cabinet — `mnemo ui`. Every bank with its index state, the
+file tree, any document with **the chunk boundaries drawn in**, live progress
+and the journal.</sub>
+
 ```mermaid
 flowchart LR
     A["<b>.claude/memory/</b><br/>curated .md, in git"]
@@ -24,6 +30,73 @@ flowchart LR
 Everything to the right of the markdown is derived. Delete the index and it
 rebuilds identically; nothing but plain `.md` and a little wiring lives in
 your repo.
+
+## How it works
+
+**The loop closes by itself.** An agent finishes a piece of work and writes
+what it learned into `.claude/memory/topics/queue.md`. Before the next
+message is typed, a watcher has already picked up the save, re-chunked that
+one file and embedded the parts that changed. Ask anything in a session an
+hour later — or on a different machine after a `git pull` — and the answer
+is found by *meaning*, across files, without anyone remembering where it was
+written down.
+
+That is the whole difference from a `MEMORY.md` that everyone is supposed to
+read: nothing has to be loaded up front, nothing competes for the context
+window, and memory does not go stale between the moment it is written and
+the moment it is indexed.
+
+Three properties are load-bearing, and each one is a deliberate constraint:
+
+- **The markdown is the only source of truth.** It is reviewed in pull
+  requests and it travels in git, like code. There is no write API and there
+  will not be one — you edit memory with the same editor you edit everything
+  else.
+- **The index is disposable.** Chunks, vectors and the SQLite file are
+  derived; delete them and the next run rebuilds an identical index. Nothing
+  is ever *only* in the index, so nothing can be lost in it.
+- **Nothing leaves the machine.** Embeddings are computed locally by a
+  resident model, the service listens on loopback behind a token, and no
+  content is sent anywhere.
+
+### Banks
+
+A **bank** is one root folder of `.md` — anywhere on disk — indexed as a
+whole. For a project that is `<project>/.claude/memory/`, and everything
+nested inside it is one searchable set.
+
+There are no scopes *inside* a bank, on purpose. If two sets of notes must
+not see each other — a private research folder, a second project, per-agent
+notes kept apart — that is a **second bank**, with its own token and its own
+MCP connection. A search can be narrowed to a subfolder with
+`--path-prefix`, but that is navigation, not a wall: the wall is the bank
+boundary, and it is the folder, which means there is no exclusion list to
+maintain and nothing to get wrong.
+
+One machine, one service, any number of banks. A project usually has one.
+
+### Many sessions, many projects, one service
+
+Nothing here is owned by a single client, and that is a consequence of the
+shape rather than a feature bolted on: the service is a **server**, and
+everything else is a client of it.
+
+- **Open as many Claude Code sessions on the same project as you like.**
+  They do not spawn anything — each one *connects* to the service that is
+  already running. No per-session process, no lock file, no "the other
+  console has it open". Every MCP request is self-contained and carries its
+  own bank in its own token, so there is no session affinity to conflict
+  over: two consoles, ten consoles and a `curl` are the same thing to the
+  backend.
+- **One service holds every project on the machine.** Banks are a registry,
+  not an instance — project number seven costs one entry, not another
+  watcher and another 1.6 GB of resident model. A search in one project
+  never waits on an index rebuild in another; the queue puts a single edit
+  ahead of a bulk reindex on purpose.
+- **Any MCP client, not just Claude Code.** The project face is ordinary
+  HTTP MCP plus a token — anything that speaks MCP connects with a URL, and
+  anything that speaks `curl` can use `/mcp-tools/*` and read exactly what
+  an agent reads.
 
 ---
 
@@ -52,15 +125,32 @@ Python 3.10+. No Docker, no WSL, no PATH changes. Flags for scripts and CI:
 `--no-model`, `--model`, `--no-start`, `--check`, `--deps-only`,
 `--no-autostart`, `--home DIR`.</sub>
 
+**One thing to know before the next step.** The launcher lands at
+`~/.claude/mnemo/bin/mnemo` (`bin\mnemo.exe` on Windows) and is deliberately
+**not** added to `PATH` — mnemo does not edit your shell environment. Either
+call it by full path, or give yourself a short name once:
+
+```powershell
+# PowerShell profile:  notepad $PROFILE
+Set-Alias mnemo "$HOME\.claude\mnemo\bin\mnemo.exe"
+```
+```bash
+# ~/.bashrc or ~/.zshrc
+alias mnemo=~/.claude/mnemo/bin/mnemo
+```
+
+The rest of this README writes the short `mnemo`. The git-tracked wiring
+never depends on it: it uses the portable path, so it works either way.
+
 ## 2. Attach a project (once per project)
 
 ```powershell
 cd C:\path\to\your\project
-& "$HOME\.claude\mnemo\bin\mnemo.exe" init
+mnemo init
 ```
 ```bash
 cd /path/to/your/project
-~/.claude/mnemo/bin/mnemo init
+mnemo init
 ```
 
 `init` registers `<project>/.claude/memory/` as a **bank**, indexes it, and
@@ -98,16 +188,11 @@ then answer.* Nothing is injected into the context — memory that is not
 searched for is memory not used, and an injection would let an agent believe
 it had already looked.
 
-**You.** Open the cabinet:
-
-```
-mnemo ui
-```
-
-It lists every bank with its file tree, shows a document with its chunk
-boundaries drawn in, streams indexing progress live, and hands out each
-bank's MCP config from one `···` menu — reindex, full rebuild, access,
-remove.
+**You.** `mnemo ui` prints the link to the cabinet shown above — every
+per-bank action lives in one `···` menu there (sync, full rebuild, MCP
+access, remove). `mnemo search "query"` answers the same question from the
+terminal, and `mnemo doctor` says whether anything on this machine needs
+attention.
 
 **Editing memory is editing files.** There is no write tool and there will
 not be one: you use the same editor and the same git as for everything else,
@@ -120,7 +205,7 @@ and the watcher does the rest.
 ```
 mnemo init [--root DIR] [--yes] [--migrate]   wire a project
 mnemo search "query" [--path-prefix P]        hybrid search over a bank
-mnemo status | logs | tree | ui               state, journal, layout, cabinet
+mnemo status | logs | tree | ui               state, journal, layout, cabinet link
 mnemo banks list | add <path> | remove <ref>  the registry
 mnemo reindex [--bank B] [--full]             force the issue (the watcher is automatic)
 mnemo service start | stop | status | restart
@@ -128,16 +213,12 @@ mnemo doctor                                  engine, model, tokens, ports, bank
 mnemo warmup                                  explicit model download — never implicit
 ```
 
-The launcher is at `~/.claude/mnemo/bin/mnemo` (`bin\mnemo.exe` on Windows)
-and is deliberately **not** on `PATH`; add it yourself or call it in full.
-The git-tracked wiring always uses the portable form, so it works either way.
+`ui` prints a link and opens nothing: which browser and which signed-in
+profile would receive a URL carrying the service token is not a decision a
+CLI command gets to make.
 
 ## How it is put together
 
-- **Banks.** A bank is any root folder of `.md`, anywhere on disk, indexed
-  whole — no scopes inside it. Need memory kept apart, per agent or per
-  domain? That is a second bank with its own token, not a scope.
-  `--path-prefix` narrows a search, but that is navigation, not isolation.
 - **One service.** A single loopback backend owns the registry, the index and
   the file watcher; the CLI, the MCP faces and the cabinet are all thin
   clients of it. A second resident process holds the embedding model warm
