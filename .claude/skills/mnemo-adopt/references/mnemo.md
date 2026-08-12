@@ -35,40 +35,63 @@ longer walls them off.
 explicit `warmup`), `state/<bankhash>.db` (the disposable index — one
 file per **bank root**, keyed by `sha1` of that path), `bin/mnemo`
 (self-locating launcher; a real `bin\mnemo.exe` on Windows).
-Installed by `install.sh` on POSIX and `install.ps1` on native Windows
-(PowerShell 5.1+, 64-bit Python 3.10+ — no WSL, PowerShell 7 or PATH
-entry required); idempotent; never deletes `state/` or `model-cache/`.
+Installed by `install.ps1` on native Windows (built-in PowerShell 5.1+,
+64-bit Python 3.10+ — no WSL, PowerShell 7 or PATH entry required) and
+`install.sh` on POSIX. One command does the whole machine: venv, deps,
+launcher, API token, autostart, the model (it asks, and skips silently
+when the run is not interactive), the service, and `doctor` last — so the
+run ends on evidence rather than a claim. Idempotent, and the update path;
+never deletes `state/` or `model-cache/`. `uninstall.ps1` / `uninstall.sh`
+is its mirror image.
 
 **Wiring — per project, most of it ships to everyone who clones**
 Created by `mnemo init` — additive, idempotent, refuses rather than
-overwrite, never touches `CLAUDE.md`, never invents memory, never runs
-git:
+overwrite, never touches `CLAUDE.md`, never invents memory structure:
 
 - `.claude/memory/MEMORY.md` — a **one-line anchor** if absent
-  (`# Memory Index — <project>`), nothing more. Git-tracked.
-- `.claude/rules/mnemo-memory.md` — the **binding memory rule** if
-  absent. `mnemo init` owns this text; it is the single source.
-  Git-tracked.
+  (`# Memory Index — <project>`), nothing more. Git-tracked, and never
+  reconsidered afterwards: it is curated content.
+- `.claude/rules/mnemo-memory.md` — the **binding memory rule**.
+  `mnemo init` owns this text and is its single source. It is also
+  **refreshed in place** when the file's bytes still hash to a redaction
+  mnemo itself wrote, so a project adopted months ago does not keep
+  months-old rules with nothing saying so; an unrecognised digest means a
+  person edited it, and it is then left exactly as it is. Git-tracked.
 - `.claude/settings.json` — **never touched by a plain `init`**. Only
   `--migrate` edits it, and only to remove hooks. Git-tracked.
-- The MCP entry — **not** git-tracked, because it holds a live token.
-  See below.
+- The MCP layer — one shape, described below.
 
-**The MCP entry and why it stays out of git.** `init` registers the
-project's memory root as a bank; registration mints that bank a token,
-and the token is written into the entry. In a plain project that goes
-straight into `.mcp.json`, and `init` appends `.mcp.json` to `.gitignore`.
-Under the template convention (`.mcp.json.template` present) `.mcp.json`
-is a build product, so `init` writes the placeholder entry into the
-template, the variables into `.mcp.env.example` and `.mcp.env`, and the
-`sed -e` substitutions into `mcp-setup.sh` — all three, because a missing
-substitution leaves `{{MNEMO_TOKEN}}` in the regenerated file while the
-script exits 0 with a success tick.
+**The MCP layer, and why the token stays out of git.** `init` registers
+the project's memory root as a bank; registration mints that bank a token.
+The token never goes into a tracked file, so there is exactly one shape,
+and `init` builds it wherever it is missing:
 
-If `.mcp.json` is already tracked, `init` **refuses** and writes nothing,
-printing `git rm --cached .mcp.json`. A refusal costs one command; a token
-committed to a tracked file is in somebody else's clone before anyone
-notices. `init` never runs that command itself.
+| File | In git | Holds |
+|---|---|---|
+| `.mcp.json.template` | yes | the entry, with `{{MNEMO_HOST}}` / `{{MNEMO_PORT}}` / `{{MNEMO_TOKEN}}` |
+| `.mcp.env.example` | yes | the variable names, empty token |
+| `mcp-setup.sh`, `mcp-setup.ps1` | yes | regenerate `.mcp.json` from the two |
+| `.mcp.env` | **no** | the real values, token included |
+| `.mcp.json` | **no** | a build product — `init` never writes it |
+
+Three facts worth knowing before explaining any of it:
+
+- **The template starts as the project's existing `.mcp.json`.** Otherwise
+  converting to the layer would drop every other server the project had,
+  silently, one step later.
+- **Both scripts discover their substitutions from the template**, so a
+  new bank is an entry plus a token and nothing else. This closed the
+  layer's one silent failure: a placeholder with no value used to pass
+  through into the generated `.mcp.json` verbatim while the script printed
+  its success tick and exited 0. It is now a named error and no file
+  written. There are two scripts because a native Windows machine has no
+  reason to have bash; a test holds their output byte-identical.
+- **A tracked `.mcp.json` or `.mcp.env` is a conversation, not a refusal.**
+  `init` explains why a live token cannot be tracked, asks, and runs
+  `git rm --cached` itself (`--yes` answers for scripts; with no terminal
+  it does nothing and prints the command). Never hand-write the entry to
+  get past it — the token has to come from the registry, and only `init`
+  gets it from there.
 
 ## Two MCP faces, and which token opens which
 
@@ -76,7 +99,8 @@ The tools carry **no `memory_` prefix** — Claude Code already namespaces
 them as `mcp__<server>__<tool>`, so a prefix only restated the namespace
 and cost tokens in every tool description.
 
-- **`/mcp?token=<bank-token>`** — the project face, server key `mnemo`.
+- **`/mcp?token=<bank-token>`** — the project face, server key
+  `mnemo-memory`.
   **Read-only, two tools:** `search(query, top_k, path_prefix)` and
   `tree(path_prefix, depth)`. Neither takes a `bank` argument; the bank
   comes from the token. This is what an adopted project is wired to.
@@ -165,7 +189,7 @@ Agent teams are experimental and **off by default**. They require
 **project** `.claude/settings.json` `env` (ships to the whole team),
 additively, after insisting it is needed for the model to work.
 
-## The hooks — seeds, and nothing is wired for you
+## The hooks — there are none, and no flag brings one back
 
 `mnemo init` writes **no hook**, and no flag makes it write one. Memory is
 reached by calling `search`; the discipline lives in
@@ -194,10 +218,9 @@ owner runs `mnemo init --migrate`, which unwires them.
 ## Portable invocation (cross-platform)
 
 Nothing machine-dependent and no secret ever goes into a git-tracked
-file — identical on Linux, macOS and native Windows:
+file — identical on Linux, macOS and native Windows. There are no hooks
+left to be portable, so this is about one entry:
 
-- **Hooks** use the shell form `~/.claude/mnemo/bin/mnemo <subcmd>` — the
-  shell expands `~` per user at run time.
 - **The MCP entry** is `{"type": "http", "url":
   "http://127.0.0.1:<port>/mcp?token=<bank-token>"}`. No `command`, no
   `args`, no spawn: the session connects to the already-running service.
@@ -214,21 +237,24 @@ file — identical on Linux, macOS and native Windows:
   `mnemo-notes`). `init` writes `mnemo-memory`; an older `mnemo` key it
   authored is renamed rather than joined, so a project never ends up with
   two entries into one bank.
-- The literal token is the reason this one file is git-ignored rather
-  than tracked; a template project keeps `{{MNEMO_HOST}}` /
-  `{{MNEMO_PORT}}` / `{{MNEMO_TOKEN}}` in git and the values in
-  `.mcp.env` — a placeholder at every varying position of the URL, the
-  host included. Portability is unchanged — only what gets substituted.
+- The literal token is the reason `.mcp.json` is git-ignored rather than
+  tracked; git carries `{{MNEMO_HOST}}` / `{{MNEMO_PORT}}` /
+  `{{MNEMO_TOKEN}}` and the values live in `.mcp.env` — a placeholder at
+  every varying position of the URL, the host included, since
+  `MNEMO_API_HOST` has always been configurable. Only the token is
+  per-entry: a second bank takes `MNEMO_NOTES_TOKEN` (else it would
+  overwrite the first's), while host and port stay shared, because they
+  address the **service** and a copy per bank is free to disagree about a
+  fact that is single.
 
 The one logical path resolves to the platform's real launcher:
 `~/.claude/mnemo/bin/mnemo` (extensionless Bash script) on Linux/macOS,
 `bin\mnemo.exe` on Windows (process creation resolves the extensionless
 path to the `.exe`). On Windows `install.ps1` sets the user `HOME`
-environment variable **only when it is absent** (so a hook seed's `~`
-resolves), never overwrites it, and refuses a value different from
-PowerShell `$HOME`/`%USERPROFILE%` — the engine lives under `HOME` and the
-git-tracked hook expands `~` at run time, and both break if the two
-disagree. After first creating it, close and reopen the launching terminal
+environment variable **only when it is absent**, never overwrites it, and
+refuses a value different from PowerShell `$HOME`/`%USERPROFILE%` — the
+engine lives under `HOME`, and the portable form resolves against it.
+After first creating it, close and reopen the launching terminal
 or IDE, then restart Claude Code. Root resolution for the commands that
 take one is the same everywhere — explicit `--root` > `MNEMO_ROOT` >
 `CLAUDE_PROJECT_DIR` > cwd — and indexed relative file identifiers always
@@ -238,9 +264,10 @@ report.
 
 ## `mnemo` is not a human command
 
-Nobody types `mnemo` for memory. It is called by the MCP registration,
-any wired hook seed, and this skill (`install.sh --check`, `mnemo init`,
-`warmup`, and `status` / `search` for verification). Not on `PATH`.
+Nobody types `mnemo` to *use* memory — that is the MCP `search` tool.
+The launcher is called by this skill (`mnemo init`, and `doctor` /
+`status` / `search` for verification) and by whoever is administering the
+machine. Not on `PATH`: call it in full, or alias it.
 
 Note which flag each command takes: `--root` belongs to `init` (and to
 the deprecated `ingest` alias); the API-client commands — `search`,

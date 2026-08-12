@@ -28,7 +28,10 @@ So: `slug = project_abs_path` with `/` → `-` and `_` → `-`.
 **Do not trust the formula blindly — confirm by listing.** The slug rule
 is Claude Code's, not mnemo's, and differs by OS (Windows paths carry a
 drive letter and backslashes) — so match by listing, not by transforming
-the path. Compute the candidate, then, for the current OS:
+the path. It is also **lossy in one direction**: `:`, `\` and `_` all
+flatten to `-`, so a folder name cannot be decoded back into a path. Going
+path → folder is fine; going folder → path is guessing. Compute the
+candidate, then, for the current OS:
 
 ```bash
 # Linux / macOS
@@ -105,7 +108,8 @@ topic files instead and keep `MEMORY.md` a thin index.
 
 ## After migration
 
-Let `mnemo ingest` rebuild the index from the new `.md` (the Verify
-step). The user-scope built-in memory is left in place — migration
-copies, it does not move or delete. The git-tracked `.claude/memory/`
-is now the source of truth going forward.
+Nothing to run: the watcher picks the new `.md` up within seconds of the
+write, and the Verify step just confirms the chunk count moved. The
+user-scope built-in memory is left in place — migration copies, it does
+not move or delete. The git-tracked `.claude/memory/` is the source of
+truth going forward.

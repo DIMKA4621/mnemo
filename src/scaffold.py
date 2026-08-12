@@ -17,15 +17,20 @@ This is a SAFE primitive, not a judgement call. It only ever:
     exists, leaving that migration to the adopt skill (shown diff +
     confirmation). It never edits CLAUDE.md.
 
-**Where the entry goes depends on the project, and getting it wrong is
-silent.** A project set up by the user-scope `project-mcp-setup` skill keeps
-`.mcp.json` **generated and git-ignored**, regenerated wholesale from
-`.mcp.json.template` by `mcp-setup.sh` — so anything written straight into
-`.mcp.json` there is erased on the next run, with no error. `init` therefore
-looks for a template first: finding one it writes the placeholder entry into
-the template, the variables into `.mcp.env.example`, the real values into
-`.mcp.env`, and the substitutions into `mcp-setup.sh`. Finding none it writes
-`.mcp.json` directly and makes sure git ignores it.
+**There is one shape, and `init` builds it wherever it is missing.** The
+entry never goes straight into `.mcp.json`: that file is a build product,
+regenerated wholesale from `.mcp.json.template` by `mcp-setup.sh` /
+`mcp-setup.ps1`, so anything written into it directly is erased on the next
+run with no error. A project without the layer gets it seeded — the template
+starting as whatever `.mcp.json` already held, or converting to the layer
+would drop every other server it had — and then the entry goes into the
+template, the variables into `.mcp.env.example` and `.mcp.env`, and both
+scripts discover their substitutions from the template itself.
+
+Both files that can carry the literal token — `.mcp.json` and `.mcp.env` —
+are added to `.gitignore`. If either is already tracked, `init` says why,
+asks, and runs `git rm --cached` itself (`--yes` answers for scripts; with no
+terminal it does nothing and prints the command).
 
 **The credential written is the bank's own token, and it is the whole
 address.** It opens that one bank's two read tools, and it is what tells the
@@ -38,10 +43,10 @@ left alone entirely; `--migrate` only *removes* hooks earlier generations
 wrote. The discipline lives in `.claude/rules/mnemo-memory.md` and nowhere
 else, because two mechanisms stating the same rule are two that can drift.
 
-The git-tracked layer stays portable by construction: both varying values in
-the MCP entry — port and token — are `{{VAR}}` in the template, resolved from
-a git-ignored `.mcp.env`. No machine-specific path and no secret is written into
-a git-tracked file.
+The git-tracked layer stays portable by construction: every varying value in
+the MCP entry — host, port and token — is a `{{VAR}}` in the template,
+resolved from a git-ignored `.mcp.env`. No machine-specific path and no
+secret is written into a git-tracked file.
 """
 from __future__ import annotations
 
@@ -261,7 +266,7 @@ _MEMORY_RULE = """\
 Everything below the divider is **portable**: it is the whole instruction for
 working with this project's memory, and it stands on its own. If an agent or a
 platform has no notion of rule files, paste that part into its system prompt,
-give it the `mnemo` MCP server, and it has what it needs.
+give it the `mnemo-memory` MCP server, and it has what it needs.
 
 **This part is Claude Code specific.** The file lives at
 `.claude/rules/mnemo-memory.md` and auto-loads for everyone in the session —
@@ -427,6 +432,10 @@ _RULE_SUPERSEDED: tuple[str, ...] = (
     # v5 — 895208b refactor(mcp)!: drop the memory_ prefix
     "83fe733cb9ccddb197c3643d47a7235c077701c6485da211d4950b7597726a8a",
     "21439e14abc870183ed5477c40da74cf1c5b91d13058455a4270fdb18217760e",
+    # v6 — 7584a9d feat(init)!: name the MCP entry mnemo-memory
+    #      (the rule still said "the `mnemo` MCP server" for one release)
+    "359122caae4f4e8c05e453e93b315ef0ae196928b35a1e2a714d75fe653fe169",
+    "f2a86bf46768cec08d55677141a7d9d32ccc4e29901de228c950fd855a9ffd1f",
 )
 # v6 — 42351ff feat!: delete the hook seeds — is the current text, so both of
 # its digests are computed from the constant rather than listed. A literal
@@ -1757,19 +1766,15 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
 def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
     """Plan the MCP wiring for one project. Raises `_Refuse`, writes nothing.
 
-    Two shapes, chosen by one fact — does `.mcp.json.template` exist:
+    One shape, built where it is missing: the entry with `{{VAR}}`
+    placeholders goes into `.mcp.json.template`, the variables into
+    `.mcp.env.example` and `.mcp.env`, and `mcp-setup.sh` / `mcp-setup.ps1`
+    regenerate `.mcp.json` from the two. `.mcp.json` itself is never written
+    here — it is a build product, and writing into it would survive exactly
+    until the next run of either script, silently.
 
-    * **template project** — the entry goes into the template with `{{VAR}}`
-      placeholders, the variables into `.mcp.env.example`, the real values into
-      `.mcp.env` when that file is there, and the substitutions into
-      `mcp-setup.sh`. `.mcp.json` is not touched at all: it is a build product,
-      and `mcp-setup.sh` regenerates it.
-    * **plain project** — the entry goes into `.mcp.json` with the literal
-      token, and `.gitignore` gains `.mcp.json` if it does not already ignore
-      it.
-
-    Getting this wrong is silent, not loud: writing into `.mcp.json` where a
-    template exists survives exactly until the next `bash mcp-setup.sh`.
+    A project without the layer gets it seeded by `_bootstrap_layer`, with the
+    template starting as its existing `.mcp.json` so no foreign server is lost.
     """
     wiring = _Wiring()
     prefix = _var_prefix(_VAR_INSTANCE)
