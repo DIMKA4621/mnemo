@@ -30,6 +30,12 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Run model-independent platform tests
         run: python tests/test_platform.py
+      # The pipeline itself: .md -> chunks -> vectors -> SQLite -> search,
+      # on a throwaway bank with a hash provider. Seconds, and no 2.2 GB
+      # model download -- relevance is measured by tests/test_search.py,
+      # which needs the real one and cannot run on every push.
+      - name: Run pipeline tests (hash provider, no model)
+        run: python tests/test_pipeline.py
       - name: Run native Windows installer smoke test
         if: runner.os == 'Windows'
         run: python tests/test_install_windows.py
