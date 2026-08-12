@@ -21,6 +21,7 @@ from typing import Any
 
 import sqlite_vec
 
+from .chunker import chunker_key
 from .config import EMBEDDING_DIM
 
 # Bumped whenever the table layout changes. A DB carrying anything else is
@@ -338,6 +339,7 @@ def init_meta(
     _set(conn, "bank_root", bank_root)
     _set(conn, "provider_key", provider_key)
     _set(conn, "embedding_dim", str(dim))
+    _set(conn, "chunker_key", chunker_key())
     conn.commit()
 
 
@@ -354,15 +356,27 @@ def needs_rebuild(
     Vectors from two different models must never share a database — they are
     not comparable and the sqlite-vec column has a fixed width. A fresh index
     (no provider recorded yet) needs no rebuild: there is nothing in it.
+
+    The chunking rule counts for the same reason, and it is not a caller's
+    choice to pass: it is a property of this build, like the schema version.
+    An index whose spans were cut by a different rule holds vectors for text
+    the current rule would never produce, and because `reconcile` re-chunks
+    only files whose sha256 moved, an unchanged file would keep its old
+    chunking forever — one database, two incompatible chunkings, nothing to
+    notice it. An index predating this check records no key at all, which
+    compares unequal and rebuilds, which is correct: it was built by the
+    character rule.
     """
     meta = _read_meta(conn)
     if meta.get("schema_version") != SCHEMA_VERSION:
         return True
     if "provider_key" not in meta:
         return False
-    return meta["provider_key"] != provider_key or meta.get(
+    if meta["provider_key"] != provider_key or meta.get(
         "embedding_dim"
-    ) != str(dim)
+    ) != str(dim):
+        return True
+    return meta.get("chunker_key") != chunker_key()
 
 
 def reset_index(conn: sqlite3.Connection, *, dim: int | None = None) -> None:

@@ -284,8 +284,26 @@ EMBED_THREADS: int = _embed_threads()
 
 # --- chunking & search knobs --------------------  engine-dev
 
-# Chunking: heading-aware (characters); a small file becomes one whole chunk.
+# Chunking: heading-aware; a small file becomes one whole chunk.
+#
+# Characters, and they stay characters. Splitting by TOKENS was built and
+# measured on the real bank (tests/eval_search.py, 64 labeled queries) and it
+# retrieves WORSE at the same median chunk size: 0.50 MRR against 0.53, and
+# 0.49 with a higher ceiling. The token rule is the more principled-looking
+# one and the evidence went the other way, so the metric stays.
 CHUNK_CAPACITY: tuple[int, int] = (200, 1200)
+# Below this, a chunk is folded into the next one. It is the bare-heading
+# case: `## Logs` alone is a chunk the splitter is right to cut and search is
+# wrong to return, because it wins both retrieval legs at once and displaces
+# the section it names. Measured neutral on retrieval — it is here because a
+# bare heading is never the answer, not because the metrics asked for it.
+CHUNK_MERGE_FLOOR_CHARS: int = 150
+# The one thing characters cannot promise: that a chunk fits the model's
+# context window. e5-large truncates at 512 tokens INCLUDING two specials,
+# and truncation is silent — the tail simply is not in the index. A chunk
+# over this is re-split; on text that never reaches it (this bank peaks at
+# 469) nothing moves at all.
+CHUNK_TOKEN_CEILING: int = 480
 
 # Search knobs.
 TOP_K: int = 5

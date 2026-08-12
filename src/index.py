@@ -365,7 +365,8 @@ def _open_bank(paths: BankPaths, provider: EmbeddingProvider, verbose: bool):
         # search would blend incomparable vectors with nothing to notice it.
         reset_index(conn, dim=provider.dim)
         if verbose:
-            print(f"provider changed -> full rebuild of {paths.db.name}")
+            print(f"provider or chunking changed -> full rebuild of "
+                  f"{paths.db.name}")
     init_meta(
         conn,
         bank_id=paths.id,

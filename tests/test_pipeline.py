@@ -40,7 +40,8 @@ _STATE = tempfile.TemporaryDirectory(prefix="mnemo pipeline state ")
 os.environ["MNEMO_STATE_DIR"] = _STATE.name
 
 from src import store  # noqa: E402
-from src.config import resolve  # noqa: E402
+from src.chunker import _rule, split_markdown  # noqa: E402
+from src.config import CHUNK_TOKEN_CEILING, resolve  # noqa: E402
 from src.index import _open_bank, reconcile  # noqa: E402
 from src.providers.base import EmbeddingProvider  # noqa: E402
 from src.search import _fts_ranked, _vector_ranked, search  # noqa: E402
@@ -111,9 +112,10 @@ _FILES = {
         "# Memory index\n\n"
         "Links and quick facts. Detail lives in topics, day notes in logs.\n"
     ),
-    # Deliberately past CHUNK_CAPACITY's ceiling (1200 chars): a file that
-    # fits in one chunk would make every boundary assertion below true by
-    # having nothing to get wrong.
+    # Deliberately past CHUNK_CAPACITY's ceiling, and by enough margin to
+    # survive it being retuned: a file that fits in one chunk would make
+    # every boundary assertion below true by having nothing to get wrong,
+    # and would say so in no way at all.
     "topics/deployment.md": (
         "# Deployment\n\n"
         "How a release reaches production, and how it is taken back out.\n"
@@ -141,7 +143,24 @@ _FILES = {
         "has read it for a full retention window, which is longer than any\n"
         "rollback we would still consider. The rule is what buys the cheap\n"
         "revert above: schema and code are never required to move together,\n"
-        "so either one can be moved back alone.\n"
+        "so either one can be moved back alone.\n\n"
+        "## Secrets\n\n"
+        "Nothing that unlocks anything is written into the repository, and\n"
+        "that includes the files a developer generates locally: the wiring\n"
+        "that carries a token is ignored by git rather than trusted to a\n"
+        "reviewer noticing it. Rotation is assumed rather than exceptional,\n"
+        "so every consumer reads its secret at startup and none of them\n"
+        "caches one across a restart. The cost is a restart on rotation,\n"
+        "which is cheap, and the thing it buys is that a leaked value stops\n"
+        "working on a schedule instead of whenever somebody remembers.\n\n"
+        "## On-call\n\n"
+        "An alert names the user-visible symptom, never the component that\n"
+        "produced it, because the component is what the responder is about\n"
+        "to go and determine. Every page carries a link to the runbook step\n"
+        "that clears it, and an alert without one is deleted rather than\n"
+        "tolerated: a page nobody can act on trains the responder to ignore\n"
+        "the next one, which is the failure this whole arrangement exists\n"
+        "to avoid.\n"
     ),
     "topics/чанкування.md": (
         "# Чанкування\n\n"
@@ -218,7 +237,7 @@ def test_index_and_chunks() -> None:
             check("headings are carried, not invented",
                   {r["heading"] for r in rows} <= {
                       "Deployment", "Rollback strategy", "Health checks",
-                      "Migrations"},
+                      "Migrations", "Secrets", "On-call"},
                   detail=str(sorted({r["heading"] for r in rows})))
 
             # Paths are identifiers, not filesystem paths: they must read the
@@ -467,6 +486,102 @@ def test_provider_change_rebuilds() -> None:
             conn.close()
 
 
+def test_chunking_rule() -> None:
+    """No chunk is a bare heading, and changing the rule rebuilds the bank."""
+    print("\n=== chunking rule ===")
+    rule = _rule()
+    print(f"  rule: {rule.key}")
+
+    # A heading immediately followed by another heading is where the splitter
+    # produces a runt: structurally a section, textually three words.
+    text = (
+        "# Day\n\n## Logs\n\n## Done\n\n## Notes\n\n"
+        + "The worker was drained before the deploy, and the queue was "
+          "allowed to empty on its own rather than being flushed. "
+          * 40
+    )
+    chunks = split_markdown(text)
+    check("a run of headings still splits into several chunks",
+          len(chunks) > 1, detail=f"{len(chunks)} chunks")
+    check("no chunk is left below the merge floor",
+          all(len(c.text) >= rule.floor for c in chunks),
+          detail=str(sorted(len(c.text) for c in chunks)[:4]))
+    check("a folded heading is kept, not dropped",
+          "## Logs" in chunks[0].text and "## Done" in chunks[0].text,
+          detail=chunks[0].text[:40].replace("\n", "\\n"))
+    check("folding leaves the spans exact",
+          all(text[c.start:c.end] == c.text for c in chunks))
+    check("and contiguous, so nothing falls between two chunks",
+          all(a.end <= b.start for a, b in zip(chunks, chunks[1:])))
+
+    # The token cap. Dense text — identifiers and numbers rather than prose —
+    # is where characters lie about size: this runs near 1.8 chars per token
+    # against roughly 2.9 for our prose, so a chunk the character rule
+    # considers ordinary is past the model's window.
+    if rule.count is None:
+        print("  (no tokenizer on this machine: the cap is skipped by design)")
+    else:
+        dense = "# Dense\n\n" + " ".join(
+            f"0x{i:04x}::{i * 7:05d}" for i in range(220))
+        check("dense text really is past the window",
+              rule.count(dense) > CHUNK_TOKEN_CEILING,
+              detail=f"{rule.count(dense)} tokens in {len(dense)} chars")
+        capped = split_markdown(dense)
+        check("no chunk is left over the model's context window",
+              all(rule.count(c.text) <= CHUNK_TOKEN_CEILING for c in capped),
+              detail=str([rule.count(c.text) for c in capped]))
+        check("the cap leaves the spans exact too",
+              all(dense[c.start:c.end] == c.text for c in capped))
+        # The cap must be inert on text that does not need it, or it would
+        # silently change every boundary the retrieval numbers were measured
+        # against.
+        prose = "\n\n".join(
+            f"## Section {i}\n\nThe rollback never touches the database, "
+            f"because migrations are expand-only and the old code keeps "
+            f"reading the new schema." for i in range(12))
+        spans = [(o, o + len(p))
+                 for o, p in rule.split.chunk_indices(prose)]
+        from src.chunker import _cap_tokens, _merge_runts  # noqa: PLC0415
+        merged = _merge_runts(prose, spans, rule.floor)
+        check("and is inert on text that fits",
+              _cap_tokens(prose, merged, rule) == merged,
+              detail=f"{len(merged)} chunks")
+
+    # The rule is recorded like the provider is, and for the same reason:
+    # reconcile re-chunks only files whose sha256 moved, so without this an
+    # untouched file would keep its old chunking forever.
+    with tempfile.TemporaryDirectory(prefix="mnemo bank ") as raw:
+        root = Path(raw) / "memory"
+        _build(root)
+        paths = resolve(root)
+        provider = HashProvider()
+        conn = _open_bank(paths, provider, False)
+        try:
+            built = reconcile(conn, provider, paths.root)
+            check("the bank records which rule cut it",
+                  store.get_meta(conn).get("chunker_key") == rule.key,
+                  detail=str(store.get_meta(conn).get("chunker_key")))
+            store._set(conn, "chunker_key", "md:chr:1-2:m3")
+            conn.commit()
+            check("a different rule counts as needing a rebuild",
+                  store.needs_rebuild(conn, provider_key=provider.key,
+                                      dim=provider.dim))
+        finally:
+            conn.close()
+
+        conn = _open_bank(paths, provider, False)
+        try:
+            check("and reopening empties the index",
+                  store.chunk_count(conn) == 0,
+                  detail=f"{store.chunk_count(conn)} chunks survived")
+            again = reconcile(conn, provider, paths.root)
+            check("the rebuild restores the same shape from the .md alone",
+                  again.chunks_indexed == built.chunks_indexed,
+                  detail=f"{again.chunks_indexed} vs {built.chunks_indexed}")
+        finally:
+            conn.close()
+
+
 def test_missing_extension_support_is_explained() -> None:
     """A Python that cannot load extensions must say so, not AttributeError.
 
@@ -513,6 +628,7 @@ def main() -> int:
     test_incremental_reindex()
     test_prune_follows_the_files()
     test_provider_change_rebuilds()
+    test_chunking_rule()
     test_missing_extension_support_is_explained()
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
