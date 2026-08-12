@@ -27,6 +27,7 @@ from .config import (
     MIN_SIM,
     NEIGHBOR_WINDOW,
     RRF_K,
+    RRF_VECTOR_WEIGHT,
     TOP_K,
 )
 from .providers import EmbeddingProvider, EmbeddingUnavailable, get_provider
@@ -159,12 +160,19 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def _rrf(*rankings: list[int]) -> dict[int, float]:
-    """Reciprocal rank fusion: sum 1 / (RRF_K + rank)."""
+def _rrf(
+    *rankings: list[int], weights: tuple[float, ...] | None = None
+) -> dict[int, float]:
+    """Reciprocal rank fusion: sum weight / (RRF_K + rank).
+
+    ``weights`` defaults to 1 per leg — the textbook form, which assumes the
+    legs are equally trustworthy. Ours are not; see ``RRF_VECTOR_WEIGHT``.
+    """
+    factors = weights or (1.0,) * len(rankings)
     scores: dict[int, float] = {}
-    for ranking in rankings:
+    for weight, ranking in zip(factors, rankings):
         for rank, cid in enumerate(ranking):
-            scores[cid] = scores.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+            scores[cid] = scores.get(cid, 0.0) + weight / (RRF_K + rank + 1)
     return scores
 
 
@@ -291,7 +299,8 @@ def search(
             fts_ids = _fts_ranked(conn, query, pool, prefix)
         except sqlite3.OperationalError:
             fts_ids = []
-        fused = _rrf(vec_ids, fts_ids)
+        fused = _rrf(vec_ids, fts_ids,
+                    weights=(RRF_VECTOR_WEIGHT, 1.0))
         if not fused:
             return []
 

@@ -22,6 +22,10 @@ Three things make it able to:
 Not a pytest test and deliberately not named `test_*`: it needs the model and
 this repo's memory, so it can neither run in CI nor gate a commit.
 
+The bank it measures is a living one — writing memory changes the corpus and
+moves every number by a case or so. Compare arms WITHIN a run, not a number
+against one written down last week.
+
     .venv/Scripts/python tests/eval_search.py [--bank DIR] [--verbose]
 """
 from __future__ import annotations
@@ -40,7 +44,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from src.config import RRF_K, resolve  # noqa: E402
+from src.config import RRF_VECTOR_WEIGHT, resolve  # noqa: E402
 from src.providers import get_provider  # noqa: E402
 from src.search import _fts_ranked, _rrf, _vector_ranked  # noqa: E402
 from src.store import connect  # noqa: E402
@@ -259,16 +263,11 @@ def _fused(*rankings: list[int]) -> list[int]:
 
 
 def _fused_weighted(pairs: list[tuple[float, list[int]]]) -> list[int]:
-    """RRF with a weight per leg — plain `_rrf` is the case where all are 1.
-
-    Equal weight is only right when the legs are equally good. Ours are not:
-    the vector leg scores about 1.6x the lexical one here, and fusing them
-    1:1 drags correct vector results down.
-    """
-    scores: dict[int, float] = {}
-    for weight, ranking in pairs:
-        for rank, cid in enumerate(ranking):
-            scores[cid] = scores.get(cid, 0.0) + weight / (RRF_K + rank + 1)
+    """Weighted fusion, through the product's own `_rrf` so the two cannot
+    drift — an evaluation that reimplements what it measures is measuring
+    itself."""
+    weights = tuple(w for w, _ in pairs)
+    scores = _rrf(*(r for _, r in pairs), weights=weights)
     return sorted(scores, key=lambda c: scores[c], reverse=True)
 
 
@@ -293,6 +292,11 @@ def measure(ranking: list[int], relevant: set[int]) -> dict[str, float]:
 
 
 METRICS = ("r@1", "r@3", "r@5", "r@10", "mrr", "ndcg")
+
+
+def _arm(weight: float) -> str:
+    """Arm label for a vector:lexical weight; the shipped one is starred."""
+    return f"hybrid-{weight:g}:1" + ("*" if weight == RRF_VECTOR_WEIGHT else "")
 
 
 # ----------------------------------------------------------------- validation
@@ -363,9 +367,11 @@ def run(bank: Path, verbose: bool) -> int:
                   f"under the cases. Fix them before trusting the numbers.")
 
         provider = get_provider()
-        weights = (2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 12.0)
-        arms = (("vector", "lexical", "hybrid", "hybrid-phrase")
-                + tuple(f"hybrid-w{w:g}" for w in weights))
+        # 1:1 is the textbook equal vote — worth keeping visible, because it
+        # is the form that loses to the vector leg on its own.
+        weights = (1.0, 2.0, 4.0, RRF_VECTOR_WEIGHT, 8.0, 12.0)
+        arms = (("vector", "lexical", "phrase-fts")
+                + tuple(_arm(w) for w in weights))
         totals = {a: {m: 0.0 for m in METRICS} for a in arms}
         rows: list[str] = []
 
@@ -378,11 +384,10 @@ def run(bank: Path, verbose: bool) -> int:
             rankings = {
                 "vector": vec,
                 "lexical": lex,
-                "hybrid": _fused(vec, lex),
-                "hybrid-phrase": _fused(vec, phrase),
+                "phrase-fts": _fused(vec, phrase),
             }
             for w in weights:
-                rankings[f"hybrid-w{w:g}"] = _fused_weighted(
+                rankings[_arm(w)] = _fused_weighted(
                     [(w, vec), (1.0, lex)])
             per_arm = {a: measure(rankings[a], rel) for a in arms}
             for a in arms:
@@ -395,8 +400,8 @@ def run(bank: Path, verbose: bool) -> int:
                     f"  {case.query[:48]:<48} "
                     f"v={per_arm['vector']['mrr']:.2f} "
                     f"l={per_arm['lexical']['mrr']:.2f} "
-                    f"h={per_arm['hybrid']['mrr']:.2f} "
-                    f"p={per_arm['hybrid-phrase']['mrr']:.2f}"
+                    f"h={per_arm[_arm(RRF_VECTOR_WEIGHT)]['mrr']:.2f} "
+                    f"p={per_arm['phrase-fts']['mrr']:.2f}"
                     f"  |R|={len(rel)}{flag}"
                 )
         if rows:
@@ -410,9 +415,10 @@ def run(bank: Path, verbose: bool) -> int:
             print(f"{a:<15} " + "  ".join(
                 f"{totals[a][m] / n:5.2f}" for m in METRICS))
 
-        print("\nlexical leg: A1 replaced one-phrase matching with OR over "
-              "terms.\n'hybrid' is today's code, 'hybrid-phrase' is what it "
-              "replaced.")
+        print("\n'phrase-fts' is the lexical leg as it was before A1 — it "
+              "scores identically\nto 'vector' because it contributed "
+              "nothing. '*' is the shipped weight "
+              f"({RRF_VECTOR_WEIGHT:g}:1).")
         return 0 if not missing else 1
     finally:
         conn.close()

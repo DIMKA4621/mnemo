@@ -290,6 +290,18 @@ CHUNK_CAPACITY: tuple[int, int] = (200, 1200)
 # Search knobs.
 TOP_K: int = 5
 RRF_K: int = 60
+# The two retrieval legs are NOT equally good, so they do not get an equal
+# vote. Measured on the real bank with `tests/eval_search.py` (64 labeled
+# queries): the vector leg alone scores 0.51 MRR / 0.75 recall@10, the
+# lexical leg 0.32 / 0.61, and fusing them 1:1 lands at 0.49 / 0.75 —
+# BELOW the vector leg alone. Weighting it 4:1 through 12:1 gives a flat
+# 0.54 / 0.81, better than either leg on all six metrics.
+#
+# It is a plateau rather than a peak, so the exact number is not load-
+# bearing; 6 sits in the middle of it. The mechanism: at this weight the
+# lexical leg can no longer outrank the vector ordering, it can only lift a
+# chunk that BOTH legs found — which is the job it is actually good at.
+RRF_VECTOR_WEIGHT: float = 6.0
 # Neighbor expansion: pull ±N adjacent chunks from the same file around
 # each hit and merge overlapping windows into one block, so one query
 # returns a self-contained excerpt instead of a fragment. 0 = off.
