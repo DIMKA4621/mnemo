@@ -164,19 +164,33 @@ class Value:
         return self.source == "env"
 
 
-def _resolve(env_var: str, path: tuple[str, ...], default: Any) -> Value:
-    """environment > file > default, for one key."""
+def _resolve(
+    env_var: str, path: tuple[str, ...], default: Any, *, empty_is_a_value: bool = False
+) -> Value:
+    """environment > file > default, for one key.
+
+    ``empty_is_a_value`` distinguishes "not set" from "deliberately blank".
+    Normally an empty string means unset — an exported-but-empty variable is
+    almost always an accident, and treating it as a value would blank out a
+    URL. Prefixes are the exception: "" is how a person says *this model takes
+    no markers*, overriding what the catalogue believes, and that instruction
+    has to survive.
+    """
     raw = os.environ.get(env_var)
-    if raw is not None and raw != "":
+    if raw is not None and (empty_is_a_value or raw != ""):
         return Value(raw, "env", env_var)
     node: Any = load()
+    missing = object()
+    found: Any = missing
     for part in path:
         if not isinstance(node, dict) or part not in node:
-            node = None
             break
         node = node[part]
-    if node is not None and node != "":
-        return Value(node, "file")
+    else:
+        found = node
+    if found is not missing and found is not None:
+        if empty_is_a_value or found != "":
+            return Value(found, "file")
     return Value(default, "default")
 
 
@@ -222,6 +236,28 @@ def api_dim() -> int:
 
 def api_key() -> str:
     return str(_resolve("MNEMO_API_EMBED_KEY", ("api", "key"), "").value)
+
+
+def api_passage_prefix(default: str = "") -> str:
+    """Marker prepended to documents, when the model was trained with one.
+
+    ``default`` comes from the model catalogue, so the usual path needs no
+    setting at all. An explicit value wins in both directions — it can supply
+    markers for a model we have not catalogued, or clear them for one we
+    catalogued wrongly.
+    """
+    return str(
+        _resolve("MNEMO_API_PASSAGE_PREFIX", ("api", "passage_prefix"), default,
+                 empty_is_a_value=True).value
+    )
+
+
+def api_query_prefix(default: str = "") -> str:
+    """Marker prepended to queries. See ``api_passage_prefix``."""
+    return str(
+        _resolve("MNEMO_API_QUERY_PREFIX", ("api", "query_prefix"), default,
+                 empty_is_a_value=True).value
+    )
 
 
 def api_timeout() -> float:

@@ -18,13 +18,24 @@ would serve the value the process started with forever (the same frozen-path
 scar as ``BANKS_FILE``). Each is resolved environment > ``settings.json`` >
 default.
 
-No ``passage:`` / ``query:`` prefixes: those are an e5 convention and belong
-to the local provider. An endpoint that wants them can be given a model that
-applies them server-side.
+**Prefixes are applied here when the model needs them**, which reverses this
+module's original rule ("no prefixes — that is an e5 detail belonging to
+`local`"). That rule held only while `api` meant "somebody else's endpoint".
+It is a URL, so it can address the very model mnemo ships:
+``zylonai/multilingual-e5-large`` in Ollama is e5, and e5 is trained with
+mandatory ``passage: `` / ``query: `` markers. Sending it bare text produced
+the same vectors as a different, worse system, with nothing in a log to say
+so.
+
+They are not a setting a person types, because whoever forgot the field would
+hit exactly the same silent failure. They belong to the **model**, so
+``presets`` records them next to it and a name is enough to get them right.
+An unlisted model gets none, which is correct for most embeddings; an
+explicit setting can still override either way.
 """
 from __future__ import annotations
 
-from .. import settings
+from .. import presets, settings
 from .base import EmbeddingProvider, EmbeddingUnavailable
 
 
@@ -39,6 +50,11 @@ class ApiProvider(EmbeddingProvider):
         self._url = settings.api_url()
         self._model = settings.api_model()
         self._dim = settings.api_dim()
+        # From the catalogue by default; an explicit setting wins, so a model
+        # we have not catalogued is still usable with the right markers.
+        catalogue = presets.prefixes(self._model)
+        self._passage_prefix = settings.api_passage_prefix(catalogue[0])
+        self._query_prefix = settings.api_query_prefix(catalogue[1])
         missing = [
             name
             for name, value in (
@@ -71,6 +87,30 @@ class ApiProvider(EmbeddingProvider):
     @property
     def dim(self) -> int:
         return self._dim
+
+    @property
+    def key(self) -> str:
+        """Rebuild fingerprint — and the prefixes are part of it.
+
+        Without them this would be the same silent-corruption hazard as an
+        unrecorded chunker rule: turning ``passage: `` on or off changes every
+        vector this endpoint produces, while ``name:model:dim`` stays
+        identical. `reconcile` only re-embeds files whose sha256 moved, so one
+        database would end up holding vectors from two different embeddings of
+        the same model, with nothing to detect it.
+
+        The prefixes are hashed rather than spelled out: they can be arbitrary
+        text, and a key is compared, never parsed.
+        """
+        base = super().key
+        if not (self._passage_prefix or self._query_prefix):
+            return base
+        import hashlib
+
+        digest = hashlib.sha1(
+            f"{self._passage_prefix}\x00{self._query_prefix}".encode("utf-8")
+        ).hexdigest()[:8]
+        return f"{base}:p{digest}"
 
     def _post(self, inputs: list[str]) -> list[list[float]]:
         import httpx
@@ -128,10 +168,10 @@ class ApiProvider(EmbeddingProvider):
     def embed_passages(self, texts: list[str]) -> list[list[float]]:
         if not texts:
             return []
-        return self._post(texts)
+        return self._post([f"{self._passage_prefix}{t}" for t in texts])
 
     def embed_query(self, text: str) -> list[float]:
-        return self._post([text])[0]
+        return self._post([f"{self._query_prefix}{text}"])[0]
 
     def health(self) -> bool:
         """Configured is as far as we check — a probe would be a paid call."""

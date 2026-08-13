@@ -2019,6 +2019,116 @@ def test_machine_settings() -> None:
               detail=str({k: v.value for k, v in report.items()}))
 
 
+def test_model_presets() -> None:
+    """A model's prefixes travel with the model, not with the person."""
+    print("\n=== model presets ===")
+    from src import presets
+
+    # The hole this closes: `api` pointed at e5 must still send the markers
+    # e5 was trained with, without anybody remembering to configure them.
+    check("e5 through Ollama keeps its prefixes",
+          presets.prefixes("zylonai/multilingual-e5-large")
+          == ("passage: ", "query: "),
+          detail=str(presets.prefixes("zylonai/multilingual-e5-large")))
+    check("and the local spelling of the same model agrees",
+          presets.prefixes("intfloat/multilingual-e5-large")
+          == presets.prefixes("zylonai/multilingual-e5-large"))
+    check("a model without prefixes gets none",
+          presets.prefixes("bge-m3") == ("", ""))
+    check("an unlisted model is usable, just unprefixed",
+          presets.prefixes("some-private/model-v9") == ("", ""))
+    check("a prefixed non-e5 family keeps ITS markers, not e5's",
+          presets.prefixes("nomic-embed-text")
+          == ("search_document: ", "search_query: "),
+          detail=str(presets.prefixes("nomic-embed-text")))
+
+    # The same weights travel under several spellings; a lookup that missed
+    # one would drop the prefixes for exactly that spelling.
+    for spelling in ("bge-m3:latest", "BAAI/bge-m3", "BGE-M3"):
+        found = presets.find_model(spelling)
+        check(f"{spelling!r} resolves to the catalogued model",
+              found is not None and found.name == "bge-m3",
+              detail=str(found))
+    for spelling in ("zylonai/multilingual-e5-large:latest",
+                     "multilingual-e5-large"):
+        check(f"{spelling!r} still carries the e5 markers",
+              presets.prefixes(spelling) == ("passage: ", "query: "),
+              detail=str(presets.prefixes(spelling)))
+
+    check("every catalogued model declares a width",
+          all(m.dim > 0 for b in presets.BACKENDS for m in b.models))
+    check("only `api` backends need a URL",
+          all(bool(b.url) == (b.provider == "api") for b in presets.BACKENDS),
+          detail=str([(b.id, b.url) for b in presets.BACKENDS]))
+    check("the catalogue carries no credentials",
+          "key" not in json.dumps(presets.as_json()).lower()
+          or all("key" not in m for b in presets.as_json() for m in b["models"]))
+
+
+def test_prefix_is_part_of_the_rebuild_key() -> None:
+    """Changing a prefix changes every vector, so it must force a rebuild."""
+    print("\n=== prefixes are part of the provider key ===")
+    import subprocess
+
+    def key_for(model: str, extra: dict[str, str] | None = None) -> str:
+        """Build an ApiProvider in a fresh interpreter and report its key."""
+        env = dict(os.environ)
+        for name in list(env):
+            if name.startswith("MNEMO_"):
+                env.pop(name)
+        env.update({
+            "MNEMO_PROVIDER": "api",
+            "MNEMO_API_EMBED_URL": "http://127.0.0.1:11434/v1/embeddings",
+            "MNEMO_API_EMBED_MODEL": model,
+            "MNEMO_API_EMBED_DIM": "1024",
+        })
+        env.update(extra or {})
+        result = subprocess.run(
+            [sys.executable, "-c",
+             # JSON, not a delimiter: the prefixes END IN A SPACE, and any
+             # separator-and-strip scheme silently eats it -- which would make
+             # this test agree with a provider that dropped the trailing space
+             # and produced different vectors.
+             "import sys, json; sys.path.insert(0, sys.argv[1]);"
+             "from src.providers import get_provider;"
+             "p = get_provider();"
+             "print(json.dumps({'key': p.key, 'passage': p._passage_prefix,"
+             " 'query': p._query_prefix}))",
+             str(Path(__file__).resolve().parent.parent)],
+            capture_output=True, text=True, env=env,
+        )
+        if not result.stdout.strip():
+            check("the provider probe ran at all", False,
+                  detail=result.stderr[-400:])
+            return {}
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    bge = key_for("bge-m3")
+    e5 = key_for("zylonai/multilingual-e5-large")
+    check("an unprefixed model keeps the plain name:model:dim key",
+          bge.get("key") == "api:bge-m3:1024", detail=str(bge))
+    check("e5 through `api` really does get the markers applied",
+          (e5.get("passage"), e5.get("query")) == ("passage: ", "query: "),
+          detail=str(e5))
+    check("and its key records them, so the bank rebuilds",
+          str(e5.get("key")).startswith(
+              "api:zylonai/multilingual-e5-large:1024:p"),
+          detail=str(e5))
+
+    # The scenario that would corrupt an index: same endpoint, same model,
+    # same dim — only the markers differ. If the key did not move, reconcile
+    # would leave untouched files on the old embedding forever.
+    stripped = key_for("zylonai/multilingual-e5-large",
+                       {"MNEMO_API_PASSAGE_PREFIX": "",
+                        "MNEMO_API_QUERY_PREFIX": ""})
+    check("clearing the markers is an explicit, honoured override",
+          (stripped.get("passage"), stripped.get("query")) == ("", ""),
+          detail=str(stripped))
+    check("and it changes the key, so the two never share an index",
+          stripped.get("key") != e5.get("key"),
+          detail=f"{stripped.get('key')} vs {e5.get('key')}")
+
+
 def main() -> int:
     test_scaffold()
     test_scaffold_template_project()
@@ -2040,6 +2150,8 @@ def main() -> int:
     test_model_cache_validation()
     test_env_file()
     test_machine_settings()
+    test_model_presets()
+    test_prefix_is_part_of_the_rebuild_key()
     print(
         f"\n{_passed} passed, {_failed} failed, "
         f"{_xfailed} xfailed (awaiting a later phase), {_xpassed} xpassed"

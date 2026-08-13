@@ -51,7 +51,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, registry, servicelog, settings, store
+from . import config, presets, registry, servicelog, settings, store
 from .config import TOP_K
 from .providers import EmbeddingUnavailable, forget_providers, get_provider
 from .registry import AmbiguousBankRef, Bank, BankExists, BankNotFound
@@ -1704,6 +1704,11 @@ def api_settings() -> dict:
         # a form would cut the page off from its own backend and break wiring
         # the form cannot see. It is an installer-level decision.
         "readonly": {"api_host": API_HOST, "api_port": API_PORT},
+        # Backends and their models, so the form is a choice rather than four
+        # free-text fields. It carries each model's prefixes and width, which
+        # is what stops "point `api` at e5 and forget the markers" from being
+        # possible at all (`presets`).
+        "presets": presets.as_json(),
     }
 
 
@@ -1725,7 +1730,11 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
     api_in = payload.get("api")
     if isinstance(api_in, dict):
         api_doc: dict = dict(settings.load().get("api") or {})
-        for key in ("url", "model", "key"):
+        # `passage_prefix`/`query_prefix` are accepted but rarely sent: the
+        # catalogue supplies them from the model name. Storing "" is a real
+        # choice (a catalogued model whose markers we got wrong), so an empty
+        # string is written rather than skipped.
+        for key in ("url", "model", "key", "passage_prefix", "query_prefix"):
             if key in api_in:
                 api_doc[key] = str(api_in[key] or "")
         if "dim" in api_in:
