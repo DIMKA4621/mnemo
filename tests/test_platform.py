@@ -2129,6 +2129,113 @@ def test_prefix_is_part_of_the_rebuild_key() -> None:
           detail=f"{stripped.get('key')} vs {e5.get('key')}")
 
 
+def test_local_is_not_the_only_provider() -> None:
+    """`warmup` and `doctor` must stop assuming the local model is needed.
+
+    The failure this guards is not a crash but a lie: under `api` the model
+    cache is empty by design and the resident never runs, so a `doctor` that
+    reports them the same way puts a permanent false alarm at the top of the
+    one command people run when something is wrong — and `warmup` would pull
+    2.2 GB for a model nothing would load.
+
+    A subprocess per case, for the reason `test_machine_settings` explains:
+    inside this process `config` is already imported.
+    """
+    print("\n=== local is not the only provider ===")
+    import subprocess
+
+    def run(argv: list[str], stored: dict | None) -> str:
+        with tempfile.TemporaryDirectory(prefix="mnemo provider ") as raw:
+            state = Path(raw)
+            if stored is not None:
+                (state / "settings.json").write_text(
+                    json.dumps(stored), encoding="utf-8")
+            env = dict(os.environ)
+            for name in list(env):
+                if name.startswith("MNEMO_"):
+                    env.pop(name)
+            env["MNEMO_STATE_DIR"] = str(state)
+            result = subprocess.run(
+                [sys.executable, "-c",
+                 "import sys; sys.path.insert(0, sys.argv[1]);"
+                 "from src import cli; sys.exit(cli.main(sys.argv[2:]))",
+                 str(Path(__file__).resolve().parent.parent), *argv],
+                capture_output=True, text=True, env=env,
+            )
+            return result.stdout + result.stderr
+
+    api_settings = {
+        "version": 1, "provider": "api",
+        "api": {"url": "http://127.0.0.1:11434/v1/embeddings",
+                "model": "bge-m3", "dim": 1024},
+    }
+
+    out = run(["warmup"], api_settings)
+    check("`warmup` under `api` downloads nothing",
+          "Nothing to download" in out and "~2.2 GB" not in out,
+          detail=out[:300])
+    check("and it says how to get the model anyway",
+          "--force" in out, detail=out[:300])
+
+    out = run(["doctor"], api_settings)
+    check("`doctor` names the provider first",
+          "provider         api" in out, detail=out[:400])
+    check("the empty model cache is no longer an alarm under `api`",
+          "not needed under `api`" in out, detail=out[:400])
+    check("and the resident is not probed at all",
+          "embed resident   n/a under `api`" in out, detail=out[:400])
+    check("the endpoint IS reported, since that is what produces vectors",
+          "api endpoint     http://127.0.0.1:11434/v1/embeddings" in out
+          and "model bge-m3, dim 1024" in out, detail=out[:600])
+    check("and no credential is printed with it",
+          "no key" in out, detail=out[:600])
+
+    # The `local` path must be untouched: this is the machine most people run,
+    # and a "cleanup" that quietly stopped reporting the resident would remove
+    # the diagnosis this command exists for.
+    out = run(["doctor"], None)
+    check("under `local` the model cache is still reported plainly",
+          "model cached" in out and "not needed" not in out, detail=out[:400])
+    check("and the resident is still probed",
+          "starts on first search" in out or "embed resident   up" in out,
+          detail=out[:400])
+    check("with no endpoint section, because nothing uses one",
+          "api endpoint" not in out, detail=out[:400])
+
+    # A bank may name its own provider, overriding the machine default. The
+    # model is then needed even though `settings.provider()` says otherwise —
+    # so the question is about the union, never about the machine setting.
+    with tempfile.TemporaryDirectory(prefix="mnemo bankprov ") as raw:
+        root = Path(raw) / "memory"
+        root.mkdir()
+        state = Path(raw) / "state"
+        state.mkdir()
+        (state / "settings.json").write_text(json.dumps(api_settings),
+                                             encoding="utf-8")
+        (state / "banks.json").write_text(json.dumps({
+            "version": 1,
+            "banks": [{"id": "b1", "name": "b1", "root": str(root),
+                       "token": "t" * 48, "enabled": True,
+                       "provider": "local"}],
+        }), encoding="utf-8")
+        env = dict(os.environ)
+        for name in list(env):
+            if name.startswith("MNEMO_"):
+                env.pop(name)
+        env["MNEMO_STATE_DIR"] = str(state)
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import sys; sys.path.insert(0, sys.argv[1]);"
+             "from src import cli; sys.exit(cli.main(['warmup']))",
+             str(Path(__file__).resolve().parent.parent)],
+            capture_output=True, text=True, env=env,
+        )
+        out = result.stdout + result.stderr
+        check("a bank that names `local` keeps the model needed, "
+              "whatever the machine default says",
+              "Nothing to download" not in out, detail=out[:300])
+
+
 def main() -> int:
     test_scaffold()
     test_scaffold_template_project()
@@ -2152,6 +2259,7 @@ def main() -> int:
     test_machine_settings()
     test_model_presets()
     test_prefix_is_part_of_the_rebuild_key()
+    test_local_is_not_the_only_provider()
     print(
         f"\n{_passed} passed, {_failed} failed, "
         f"{_xfailed} xfailed (awaiting a later phase), {_xpassed} xpassed"

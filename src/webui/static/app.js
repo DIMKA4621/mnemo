@@ -405,7 +405,13 @@ function renderService() {
   box.appendChild(bit('провайдер', svc.provider || '—'));
   box.appendChild(bit('черга', q.depth + ' (H' + q.high + '/N' + q.normal + '/L' + q.low + ')'));
   if (svc.embed) {
-    box.appendChild(bit('embed', svc.embed.reachable ? 'ok' : 'недоступний'));
+    // `kind` says what was probed. Under `api` nothing is called — health()
+    // only checks configuration — so «недоступний» would describe a resident
+    // that is not supposed to be running at all.
+    const local = (svc.embed.kind || 'local') === 'local';
+    box.appendChild(bit('embed', svc.embed.reachable
+      ? (local ? 'ok' : 'налаштовано')
+      : (local ? 'недоступний' : 'не налаштовано')));
   }
 }
 
@@ -1922,6 +1928,461 @@ function renderTokenPanel() {
 }
 
 // ---------------------------------------------------------------------------
+// settings screen (contract 9.5: GET/PUT /api/settings)
+// ---------------------------------------------------------------------------
+
+/**
+ * Machine settings: which backend produces vectors, and what it needs.
+ *
+ * A full screen rather than a modal, because unlike every other dialog here
+ * this one is not about a bank — it is about the machine, and it takes the
+ * page over while you are in it.
+ *
+ * The design principle is that **the backend is picked, not typed**. Prefixes
+ * are the reason: e5 is trained with mandatory `passage: ` / `query: ` markers
+ * and sending it bare text quietly produces worse vectors with nothing in a
+ * log to say so. A free-text form would make that a thing you can forget, so
+ * the catalogue (`/api/settings` -> `presets`) supplies the URL, the model,
+ * its width and its markers together, and choosing a model is enough to get
+ * all four right.
+ *
+ * `dim` is still shown and still editable: the catalogue's value is what the
+ * model publishes, but the endpoint is the authority and a wrong width does
+ * not degrade an index, it corrupts one.
+ */
+const settings = {
+  root: null,
+  data: null,          // the last GET /api/settings response
+  backendId: null,     // which tab is open
+  form: null,          // {model, url, dim, timeout, key} — the edited values
+  busy: false,
+  errorText: null,
+  note: null,
+  keyTouched: false,   // the key field was typed into; otherwise leave stored
+};
+
+/** The catalogue entry for a backend id, or null. */
+function backendPreset(id) {
+  const list = (settings.data && settings.data.presets) || [];
+  return list.find((b) => b.id === id) || null;
+}
+
+/** The catalogue entry for a model name inside a backend, or null. */
+function modelPreset(backend, name) {
+  if (!backend) return null;
+  return (backend.models || []).find((m) => m.name === name) || null;
+}
+
+function settingValue(key) {
+  const box = settings.data && settings.data.settings;
+  return box && box[key] ? box[key] : null;
+}
+
+/**
+ * Which backend the stored settings correspond to.
+ *
+ * `provider` alone does not answer it: `ollama` and `openai` are both the
+ * `api` provider, and what tells them apart is the URL. Matching on the URL
+ * keeps a configured machine opening on the tab it actually uses, and falls
+ * back to the first `api` backend when the URL is one we do not know — the
+ * fields are all still editable there, so an unlisted endpoint is usable,
+ * just not pre-filled.
+ */
+function backendForSettings() {
+  const provider = (settingValue('provider') || {}).value || 'local';
+  const list = (settings.data && settings.data.presets) || [];
+  if (provider === 'local') return 'local';
+  const url = ((settingValue('api.url') || {}).value || '').trim();
+  const match = list.find((b) => b.provider === 'api' && b.url && b.url === url);
+  if (match) return match.id;
+  const anyApi = list.find((b) => b.provider === 'api');
+  return anyApi ? anyApi.id : 'local';
+}
+
+function buildSettings() {
+  settings.body = el('div', { className: 'set-body' });
+  settings.save = el('button', {
+    className: 'btn btn-primary',
+    text: 'Зберегти',
+    on: { click: () => submitSettings() },
+  });
+
+  settings.root = el('div', { className: 'screen', attrs: { hidden: '' } }, [
+    el('div', { className: 'screen-head' }, [
+      el('h1', { text: 'Налаштування машини' }),
+      el('button', {
+        className: 'btn btn-ghost',
+        text: '✕',
+        title: 'Закрити (Esc)',
+        on: { click: () => closeSettings() },
+      }),
+    ]),
+    settings.body,
+    el('div', { className: 'screen-foot' }, [
+      el('button', { className: 'btn', text: 'Закрити', on: { click: () => closeSettings() } }),
+      settings.save,
+    ]),
+  ]);
+  document.body.appendChild(settings.root);
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !settings.root.hidden) closeSettings();
+  });
+}
+
+async function openSettings() {
+  settings.root.hidden = false;
+  settings.errorText = null;
+  settings.note = null;
+  settings.busy = true;
+  renderSettings();
+  try {
+    settings.data = await api('/api/settings');
+    settings.backendId = backendForSettings();
+    seedSettingsForm();
+  } catch (err) {
+    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
+    settings.errorText = err.message;
+  } finally {
+    settings.busy = false;
+    renderSettings();
+  }
+}
+
+function closeSettings() {
+  if (settings.busy) return;      // a save is in flight; let it land
+  settings.root.hidden = true;
+  // The key is a credential: do not leave it in memory behind a closed screen.
+  if (settings.form) settings.form.key = '';
+  settings.keyTouched = false;
+}
+
+/** Fill the form from what is stored, for the currently selected backend. */
+function seedSettingsForm() {
+  const backend = backendPreset(settings.backendId);
+  const stored = {
+    url: ((settingValue('api.url') || {}).value || ''),
+    model: ((settingValue('api.model') || {}).value || ''),
+    dim: ((settingValue('api.dim') || {}).value || 0),
+    timeout: ((settingValue('api.timeout') || {}).value || 60),
+  };
+  // Only carry the stored values across when this tab IS the stored backend.
+  // Switching to OpenAI must not inherit Ollama's URL — that would produce a
+  // config that looks deliberate and cannot work.
+  const isStored = settings.backendId === backendForSettings();
+  const known = backend && (backend.models || [])[0];
+  const model = (isStored && stored.model) || (known ? known.name : '');
+  const preset = modelPreset(backend, model);
+  settings.form = {
+    model: model,
+    url: (isStored && stored.url) || (backend ? backend.url : ''),
+    dim: (isStored && stored.dim) || (preset ? preset.dim : 0),
+    timeout: (isStored && stored.timeout) || 60,
+    key: '',
+  };
+  settings.keyTouched = false;
+}
+
+/**
+ * Drop the last save's verdict as soon as the form is edited.
+ *
+ * «Вкажіть адресу» describes the state at the moment Save was pressed. Leaving
+ * it under a field the user has since fixed makes the page report a problem
+ * that is no longer there — and the same goes for «Збережено», which would
+ * otherwise sit above unsaved edits and claim they are stored.
+ *
+ * The nodes are removed rather than re-rendered: this runs on every keystroke,
+ * and rebuilding the form would take the focus out of the input mid-word.
+ */
+function clearSettingsMessages() {
+  if (!settings.errorText && !settings.note) return;
+  settings.errorText = null;
+  settings.note = null;
+  for (const node of settings.body.querySelectorAll('.modal-error, .tok-ok')) {
+    node.remove();
+  }
+}
+
+/** A model was chosen: adopt its width, since that is what it publishes. */
+function chooseModel(name) {
+  const backend = backendPreset(settings.backendId);
+  const preset = modelPreset(backend, name);
+  settings.form.model = name;
+  if (preset) settings.form.dim = preset.dim;
+  settings.errorText = null;
+  settings.note = null;
+  renderSettings();
+}
+
+function chooseBackend(id) {
+  if (settings.backendId === id) return;
+  settings.backendId = id;
+  settings.errorText = null;
+  settings.note = null;
+  seedSettingsForm();
+  renderSettings();
+}
+
+/** A labelled row: caption, control, and the note under it. */
+function setField(label, control, note) {
+  return el('div', { className: 'set-field' }, [
+    el('label', { className: 'set-label', text: label }),
+    control,
+    note ? el('p', { className: 'set-note', text: note }) : null,
+  ]);
+}
+
+/**
+ * The "this is overridden by an environment variable" line.
+ *
+ * Not decoration: precedence is env > file, so a value saved here can be
+ * completely inert. A form that stayed silent about it would accept a click,
+ * report success and change nothing observable.
+ */
+function overrideNote(key) {
+  const item = settingValue(key);
+  if (!item || !item.overridden) return null;
+  return el('p', {
+    className: 'set-override',
+    text: 'перекрито змінною ' + item.env_var + ' — збережене тут не подіє, ' +
+          'доки вона виставлена',
+  });
+}
+
+function renderSettings() {
+  const body = settings.body;
+  clear(body);
+
+  if (settings.busy && !settings.data) {
+    body.appendChild(el('p', { className: 'empty-hint', text: 'Завантаження…' }));
+    return;
+  }
+  if (!settings.data) {
+    body.appendChild(el('p', { className: 'modal-error', text: settings.errorText || '—' }));
+    return;
+  }
+
+  const presetList = settings.data.presets || [];
+  const backend = backendPreset(settings.backendId);
+
+  // -- backend tabs ---------------------------------------------------
+  const tabs = el('div', { className: 'segmented set-tabs' });
+  for (const item of presetList) {
+    tabs.appendChild(el('button', {
+      className: 'seg' + (item.id === settings.backendId ? ' is-active' : ''),
+      text: item.label,
+      on: { click: () => chooseBackend(item.id) },
+    }));
+  }
+  body.appendChild(setField('Бекенд', tabs, backend ? backend.note : null));
+
+  const providerOverride = overrideNote('provider');
+  if (providerOverride) body.appendChild(providerOverride);
+
+  if (!backend) { renderSettingsMessages(); return; }
+
+  // -- local needs nothing --------------------------------------------
+  if (backend.provider === 'local') {
+    const model = (backend.models || [])[0];
+    body.appendChild(el('p', { className: 'set-lead' }, [
+      document.createTextNode('Вектори рахує резидент на цій машині — '),
+      el('code', { text: model ? model.label : '—' }),
+      document.createTextNode(model ? ' (' + model.dim + ' вимірів). ' : '. '),
+      document.createTextNode('Нічого налаштовувати не треба; жоден байт памʼяті ' +
+                              'не залишає машину.'),
+    ]));
+    // Switching TO local is a save like any other, and this branch returns
+    // early — without this the one backend that needs no configuration was
+    // also the one whose «Збережено» never appeared, so the click read as
+    // ignored while the file on disk had already changed.
+    renderSettingsMessages();
+    return;
+  }
+
+  // -- model ------------------------------------------------------------
+  const select = el('select', { className: 'set-select' });
+  for (const model of backend.models || []) {
+    const option = el('option', { text: model.label, attrs: { value: model.name } });
+    if (model.name === settings.form.model) option.selected = true;
+    select.appendChild(option);
+  }
+  // An endpoint may serve a model the catalogue does not list; keep it
+  // selectable rather than silently rewriting what the user configured.
+  if (settings.form.model && !modelPreset(backend, settings.form.model)) {
+    const option = el('option', {
+      text: settings.form.model + ' (не з довідника)',
+      attrs: { value: settings.form.model },
+    });
+    option.selected = true;
+    select.appendChild(option);
+  }
+  select.addEventListener('change', (ev) => chooseModel(ev.target.value));
+
+  const chosen = modelPreset(backend, settings.form.model);
+  body.appendChild(setField('Модель', select, chosen ? chosen.note : null));
+  if (chosen && chosen.prefixed) {
+    // Said out loud because it is the one property of a model that is
+    // invisible in every other way: markers change every vector, and getting
+    // them wrong shows up only as quietly worse search.
+    body.appendChild(el('p', {
+      className: 'set-note',
+      text: 'ця модель тренована з маркерами — mnemo підставить їх сама',
+    }));
+  }
+  const modelOverride = overrideNote('api.model');
+  if (modelOverride) body.appendChild(modelOverride);
+
+  // -- endpoint ---------------------------------------------------------
+  const url = el('input', {
+    className: 'fs-input set-wide',
+    attrs: { type: 'text', spellcheck: 'false', placeholder: 'http://…' },
+  });
+  url.value = settings.form.url;
+  url.addEventListener('input', (ev) => {
+    settings.form.url = ev.target.value;
+    clearSettingsMessages();
+  });
+  body.appendChild(setField('Адреса', url, null));
+  const urlOverride = overrideNote('api.url');
+  if (urlOverride) body.appendChild(urlOverride);
+
+  // -- dim + timeout ----------------------------------------------------
+  const dim = el('input', {
+    className: 'fs-input set-narrow',
+    attrs: { type: 'number', min: '1', step: '1' },
+  });
+  dim.value = settings.form.dim || '';
+  dim.addEventListener('input', (ev) => {
+    settings.form.dim = ev.target.value;
+    clearSettingsMessages();
+  });
+
+  const timeout = el('input', {
+    className: 'fs-input set-narrow',
+    attrs: { type: 'number', min: '1', step: '1' },
+  });
+  timeout.value = settings.form.timeout || '';
+  timeout.addEventListener('input', (ev) => {
+    settings.form.timeout = ev.target.value;
+    clearSettingsMessages();
+  });
+
+  body.appendChild(el('div', { className: 'set-row' }, [
+    setField('Вимірів', dim, null),
+    setField('Таймаут, с', timeout, null),
+  ]));
+  body.appendChild(el('p', {
+    className: 'set-note',
+    text: 'Ширина підставлена з довідника, але останнє слово за самим ' +
+          'ендпоінтом: mnemo звіряє її з першим отриманим вектором і ' +
+          'відмовиться писати індекс, якщо вони розійшлися.',
+  }));
+  // Every editable field needs its own override line, not just the obvious
+  // ones: an environment variable on `dim` or `timeout` makes that input inert
+  // exactly as much as one on the URL does.
+  const dimOverride = overrideNote('api.dim');
+  if (dimOverride) body.appendChild(dimOverride);
+  const timeoutOverride = overrideNote('api.timeout');
+  if (timeoutOverride) body.appendChild(timeoutOverride);
+
+  // -- key --------------------------------------------------------------
+  if (backend.needs_key) {
+    const stored = (settingValue('api.key_set') || {}).value;
+    const key = el('input', {
+      className: 'fs-input set-wide',
+      attrs: {
+        type: 'password', spellcheck: 'false', autocomplete: 'off',
+        placeholder: stored ? 'збережений — введіть новий, щоб замінити' : 'sk-…',
+      },
+    });
+    key.value = settings.form.key;
+    key.addEventListener('input', (ev) => {
+      settings.form.key = ev.target.value;
+      settings.keyTouched = true;
+    });
+    body.appendChild(setField('Ключ API', key,
+      'Зберігається у settings.json на цій машині. Назад не показується — ' +
+      'сторінка, яка друкує секрет, друкує його і в скриншот.'));
+    const keyOverride = overrideNote('api.key_set');
+    if (keyOverride) body.appendChild(keyOverride);
+  }
+
+  // -- consequences -----------------------------------------------------
+  body.appendChild(el('p', { className: 'set-warn' }, [
+    document.createTextNode('Зміна моделі або ширини — це новий ключ перебудови: ' +
+      'кожен банк переембедиться повністю при наступній синхронізації. ' +
+      'Наберає чинності після перезапуску служби.'),
+  ]));
+
+  renderSettingsMessages();
+}
+
+/** The last save's verdict. Called from every branch of `renderSettings`,
+ *  because a backend that renders fewer fields still gets saved. */
+function renderSettingsMessages() {
+  if (settings.note) {
+    settings.body.appendChild(el('p', { className: 'tok-ok', text: settings.note }));
+  }
+  if (settings.errorText) {
+    settings.body.appendChild(
+      el('p', { className: 'modal-error', text: settings.errorText }));
+  }
+}
+
+async function submitSettings() {
+  const backend = backendPreset(settings.backendId);
+  if (!backend) return;
+  settings.errorText = null;
+  settings.note = null;
+
+  const payload = { provider: backend.provider };
+  if (backend.provider === 'api') {
+    const dim = parseInt(settings.form.dim, 10);
+    if (!settings.form.url.trim()) {
+      settings.errorText = 'Вкажіть адресу ендпоінта.';
+      renderSettings();
+      return;
+    }
+    if (!(dim > 0)) {
+      // Refused here rather than sent: `dim` declares the vector column's
+      // width, so a zero would not be a slow degradation but an index that
+      // cannot hold what the endpoint returns.
+      settings.errorText = 'Вимірів має бути додатним числом.';
+      renderSettings();
+      return;
+    }
+    payload.api = {
+      url: settings.form.url.trim(),
+      model: settings.form.model,
+      dim: dim,
+      timeout: parseFloat(settings.form.timeout) || 60,
+    };
+    // Sent only when typed. An untouched field means "leave what is stored";
+    // sending its empty value would erase a working credential.
+    if (settings.keyTouched) payload.api.key = settings.form.key;
+  }
+
+  settings.busy = true;
+  settings.save.disabled = true;
+  try {
+    const data = await api('/api/settings', { method: 'PUT', body: payload });
+    settings.data = data;
+    settings.keyTouched = false;
+    settings.form.key = '';
+    settings.note = data.restart_required
+      ? 'Збережено. Набере чинності після перезапуску служби.'
+      : 'Збережено.';
+  } catch (err) {
+    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
+    settings.errorText = err.message;
+  } finally {
+    settings.busy = false;
+    settings.save.disabled = false;
+    renderSettings();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // tree
 // ---------------------------------------------------------------------------
 
@@ -2553,6 +3014,8 @@ function bindControls() {
     });
   }
 
+  $('settings-open').addEventListener('click', () => openSettings());
+
   $('log-refresh').addEventListener('click', () => loadLogs().catch(reportError));
 
   $('chunkviz-toggle').addEventListener('change', (ev) => {
@@ -2620,6 +3083,7 @@ async function boot() {
   buildTokenPanel();
   buildBankMenu();
   buildRemoval();
+  buildSettings();
   renderService();
   if (!token) {
     // First run: nothing has been rejected, so ask before knocking.

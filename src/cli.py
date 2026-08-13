@@ -78,12 +78,54 @@ def _bank_ref(explicit: str | None) -> str:
 # ------------------------------------------------------------ local commands
 
 
-def _cmd_warmup() -> int:
+def _providers_in_use(banks) -> tuple[str, list[str]]:
+    """``(machine default, providers a bank names for itself)``.
+
+    Both halves matter. The machine setting is not the whole answer — a bank
+    carries an optional ``provider`` field that overrides it — so "is the local
+    model needed on this machine" is a question about the union, not about
+    ``settings.provider()`` alone.
+    """
+    from . import settings
+
+    machine = settings.provider()
+    overrides = sorted({b.provider for b in banks if b.provider and b.provider != machine})
+    return machine, overrides
+
+
+def _banks_quietly() -> list:
+    """The registry, or an empty list. Callers here only want to know which
+    providers are in play; an unreadable registry is `doctor`'s story to tell."""
+    try:
+        from . import registry
+
+        return registry.load()
+    except Exception:  # noqa: BLE001 - never the reason a command fails
+        return []
+
+
+def _cmd_warmup(args: argparse.Namespace) -> int:
+    machine, overrides = _providers_in_use(_banks_quietly())
+    in_use = {machine, *overrides}
+    if "local" not in in_use and not getattr(args, "force", False):
+        # 2.2 GB for a model nothing would load. The download is the one thing
+        # this command does, so doing it anyway "just in case" is the whole
+        # cost of the mistake — and the explicit-warmup invariant cuts both
+        # ways: never implicitly, and not for a provider that does not use it.
+        print(f"Nothing to download — this machine embeds through `{machine}`, "
+              f"which calls an endpoint instead of loading a local model.")
+        print("Run `mnemo warmup --force` to cache it anyway (e.g. before "
+              "switching back to `local`).")
+        return EXIT_OK
+
     from .embedder import warmup
 
     print("Downloading / loading model (one-time, ~2.2 GB) ...")
     dim = warmup()
     print(f"READY — model cached, test embedding dim = {dim}")
+    if "local" not in in_use:
+        print(f"NOTE — the active provider is `{machine}`; this model is cached "
+              f"but not in use.")
     return EXIT_OK
 
 
@@ -97,7 +139,23 @@ def _cmd_doctor() -> int:
     print(f"engine home      {config.USER_HOME}")
     print(f"state dir        {config.STATE_DIR}")
     print(f"python           {Path(sys.executable).as_posix()}")
-    print(f"model cached     {is_model_cached()}")
+
+    # Which provider actually produces vectors decides whether the next three
+    # lines are diagnostics or noise. Under `api` the model cache is empty by
+    # design and the resident never starts, so reporting them the same way
+    # would put a permanent false alarm at the top of the one command a user
+    # runs when something is wrong.
+    banks_for_providers = _banks_quietly()
+    machine, overrides = _providers_in_use(banks_for_providers)
+    local_in_use = "local" in {machine, *overrides}
+    detail = f" (+ {', '.join(overrides)} on some banks)" if overrides else ""
+    print(f"provider         {machine}{detail}")
+
+    if local_in_use:
+        print(f"model cached     {is_model_cached()}")
+    else:
+        print(f"model cached     {is_model_cached()} — not needed under "
+              f"`{machine}`")
     # Asked before anything else that could fail, because when this is the
     # answer nothing else in the report matters: no bank can be opened at all.
     from .store import vector_support
@@ -106,13 +164,19 @@ def _cmd_doctor() -> int:
     print(f"sqlite-vec       {'ok' if unsupported is None else 'UNAVAILABLE'}")
     if unsupported is not None:
         print(f"                 {unsupported}")
-    # "down" is the normal state of a machine that has not searched yet — the
-    # resident is started on demand and holds ~1.5 GB, so it does not sit
-    # there from boot. Saying only "down" right after an install reads as a
-    # broken install, and that is the first thing a new user sees.
-    resident = ("up" if server_is_up() else "down (starts on first search)")
-    print(f"embed resident   {resident} "
-          f"({config.EMBED_HOST}:{config.EMBED_PORT})")
+    if local_in_use:
+        # "down" is the normal state of a machine that has not searched yet —
+        # the resident is started on demand and holds ~1.5 GB, so it does not
+        # sit there from boot. Saying only "down" right after an install reads
+        # as a broken install, and that is the first thing a new user sees.
+        resident = ("up" if server_is_up() else "down (starts on first search)")
+        print(f"embed resident   {resident} "
+              f"({config.EMBED_HOST}:{config.EMBED_PORT})")
+    else:
+        # Not probed at all: the resident is irrelevant here, and asking costs
+        # a connection attempt whose answer would mean nothing.
+        print(f"embed resident   n/a under `{machine}`")
+    _report_endpoint(machine, overrides)
 
     client = _client(timeout=3.0)
     print(f"backend url      {client.base_url}")
@@ -141,6 +205,9 @@ def _cmd_doctor() -> int:
               f"queue {health.get('queue_depth')})")
     except ServiceDown as exc:
         print(f"backend          DOWN — {exc}")
+    # Read again rather than reusing `banks_for_providers`: there the registry
+    # was only a hint about providers and an unreadable one is survivable,
+    # here it IS the diagnosis and must be reported.
     try:
         banks = registry.load()
     except Exception as exc:  # noqa: BLE001
@@ -172,6 +239,31 @@ def _cmd_doctor() -> int:
 
     _report_project_wiring(banks)
     return EXIT_OK
+
+
+def _report_endpoint(machine: str, overrides: list[str]) -> None:
+    """What the `api` provider is pointed at, when anything uses it.
+
+    Configuration only — the endpoint is never called. A diagnostic that
+    embeds a probe would cost money on a metered API and burn a rate limit,
+    and `doctor` is the command people run repeatedly while fixing something.
+    """
+    if "api" not in {machine, *overrides}:
+        return
+    from . import settings
+    from .providers import get_provider
+
+    try:
+        provider = get_provider("api")
+    except ValueError as exc:
+        print(f"api endpoint     NOT CONFIGURED — {exc}")
+        return
+    except Exception as exc:  # noqa: BLE001 - diagnostics never fail
+        print(f"api endpoint     UNKNOWN — {type(exc).__name__}: {exc}")
+        return
+    print(f"api endpoint     {settings.api_url()}")
+    print(f"                 model {provider.model}, dim {provider.dim}"
+          + (", key set" if settings.api_key() else ", no key"))
 
 
 def _report_project_wiring(banks) -> None:
@@ -466,10 +558,19 @@ def _cmd_status() -> int:
               f"up {svc['uptime_s']:.0f}s")
         provider = svc.get("provider") or "—"
         model = svc.get("provider_model")
+        # What "embed" means depends on the provider, so the word does too.
+        # Under `local` it is the resident process, which is genuinely DOWN
+        # when unreachable; under `api` nothing is probed — health() is
+        # configuration-only by contract, so calling that state "DOWN" would
+        # report a process that was never supposed to exist.
+        if provider == "local":
+            embed = ("reachable" if svc["embed"].get("reachable") else "DOWN")
+        else:
+            embed = ("configured" if svc["embed"].get("reachable")
+                     else "not configured")
         print(f"provider {provider}"
               + (f" ({model}, dim {svc.get('provider_dim')})" if model else "")
-              + f"  embed "
-              + ("reachable" if svc["embed"].get("reachable") else "DOWN"))
+              + f"  embed {embed}")
         if svc.get("provider_error"):
             print(f"  provider NOT CONFIGURED: {svc['provider_error']}")
         print(f"queue depth={queue['depth']} high={queue['high']} "
@@ -591,16 +692,22 @@ def _build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="cmd", required=True, metavar="COMMAND")
 
     # --- local ----------------------------------------------------------
-    sub.add_parser(
+    wu = sub.add_parser(
         "warmup",
         help="Download the embedding model (~2.2 GB). The ONLY thing that "
-             "does — no hook, service or search ever downloads it for you.",
+             "does — no hook, service or search ever downloads it for you. "
+             "Skips when nothing on this machine embeds locally.",
+    )
+    wu.add_argument(
+        "--force", action="store_true",
+        help="Cache the model even where no bank embeds locally — e.g. before "
+             "switching back to `local`.",
     )
     sub.add_parser(
         "doctor",
-        help="Answer 'why is memory not working': engine, venv, model cache, "
-             "embedding resident, token, backend, banks, orphan indexes. "
-             "Reads only — it never changes anything.",
+        help="Answer 'why is memory not working': engine, venv, provider, "
+             "model cache, embedding resident, token, backend, banks, orphan "
+             "indexes. Reads only — it never changes anything.",
     )
 
     co = sub.add_parser(
@@ -802,7 +909,7 @@ def main(argv: list[str] | None = None) -> int:
     cmd = args.cmd
 
     if cmd == "warmup":
-        return _cmd_warmup()
+        return _cmd_warmup(args)
     if cmd == "doctor":
         return _cmd_doctor()
     if cmd == "clean-orphans":

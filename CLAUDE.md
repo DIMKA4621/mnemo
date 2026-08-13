@@ -106,6 +106,13 @@ Service (the persistent backend):
   gone and every card is four lines shorter. Removal is the only irreversible
   action here, and its dialog leads with the **token**, not the megabytes:
   the index rebuilds, the token is minted and cannot be reissued.
+  Machine settings are a **screen**, not a modal (the gear in the topbar) —
+  everything else here is about one bank and floats over the work; this is
+  about the machine and replaces it. The backend is **picked, not typed**:
+  the tabs come from `presets`, and choosing a model fills in its URL, width
+  and prefixes together. That is the point rather than a convenience — a
+  prefix field is a field somebody forgets, which is the same silent failure
+  the catalogue exists to remove.
 
 Faces:
 
@@ -195,15 +202,16 @@ Around it:
 Landed and working today:
 
 ```
-mnemo warmup                        one-time explicit ~2.2 GB model download + check
+mnemo warmup [--force]              one-time explicit ~2.2 GB model download + check;
+                                    skips when nothing here embeds locally
 mnemo init [--root DIR] [--yes]     additive, idempotent project wiring; NO hook
      [--migrate]                    also unwire every hook mnemo ever wrote
 mnemo search "q" [--path-prefix P]  hybrid search over a bank
 mnemo reindex [--bank B] [--full]   queue a reindex (`ingest` is a deprecated alias)
 mnemo banks list|add|remove         registry, through the API
 mnemo status | logs | tree | ui     service state, journal, tree, cabinet
-mnemo doctor                        engine, model, tokens, ports, banks, orphans,
-                                    and the projects whose wiring needs rewiring
+mnemo doctor                        engine, provider, model, tokens, ports, banks,
+                                    orphans, and the projects needing rewiring
 mnemo clean-orphans [--dry-run]     delete index files no bank claims; asks first
      [--yes]                        skip the prompt (scripts)
 ```
@@ -229,6 +237,21 @@ connects instead of spawning. Two faces, keyed by which token is presented —
 `reindex`, `status`, `logs`). Neither credential opens the other's face.
 Poke the read tools by hand at `/mcp-tools/*` (Swagger at
 `http://127.0.0.1:8918/docs`, token from `~/.claude/mnemo/state/api.token`).
+
+**`local` is not the only provider, and three commands branch on that.**
+Under `api` the model cache is empty by design and the resident never starts,
+so `doctor` says `not needed under \`api\`` and `n/a` instead of reporting them
+as findings — otherwise the first command anyone runs when something breaks
+opens with a permanent false alarm. It prints the endpoint (url, model, dim,
+whether a key is set) but **never calls it**: a diagnostic that embedded a
+probe would cost money on a metered API and burn a rate limit, and `doctor`
+gets run repeatedly while fixing things. `warmup` skips the 2.2 GB download
+for the same reason and prints `--force`. The question is the **union** of
+the machine setting and every bank's own `provider` field — a bank may name
+`local` while the machine is on `api`. `status` changes the word, not the
+check: `reachable`/`DOWN` under `local` (a real process), `configured`/`not
+configured` under `api` (nothing was called) — `embed.kind` in the status
+payload is what says which.
 
 Service control (`mnemo serve`, `mnemo service start|stop|status|restart`,
 `mnemo autostart enable|disable|status`) is **phase 5, in flight** — the

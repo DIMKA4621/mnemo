@@ -1646,6 +1646,12 @@ def api_status() -> dict:
             "reachable": reachable,
             "host": getattr(config, "EMBED_HOST", None),
             "port": getattr(config, "EMBED_PORT", None),
+            # What was actually probed. Under `local` "reachable" is a live
+            # resident on that host/port; under `api` it is configuration only
+            # (health() makes no request by contract), and a client that
+            # cannot tell them apart renders an unconfigured endpoint as a
+            # dead process — or worse, a working one as "DOWN".
+            "kind": identity.get("name") or "unknown",
         }
     except Exception as exc:  # noqa: BLE001
         embed = {"reachable": False, "error": str(exc)}

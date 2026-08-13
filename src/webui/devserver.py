@@ -141,6 +141,64 @@ FS_MD: dict[str, int] = {
 
 
 # --------------------------------------------------------------------------
+# fixture machine settings (contract 9.5 GET/PUT /api/settings, §6.6)
+# --------------------------------------------------------------------------
+#
+# Held in memory and genuinely mutated by PUT, so the dev page exercises the
+# save path rather than a stub that always answers the same thing. Never read
+# from — and never written to — the machine's real `state/settings.json`: a
+# dev mock that edited it could switch this machine's provider from a page
+# that is still being written.
+#
+# The catalogue is imported from `presets`, not copied. It is pure data with
+# no service dependency, and duplicating it here is exactly how a fixture ends
+# up disagreeing with the product it stands in for.
+
+_SETTINGS: dict[str, Any] = {
+    "provider": "local",
+    "api": {"url": "", "model": "", "dim": 0, "timeout": 60.0, "key": ""},
+}
+
+# One value pinned to "env" so the override path — the warning that a saved
+# value cannot take effect — is reachable in dev. It is the timeout precisely
+# because it is the least consequential: nothing else in the form is blocked.
+_SETTINGS_ENV = {"api.timeout": "MNEMO_API_EMBED_TIMEOUT"}
+
+
+def _settings_presets() -> list[dict]:
+    import sys
+
+    sys.path.insert(0, str(HERE.parent.parent))
+    from src import presets
+
+    return presets.as_json()
+
+
+def settings_payload() -> dict:
+    def item(key: str, value: Any) -> dict:
+        env = _SETTINGS_ENV.get(key)
+        source = "env" if env else ("file" if value not in ("", 0) else "default")
+        return {"value": value, "source": source, "env_var": env or "",
+                "overridden": bool(env)}
+
+    api = _SETTINGS["api"]
+    return {
+        "path": "/home/dev/.claude/mnemo/state/settings.json",
+        "exists": True,
+        "settings": {
+            "provider": item("provider", _SETTINGS["provider"]),
+            "api.url": item("api.url", api["url"]),
+            "api.model": item("api.model", api["model"]),
+            "api.dim": item("api.dim", api["dim"]),
+            "api.timeout": item("api.timeout", api["timeout"]),
+            "api.key_set": item("api.key_set", bool(api["key"])),
+        },
+        "readonly": {"api_host": "127.0.0.1", "api_port": 8918},
+        "presets": _settings_presets(),
+    }
+
+
+# --------------------------------------------------------------------------
 # fixture bank tokens (contract 9.5 GET/POST /api/banks/{bank_id}/token)
 # --------------------------------------------------------------------------
 #
@@ -565,6 +623,56 @@ class Handler(BaseHTTPRequestHandler):
         broadcast("bank_removed", bank["id"], {"bank_id": bank["id"]})
         self.json_out(200, {"ok": True, "index_removed": drop})
 
+    def do_PUT(self) -> None:  # noqa: N802 - stdlib name
+        parsed = urlparse(self.path)
+        if not self.authorised():
+            self.fail(401, "unauthorized", "missing or invalid token")
+            return
+        if parsed.path != "/api/settings":
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            self.fail(422, "validation_error", "body is not valid JSON")
+            return
+
+        # The same validation the real endpoint applies, and for the same
+        # reason: a dev page that could save a zero `dim` would look correct
+        # while the product refuses it, and the form's error path would never
+        # be seen until it hit a real service.
+        if "provider" in body:
+            chosen = str(body["provider"] or "").strip().lower()
+            if chosen not in ("local", "api"):
+                self.fail(400, "bad_request",
+                          f"unknown provider {chosen!r} (known: local, api)")
+                return
+            _SETTINGS["provider"] = chosen
+        api_in = body.get("api")
+        if isinstance(api_in, dict):
+            for key in ("url", "model"):
+                if key in api_in:
+                    _SETTINGS["api"][key] = str(api_in[key] or "")
+            if "key" in api_in:
+                _SETTINGS["api"]["key"] = str(api_in["key"] or "")
+            if "dim" in api_in:
+                try:
+                    _SETTINGS["api"]["dim"] = max(0, int(api_in["dim"] or 0))
+                except (TypeError, ValueError):
+                    self.fail(400, "bad_request", "dim must be a whole number")
+                    return
+            if "timeout" in api_in:
+                try:
+                    _SETTINGS["api"]["timeout"] = float(api_in["timeout"] or 60.0)
+                except (TypeError, ValueError):
+                    self.fail(400, "bad_request", "timeout must be a number")
+                    return
+
+        self.json_out(200, {"ok": True, "restart_required": True,
+                            **settings_payload()})
+
     def do_POST(self) -> None:  # noqa: N802 - stdlib name
         parsed = urlparse(self.path)
         if not parsed.path.startswith("/api/"):
@@ -664,9 +772,16 @@ class Handler(BaseHTTPRequestHandler):
                                 STARTED_AT, timezone.utc).astimezone().isoformat(
                                     timespec="seconds"),
                             "uptime_s": round(time.time() - STARTED_AT, 1),
-                            "provider": "local", "priority_enabled": True,
+                            "provider": _SETTINGS["provider"],
+                            "priority_enabled": True,
+                            # `kind` says WHAT was probed: a live resident under
+                            # `local`, configuration only under `api`. The page
+                            # words the badge from it, so a mock that omitted it
+                            # would render an unconfigured endpoint as a dead
+                            # process.
                             "embed": {"reachable": True, "host": "127.0.0.1",
-                                      "port": 8917}},
+                                      "port": 8917,
+                                      "kind": _SETTINGS["provider"]}},
                 "queue": queue_snapshot(),
                 "banks": [bank_info(b) for b in BANKS],
             })
@@ -702,6 +817,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/logs":
             self.get_logs(query)
+            return
+
+        if path == "/api/settings":
+            self.json_out(200, settings_payload())
             return
 
         self.fail(404, "internal", "no route " + path)

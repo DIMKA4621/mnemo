@@ -359,6 +359,141 @@ h2 {
   font-size: 12px;
 }
 
+/* ---- settings screen ---------------------------------------------------
+   A screen, not a modal: the other dialogs are all about one bank and float
+   over the work, this one is about the machine and replaces it. Same z-index
+   band as `.modal` and below the gate, for the same reason — behind the gate
+   no request is possible, so a settings form there could not load. */
+
+.screen {
+  position: fixed;
+  inset: 0;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+}
+
+.screen[hidden] { display: none; }
+
+.screen-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+
+.screen-head h1 {
+  flex: 1 1 auto;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.screen-foot {
+  flex: none;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+
+/* The form is a column of fields, capped rather than stretched: full-window
+   text inputs are harder to read, not easier. */
+.set-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  padding: 20px 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  width: 100%;
+  max-width: 620px;
+  margin: 0 auto;
+}
+
+.set-field { display: flex; flex-direction: column; gap: 5px; }
+
+.set-label {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.set-note {
+  margin: 0;
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.set-lead {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.set-lead code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+}
+
+/* An override means the field below it cannot take effect. It reads as a
+   warning because that is what it is — the save will succeed and change
+   nothing observable. */
+.set-override {
+  margin: 0;
+  color: var(--busy);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.set-warn {
+  margin: 0;
+  padding: 9px 11px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.55;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.set-tabs { align-self: flex-start; }
+
+.set-row { display: flex; gap: 12px; }
+.set-row .set-field { flex: 0 0 auto; }
+
+.set-wide { width: 100%; }
+.set-narrow { width: 110px; }
+
+.set-select {
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.set-select:focus { outline: none; border-color: var(--accent); }
+
+/* The gear sits between two controls with real labels, so it needs to read as
+   a control rather than as a stray glyph. */
+.btn-gear {
+  font-size: 15px;
+  line-height: 1;
+  padding: 4px 8px;
+}
+
 /* ---- modal (bank picker) ---------------------------------------------- */
 
 /* Above the gate would be wrong — the gate means "no requests are possible",
