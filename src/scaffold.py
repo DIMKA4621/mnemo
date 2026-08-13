@@ -306,16 +306,37 @@ afterwards. A reply composed before the search is one the search cannot
 repair — the best you can do then is paste a correction underneath it, and
 the user has already read the wrong thing.
 
-The MCP tool is **`search`**. Narrow with `path_prefix` when you know
-roughly where to look (`logs`, `topics`, `agents/reviewer`); leave it out to
-search the whole bank. `tree` shows the layout with each file's
-headings.
-
 **You have not consulted memory until you have called `search` in this
 session, for this task.** Text that happens to be in your context is not a
 search result: it may be stale, it may be about something else, and it is not
 evidence that anything was checked. Do not reason from "I think I already have
 this".
+
+### How to search — the protocol
+
+**One query is not a search.** The index matches phrasing, not meaning in
+general, so a single formulation that comes back empty proves nothing about
+what is recorded.
+
+1. **Ask two or three different questions**, not one question twice. Vary the
+   angle: the symptom and the cause are separate queries; the name of a thing
+   and what it does are separate queries; a decision and its rationale may sit
+   in different files. Both languages hit — the bank holds whatever was
+   written.
+2. **Widen first, narrow second.** Leave `path_prefix` out to sweep the whole
+   bank; add it (`logs`, `topics`, `agents/reviewer`) once you know roughly
+   where the answer lives. `tree` shows the layout with each file's headings.
+3. **A chunk is a pointer, not the answer.** It is a fragment cut to fit an
+   index. Open the file it came from and read around it — the qualification
+   that reverses the meaning is often in the next paragraph.
+4. **Follow the links.** `MEMORY.md` indexes `topics/`; a topic file names the
+   log that produced it. Two hops is normal, not thoroughness.
+5. **Stop when fresh queries stop surfacing fresh files** — that, and not the
+   first plausible hit, is what "I checked" means.
+
+Assemble the whole picture — the log, the topic, the research note — **before**
+planning or answering. Half a record is how a settled decision gets
+relitigated.
 
 ### Searching is the default, not a trigger you look for
 
@@ -363,9 +384,16 @@ Three answers mean three different things, and they are not interchangeable:
 
 ## Writing — after significant work or any decision
 
+| What | Where |
+|---|---|
+| Key paths, architecture overview, quick facts | `MEMORY.md` |
+| What was done today, decisions, the commit's subject | `logs/YYYY-MM-DD.md` |
+| Architecture deep-dives, one concept per file | `topics/<name>.md` |
+| Research, benchmarks, debugging conclusions | `topics/<topic>-research.md` |
+| Per-role notes, when the project has agent roles | `agents/<role>/` |
+
 - `MEMORY.md` stays an **index**: links and quick facts, under ~200 lines. When
   it outgrows that, move detail into `topics/` and leave a link.
-- One concept per file in `topics/`. Day-by-day notes in `logs/`.
 - Write more rather than less: a redundant entry costs nothing, a lost insight
   costs the next session's time. When in doubt, record it.
 - Record **research and debugging conclusions**, not just outcomes — the dead
@@ -436,10 +464,13 @@ _RULE_SUPERSEDED: tuple[str, ...] = (
     #      (the rule still said "the `mnemo` MCP server" for one release)
     "359122caae4f4e8c05e453e93b315ef0ae196928b35a1e2a714d75fe653fe169",
     "f2a86bf46768cec08d55677141a7d9d32ccc4e29901de228c950fd855a9ffd1f",
+    # v6 — 42351ff feat!: delete the hook seeds
+    "21d012e96a81fb1a4bd908eb734d9240ca1bda045822a90501c0b9f709d9e88c",
+    "e3a9f9865237c6b9fdf3cb60aab2f4f32c32bf3528bc7177d2b85198ca8c78de",
 )
-# v6 — 42351ff feat!: delete the hook seeds — is the current text, so both of
-# its digests are computed from the constant rather than listed. A literal
-# would be free to fall out of step with the text it claims to describe.
+# v7 — the search protocol and the what-goes-where table — is the current text,
+# so both of its digests are computed from the constant rather than listed. A
+# literal would be free to fall out of step with the text it claims to describe.
 
 
 def _digest(text: str) -> str:
