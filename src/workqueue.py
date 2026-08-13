@@ -548,12 +548,9 @@ def _run_file(task: Task, bank: registry.Bank, running: _Running) -> None:
         throttle = 0.0
         yielded = False
 
-        chunks_done = task.start_batch * BATCH_SIZE
-
         def on_batch(result: index.BatchResult) -> None:
-            nonlocal last_batch, throttle, chunks_done
+            nonlocal last_batch, throttle
             last_batch = result.batch
-            chunks_done += result.chunks
             with _lock:
                 running.batch = result.batch + 1
                 running.batches = result.batches
@@ -561,18 +558,18 @@ def _run_file(task: Task, bank: registry.Bank, running: _Running) -> None:
             final = result.batch + 1 >= result.batches
             if final or now - throttle >= PROGRESS_INTERVAL_S:
                 throttle = now
-                # Until the last batch lands, the true total is unknown and
-                # `batches * BATCH_SIZE` is only an upper bound — a 2-chunk
-                # file would otherwise report "2/16" forever. On the final
-                # batch the count IS known, so send it and let the figure
-                # become exact rather than plausible. `batch`/`batches` is
-                # the pair to drive a progress bar from either way.
+                # Both counts come from the indexer, which holds the batch
+                # plan. They used to be reconstructed here from BATCH_SIZE,
+                # and that reconstruction is now impossible as well as
+                # inexact: `plan_batches` sizes each batch by padded cost, so
+                # batches within one file differ in length. The old estimate
+                # was an upper bound that a 2-chunk file showed as "2/16";
+                # this is the real figure from the first batch onward.
                 _emit("index_progress", bank.id, task_id=task.id,
                       path=result.path, batch=result.batch + 1,
                       batches=result.batches,
-                      chunks_done=chunks_done,
-                      chunks_total=(chunks_done if final
-                                    else result.batches * BATCH_SIZE))
+                      chunks_done=result.chunks_done,
+                      chunks_total=result.chunks_total)
 
         def should_yield() -> bool:
             nonlocal yielded

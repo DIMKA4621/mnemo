@@ -123,6 +123,11 @@ class EmbeddingProvider(abc.ABC):
     def key(self) -> str:
         """Rebuild fingerprint stored in the bank DB: f"{name}:{model}:{dim}"."""
 
+    @property
+    def pad_budget(self) -> int:      # [NEW]
+        """Стеля `найдовший × кількість` на один виклик, у символах.
+        Дефолт — `DEFAULT_PAD_BUDGET = 19200`; `local` віддає 1200."""
+
     @abc.abstractmethod
     def embed_passages(self, texts: list[str]) -> list[list[float]]:
         """Embed documents for indexing. Raises EmbeddingUnavailable."""
@@ -144,6 +149,14 @@ class EmbeddingProvider(abc.ABC):
 * **Провайдер ніколи не качає модель.** Правило «модель тягне тільки явний
   `warmup`» лишається інваріантом (design §1, §12).
 * Провайдер **не логує** й не знає ні про банки, ні про чергу.
+* **`pad_budget` належить провайдеру, бо бекенди хочуть протилежного [NEW].**
+  Заміряно на одному корпусі й **одній моделі** (`multilingual-e5-large`),
+  різнився лише бекенд: бюджет 1200 дає CPU-резиденту **1.38×**, а тій самій
+  моделі в Ollama на GPU — **0.50×**. CPU платить за кожен токен паддінгу й
+  хоче вузьких батчів; GPU паддінг не помічає, зате платить ~0.34 с за
+  виклик і хоче широких. Спільної константи, правильної для обох, не існує,
+  а помилка **мовчазна** — тому дефолт консервативний (широкий), і кожен
+  провайдер знижує його лише там, де сам заміряний.
 
 ### 2.1 `local` — як він досягає `embed_server`
 
@@ -385,6 +398,8 @@ class BatchResult:
     batch: int            # 0-based
     batches: int
     chunks: int           # chunks written by this batch
+    chunks_done: int      # cumulative within the file  [NEW]
+    chunks_total: int     # the file's chunk count      [NEW]
 
 
 @dataclass(frozen=True)
@@ -424,6 +439,19 @@ def index_file(
     has that result from `on_batch`."""
 
 
+def plan_batches(
+    chunks: list[Chunk],
+    *,
+    batch_size: int = 16,
+    budget: int | None = None,     # None -> DEFAULT_PAD_BUDGET
+) -> list[list[Chunk]]:
+    """Group one file's chunks into embed calls: sort by length, then cut
+    when `найдовший × кількість` would pass `budget`, `batch_size` as a
+    backstop in items. Deterministic — `start_batch` indexes into this list
+    across a preemption. `index_file` завжди передає `provider.pad_budget`.
+    **[NEW]**"""
+
+
 def prune(conn, removed: list[str]) -> int
 
 
@@ -447,6 +475,21 @@ def reconcile(
   (`Memory-implementation-v3.md` §4).
 * Один батч = один виклик `provider.embed_passages(...)` + N `insert_chunk` +
   **один `conn.commit()`**.
+* **Склад батчу задає `plan_batches`, а не нарізка по порядку [NEW].** Батч
+  доганяється паддінгом до найдовшого свого члена, тож коштує `найдовший ×
+  кількість`, а не `кількість`. Заміряно: `секунди = паддед / 243` з розкидом
+  1.4% на чотирьох стратегіях, тобто час залежить **виключно** від паддінгу.
+  Тому чанки файлу сортуються за довжиною і ріжуться за паддед-бюджетом;
+  `BATCH_SIZE` лишається стелею в штуках. Природний порядок документа міряв
+  **гірше** за навмисно перемішаний, тобто попередня поведінка була близька до
+  найгіршого випадку.
+* **Пофайлово, ніколи наскрізно.** Наскрізне сортування міряє краще (1.85×
+  проти 1.63×) і нам недоступне: батч — це одночасно одиниця коміту, точка
+  витіснення (§8.3), одиниця відновлення після падіння (§4.2) і межа ізоляції
+  помилки, а всі чотири визначені **на файл**.
+* Групування **детерміноване**: `start_batch` індексує саме в цей список через
+  витіснення, тож перегрупування при відновленні пропустило б чанки або
+  зембедило б їх двічі.
 
 ### 4.2 Порядок операцій для одного файлу (crash-safety) **[NEW]**
 
@@ -1405,7 +1448,7 @@ API token» відправило б її шукати неіснуючу про�
 | `hello` | одразу після коннекту | `{"version","banks":["<id>",…],"queue":QueueSnapshot}` |
 | `queue` | будь-яка зміна глибини/поточної задачі | `{"depth","high","normal","low","current":{…}\|null}` |
 | `index_start` | воркер узяв задачу | `{"task_id","kind","path","batches","trigger"}` — `batches: 0`, коли к-сть ще не відома (файл не нарізано; для `bulk` — завжди) |
-| `index_progress` | після кожного закомміченого батчу | `{"task_id","path","batch","batches","chunks_done","chunks_total"}` |
+| `index_progress` | після кожного закомміченого батчу | `{"task_id","path","batch","batches","chunks_done","chunks_total"}` — обидва лічильники **точні з першого батчу [NEW]**: їх дає `BatchResult`, бо `plan_batches` робить батчі нерівними й `batch × BATCH_SIZE` більше нічого не означає |
 | `index_done` | файл/bulk завершено | `{"task_id","kind","path","chunks_indexed","files_indexed","took_ms"}` |
 | `index_error` | задача впала | `{"task_id","kind","path","error"}` |
 | `index_yield` | задачу витіснено (8.3) | `{"task_id","path","resume_batch"}` |
@@ -2124,7 +2167,8 @@ CLI лишається детермінованим примітивом: або
 | `MNEMO_EMBED_IDLE_TIMEOUT` | `0` **(змінено)** | daemon / engine-dev | `0` = **немає idle-виходу**; резидент і далі підіймається **на першу потребу** й гине разом із `mnemo service stop` (не «висить завжди»). Старе `1800` коштувало ~9 с на першому пошуку після півгодинної паузи **[NEW]** |
 | `MNEMO_EMBED_THREADS` | `cpu*3//4` | daemon / engine-dev | стеля ONNX-потоків (NFR-5, фаза 0) |
 | `MNEMO_EMBED_POOL` | `1` | daemon / engine-dev | к-сть інстансів резидента — **не реалізовано**: конкурентність дали дві смуги в одному процесі (implementation §4) |
-| `MNEMO_BATCH_SIZE` | `16` | indexer / engine-dev | чанків на батч і на коміт |
+| `MNEMO_BATCH_SIZE` | `16` | indexer / engine-dev | **стеля** чанків на батч і на коміт (не розмір) |
+| `MNEMO_BATCH_PAD_BUDGET` | `1200` | indexer / engine-dev | стеля `найдовший × кількість` у символах **для провайдера `local`**; батч звужується на довгих чанках і розширюється на коротких. Спільний консервативний дефолт — `providers.base.DEFAULT_PAD_BUDGET = 19200`; ця змінна його **не** чіпає **[NEW]** |
 | `MNEMO_FILE_MAX_BYTES` | `2097152` | indexer / engine-dev | ліміт `GET /api/file` **[NEW]** |
 | `MNEMO_BANKS_FILE` | `$STATE_DIR/banks.json` | registry / service-dev | шлях реєстру **[NEW]** |
 | `MNEMO_API_HOST` | `127.0.0.1` | api / service-dev | bind бекенда **[NEW]** |

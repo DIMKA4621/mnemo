@@ -358,10 +358,40 @@ DEFAULT_EXCLUDE: list[str] = [
     "__pycache__/**",
 ]
 
-# Chunks per embed call and per commit. Small enough that one batch cannot
-# hit a timeout and that an urgent edit waits at most one batch; large enough
-# that per-call overhead stays negligible.
+# Chunks per embed call and per commit — now a CEILING, not the batch size.
+# Small enough that one batch cannot hit a timeout and that an urgent edit
+# waits at most one batch; large enough that per-call overhead stays
+# negligible.
 BATCH_SIZE: int = max(1, int(os.environ.get("MNEMO_BATCH_SIZE", "16")))
+
+# The other half of the batching rule, and the one that actually bounds cost.
+#
+# A batch is padded to its longest member, so it costs `longest x count`, not
+# `count`. `index.plan_batches` therefore sorts a file's chunks by length and
+# cuts a batch when `longest x count` would exceed this budget, with
+# BATCH_SIZE as a backstop in items. Characters, not tokens, because that is
+# what a chunk can be measured in before a tokenizer exists (see chunker: a
+# machine that never ran `warmup` cannot count tokens) — and the rule only
+# needs a monotone proxy, not a unit.
+#
+# 1200 is measured, on this bank, interleaved and best-of-2: 1.38x against
+# the 19200 that matches the old fixed-16 rule. Combined with the sort, 1.6x
+# on a full rebuild.
+#
+# **This value is for the CPU resident and is wrong for a GPU** — the same
+# sweep against Ollama scored 0.50x here. It is not the shared default for
+# that reason: `EmbeddingProvider.pad_budget` carries the conservative 19200
+# and `local` overrides it with this. Setting MNEMO_BATCH_PAD_BUDGET moves
+# the local one only.
+#
+# Not lowered further although 600 measured marginally faster (1.15x against
+# 2400, versus 1200's 1.08x): those last steps sit inside the machine's own
+# drift — the same arm varied 20% between rounds — and a batch is the commit
+# unit, so 600 means one transaction per chunk. Single digits of embedding
+# time is not worth an order of magnitude more fsyncs.
+BATCH_PAD_BUDGET: int = max(
+    1, int(os.environ.get("MNEMO_BATCH_PAD_BUDGET", "1200"))
+)
 
 # Ceiling for serving one file's raw text over the API (phase 6 viewer).
 FILE_MAX_BYTES: int = int(os.environ.get("MNEMO_FILE_MAX_BYTES", str(2 * 1024 * 1024)))

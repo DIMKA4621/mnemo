@@ -38,7 +38,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .chunker import split_markdown
+from .chunker import Chunk, split_markdown
 from .config import (
     BATCH_SIZE,
     DEFAULT_EXCLUDE,
@@ -47,6 +47,7 @@ from .config import (
     resolve,
 )
 from .providers import EmbeddingProvider, EmbeddingUnavailable, get_provider
+from .providers.base import DEFAULT_PAD_BUDGET
 from .store import (
     chunk_uid,
     connect,
@@ -101,6 +102,14 @@ class BatchResult:
     batch: int            # 0-based
     batches: int
     chunks: int           # chunks written by this batch
+    # Cumulative within the file, and both exact from the first batch on.
+    # They are reported rather than derived because batches are no longer
+    # uniform: `plan_batches` sizes each one by padded cost, so neither
+    # `batch * BATCH_SIZE` nor `batches * BATCH_SIZE` means anything now.
+    # `index_file` holds the plan and can simply count, including across a
+    # resume, where a caller has nothing to count from.
+    chunks_done: int = 0
+    chunks_total: int = 0
 
 
 @dataclass(frozen=True)
@@ -197,6 +206,73 @@ def build_plan(conn, disk: dict[str, FileStat]) -> IndexPlan:
 # ------------------------------------------------------------ embed+write
 
 
+def plan_batches(
+    chunks: list[Chunk],
+    *,
+    batch_size: int = BATCH_SIZE,
+    budget: int | None = None,
+) -> list[list[Chunk]]:
+    """Group a file's chunks into embed calls, cheapest-padding first.
+
+    A batch is padded to its longest member, so it costs ``longest x count``
+    and not ``count``. Measured, that padded total is the *only* thing the
+    wall clock tracks (seconds = padded_tokens / 243, within 1.4% across four
+    strategies) — which turns "what batch size is best" from an experiment
+    into arithmetic.
+
+    Two rules, in this order:
+
+    1. **Sort by length.** This is the whole win: +36% pooled, +14-18% per
+       file. Mixing a 60-char chunk with a 1200-char one pads the short one
+       twentyfold; neighbours of a similar length pad each other barely at
+       all. Natural document order measured *worse* than a deliberate
+       shuffle, so the behaviour this replaces was close to the worst case.
+    2. **Cut on the padded budget**, ``BATCH_SIZE`` as a backstop in items.
+       Packing on its own is not merely neutral, it is harmful: pooling
+       without sorting produced fewer batches and a *longer* run (0.92x).
+       The budget exists to bound cost, the sort to lower it.
+
+    Per file, never across files. Cross-file batching measures better still
+    (1.85x vs 1.63x) and is not available to us: a batch is the commit unit,
+    the preemption point, the eviction-recovery unit and the error-isolation
+    boundary, and all four are defined per file (module docstring, and
+    Memory-contracts-v3 §4.1).
+
+    ``budget`` defaults to the **conservative** shared value rather than to
+    the CPU's measured one, because callers that do not pass it also do not
+    know which backend is on the other end — and the wrong value is silent.
+    ``index_file`` always passes ``provider.pad_budget``.
+
+    Deterministic — same chunks in, same grouping out — because ``start_batch``
+    indexes into this list across a preemption, and a resume that regrouped
+    differently would skip or redo chunks.
+    """
+    if not chunks:
+        return []
+    if budget is None:
+        budget = DEFAULT_PAD_BUDGET
+    # `index` breaks ties so equal-length chunks keep document order: a stable
+    # key is what makes the grouping reproducible for a resume.
+    ordered = sorted(chunks, key=lambda c: (len(c.text), c.index))
+    batches: list[list[Chunk]] = []
+    current: list[Chunk] = []
+    for chunk in ordered:
+        size = len(chunk.text)
+        # Ascending order means the candidate always IS the new longest, so
+        # the batch's padded cost is exactly `size * (len(current) + 1)`.
+        # A single chunk over budget still gets in — as its own batch, since
+        # `current` is empty — because dropping it is not an option.
+        if current and (
+            len(current) >= batch_size or size * (len(current) + 1) > budget
+        ):
+            batches.append(current)
+            current = []
+        current.append(chunk)
+    if current:
+        batches.append(current)
+    return batches
+
+
 def index_file(
     conn,
     provider: EmbeddingProvider,
@@ -230,7 +306,12 @@ def index_file(
         start_batch = 0  # changed under us: the partial work is not reusable
 
     chunks = split_markdown(text)
-    batches = max(1, (len(chunks) + batch_size - 1) // batch_size)
+    # The budget comes from the provider: the CPU resident and a GPU endpoint
+    # want opposite values, and the wrong one is 2x slower with nothing to
+    # notice it by (`EmbeddingProvider.pad_budget`).
+    plan = plan_batches(chunks, batch_size=batch_size,
+                        budget=provider.pad_budget)
+    batches = max(1, len(plan))
 
     if start_batch == 0:
         # Step 1: the file becomes "not indexed" atomically. Everything that
@@ -248,8 +329,11 @@ def index_file(
         return 0
 
     written = 0
+    # Chunks in the batches we are skipping — exact, because the plan is
+    # deterministic and this is the same grouping the earlier run used.
+    done = sum(len(b) for b in plan[:start_batch])
     for batch_no in range(start_batch, batches):
-        window = chunks[batch_no * batch_size:(batch_no + 1) * batch_size]
+        window = plan[batch_no] if batch_no < len(plan) else []
         if not window:
             continue
         # Step 2: one batch = one embed call + N inserts + ONE commit.
@@ -268,8 +352,10 @@ def index_file(
             )
         conn.commit()
         written += len(window)
+        done += len(window)
         if on_batch is not None:
-            on_batch(BatchResult(fs.path, batch_no, batches, len(window)))
+            on_batch(BatchResult(fs.path, batch_no, batches, len(window),
+                                 chunks_done=done, chunks_total=len(chunks)))
         if (
             batch_no + 1 < batches
             and should_yield is not None

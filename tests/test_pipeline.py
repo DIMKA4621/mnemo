@@ -40,9 +40,14 @@ _STATE = tempfile.TemporaryDirectory(prefix="mnemo pipeline state ")
 os.environ["MNEMO_STATE_DIR"] = _STATE.name
 
 from src import store  # noqa: E402
-from src.chunker import _rule, split_markdown  # noqa: E402
+from src.chunker import Chunk, _rule, split_markdown  # noqa: E402
 from src.config import CHUNK_TOKEN_CEILING, resolve  # noqa: E402
-from src.index import _open_bank, reconcile  # noqa: E402
+from src.index import (  # noqa: E402
+    BatchResult,
+    _open_bank,
+    plan_batches,
+    reconcile,
+)
 from src.providers.base import EmbeddingProvider  # noqa: E402
 from src.search import _fts_ranked, _vector_ranked, search  # noqa: E402
 
@@ -582,6 +587,108 @@ def test_chunking_rule() -> None:
             conn.close()
 
 
+def test_batch_planning() -> None:
+    """Batches are cut by padded cost, and the grouping survives a resume."""
+    print("\n=== batch planning ===")
+
+    def fake(sizes: list[int]) -> list[Chunk]:
+        return [Chunk(index=i, text="x" * n, heading="", start=0, end=n)
+                for i, n in enumerate(sizes)]
+
+    check("no chunks means no batches", plan_batches([]) == [])
+
+    # The budget belongs to the provider, because the two backends want
+    # opposite values: measured, the CPU's best (1200) runs a GPU at 0.50x.
+    # A caller that does not name one gets the conservative wide value, since
+    # an unknown endpoint resembles the GPU and being wrong here is silent.
+    from src.providers.base import DEFAULT_PAD_BUDGET  # noqa: PLC0415
+    from src.providers.local import LocalProvider  # noqa: PLC0415
+    check("an unmeasured provider gets the conservative budget",
+          HashProvider().pad_budget == DEFAULT_PAD_BUDGET,
+          detail=str(HashProvider().pad_budget))
+    check("the local resident overrides it downward",
+          LocalProvider().pad_budget < DEFAULT_PAD_BUDGET,
+          detail=f"{LocalProvider().pad_budget} vs {DEFAULT_PAD_BUDGET}")
+    check("and an unspecified budget falls back to the safe one",
+          plan_batches(fake([300] * 40))
+          == plan_batches(fake([300] * 40), budget=DEFAULT_PAD_BUDGET))
+
+    # The property the whole change rests on: a batch costs `longest x count`,
+    # so mixing lengths is what wastes time. Sorting is what fixes it.
+    mixed = fake([1200, 60, 1100, 55, 1000, 50])
+    planned = plan_batches(mixed, batch_size=2, budget=2400)
+    grouped = [[len(c.text) for c in b] for b in planned]
+    check("short chunks batch with short, long with long",
+          grouped == [[50, 55], [60, 1000], [1100, 1200]], detail=str(grouped))
+    padded = sum(max(len(c.text) for c in b) * len(b) for b in planned)
+    natural = sum(
+        max(len(c.text) for c in mixed[i:i + 2]) * len(mixed[i:i + 2])
+        for i in range(0, len(mixed), 2))
+    check("and that costs strictly less padding than document order",
+          padded < natural, detail=f"{padded} vs {natural}")
+
+    # Every chunk exactly once: a planner that drops one loses it from the
+    # index silently, and a planner that repeats one wastes an embed call.
+    seen = sorted(c.index for b in planned for c in b)
+    check("every chunk is planned exactly once",
+          seen == list(range(len(mixed))), detail=str(seen))
+
+    check("the item ceiling is honoured",
+          all(len(b) <= 2 for b in planned), detail=str([len(b) for b in planned]))
+    check("and so is the padded budget",
+          all(max(len(c.text) for c in b) * len(b) <= 2400
+              for b in planned[:-1]),
+          detail=str([max(len(c.text) for c in b) * len(b) for b in planned]))
+
+    # A chunk larger than the whole budget still has to be embedded. It gets a
+    # batch to itself rather than being dropped or stalling the planner.
+    huge = plan_batches(fake([50, 9000, 60]), batch_size=8, budget=1000)
+    check("an oversize chunk gets a batch of its own",
+          [[len(c.text) for c in b] for b in huge] == [[50, 60], [9000]],
+          detail=str([[len(c.text) for c in b] for b in huge]))
+
+    # Determinism is load-bearing, not hygiene: `start_batch` indexes into
+    # this list across a preemption, so a resume that regrouped differently
+    # would skip chunks or embed them twice.
+    twins = fake([300, 300, 300, 300, 300])
+    check("equal lengths keep document order",
+          [[c.index for c in b] for b in plan_batches(twins, batch_size=2)]
+          == [[0, 1], [2, 3], [4]])
+    check("and the same input always plans the same way",
+          plan_batches(mixed, batch_size=2, budget=2400)
+          == plan_batches(mixed, batch_size=2, budget=2400))
+
+    # The counters `index_progress` reports now come from the plan, because
+    # uneven batches make `batch * BATCH_SIZE` meaningless.
+    with tempfile.TemporaryDirectory(prefix="mnemo batch ") as raw:
+        root = Path(raw) / "memory"
+        _build(root)
+        paths = resolve(root)
+        provider = HashProvider()
+        conn = _open_bank(paths, provider, False)
+        seen_batches: list[BatchResult] = []
+        try:
+            reconcile(conn, provider, paths.root,
+                      on_batch=seen_batches.append)
+        finally:
+            conn.close()
+        check("progress counts are reported at all",
+              bool(seen_batches), detail=f"{len(seen_batches)} batches")
+        by_file: dict[str, list[BatchResult]] = {}
+        for result in seen_batches:
+            by_file.setdefault(result.path, []).append(result)
+        check("chunks_done rises to chunks_total, and stops there",
+              all(rs[-1].chunks_done == rs[-1].chunks_total
+                  and [r.chunks_done for r in rs]
+                  == sorted(r.chunks_done for r in rs)
+                  for rs in by_file.values()),
+              detail=str({p: [(r.chunks_done, r.chunks_total) for r in rs]
+                          for p, rs in list(by_file.items())[:2]}))
+        check("the total never changes mid-file",
+              all(len({r.chunks_total for r in rs}) == 1
+                  for rs in by_file.values()))
+
+
 def test_missing_extension_support_is_explained() -> None:
     """A Python that cannot load extensions must say so, not AttributeError.
 
@@ -629,6 +736,7 @@ def main() -> int:
     test_prune_follows_the_files()
     test_provider_change_rebuilds()
     test_chunking_rule()
+    test_batch_planning()
     test_missing_extension_support_is_explained()
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

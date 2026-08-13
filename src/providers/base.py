@@ -20,6 +20,12 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 
+# Ceiling on `longest x count` for one embed call, in characters — the
+# conservative value, used by any provider that has not measured its own.
+# See `EmbeddingProvider.pad_budget` for why the safe direction is *wide*.
+DEFAULT_PAD_BUDGET = 19200
+
+
 class EmbeddingUnavailable(RuntimeError):
     """Provider cannot produce vectors right now (daemon down, API error,
     model not cached). Callers degrade; they never crash.
@@ -56,6 +62,34 @@ class EmbeddingProvider(ABC):
         newly produced ones, so the bank is rebuilt from the .md (FR-8).
         """
         return f"{self.name}:{self.model}:{self.dim}"
+
+    @property
+    def pad_budget(self) -> int:
+        """Ceiling on ``longest x count`` for one embed call, in characters.
+
+        A batch is padded to its longest member, so this bounds what a call
+        actually costs rather than how many items it carries. It lives on the
+        provider because **the two backends want opposite things**, measured
+        on one corpus with one model (``multilingual-e5-large``), only the
+        backend differing:
+
+        | budget | calls | CPU resident | Ollama on a GPU |
+        |--------|-------|--------------|-----------------|
+        | 19200  |     9 | 1.00x        | **1.00x**       |
+        | 2400   |    26 | 1.27x        | 0.71x           |
+        | 1200   |    49 | **1.38x**    | 0.50x           |
+
+        A CPU pays for every padding token and so wants narrow batches; a GPU
+        pads for free but pays ~0.34s per call and so wants wide ones. One
+        shared constant therefore cannot be right for both: the CPU's best
+        value makes the GPU **twice as slow**, with no error to notice it by.
+
+        The default is deliberately the conservative end. An unknown endpoint
+        behind ``api`` is far likelier to resemble the GPU (network round
+        trips dominate) than the resident, and being wrong here is silent.
+        ``local`` overrides it downward, where it was measured.
+        """
+        return DEFAULT_PAD_BUDGET
 
     @abstractmethod
     def embed_passages(self, texts: list[str]) -> list[list[float]]:

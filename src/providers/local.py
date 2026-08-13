@@ -16,7 +16,7 @@ loopback only).
 """
 from __future__ import annotations
 
-from ..config import EMBEDDING_DIM, EMBEDDING_MODEL
+from ..config import BATCH_PAD_BUDGET, EMBEDDING_DIM, EMBEDDING_MODEL
 from .base import EmbeddingProvider, EmbeddingUnavailable
 
 _UNAVAILABLE = (
@@ -39,6 +39,19 @@ class LocalProvider(EmbeddingProvider):
     @property
     def dim(self) -> int:
         return EMBEDDING_DIM
+
+    @property
+    def pad_budget(self) -> int:
+        """Narrow, because this backend pays for every padding token.
+
+        Measured here, interleaved and best-of-2: 1.38x against the shared
+        default. Below this the curve flattens into the machine's own noise
+        (the same arm drifted 20% between rounds under background load), and
+        a batch is also the commit unit — so a smaller value buys single
+        digits of embedding time at the price of many more transactions. The
+        knee is where the evidence stops being able to tell arms apart.
+        """
+        return BATCH_PAD_BUDGET
 
     def embed_passages(self, texts: list[str]) -> list[list[float]]:
         if not texts:
