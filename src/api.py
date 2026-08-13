@@ -42,7 +42,7 @@ from typing import Any, Iterable, Literal
 
 
 from fastapi import (
-    FastAPI, Query, Request, Security, WebSocket, WebSocketDisconnect,
+    Body, FastAPI, Query, Request, Security, WebSocket, WebSocketDisconnect,
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse
@@ -51,9 +51,9 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, registry, servicelog, store
+from . import config, registry, servicelog, settings, store
 from .config import TOP_K
-from .providers import EmbeddingUnavailable, get_provider
+from .providers import EmbeddingUnavailable, forget_providers, get_provider
 from .registry import AmbiguousBankRef, Bank, BankExists, BankNotFound
 
 log = logging.getLogger("mnemo.api")
@@ -1675,6 +1675,82 @@ def api_status() -> dict:
         "queue": _queue_snapshot_json(),
         "banks": [_bank_info(b) for b in registry.load()],
     }
+
+
+@app.get("/api/settings", include_in_schema=False)
+def api_settings() -> dict:
+    """Machine settings, each with the value AND where it came from.
+
+    The origin is not decoration. Precedence is environment > file, so a
+    value the cabinet stored can be inert, and a form that cannot say
+    "overridden by MNEMO_PROVIDER" shows a field that silently does nothing
+    when saved.
+    """
+    resolved = settings.effective()
+    return {
+        "path": str(settings.settings_file()),
+        "exists": settings.settings_file().exists(),
+        "settings": {
+            key: {
+                "value": item.value,
+                "source": item.source,
+                "env_var": item.env_var,
+                "overridden": item.overridden,
+            }
+            for key, item in resolved.items()
+        },
+        # Shown, never editable: the cabinet reaches the service through this
+        # port and every project's `.mcp.json` holds it, so changing it from
+        # a form would cut the page off from its own backend and break wiring
+        # the form cannot see. It is an installer-level decision.
+        "readonly": {"api_host": API_HOST, "api_port": API_PORT},
+    }
+
+
+@app.put("/api/settings", include_in_schema=False)
+def api_settings_save(payload: dict = Body(...)) -> dict:
+    """Store settings. Applies on the next service start, and says so.
+
+    Hot application is deliberately not promised: `dim` and `model` are part
+    of every bank's `provider_key`, so swapping them under a running index is
+    how two vector spaces end up in one database.
+    """
+    doc: dict = {}
+    if "provider" in payload:
+        chosen = str(payload["provider"] or "").strip().lower()
+        if chosen not in ("local", "api"):
+            raise ApiError("bad_request",
+                           f"unknown provider {chosen!r} (known: local, api)")
+        doc["provider"] = chosen
+    api_in = payload.get("api")
+    if isinstance(api_in, dict):
+        api_doc: dict = dict(settings.load().get("api") or {})
+        for key in ("url", "model", "key"):
+            if key in api_in:
+                api_doc[key] = str(api_in[key] or "")
+        if "dim" in api_in:
+            try:
+                api_doc["dim"] = max(0, int(api_in["dim"] or 0))
+            except (TypeError, ValueError):
+                raise ApiError("bad_request",
+                               "dim must be a whole number") from None
+        if "timeout" in api_in:
+            try:
+                api_doc["timeout"] = float(api_in["timeout"] or 60.0)
+            except (TypeError, ValueError):
+                raise ApiError("bad_request",
+                               "timeout must be a number") from None
+        doc["api"] = api_doc
+    if not doc:
+        raise ApiError("bad_request", "expected 'provider' and/or 'api'")
+
+    settings.save(doc)
+    # A cached provider instance holds the url/model/dim it was built with,
+    # so an edit that was meant to replace it would otherwise be invisible
+    # until a restart even where a restart is not needed.
+    forget_providers()
+    return {"ok": True, "path": str(settings.settings_file()),
+            "restart_required": True, **api_settings()}
 
 
 @app.get("/api/logs", include_in_schema=False)

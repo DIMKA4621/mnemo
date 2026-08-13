@@ -1914,6 +1914,111 @@ def test_env_file() -> None:
               f"batch={seen['batch']} file={seen['file']!r}")
 
 
+def test_machine_settings() -> None:
+    """env > file > default, and nothing freezes a value at import time."""
+    print("\n=== machine settings ===")
+    import subprocess
+
+    from src import settings as settings_mod
+
+    def resolved(state: Path, extra: dict[str, str] | None = None) -> dict:
+        """Resolve settings in a FRESH interpreter.
+
+        A subprocess, not a monkeypatch, because the bug this guards against
+        is exactly an import-time binding: inside this process `config` is
+        already imported and would hide it.
+        """
+        env = dict(os.environ)
+        for key in list(env):
+            if key.startswith("MNEMO_"):
+                env.pop(key)
+        env["MNEMO_STATE_DIR"] = str(state)
+        env.update(extra or {})
+        result = subprocess.run(
+            [sys.executable, "-c",
+             "import sys, json; sys.path.insert(0, sys.argv[1]);"
+             "from src import settings;"
+             "from src.providers import get_provider;"
+             "print(json.dumps({"
+             " 'provider': settings.provider(),"
+             " 'url': settings.api_url(),"
+             " 'dim': settings.api_dim(),"
+             " 'source': settings.effective()['provider'].source,"
+             " 'instance': get_provider().name,"
+             "}))",
+             str(Path(__file__).resolve().parent.parent)],
+            capture_output=True, text=True, env=env,
+        )
+        if not result.stdout.strip():
+            check("the settings probe ran at all", False, detail=result.stderr[-400:])
+            return {}
+        return json.loads(result.stdout.strip().splitlines()[-1])
+
+    with tempfile.TemporaryDirectory(prefix="mnemo settings ") as raw:
+        state = Path(raw)
+
+        seen = resolved(state)
+        check("an absent settings.json is not an error",
+              seen.get("provider") == "local" and seen.get("source") == "default",
+              detail=str(seen))
+
+        (state / "settings.json").write_text(
+            json.dumps({"version": 1, "provider": "api",
+                        "api": {"url": "http://127.0.0.1:11434/v1/embeddings",
+                                "model": "bge-m3", "dim": 1024},
+                        "note": "a human left this here"}),
+            encoding="utf-8",
+        )
+        seen = resolved(state)
+        check("a stored provider is read from the file",
+              seen.get("provider") == "api" and seen.get("source") == "file",
+              detail=str(seen))
+        check("and the endpoint comes with it",
+              seen.get("dim") == 1024 and "11434" in str(seen.get("url")),
+              detail=str(seen))
+        # The whole point of resolving in a subprocess: `get_provider()` must
+        # honour the stored value, not the one bound when the module loaded.
+        check("get_provider follows the file, not an import-time constant",
+              seen.get("instance") == "api", detail=str(seen))
+
+        seen = resolved(state, {"MNEMO_PROVIDER": "local"})
+        check("a real environment variable beats the file",
+              seen.get("provider") == "local" and seen.get("source") == "env",
+              detail=str(seen))
+
+        # Saving must not eat a key we do not own — same rule as banks.json.
+        os.environ["MNEMO_SETTINGS_FILE"] = str(state / "settings.json")
+        try:
+            settings_mod.load(force=True)
+            settings_mod.save({"provider": "local"})
+            doc = json.loads((state / "settings.json").read_text(encoding="utf-8"))
+        finally:
+            os.environ.pop("MNEMO_SETTINGS_FILE", None)
+            settings_mod.load(force=True)
+        check("saving preserves a hand-written key",
+              doc.get("note") == "a human left this here", detail=str(doc))
+        check("and keeps the rest of the endpoint",
+              (doc.get("api") or {}).get("dim") == 1024, detail=str(doc))
+        check("while writing the new value",
+              doc.get("provider") == "local", detail=str(doc))
+
+        # A secret must never come back out of the settings endpoint.
+        os.environ["MNEMO_SETTINGS_FILE"] = str(state / "settings.json")
+        os.environ["MNEMO_API_EMBED_KEY"] = "sk-secret-value"
+        try:
+            settings_mod.load(force=True)
+            report = settings_mod.effective()
+        finally:
+            os.environ.pop("MNEMO_API_EMBED_KEY", None)
+            os.environ.pop("MNEMO_SETTINGS_FILE", None)
+            settings_mod.load(force=True)
+        check("the key is reported as set, never echoed",
+              report["api.key_set"].value is True
+              and "sk-secret-value" not in json.dumps(
+                  {k: v.value for k, v in report.items()}),
+              detail=str({k: v.value for k, v in report.items()}))
+
+
 def main() -> int:
     test_scaffold()
     test_scaffold_template_project()
@@ -1934,6 +2039,7 @@ def main() -> int:
     test_bank_resolution()
     test_model_cache_validation()
     test_env_file()
+    test_machine_settings()
     print(
         f"\n{_passed} passed, {_failed} failed, "
         f"{_xfailed} xfailed (awaiting a later phase), {_xpassed} xpassed"

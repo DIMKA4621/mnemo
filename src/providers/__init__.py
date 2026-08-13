@@ -7,22 +7,22 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from ..config import EMBED_PROVIDER
+from .. import settings
 from .base import EmbeddingProvider, EmbeddingUnavailable
 
-__all__ = ["EmbeddingProvider", "EmbeddingUnavailable", "get_provider"]
+__all__ = [
+    "EmbeddingProvider",
+    "EmbeddingUnavailable",
+    "forget_providers",
+    "get_provider",
+]
 
 
 @lru_cache(maxsize=None)
-def get_provider(spec: str | None = None) -> EmbeddingProvider:
-    """Resolve a provider by name.
-
-    Precedence (Memory-contracts-v3 §2.3): explicit ``spec`` → the bank's
-    ``provider`` field (the caller passes it as ``spec``) → ``$MNEMO_PROVIDER``
-    → ``"local"``. Cached per spec: providers are stateless handles and the
-    local one memoises the loaded model behind it.
-    """
-    chosen = (spec or EMBED_PROVIDER).strip().lower()
+def _build(chosen: str) -> EmbeddingProvider:
+    """Construct one provider. Cached on the RESOLVED name, not on the
+    argument: ``get_provider(None)`` must not pin whatever the machine
+    default happened to be the first time it was called."""
     if chosen == "local":
         from .local import LocalProvider
 
@@ -34,3 +34,29 @@ def get_provider(spec: str | None = None) -> EmbeddingProvider:
 
         return ApiProvider()
     raise ValueError(f"unknown embedding provider {chosen!r} (known: local, api)")
+
+
+def get_provider(spec: str | None = None) -> EmbeddingProvider:
+    """Resolve a provider by name.
+
+    Precedence (Memory-contracts-v3 §2.3): explicit ``spec`` → the bank's
+    ``provider`` field (the caller passes it as ``spec``) → the machine
+    setting (``MNEMO_PROVIDER`` or ``settings.json``) → ``"local"``.
+
+    The machine default is read **here, per call**, and only the resolved name
+    is memoised. Reading it at import — as this did — meant the cabinet could
+    store a new provider, the service could restart its settings, and every
+    caller would still be handed the provider the module was imported with.
+    """
+    chosen = (spec or settings.provider()).strip().lower()
+    return _build(chosen)
+
+
+def forget_providers() -> None:
+    """Drop the construction cache — after a settings change, and in tests.
+
+    Providers are handles, but ``api`` snapshots url/model/dim at
+    construction (they define ``provider_key``), so a cached instance
+    outlives an edit that was meant to replace it.
+    """
+    _build.cache_clear()

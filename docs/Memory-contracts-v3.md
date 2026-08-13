@@ -50,6 +50,7 @@
 | `src/index.py` | D | 1 | engine-dev |
 | `src/search.py` | H | 0, 2 | engine-dev |
 | `src/registry.py` | G | 2 | **service-dev** |
+| `src/settings.py` | G | 7 | **engine-dev** — машинні налаштування (§6.6) **[NEW]** |
 | `src/servicelog.py` | I | 2 | service-dev |
 | `src/workqueue.py` | E | 3 | service-dev |
 | `src/watcher.py` | F | 3 | service-dev |
@@ -842,6 +843,56 @@ def delete_index(index_id: str) -> tuple[int, list[Path]]   # (removed, locked)
 
 Наслідок для UI: перейменування банку — операція, яка може відмовити; форму
 треба будувати з обробкою 409.
+
+### 6.6 Машинні налаштування — `settings.json` **[NEW]**
+
+`src/settings.py`, файл `STATE_DIR / "settings.json"`. Той самий шаблон, що
+`banks.json`, на рівень вище: `banks.json` налаштовує **банк**,
+`settings.json` — **машину**. Обидва редаговні руками, обидва перечитуються
+за зміною mtime, обидва зберігають чужі ключі.
+
+```json
+{
+  "version": 1,
+  "provider": "api",
+  "api": {"url": "http://127.0.0.1:11434/v1/embeddings",
+          "model": "bge-m3", "dim": 1024, "key": "", "timeout": 60}
+}
+```
+
+* **Пріоритет: env > файл > дефолт у коді.** Змінна, виставлена на один
+  прогін, мусить бити збережене значення, інакше скрипти й CI перестають бути
+  передбачуваними. Ціна — збережене значення може бути **інертним**, тому
+  `effective()` віддає ще й `source`, а кабінет **зобовʼязаний** показати
+  перекриття. Форма, яка цього не каже, показує поле, що мовчки нічого не
+  робить.
+* **Усе віддає функція, ніколи не константа.** `config.py` рахує кноби один
+  раз при імпорті; значення, редаговане з кабінету, такою константою бути не
+  може — це той самий шрам, що `BANKS_FILE` (замерзлий шлях залив порожні
+  бази в справжню `state/`). Тому `settings.provider()`, а не
+  `from .settings import PROVIDER`.
+* **Кеш провайдерів мусить скидатись** (`providers.forget_providers()`):
+  `ApiProvider` знімає `url`/`model`/`dim` при конструюванні, бо вони входять
+  у `provider_key`, тож закешований інстанс пережив би редагування.
+* Файл зʼявляється лише при відхиленні від дефолту; його відсутність — норма.
+* Туди їде **тільки те, що людина справді налаштовує**. Свідомо **не** їде:
+  * **порт API** — кабінет ходить у службу **через нього**, і кожен
+    `.mcp.json` його тримає; зміна з форми відрізала б сторінку від власного
+    бекенда й зламала б проводку, якої форма не бачить. Показуємо
+    (`readonly`), не редагуємо;
+  * **`pad_budget`** — виміряна властивість бекенда, а не смак; хибне
+    значення коштує 2× мовчки. Приїде, коли кнопка калібрування зможе його
+    **виміряти й записати**.
+* Застосування — **через рестарт служби**, і так і кажемо
+  (`restart_required: true`). Гарячого застосування не обіцяємо: `dim` і
+  `model` входять у `provider_key` кожного банку, тож підміна під живим
+  індексом — це два векторні простори в одній базі.
+* `api.key` **ніколи не віддається назад** — лише `api.key_set: bool`.
+  Сторінка налаштувань, яка луною повертає секрет, кладе його на скріншот.
+
+**HTTP:** `GET /api/settings` (значення + `source` + `readonly`),
+`PUT /api/settings` (приймає `provider` і/або `api`, віддає збережений стан і
+`restart_required`). Обидва — приватні, під сервісним токеном.
 
 ---
 
@@ -2181,10 +2232,11 @@ CLI лишається детермінованим примітивом: або
 | `MNEMO_RECONCILE_ON_START` | `1` | watcher / service-dev | наздогнати зміни, зроблені поки сервіс лежав **[NEW]** |
 | `MNEMO_LOG_RETENTION_DAYS` | `30` | logs / service-dev | NFR-8 |
 | `MNEMO_LOG_MAX_ROWS` | `200000` | logs / service-dev | backstop за рядками, `0` = вимкнено **[NEW]** |
-| `MNEMO_API_EMBED_URL` | — | providers / engine-dev | ендпоінт `api`-провайдера (фаза 7) **[NEW]** |
-| `MNEMO_API_EMBED_KEY` | — | providers / engine-dev | ключ `api`-провайдера **[NEW]** |
-| `MNEMO_API_EMBED_MODEL` | — | providers / engine-dev | модель `api`-провайдера **[NEW]** |
-| `MNEMO_API_EMBED_DIM` | — | providers / engine-dev | розмірність `api`-провайдера (обовʼязкова) **[NEW]** |
+| `MNEMO_SETTINGS_FILE` | `$STATE_DIR/settings.json` | settings / engine-dev | шлях машинних налаштувань **[NEW]** |
+| `MNEMO_API_EMBED_URL` | — | providers / engine-dev | ендпоінт `api`-провайдера; перекриває `api.url` у `settings.json` **[NEW]** |
+| `MNEMO_API_EMBED_KEY` | — | providers / engine-dev | ключ `api`-провайдера; перекриває `api.key` **[NEW]** |
+| `MNEMO_API_EMBED_MODEL` | — | providers / engine-dev | модель `api`-провайдера; перекриває `api.model` **[NEW]** |
+| `MNEMO_API_EMBED_DIM` | — | providers / engine-dev | розмірність `api`-провайдера (обовʼязкова); перекриває `api.dim` **[NEW]** |
 
 Зникають з v2: `INJECT_LOG_*` (JSONL більше немає).
 
