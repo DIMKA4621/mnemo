@@ -45,7 +45,7 @@ from fastapi import (
     Body, FastAPI, Query, Request, Security, WebSocket, WebSocketDisconnect,
 )
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from fastapi.security import HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -964,9 +964,27 @@ async def _validation_handler(request: Request, exc: RequestValidationError):
 
 @app.exception_handler(StarletteHTTPException)
 async def _http_handler(request: Request, exc: StarletteHTTPException):
-    # Framework-level failures (unknown route, wrong method). Domain 404s go
-    # through ApiError with a precise code; these are just bad requests.
-    code = {401: "unauthorized", 405: "bad_request", 404: "bad_request"}.get(
+    # A route that does not exist gets an EMPTY body — no envelope.
+    #
+    # The envelope is this API's way of describing a *domain* failure, and a
+    # path nobody registered is not one: there is no bank, no query and no
+    # rule that was broken, only an address that means nothing here.
+    #
+    # It also actively lies to one caller. An MCP client that gets 401 starts
+    # OAuth discovery and probes `/.well-known/oauth-*`; RFC 6749 says an
+    # OAuth error body is `{"error": "<string>"}`, while ours makes `error` an
+    # object. The client's schema check fails on that field and it reports
+    # "404 Not Found" — burying the real 401, which carries a precise
+    # explanation of the stale token that actually caused this. Three separate
+    # sessions chased that phantom 404 (`topics/search-quality.md` A6).
+    #
+    # 404 with no body says exactly as much and cannot be misparsed. Every
+    # other framework failure — 405, 401, anything else — keeps the envelope:
+    # those name something the caller did, and a client acting on them is
+    # asking our API a question, not a spec's.
+    if exc.status_code == 404:
+        return Response(status_code=404)
+    code = {401: "unauthorized", 405: "bad_request"}.get(
         exc.status_code, "internal"
     )
     return JSONResponse(

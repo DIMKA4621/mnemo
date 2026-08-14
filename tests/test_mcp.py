@@ -325,6 +325,29 @@ async def main() -> int:
     check("the segment is refused even with no credential at all",
           _status("/mcp/anything", None, method="POST") == 400)
 
+    # A route that does not exist answers with an EMPTY body, and the reason
+    # is a real bug that cost three sessions. A rejected MCP client starts
+    # OAuth discovery against `/.well-known/oauth-*`; RFC 6749 says that error
+    # body is `{"error": "<string>"}`, and ours made `error` an object, so the
+    # client's schema check failed and it reported "404 Not Found" — hiding
+    # the 401 that actually explained the stale token (`search-quality.md` A6).
+    for probe in ("/.well-known/oauth-protected-resource",
+                  "/.well-known/oauth-authorization-server",
+                  "/no-such-route"):
+        check(f"{probe} is 404", _status(probe, None) == 404)
+        check(f"{probe} carries NO envelope", _body(probe, None) == "",
+              detail=_body(probe, None)[:120])
+
+    # ...while everything that names something the caller did keeps it. The
+    # split is "route does not exist" vs "your request was wrong", not
+    # "404 vs the rest": a domain 404 is still an answer about a bank.
+    missing_bank = _body(f"/api/banks/no-such-bank-xyz", token)
+    check("a DOMAIN 404 still carries the envelope",
+          '"bank_not_found"' in missing_bank, detail=missing_bank[:160])
+    check("a 405 still carries the envelope",
+          '"error"' in _body("/api/status", token, method="DELETE"),
+          detail=_body("/api/status", token, method="DELETE")[:160])
+
     others = [name for name in ids if name != bank]
     if others:
         other = others[0]
