@@ -488,10 +488,15 @@ def _open_bank(bank: registry.Bank):
 
 
 def _open_for_rebuild(bank: registry.Bank):
-    """Open a bank that is about to be wiped: reset first, then record meta."""
+    """Open a bank that is about to be wiped: reset first, then record meta.
+
+    ``dim`` is what makes the wipe a real one. The vec0 column width is part
+    of the table definition, so recreating it at the OLD width for a provider
+    that sends a new one refuses every insert and leaves the bank empty.
+    """
     provider = get_provider(bank.provider)
     conn = store.connect(bank.db_path)
-    store.reset_index(conn)
+    store.reset_index(conn, dim=provider.dim)
     store.init_meta(
         conn,
         bank_id=bank.id,

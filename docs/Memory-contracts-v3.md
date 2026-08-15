@@ -325,7 +325,7 @@ def init_meta(conn, *, bank_id: str, bank_root: str, provider_key: str,
               dim: int) -> None
 def get_meta(conn) -> dict[str, str]
 def needs_rebuild(conn, *, provider_key: str, dim: int) -> bool
-def reset_index(conn) -> None            # drops all chunks/vectors/fts/files
+def reset_index(conn, *, dim: int) -> None   # drops chunks/vectors/fts/files
 def get_indexed_hashes(conn) -> dict[str, str]
 def get_file_row(conn, path: str) -> sqlite3.Row | None
 def insert_chunk(conn, *, chunk_uid: str, path: str, chunk_index: int,
@@ -357,6 +357,17 @@ recovery, тож розмір файлу треба міряти **до** `probe
 `meta.provider_key` ≠ активний, або `meta.embedding_dim` ≠ `dim`. Реакція —
 `reset_index` + повний реіндекс (це вирішує і «міграцію індексів» з
 `Memory-implementation-v3.md` §6: нічого не конвертуємо).
+
+**`dim` у `reset_index` обовʼязковий, і це не стиль.** Ширина колонки `vec0` —
+частина визначення таблиці, тож витирання, яке перестворює її старою шириною,
+відхиляє **кожну** вставку («Dimension mismatch … Expected 1024 … received
+1536»), і банк лишається порожнім: старі вектори видалено, нові не прийнято.
+Гірше — `chunks` при цьому наповнюється, тож банк виглядає повним і не
+знаходить нічого. Параметр був необовʼязковий із фолбеком на `meta`, і рівно
+той фолбек дав ваду (2026-08-15, перехід на OpenAI 1536). Викликач, який не
+може назвати ширину, не знає, для якого провайдера перебудовує, — чесного
+фолбеку тут немає. Обидва шляхи перебудови (`index._open_bank` і
+`workqueue._open_for_rebuild`) передають `provider.dim`.
 
 `mtime_ns` і `size` зберігаються **для UI та діагностики**. Джерело істини про
 зміну — **тільки sha256**; жодного «швидкого сканування за mtime» не вводимо

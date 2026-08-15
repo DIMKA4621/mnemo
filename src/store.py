@@ -379,24 +379,30 @@ def needs_rebuild(
     return meta.get("chunker_key") != chunker_key()
 
 
-def reset_index(conn: sqlite3.Connection, *, dim: int | None = None) -> None:
+def reset_index(conn: sqlite3.Connection, *, dim: int) -> None:
     """Drop every chunk, vector, FTS row and hash; keep the meta.
 
     DROP rather than DELETE: a rebuild may be triggered by a dimensionality
     change, and the ``vec0`` column width is part of the table definition.
 
-    Pass ``dim`` — the width of the vectors that are about to be written — so
-    this can run **before** ``init_meta`` claims the new provider. Order
-    matters: if meta were updated first and the process died before the wipe,
-    meta would claim provider B over provider A's vectors, ``needs_rebuild``
-    would answer False forever, and search would silently blend incomparable
-    vectors. Wiping first is recoverable; the reverse is not. ``dim=None``
-    falls back to what meta already records, for callers rebuilding in place.
+    ``dim`` is the width of the vectors that are about to be written, and it
+    is **required**. It used to default to what meta already recorded, which
+    reads like a convenience and is a trap: the one caller that omitted it
+    dropped a ``float[1024]`` table and recreated it ``float[1024]`` for a
+    provider about to send 1536, so every insert failed with a dimension
+    mismatch and the bank ended up empty — old vectors gone, new ones
+    refused. A caller that cannot name the width does not know which provider
+    it is rebuilding for, so there is no honest fallback to give it.
+
+    Call this **before** ``init_meta`` claims the new provider. Order matters:
+    if meta were updated first and the process died before the wipe, meta
+    would claim provider B over provider A's vectors, ``needs_rebuild`` would
+    answer False forever, and search would silently blend incomparable
+    vectors. Wiping first is recoverable; the reverse is not.
     """
     for table in _CONTENT_TABLES:
         conn.execute(f"DROP TABLE IF EXISTS {table}")
-    width = dim or _schema_int(_read_meta(conn).get("embedding_dim")) or EMBEDDING_DIM
-    _create_content(conn, width)
+    _create_content(conn, dim)
     conn.commit()
 
 

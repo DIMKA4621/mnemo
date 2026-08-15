@@ -80,8 +80,13 @@ class HashProvider(EmbeddingProvider):
     "any chunk will do", which would make every ranking assertion vacuous.
     """
 
-    def __init__(self, model: str = "bagofwords-v1") -> None:
+    def __init__(self, model: str = "bagofwords-v1", dim: int = _DIM) -> None:
         self._model = model
+        # Width is a constructor argument so a test can change the DIMENSION
+        # rather than only the model name. Those are different failure modes:
+        # the vec0 column width is part of the table definition, so a rebuild
+        # that keeps the old width refuses every insert.
+        self._dim = dim
 
     @property
     def name(self) -> str:
@@ -93,13 +98,13 @@ class HashProvider(EmbeddingProvider):
 
     @property
     def dim(self) -> int:
-        return _DIM
+        return self._dim
 
     def _vector(self, text: str) -> list[float]:
-        vec = [0.0] * _DIM
+        vec = [0.0] * self._dim
         for token in re.findall(r"\w+", text.lower(), re.UNICODE):
             digest = hashlib.sha1(token.encode("utf-8")).hexdigest()[:8]
-            vec[int(digest, 16) % _DIM] += 1.0
+            vec[int(digest, 16) % self._dim] += 1.0
         norm = math.sqrt(sum(v * v for v in vec))
         return [v / norm for v in vec] if norm else vec
 
@@ -491,6 +496,84 @@ def test_provider_change_rebuilds() -> None:
             conn.close()
 
 
+def test_rebuild_survives_a_dimension_change() -> None:
+    """A wider provider must rebuild through the QUEUE, not just through index.
+
+    This is the shape that shipped broken. `test_provider_change_rebuilds`
+    above changes the model but keeps the width, and it goes through
+    `index._open_bank` — the caller that always passed `dim`. The queue's
+    `_open_for_rebuild` did not, so it recreated the vec0 table at whatever
+    width meta already held, ignoring the provider about to write. Every
+    insert then failed with a dimension mismatch.
+
+    Note what the first assertion covers: the very FIRST bulk build through
+    the queue was already wrong, because `connect()` creates the table at the
+    default 1024 and the wipe kept that width. Real models are all 1024, so
+    the coincidence hid it; only a provider of a different width shows it.
+
+    And `chunks_indexed` is checked, not `chunk_count`: the text rows land in
+    `chunks` even when the vector insert fails, so a bank with a broken index
+    does not look empty — it looks full and returns nothing.
+    """
+    print("\n=== rebuild across a dimension change ===")
+    from src import registry, workqueue  # noqa: PLC0415 - keeps import cost local
+
+    with tempfile.TemporaryDirectory(prefix="mnemo dim ") as raw:
+        tmp = Path(raw)
+        root = tmp / "memory"
+        _build(root)
+        state = tmp / "state"
+        state.mkdir()
+
+        narrow = HashProvider(model="narrow-v1", dim=_DIM)
+        wide = HashProvider(model="wide-v1", dim=_DIM * 3)
+        bank = registry.Bank(id="dimtest", name="dimtest", root=root)
+
+        prev_state = os.environ.get("MNEMO_STATE_DIR")
+        os.environ["MNEMO_STATE_DIR"] = str(state)
+        active = {"p": narrow}
+        real_get = workqueue.get_provider
+        workqueue.get_provider = lambda spec=None: active["p"]  # type: ignore[assignment]
+        try:
+            conn, provider = workqueue._open_for_rebuild(bank)
+            try:
+                first = reconcile(conn, provider, bank.root)
+                check("the first bulk build through the queue embeds anything",
+                      first.chunks_indexed > 0,
+                      detail=f"{first.chunks_indexed} chunks, "
+                             f"errors={[e[1] for e in first.errors][:1]}")
+            finally:
+                conn.close()
+
+            active["p"] = wide
+            conn, provider = workqueue._open_for_rebuild(bank)
+            try:
+                check("the wiped table is recreated at the NEW width",
+                      provider.dim == _DIM * 3,
+                      detail=f"provider dim {provider.dim}")
+                again = reconcile(conn, provider, bank.root)
+                # The assertion that fails on the old code: the vector insert
+                # raised a dimension mismatch, so nothing was embedded.
+                check("the wider provider actually rebuilds the bank",
+                      again.chunks_indexed == first.chunks_indexed,
+                      detail=f"{again.chunks_indexed} indexed vs "
+                             f"{first.chunks_indexed} before")
+                check("the rebuild reports no errors",
+                      not again.errors,
+                      detail=str([e[1] for e in again.errors][:1]))
+                hits = search(conn, "rollback", provider=provider, top_k=3)
+                check("search works against the rebuilt index",
+                      len(hits) > 0, detail=f"{len(hits)} hits")
+            finally:
+                conn.close()
+        finally:
+            workqueue.get_provider = real_get  # type: ignore[assignment]
+            if prev_state is None:
+                os.environ.pop("MNEMO_STATE_DIR", None)
+            else:
+                os.environ["MNEMO_STATE_DIR"] = prev_state
+
+
 def test_chunking_rule() -> None:
     """No chunk is a bare heading, and changing the rule rebuilds the bank."""
     print("\n=== chunking rule ===")
@@ -735,6 +818,7 @@ def main() -> int:
     test_incremental_reindex()
     test_prune_follows_the_files()
     test_provider_change_rebuilds()
+    test_rebuild_survives_a_dimension_change()
     test_chunking_rule()
     test_batch_planning()
     test_missing_extension_support_is_explained()
