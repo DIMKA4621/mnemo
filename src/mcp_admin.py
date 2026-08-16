@@ -74,7 +74,9 @@ def _resolve(ref: str):
 def _bank_line(info: dict) -> str:
     flags = []
     if not info.get("enabled"):
-        flags.append("disabled")
+        # The state itself, not a blanket "disabled": an agent reading this
+        # needs to know whether the bank still answers a search.
+        flags.append(info.get("state") or "disabled")
     if not info.get("exists"):
         flags.append("ROOT MISSING")
     if info.get("rebuild_pending"):
@@ -135,6 +137,30 @@ def run_bank_remove(ref: str, drop_index: bool = True) -> str:
     kept = "" if drop_index else " (its index file was kept on disk)"
     return (f"[mnemo] removed {bank.name} from the registry{kept}. "
             f"The .md under {bank.root.as_posix()} were not touched.")
+
+
+def run_bank_state(bank: str, state: str) -> str:
+    """Switch a bank between `enabled`, `frozen` and `disabled`.
+
+    `frozen` is the useful middle: the bank stops following its files but
+    stays searchable, so changing the machine's embedding backend does not
+    force a rebuild of every bank on it.
+    """
+    from .api import PatchBankRequest, api_patch_bank
+
+    target, problem = _resolve(bank)
+    if problem:
+        return problem
+    try:
+        info = api_patch_bank(target.id, PatchBankRequest(state=state))
+    except Exception as exc:  # noqa: BLE001
+        return _problem(exc)
+    said = {
+        "enabled": "watched and searchable; catching up on what changed",
+        "frozen": "not watched, still searchable — the index is held as it is",
+        "disabled": "not watched and not searchable; still registered",
+    }[info["state"]]
+    return f"[mnemo] {info['name']} is now {info['state']} — {said}"
 
 
 def run_reindex(bank: str, path: str | None = None, full: bool = False) -> str:
@@ -249,6 +275,12 @@ def _register(mcp: MCPServer) -> None:
     def bank_remove(ref: str, drop_index: bool = True) -> str:
         """Unregister a bank by name or id. Never deletes its .md files."""
         return run_bank_remove(ref, drop_index)
+
+    @mcp.tool()
+    def bank_state(bank: str, state: str) -> str:
+        """Set a bank to 'enabled', 'frozen' (kept searchable, not watched)
+        or 'disabled' (off, still registered)."""
+        return run_bank_state(bank, state)
 
     @mcp.tool()
     def reindex(bank: str, path: str | None = None, full: bool = False) -> str:

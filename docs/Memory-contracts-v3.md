@@ -701,7 +701,7 @@ else:                              status = "ready"
       "name": "mnemo",
       "root": "E:/work_projects/other/mnemo/.claude",
       "provider": "local",
-      "enabled": true,
+      "state": "enabled",
       "exclude": [".git/**", ".venv/**", "node_modules/**", "__pycache__/**"],
       "added_at": "2026-07-26T12:00:00+03:00",
       "token": "0f1e2d3c4b5a69780f1e2d3c4b5a69780f1e2d3c4b5a6978"
@@ -716,13 +716,44 @@ else:                              status = "ready"
 | `name` | string | так | **унікальна** людська назва — це публічна адреса банку (6.5); за замовчуванням імʼя теки-кореня, з суфіксом `-2`, `-3` при колізії |
 | `root` | string | так | **абсолютний** шлях, POSIX-роздільники (`/`) навіть на Windows |
 | `provider` | `"local" \| "api" \| null` | ні | `null` → провайдер сервісу (`MNEMO_PROVIDER`) |
-| `enabled` | bool | ні (типово `true`) | `false` → не стежимо, не індексуємо, у пошуку віддаємо 404 |
+| `state` | `"enabled" \| "frozen" \| "disabled"` | ні (типово `enabled`) | **[NEW]** три стани банку, див. нижче |
+| ~~`enabled`~~ | bool | — | **замінено на `state`.** Читається зі старих файлів (`false` → `disabled`, `true`/відсутнє → `enabled`) і при перезаписі **зникає**: два поля про один факт вільні розійтися при ручній правці |
 | `exclude` | string[] | ні | glob-патерни відносно кореня; типове значення — у таблиці вище **[NEW]** |
 | `added_at` | string | так | ISO-8601 з офсетом |
 | `token` | string(48) | так | **[NEW]** власний токен банку — 48 hex, той самий генератор, що й `api.token`. Відкриває MCP-обличчя саме цього банку (9.1). Карбується при `add`; порожній лише у банку, зареєстрованого до появи токенів і ще не мігрованого |
 
 Невідомі поля **зберігаються as-is** при перезаписі (щоб ручна примітка
 користувача не зникала). **[NEW]**
+
+#### Три стани банку **[NEW]**
+
+| `state` | watcher | фонова індексація | пошук / MCP | явний `reindex` |
+|---|---|---|---|---|
+| `enabled` | так | так | так | так |
+| `frozen` | **ні** | **ні** | **так** | **так** |
+| `disabled` | ні | ні | ні | ні |
+
+`frozen` існує заради однієї конкретної потреби: зміна бекенда ембедингів
+перебудовує **всі** банки машини, тож кожен експеримент коштує повний ребілд
+усього. Заморожений банк лишається придатним до пошуку, поки його індекс
+навмисно тримають нерухомим.
+
+Три властивості в коді (`registry.Bank`) — `enabled` (тільки `enabled`),
+`watched` (чи стежимо й чи виконуємо фонову роботу), `searchable` (все, крім
+`disabled`). `enabled` лишилась **обчислюваною property**, тож присвоїти її
+неможливо: стан задається лише через `state`.
+
+**Явний реіндекс замороженого банку виконується**, фоновий — ні: черга
+розрізняє їх за `trigger` (`api`/`cli`/`mcp`/`ui` проти `watcher`/`startup`).
+Інакше «повний реіндекс» у кабінеті на замороженому банку мовчки не робив би
+нічого. Реіндекс **не знімає** заморозку.
+
+**Повернення в `enabled` ставить `bulk`-задачу**: поки банк спав, файли
+змінювались, а watcher бачить лише зміни від цієї миті.
+
+Невідоме значення `state` → попередження в лог і трактування як `enabled`:
+файл рекламується як редаговний руками, тож опечатка реальна, і безпечний
+напрямок для неї — банк, який усе ще відповідає, а не той, що тихо замовк.
 
 **Наслідок появи `token`: `banks.json` — файл із секретами. [NEW]** Пишеться
 з `chmod 0600` (best-effort, як `api.token`; на Windows реальний захист —
@@ -772,10 +803,16 @@ class Bank:
     name: str
     root: Path
     provider: str | None
-    enabled: bool
+    state: str                           # "enabled" | "frozen" | "disabled"
     exclude: list[str]
     added_at: str
 
+    @property
+    def enabled(self) -> bool            # state == "enabled"
+    @property
+    def watched(self) -> bool            # watcher + background work
+    @property
+    def searchable(self) -> bool         # state != "disabled"
     @property
     def db_path(self) -> Path            # STATE_DIR / f"{id}.db"
     @property
@@ -794,7 +831,11 @@ def resolve(ref: str) -> Bank                    # see 6.4
 def add(root: Path | str, *, name: str | None = None,
         provider: str | None = None) -> Bank     # raises BankExists
 def remove(bank_id: str, *, drop_index: bool = True) -> None
-def update(bank_id: str, **fields) -> Bank       # raises BankExists on a name clash
+def update(bank_id: str, **fields) -> Bank       # name | provider | state | exclude
+                                                 # raises BankExists on a name clash,
+                                                 # ValueError on an unknown state.
+                                                 # `enabled=` is a deprecated alias for
+                                                 # `state=`; passing both is refused.
 def unique_name(candidate: str) -> str           # 'notes' -> 'notes-2' -> 'notes-3'
 def save(banks: list[Bank]) -> None              # atomic: tmp + os.replace
 
@@ -1350,6 +1391,7 @@ API token» відправило б її шукати неіснуючу про�
 | `path_outside_bank` | 400 | `path` виходить за корінь банку |
 | `file_not_found` | 404 | немає такого файлу в банку |
 | `embed_unavailable` | 503 | провайдер не дає векторів |
+| `bank_stale` | 409 | **[NEW]** вектори в індексі зібрані **іншим** провайдером, ніж той, що ембедить запит. Відповідати не можна: при різній ширині sqlite-vec кидає, а при **однаковій** — не кидає й тихо ранжує два різні простори один проти одного. Виправно на місці — перебудувати банк, — тому 409, а не `internal` |
 | `internal` | 500 | усе інше |
 
 **Маршрут, якого немає, конверта НЕ має — тіло порожнє.** **[NEW]** Конверт
@@ -1421,6 +1463,15 @@ OAuth-дискавері й стукає в `/.well-known/oauth-*`; за RFC 674
   код `embed_unavailable` (503) лишається за ендпоінтами **запису**
   (`/api/reindex`), де без векторів справді нічого не зробити.
 
+**Єдиний виняток — `bank_stale` (409). [NEW]** Мʼяка деградація тут була б
+гіршою за відмову: порожня видача читається як «нічого не записано», а при
+збігу ширини видача **не порожня**, просто беззмістовна. Перевірка йде **до**
+ембедингу (властивість індексу, і не варта завантаження моделі чи платного
+виклику) і повторюється на `search.DimensionMismatch` — ключ у `meta` вартий
+рівно стільки, скільки записав останній писар, а ширина колонки міряється по
+самій таблиці. `tree`, `file` і токен працюють далі: застарілі **вектори** не
+роблять недоступними **файли**.
+
 Кожен виклик пише один рядок у `query_events`.
 
 ### 9.5 Решта ендпоінтів
@@ -1437,7 +1488,7 @@ OAuth-дискавері й стукає в `/.well-known/oauth-*`; за RFC 674
 ```json
 {"id": "9f2a1c7b3e5d0846", "name": "mnemo",
  "root": "E:/work_projects/other/mnemo/.claude",
- "provider": "local", "enabled": true,
+ "provider": "local", "state": "enabled", "enabled": true,
  "exists": true, "git": true,
  "files": 42, "chunks": 318, "db_bytes": 4718592,
  "last_indexed": "2026-07-26T12:31:07+03:00",
@@ -1445,9 +1496,24 @@ OAuth-дискавері й стукає в `/.well-known/oauth-*`; за RFC 674
  "last_error": null}
 ```
 
+`state` і `status` — **різні питання**, і картка показує обидва: `state` це
+те, що виставив користувач (6.2), `status` — що робить індекс *зараз*.
+Заморожений банк цілком нормально читається як `ready`. `enabled` лишається
+у відповіді як **похідне** поле для старих клієнтів; у реєстрі його немає.
+
 **`POST /api/banks`** — тіло `{"root": "...", "name": null, "provider": null}`
 → `201` + `BankInfo`. Побічний ефект: ставить `bulk`-задачу з `trigger="api"`,
 `priority=LOW`, і починає стежити (фаза 3).
+
+**`PATCH /api/banks/{bank_id}`** **[NEW]** — тіло
+`{"state": "frozen"}` (також `name`, `provider`; пропущене = без змін) →
+`200` + `BankInfo` і подія `bank_status`. `root` не редагується: `id`
+похідний від нього, тож переїзд кореня — це `remove` + `add`, а не правка,
+що тихо осиротить базу.
+
+Порожнє тіло → `400 bad_request` («нічого міняти»), невідомий стан → `400`.
+**Повернення в `enabled` ставить `bulk`-задачу**: поки банк був заморожений
+чи вимкнений, файли змінювались, а watcher бачить лише зміни від цієї миті.
 
 **`GET /api/banks/{bank_id}/token`** **[NEW]** →
 
@@ -1883,8 +1949,10 @@ percent-encoding назви банку, яка на цій машині регу
   сервісний належить на `/mcp-admin` або `/mcp-tools`»;
 * сегмент у шляху → `400` з формою правильного URL і порадою
   `mnemo init --migrate`;
-* банк **вимкнено** (`enabled: false`) → токен **автентифікується** (він
+* банк **вимкнено** (`state: "disabled"`) → токен **автентифікується** (він
   справжній), і тул відповідає текстом «bank_not_found: bank X is disabled».
+  Заморожений банк тут відповідає нормально — він шукається (6.2), — а якщо
+  його вектори застаріли, тул скаже `bank_stale` замість порожньої видачі.
   Це навмисно: `401`, який власник не відрізнить від невірного токена, сказав
   би йому менше.
 
@@ -2044,13 +2112,14 @@ git-трекнутому шаблоні означав, що єдиний про
 |---|---|---|
 | адресується | одному банку — **самим токеном** (10.3); у шляху немає нічого | сервісу |
 | відкривається | **тільки** токеном банку (сервісний тут 401 — йому нема в що резолвитись) | **тільки** сервісним |
-| тули | `search`, `tree` | шість нижче |
+| тули | `search`, `tree` | сім нижче |
 
 | Тул | Аргументи | Повертає |
 |---|---|---|
 | `banks` | — | текст: усі банки зі статусом і лічильниками |
 | `bank_add` | `path: str`, `name: str \| None = None` | текст: під якою назвою зареєстровано + що індексацію поставлено в чергу |
 | `bank_remove` | `ref: str`, `drop_index: bool = True` | текст; `.md` не чіпаються ніколи |
+| `bank_state` | `bank: str`, `state: str` | **[NEW]** текст: новий стан і що він означає (6.2) |
 | `reindex` | `bank: str`, `path: str \| None = None`, `full: bool = False` | текст: «queued N task(s)» |
 | `status` | — | текст: сервіс + черга + банки |
 | `logs` | `kind: str = "index"`, `bank: str \| None = None`, `n: int = 20` | текст: останні події журналу |
@@ -2103,6 +2172,7 @@ git-трекнутому шаблоні означав, що єдиний про
 | `mnemo banks list` | API | `GET /api/banks` |
 | `mnemo banks add <path> [--name] [--provider]` | API | `POST /api/banks` |
 | `mnemo banks remove <ref> [--keep-index]` | API | `DELETE /api/banks/{id}` |
+| `mnemo banks freeze\|unfreeze\|disable <ref>` | API | **[NEW]** `PATCH /api/banks/{id}` — `unfreeze`, а не `enable`: називати варто те, що скасовуєш |
 | `mnemo search <query> [--bank] [--path-prefix] [-k]` | API | `POST /api/search` |
 | `mnemo reindex [--bank] [--path] [--full]` | API | `POST /api/reindex` |
 | `mnemo ingest [--root]` | API, **deprecated** | аліас `reindex --bank <root>`, див. 11.3 |

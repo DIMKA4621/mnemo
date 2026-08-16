@@ -165,7 +165,8 @@ def _body(path: str, token: str | None, *, method: str = "GET") -> str:
         return str(exc)
 
 
-_ADMIN_TOOLS = {"banks", "bank_add", "bank_remove", "reindex", "status", "logs"}
+_ADMIN_TOOLS = {"banks", "bank_add", "bank_remove", "bank_state",
+                "reindex", "status", "logs"}
 
 
 async def main() -> int:
@@ -239,7 +240,7 @@ async def main() -> int:
         async with ClientSession(read, write) as session:
             await session.initialize()
             admin_tools = {t.name for t in (await session.list_tools()).tools}
-            check("the admin face exposes exactly the six admin tools",
+            check("the admin face exposes exactly the admin tools",
                   admin_tools == _ADMIN_TOOLS, detail=str(sorted(admin_tools)))
             # Disjoint in both directions. One FastMCP instance filtered per
             # request would have shown every client every tool: a tool list is
@@ -271,6 +272,28 @@ async def main() -> int:
                 out = _text(await session.call_tool(name, args))
                 check(f"admin `{name}` {args} answers cleanly",
                       out.startswith(head), detail=out[:160])
+
+            # `bank_state` round-trips on a real bank: freeze it, read the
+            # state back out of `banks`, then put it back. Freezing is the
+            # safe half of the pair — a frozen bank stays searchable, so a
+            # failure between these two lines cannot blind anything.
+            froze = _text(await session.call_tool(
+                "bank_state", {"bank": bank, "state": "frozen"}))
+            listed_frozen = _text(await session.call_tool("banks", {}))
+            restored = _text(await session.call_tool(
+                "bank_state", {"bank": bank, "state": "enabled"}))
+            check("admin `bank_state` freezes and says what that means",
+                  "is now frozen" in froze and "still searchable" in froze,
+                  detail=froze[:160])
+            check("and the bank listing shows the new state",
+                  "[frozen]" in listed_frozen, detail=listed_frozen[:200])
+            check("and it goes back to enabled",
+                  "is now enabled" in restored, detail=restored[:160])
+
+            refused = _text(await session.call_tool(
+                "bank_state", {"bank": bank, "state": "nonsense"}))
+            check("an unknown state is refused as readable text",
+                  "bad_request" in refused, detail=refused[:160])
 
             # A domain problem is TEXT the agent can act on, never a raised
             # exception that ends its turn.

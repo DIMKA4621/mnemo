@@ -574,6 +574,91 @@ def test_rebuild_survives_a_dimension_change() -> None:
                 os.environ["MNEMO_STATE_DIR"] = prev_state
 
 
+def test_frozen_bank_refuses_a_stale_search() -> None:
+    """A held index must refuse, not answer out of another vector space.
+
+    This is what makes `frozen` safe. A frozen bank keeps its vectors while
+    the machine's provider moves on, and there are two failure modes:
+
+    * a **different width** — sqlite-vec raises, and the old code let that
+      surface as `500 internal`, an error about SQLite rather than about the
+      bank;
+    * the **same width, different model** — nothing raises at all, and the
+      ranking silently compares two unrelated spaces. e5-large and bge-m3 are
+      both 1024, so this is the realistic case, not the exotic one.
+
+    Both are checked, because only the first announces itself.
+    """
+    print("\n=== a frozen bank refuses a stale search ===")
+    from src import api, registry  # noqa: PLC0415
+    from src.search import DimensionMismatch  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory(prefix="mnemo stale ") as raw:
+        tmp = Path(raw)
+        root = tmp / "memory"
+        _build(root)
+
+        narrow = HashProvider(model="narrow-v1", dim=_DIM)
+        wide = HashProvider(model="wide-v1", dim=_DIM * 3)
+        same_width = HashProvider(model="other-v1", dim=_DIM)
+
+        bank = registry.Bank(id="staletest", name="staletest", root=root,
+                             state=registry.STATE_FROZEN)
+        check("the fixture bank is frozen",
+              bank.state == "frozen" and bank.searchable and not bank.watched)
+
+        paths = resolve(root)
+        conn = _open_bank(paths, narrow, False)
+        try:
+            reconcile(conn, narrow, paths.root)
+            indexed_key = store.get_meta(conn)["provider_key"]
+
+            # 1. Same width, different model: the dangerous one. Nothing in
+            #    SQLite objects, so only the provider key can catch it.
+            real_identity = api._provider_identity
+            api._provider_identity = lambda spec=None: (  # type: ignore[assignment]
+                {"name": same_width.name, "model": same_width.model,
+                 "dim": same_width.dim, "key": same_width.key}, None)
+            try:
+                err = api._stale_index_error(bank, indexed_key)
+                check("a same-width model change is still refused",
+                      err is not None and err.code == "bank_stale",
+                      detail=getattr(err, "code", "no error raised"))
+                check("and the message names both keys and the way out",
+                      err is not None and indexed_key in err.message
+                      and same_width.key in err.message
+                      and "unfreeze" in err.message,
+                      detail=getattr(err, "message", ""))
+            finally:
+                api._provider_identity = real_identity  # type: ignore[assignment]
+
+            # 2. The matching provider must NOT be refused, or a frozen bank
+            #    would never be searchable at all — which is its whole point.
+            api._provider_identity = lambda spec=None: (  # type: ignore[assignment]
+                {"name": narrow.name, "model": narrow.model,
+                 "dim": narrow.dim, "key": narrow.key}, None)
+            try:
+                check("the provider that built the index is not refused",
+                      api._stale_index_error(bank, indexed_key) is None)
+                hits = search(conn, "rollback", provider=narrow, top_k=3)
+                check("so a frozen bank still answers a search",
+                      len(hits) > 0, detail=f"{len(hits)} hits")
+            finally:
+                api._provider_identity = real_identity  # type: ignore[assignment]
+
+            # 3. Different width: sqlite-vec objects. It must arrive as a named
+            #    condition, not as a bare OperationalError from the extension.
+            named = False
+            try:
+                search(conn, "rollback", provider=wide, top_k=3)
+            except DimensionMismatch:
+                named = True
+            check("a width mismatch raises DimensionMismatch, not OperationalError",
+                  named)
+        finally:
+            conn.close()
+
+
 def test_chunking_rule() -> None:
     """No chunk is a bare heading, and changing the rule rebuilds the bank."""
     print("\n=== chunking rule ===")
@@ -819,6 +904,7 @@ def main() -> int:
     test_prune_follows_the_files()
     test_provider_change_rebuilds()
     test_rebuild_survives_a_dimension_change()
+    test_frozen_bank_refuses_a_stale_search()
     test_chunking_rule()
     test_batch_planning()
     test_missing_extension_support_is_explained()

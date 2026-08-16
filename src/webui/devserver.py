@@ -634,6 +634,45 @@ class Handler(BaseHTTPRequestHandler):
         broadcast("bank_removed", bank["id"], {"bank_id": bank["id"]})
         self.json_out(200, {"ok": True, "index_removed": drop})
 
+    def do_PATCH(self) -> None:  # noqa: N802 - stdlib name
+        parsed = urlparse(self.path)
+        if not self.authorised():
+            self.fail(401, "unauthorized", "missing or invalid token")
+            return
+        if not parsed.path.startswith("/api/banks/"):
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+
+        ref = unquote(parsed.path[len("/api/banks/"):])
+        bank = find_bank(ref)
+        if not bank:
+            self.fail(404, "bank_not_found", "no bank matches", {"ref": ref})
+            return
+
+        length = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            self.fail(422, "validation_error", "body is not valid JSON")
+            return
+
+        state = body.get("state")
+        if state is None:
+            self.fail(400, "bad_request", "nothing to change")
+            return
+        if state not in ("enabled", "frozen", "disabled"):
+            self.fail(400, "bad_request",
+                      f"unknown state {state!r} — expected one of "
+                      f"enabled, frozen, disabled")
+            return
+
+        with _lock:
+            bank["state"] = state
+            # Derived on the real side too, and the card still reads it.
+            bank["enabled"] = state == "enabled"
+        broadcast("bank_status", bank["id"], {"bank": bank_info(bank)})
+        self.json_out(200, bank_info(bank))
+
     def do_PUT(self) -> None:  # noqa: N802 - stdlib name
         parsed = urlparse(self.path)
         if not self.authorised():
@@ -894,6 +933,7 @@ class Handler(BaseHTTPRequestHandler):
             "name": name,
             "root": root,
             "provider": body.get("provider") or "local",
+            "state": "enabled",
             "enabled": True,
             "exists": True,
             "git": False,

@@ -63,9 +63,30 @@ _HEX16 = re.compile(r"^[0-9a-f]{16}$")
 
 # Fields this module owns. Anything else found in a bank object is preserved
 # verbatim under ``Bank.extra`` and written back on save.
+#
+# ``enabled`` is listed although nothing writes it any more: it is the field
+# ``state`` replaced, and a registry written before that change still carries
+# it. Leaving it out would send it to ``extra``, which round-trips — so the
+# file would keep a stale boolean next to the state it was converted into,
+# and a hand-edit to one of them would silently disagree with the other.
+# Listed here, it is read once and then gone from the document.
 _KNOWN_FIELDS = frozenset(
-    {"id", "name", "root", "provider", "enabled", "exclude", "added_at", "token"}
+    {"id", "name", "root", "provider", "state", "enabled",
+     "exclude", "added_at", "token"}
 )
+
+# The three states a bank can be in (§6.2). One field, because two booleans
+# would be two things saying the same thing and free to disagree.
+#
+#   enabled   watched, indexed, searchable — the normal state
+#   frozen    NOT watched, still searchable: the index is deliberately held
+#             still. What it buys is experiments with the machine's embedding
+#             backend, which otherwise rebuild every bank on the machine.
+#   disabled  neither watched nor searchable — off, but still registered.
+STATE_ENABLED = "enabled"
+STATE_FROZEN = "frozen"
+STATE_DISABLED = "disabled"
+STATES = (STATE_ENABLED, STATE_FROZEN, STATE_DISABLED)
 
 # Same generator and same shape as the service token (`api.api_token`) and as
 # `embed.token`: 48 hex characters. One shape for every credential mnemo mints
@@ -182,7 +203,7 @@ class Bank:
     name: str
     root: Path
     provider: str | None = None
-    enabled: bool = True
+    state: str = STATE_ENABLED
     exclude: list[str] = field(default_factory=_default_exclude)
     added_at: str = ""
     # This bank's own MCP credential. Empty only for a bank registered before
@@ -192,6 +213,37 @@ class Bank:
     # Fields a human (or a future version) put in banks.json that we do not
     # understand. Round-tripped untouched.
     extra: dict[str, Any] = field(default_factory=dict, compare=False)
+
+    # The three questions the rest of the codebase actually asks. They read as
+    # what the caller means, so a site that must change when a state is added
+    # is one that genuinely cares — not every `== "enabled"` in the tree.
+    #
+    # `enabled` is kept because it is what a dozen call sites already ask, and
+    # because it is exactly "the fully normal state". It is a property now, so
+    # it cannot be assigned: a state is set through `state`, in one place.
+
+    @property
+    def enabled(self) -> bool:
+        """Fully on — watched, indexed and searchable."""
+        return self.state == STATE_ENABLED
+
+    @property
+    def watched(self) -> bool:
+        """Whether the watcher follows it and background work runs for it.
+
+        False for a frozen bank: holding the index still is the whole point.
+        An explicit reindex is a different question — see `api_reindex`.
+        """
+        return self.state == STATE_ENABLED
+
+    @property
+    def searchable(self) -> bool:
+        """Whether search and the MCP faces may reach it.
+
+        True for a frozen bank — a held index is still an index — and False
+        only for a disabled one.
+        """
+        return self.state != STATE_DISABLED
 
     @property
     def db_path(self) -> Path:
@@ -222,13 +274,43 @@ class Bank:
                 "name": self.name,
                 "root": self.root.as_posix(),
                 "provider": self.provider,
-                "enabled": self.enabled,
+                # `state` only. Writing a derived `enabled` alongside it would
+                # put a second source of truth into a file advertised as
+                # hand-editable, and the two are free to disagree the moment
+                # somebody edits one of them.
+                "state": self.state,
                 "exclude": list(self.exclude),
                 "added_at": self.added_at,
                 "token": self.token,
             }
         )
         return data
+
+
+def _read_state(obj: dict[str, Any], name: Any) -> str:
+    """The bank's state, reading both the current and the pre-`state` shape.
+
+    ``state`` wins when present. Otherwise the boolean it replaced is
+    translated (``false`` -> disabled), which is exact: before `frozen`
+    existed, ``enabled: false`` meant not watched **and** not searchable.
+
+    An unrecognised value falls back to ``enabled`` with a warning rather
+    than to ``disabled``. banks.json is advertised as hand-editable, so a
+    typo is a realistic input — and the safe direction for a typo is a bank
+    that still answers, not one that silently stops.
+    """
+    raw = obj.get("state")
+    if raw is not None:
+        value = str(raw).strip().lower()
+        if value in STATES:
+            return value
+        log.warning(
+            "bank %r: unknown state %r — treating it as %r (expected one of %s)",
+            name, raw, STATE_ENABLED, ", ".join(STATES),
+        )
+        return STATE_ENABLED
+    # Pre-`state` registry.
+    return STATE_ENABLED if bool(obj.get("enabled", True)) else STATE_DISABLED
 
 
 def _from_json(obj: dict[str, Any]) -> Bank:
@@ -252,7 +334,7 @@ def _from_json(obj: dict[str, Any]) -> Bank:
         name=str(obj["name"]),
         root=root,
         provider=obj.get("provider"),
-        enabled=bool(obj.get("enabled", True)),
+        state=_read_state(obj, obj.get("name")),
         exclude=list(obj.get("exclude") or _default_exclude()),
         added_at=str(obj.get("added_at") or ""),
         # Read, never minted here: `load` is on every request path and must
@@ -463,8 +545,13 @@ def resolve(ref: str) -> Bank:
         # disabling a child silently blinds the parent for that subtree. An
         # explicit id or name still resolves a disabled bank — otherwise there
         # would be no way to address one in order to re-enable it.
+        #
+        # A **frozen** bank stays visible here: it is still searchable, so a
+        # path inside it must keep routing to it. Handing that path to the
+        # enclosing bank instead would answer out of a different bank's
+        # memory — quietly, and with no way for the caller to tell.
         target = _canonical(path)
-        live = [b for b in banks if b.enabled]
+        live = [b for b in banks if b.searchable]
 
         best: Bank | None = None
         best_len = -1
@@ -522,7 +609,7 @@ def add(
             name=chosen,
             root=resolved,
             provider=provider,
-            enabled=True,
+            state=STATE_ENABLED,
             exclude=_default_exclude(),
             added_at=_now_iso(),
             token=new_token(),
@@ -624,7 +711,7 @@ def _with_token(bank: Bank, token: str) -> Bank:
         name=bank.name,
         root=bank.root,
         provider=bank.provider,
-        enabled=bank.enabled,
+        state=bank.state,
         exclude=list(bank.exclude),
         added_at=bank.added_at,
         token=token,
@@ -651,10 +738,16 @@ def remove(bank_id: str, *, drop_index: bool = True) -> None:
 
 
 def update(bank_id: str, **fields: Any) -> Bank:
-    """Change ``name`` / ``provider`` / ``enabled`` / ``exclude`` of a bank.
+    """Change ``name`` / ``provider`` / ``state`` / ``exclude`` of a bank.
 
     ``root`` is not updatable: the id is derived from it, so moving a root is
     a remove + add, not an edit that silently orphans a database.
+
+    ``enabled`` is accepted as a deprecated alias for ``state`` so an older
+    caller keeps working, and is translated the same way the registry file's
+    boolean is. Passing both is refused rather than resolved by precedence:
+    the two can disagree, and guessing which one the caller meant is exactly
+    the failure this field replaced.
     """
     with _lock, _file_lock():
         banks = load(force=True)
@@ -663,9 +756,22 @@ def update(bank_id: str, **fields: Any) -> Bank:
             raise BankNotFound(f"no bank with id {bank_id!r}")
         current = banks[idx]
 
-        unknown = set(fields) - {"name", "provider", "enabled", "exclude"}
+        unknown = set(fields) - {"name", "provider", "state", "enabled", "exclude"}
         if unknown:
             raise ValueError(f"cannot update {sorted(unknown)}")
+        if "state" in fields and "enabled" in fields:
+            raise ValueError("pass 'state' or 'enabled', not both")
+
+        state = current.state
+        if "state" in fields:
+            state = str(fields["state"]).strip().lower()
+            if state not in STATES:
+                raise ValueError(
+                    f"unknown state {fields['state']!r} — "
+                    f"expected one of {', '.join(STATES)}"
+                )
+        elif "enabled" in fields:
+            state = STATE_ENABLED if bool(fields["enabled"]) else STATE_DISABLED
 
         name = current.name
         if "name" in fields:
@@ -688,7 +794,7 @@ def update(bank_id: str, **fields: Any) -> Bank:
             name=name,
             root=current.root,
             provider=fields.get("provider", current.provider),
-            enabled=bool(fields.get("enabled", current.enabled)),
+            state=state,
             exclude=list(fields.get("exclude", current.exclude)),
             added_at=current.added_at,
             # Carried, never regenerated by an edit: renaming a bank must not

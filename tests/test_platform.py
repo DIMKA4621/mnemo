@@ -1860,6 +1860,97 @@ def test_bank_resolution() -> None:
                 gone = True
             check("a disabled bank is invisible to the path form", gone)
 
+            # A FROZEN bank is still searchable, so a path inside it must keep
+            # routing to it. Handing that path to an enclosing bank instead
+            # would answer out of a different bank's memory, silently.
+            registry.update(bank.id, state="frozen")
+            check("a frozen bank is visible to the path form again",
+                  registry.resolve(str(bank_root / "logs")).id == bank.id)
+
+
+def test_bank_states() -> None:
+    """`enabled` / `frozen` / `disabled` in one field, read back-compatibly.
+
+    The state exists so that changing the machine's embedding backend does not
+    force a rebuild of every bank on it: a frozen bank stops following its
+    files but keeps answering searches.
+    """
+    from src import registry
+
+    with tempfile.TemporaryDirectory() as tmp:
+        state = Path(tmp) / "state"
+        state.mkdir()
+        with patch.object(config, "STATE_DIR", state):
+            root = Path(tmp) / "mem"
+            root.mkdir()
+            bank = registry.add(root, name="b")
+
+            check("a new bank is enabled",
+                  bank.state == "enabled" and bank.enabled
+                  and bank.watched and bank.searchable)
+
+            frozen = registry.update(bank.id, state="frozen")
+            check("frozen is not watched but stays searchable",
+                  frozen.state == "frozen" and not frozen.watched
+                  and frozen.searchable and not frozen.enabled)
+
+            off = registry.update(bank.id, state="disabled")
+            check("disabled is neither watched nor searchable",
+                  not off.watched and not off.searchable)
+
+            # `state` is the only field written. A derived `enabled` alongside
+            # it would be a second source of truth in a hand-editable file.
+            doc = json.loads(registry.banks_file().read_text(encoding="utf-8"))
+            row = doc["banks"][0]
+            check("only `state` is persisted",
+                  row.get("state") == "disabled" and "enabled" not in row)
+
+            for bad in ({"state": "nonsense"}, {"state": "frozen",
+                                                "enabled": True}):
+                refused = False
+                try:
+                    registry.update(bank.id, **bad)
+                except ValueError:
+                    refused = True
+                check(f"update refuses {bad}", refused)
+
+            # A registry written before `state` existed still reads correctly:
+            # the boolean it replaced meant exactly "enabled or fully off".
+            legacy_root = Path(tmp) / "legacy"
+            legacy_root.mkdir()
+            registry.banks_file().write_text(json.dumps({"version": 1, "banks": [
+                {"id": "ignored", "name": "old-off",
+                 "root": legacy_root.as_posix(), "enabled": False,
+                 "added_at": "t", "token": "x", "note": "hand-written"},
+            ]}), encoding="utf-8")
+            legacy = registry.load(force=True)[0]
+            check("a pre-`state` `enabled: false` reads as disabled",
+                  legacy.state == "disabled")
+
+            # An unknown value is a typo in a file advertised as editable. The
+            # safe direction is a bank that still answers, not one that stops.
+            registry.banks_file().write_text(json.dumps({"version": 1, "banks": [
+                {"id": "ignored", "name": "typo",
+                 "root": legacy_root.as_posix(), "state": "frozn",
+                 "added_at": "t", "token": "x"},
+            ]}), encoding="utf-8")
+            check("an unknown state falls back to enabled",
+                  registry.load(force=True)[0].state == "enabled")
+
+            # Fields nobody here owns survive the conversion.
+            registry.banks_file().write_text(json.dumps({"version": 1, "banks": [
+                {"id": "ignored", "name": "kept",
+                 "root": legacy_root.as_posix(), "enabled": True,
+                 "added_at": "t", "token": "x", "note": "hand-written"},
+            ]}), encoding="utf-8")
+            carried = registry.load(force=True)
+            registry.save(carried)
+            row = json.loads(
+                registry.banks_file().read_text(encoding="utf-8")
+            )["banks"][0]
+            check("an unknown field survives the rewrite",
+                  row.get("note") == "hand-written" and row["state"] == "enabled")
+
 
 def test_env_file() -> None:
     """``<state>/mnemo.env`` reaches a process that inherited no environment.
@@ -2254,6 +2345,7 @@ def main() -> int:
     test_index_paths()
     test_orphan_indexes()
     test_bank_resolution()
+    test_bank_states()
     test_model_cache_validation()
     test_env_file()
     test_machine_settings()

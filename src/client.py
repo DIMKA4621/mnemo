@@ -268,6 +268,12 @@ class Client:
             json={"root": str(root), "name": name, "provider": provider},
         )
 
+    def set_bank_state(self, bank_id: str, state: str) -> dict:
+        """Switch a bank between ``enabled`` / ``frozen`` / ``disabled``."""
+        return self._request(
+            "PATCH", f"/api/banks/{bank_id}", json={"state": state}
+        )
+
     def bank_token(self, bank_id: str) -> dict:
         """This bank's own MCP credential (§9.5). Never part of a bank list."""
         return self._request("GET", f"/api/banks/{bank_id}/token")

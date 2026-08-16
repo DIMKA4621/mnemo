@@ -747,6 +747,31 @@ def _run_prune(task: Task, bank: registry.Bank) -> None:
           took_ms=(time.perf_counter() - started) * 1000)
 
 
+# Triggers that mean "a person asked for this, now". Everything else
+# (`watcher`, `startup`) is the system deciding on its own.
+_EXPLICIT_TRIGGERS = frozenset({"api", "cli", "mcp", "ui"})
+
+
+def _may_run(bank: registry.Bank, task: Task) -> bool:
+    """Whether this task may touch this bank's index, given the bank's state.
+
+    A **disabled** bank runs nothing at all.
+
+    A **frozen** bank runs nothing the system decided by itself — that is what
+    freezing is — but it does run a task somebody explicitly asked for. Without
+    that carve-out the cabinet's "full rebuild" would silently do nothing on a
+    frozen bank, and the only way to refresh one would be to unfreeze it first,
+    which is a worse answer than simply honouring the request. It also leaves
+    the reasonable workflow intact: freeze, change the machine's backend,
+    rebuild this one bank on purpose, leave the rest untouched.
+    """
+    if bank.state == registry.STATE_DISABLED:
+        return False
+    if bank.watched:
+        return True
+    return task.trigger in _EXPLICIT_TRIGGERS
+
+
 def _execute(task: Task, running: _Running) -> None:
     try:
         bank = registry.get(task.bank_id)
@@ -757,7 +782,7 @@ def _execute(task: Task, running: _Running) -> None:
               path=task.path, trigger=task.trigger, result="skipped",
               files_indexed=0, chunks_indexed=0, files_pruned=0, took_ms=0.0)
         return
-    if not bank.enabled:
+    if not _may_run(bank, task):
         _emit("index_done", bank.id, task_id=task.id, kind=task.kind,
               path=task.path, trigger=task.trigger, result="skipped",
               files_indexed=0, chunks_indexed=0, files_pruned=0, took_ms=0.0)

@@ -33,6 +33,22 @@ from .config import (
 from .providers import EmbeddingProvider, EmbeddingUnavailable, get_provider
 from .store import get_vectors
 
+class DimensionMismatch(RuntimeError):
+    """The query vector and the indexed vectors are of different widths.
+
+    sqlite-vec refuses a MATCH whose vector is not the column's width, and it
+    is right to: the two are different embedding spaces. It surfaces as a bare
+    ``OperationalError`` from inside the extension, which reads as "something
+    broke in SQLite" — so it is translated here, where the cause is known, and
+    the API turns it into `bank_stale`.
+
+    Note this is only the half of the problem that *announces itself*. Two
+    models of the SAME width (e5-large and bge-m3 are both 1024) raise
+    nothing at all and silently rank one space against another; catching that
+    needs the provider key, which is `api._stale_index_error`.
+    """
+
+
 @dataclass
 class Hit:
     """One result. For a merged neighbour window (``span`` set), ``chunk_uid``
@@ -78,11 +94,16 @@ def _under_prefix(path: str, prefix: str) -> bool:
 
 
 def _vector_ranked(conn: sqlite3.Connection, qvec: list[float], limit: int) -> list[int]:
-    rows = conn.execute(
-        "SELECT rowid FROM vec_chunks "
-        "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-        (sqlite_vec.serialize_float32(qvec), limit),
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM vec_chunks "
+            "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+            (sqlite_vec.serialize_float32(qvec), limit),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "dimension mismatch" in str(exc).lower():
+            raise DimensionMismatch(str(exc)) from exc
+        raise
     return [r["rowid"] for r in rows]
 
 

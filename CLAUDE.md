@@ -77,7 +77,16 @@ Engine (the `.md → vectors` pipeline):
 Service (the persistent backend):
 
 - `src/registry.py` — banks registry (`state/banks.json`); resolve by
-  id, name or nested path.
+  id, name or nested path. A bank carries **one** `state` —
+  `enabled | frozen | disabled` — not a pair of booleans, since two fields
+  describing one fact are free to disagree the moment somebody hand-edits
+  the file. `frozen` is the useful middle: **not watched, still
+  searchable**, so changing the machine's embedding backend no longer costs
+  a rebuild of every bank on it. `Bank.enabled` survives as a computed
+  property (`watched` / `searchable` are the other two), which is why the
+  dozen call sites reading it needed no change and why nothing can assign
+  it. The pre-`state` boolean is still read (`false` → `disabled`) and
+  disappears on the next write.
 - `src/servicelog.py` — `service.db`: query + index events, retention.
 - `src/api.py` — FastAPI/uvicorn loopback host, and the router that
   decides which credential opens which face. **Private** `/api/*` for the
@@ -131,9 +140,9 @@ Faces:
 - `src/mcp_admin.py` — the **admin** face, mounted at `/mcp-admin` under
   a distinct server name (`mnemo-admin`, so tools namespace as
   `mcp__mnemo-admin__reindex`). Service token only. Tools: `banks`,
-  `bank_add`, `bank_remove`, `reindex`, `status`, `logs`. `reindex` lives
-  here rather than on a project face because the watcher reindexes on its
-  own within seconds of a save.
+  `bank_add`, `bank_remove`, `bank_state`, `reindex`, `status`, `logs`.
+  `reindex` lives here rather than on a project face because the watcher
+  reindexes on its own within seconds of a save.
 - `src/cli.py` — thin client of the API (`src/client.py`); `warmup`,
   `init`, `doctor`, `clean-orphans` stay local. **No hook targets any
   more** beyond the `hook-postedit` no-op shim: the discipline lives in
@@ -209,6 +218,8 @@ mnemo init [--root DIR] [--yes]     additive, idempotent project wiring; NO hook
 mnemo search "q" [--path-prefix P]  hybrid search over a bank
 mnemo reindex [--bank B] [--full]   queue a reindex (`ingest` is a deprecated alias)
 mnemo banks list|add|remove         registry, through the API
+mnemo banks freeze|unfreeze         a bank's state: frozen keeps it searchable
+     |disable <ref>                 while it stops following its files
 mnemo status | logs | tree | ui     service state, journal, tree, cabinet
 mnemo doctor                        engine, provider, model, tokens, ports, banks,
                                     orphans, and the projects needing rewiring
@@ -234,7 +245,8 @@ There is no `mnemo mcp`: MCP is HTTP inside the running service, so a session
 connects instead of spawning. Two faces, keyed by which token is presented —
 `/mcp?token=<bank-token>` (project, read-only: `search`, `tree`) and
 `/mcp-admin?token=<service-token>` (`banks`, `bank_add`, `bank_remove`,
-`reindex`, `status`, `logs`). Neither credential opens the other's face.
+`bank_state`, `reindex`, `status`, `logs`). Neither credential opens the
+other's face.
 Poke the read tools by hand at `/mcp-tools/*` (Swagger at
 `http://127.0.0.1:8918/docs`, token from `~/.claude/mnemo/state/api.token`).
 

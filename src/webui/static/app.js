@@ -341,6 +341,35 @@ function fmtMs(v) {
 const STATUS_LABEL = { ready: 'готово', indexing: 'індексується', empty: 'порожньо' };
 
 /**
+ * A bank's registry state: 'enabled' | 'frozen' | 'disabled'.
+ *
+ * `status` and `state` are different questions and the card shows both:
+ * `status` is what the index is doing right now (ready / indexing / empty),
+ * `state` is what the user set it to. A frozen bank reads `ready` — its index
+ * is complete, it simply stopped following the files.
+ *
+ * Falls back to the boolean it replaced, so the page keeps working against a
+ * backend older than this field.
+ */
+function bankState(bank) {
+  if (bank.state) return bank.state;
+  return bank.enabled === false ? 'disabled' : 'enabled';
+}
+
+const BANK_STATE_LABEL = {
+  enabled: 'Активний',
+  frozen: 'Заморожений',
+  disabled: 'Вимкнений',
+};
+
+const BANK_STATE_NOTE = {
+  enabled: 'Стежимо за файлами, індекс оновлюється сам, пошук працює.',
+  frozen: 'За файлами не стежимо — індекс лишається як є, але пошук працює. ' +
+          'Це те, що рятує від повної перебудови при зміні моделі.',
+  disabled: 'Не стежимо й не шукаємо. Банк лишається в реєстрі.',
+};
+
+/**
  * Second line under the status badge.
  *
  * Precedence is indexing > empty > ready (lead amendment), and BankInfo always
@@ -438,7 +467,7 @@ function bankCard(bank) {
   const selected = bank.id === state.selectedBankId;
   const classes = ['bank'];
   if (selected) classes.push('is-selected');
-  if (bank.enabled === false) classes.push('is-disabled');
+  if (bankState(bank) === 'disabled') classes.push('is-disabled');
 
   const badges = [
     el('span', {
@@ -450,7 +479,19 @@ function bankCard(bank) {
       ? el('span', { className: 'badge badge-git', text: 'git' })
       : el('span', { className: 'badge badge-nogit', text: 'no git' }),
   ];
-  if (bank.enabled === false) {
+  if (bankState(bank) === 'frozen') {
+    // The warning IS the badge. A frozen bank keeps answering searches out of
+    // an index that no longer follows the files, and nothing else on the card
+    // says so — `status: ready` and a chunk count both look entirely healthy.
+    badges.push(el('span', {
+      className: 'badge badge-frozen',
+      text: 'заморожено',
+      title: 'Індекс не оновлюється — файли могли змінитись після ' +
+             fmtDateTime(bank.last_indexed) +
+             '. Пошук працює й відповідає за тим станом.',
+    }));
+  }
+  if (bankState(bank) === 'disabled') {
     badges.push(el('span', { className: 'badge badge-off', text: 'вимкнено' }));
   }
   if (bank.exists === false) {
@@ -465,9 +506,17 @@ function bankCard(bank) {
   // height per bank and pinned the column's width from both sides — under
   // 287px the row wrapped, over 311px the document ended up narrower than the
   // file list. With nothing but a glyph to fit, the column is free again.
+  // Name and badges wrap together inside their own box; the menu button sits
+  // outside it and cannot be pushed onto a line of its own. A third badge —
+  // which `frozen` and `no git` together produce — used to do exactly that,
+  // costing a line and leaving the glyph stranded under the name.
   const head = el('div', { className: 'bank-row' }, [
-    el('span', { className: 'bank-name', text: bank.name, title: 'id: ' + bank.id }),
-    ...badges,
+    el('div', { className: 'bank-head' }, [
+      el('span', {
+        className: 'bank-name', text: bank.name, title: 'id: ' + bank.id,
+      }),
+      ...badges,
+    ]),
     el('button', {
       className: 'btn btn-menu',
       text: '···',
@@ -538,7 +587,9 @@ function buildBankMenu() {
     className: 'menu-item' + (opts.danger ? ' is-danger' : ''),
     text: opts.text,
     title: opts.title,
-    attrs: { role: 'menuitem' },
+    // The state entries are a choice among three, not three commands, so they
+    // announce as radios and carry `aria-checked` (set in `openBankMenu`).
+    attrs: { role: opts.role || 'menuitem' },
     on: {
       click: () => {
         const bank = bankMenu.bank;
@@ -570,6 +621,22 @@ function buildBankMenu() {
       run: (bank) => openTokenPanel(bank),
     }),
     el('div', { className: 'menu-sep' }),
+    el('div', { className: 'menu-label', text: 'Стан' }),
+    // Not a submenu and not a dialog: three states are few enough to show, and
+    // the current one has to be visible at the moment of choosing — otherwise
+    // "freeze" on an already-frozen bank looks like it did nothing. The marks
+    // are refreshed in `openBankMenu`, because one menu serves every card.
+    ...['enabled', 'frozen', 'disabled'].map((value) => {
+      const button = item({
+        text: BANK_STATE_LABEL[value],
+        title: BANK_STATE_NOTE[value],
+        role: 'menuitemradio',
+        run: (bank) => setBankState(bank, value),
+      });
+      button.dataset.state = value;
+      return button;
+    }),
+    el('div', { className: 'menu-sep' }),
     item({
       text: 'Прибрати банк',
       title: 'Зняти банк з реєстру; .md не чіпаються',
@@ -592,6 +659,14 @@ function buildBankMenu() {
 
 function openBankMenu(anchor, bank) {
   bankMenu.bank = bank;
+  // The state marks belong to the bank being opened, not to the one the menu
+  // last served — one menu, many cards.
+  const current = bankState(bank);
+  for (const button of bankMenu.root.querySelectorAll('[data-state]')) {
+    const active = button.dataset.state === current;
+    button.classList.toggle('is-current', active);
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+  }
   // Laid out before it is shown: a `position: fixed` box with no coordinates
   // paints wherever it happens to flow, so measuring it visible costs one
   // frame of the menu sitting in the corner of the page.
@@ -975,6 +1050,21 @@ function reconcileProgress(queue) {
   return changed;
 }
 
+/**
+ * Replace one bank's row with a fresh BankInfo and repaint.
+ *
+ * Shared by the `bank_status` event and by any request that answers with a
+ * BankInfo, so a change applied through the cabinet lands exactly the way the
+ * same change arriving over the socket would.
+ */
+function applyBank(info) {
+  if (!info || !info.id) return;
+  const i = state.banks.findIndex((b) => b.id === info.id);
+  if (i >= 0) state.banks[i] = info;
+  else state.banks.push(info);
+  renderBanks();
+}
+
 function setNote(bankId, text) {
   state.notes.set(bankId, text);
   renderBanks();
@@ -1000,6 +1090,30 @@ async function reindex(bank, opts) {
       : TASK_KIND_LABEL[opts.full ? 'rebuild' : 'bulk'];
     setNote(bank.id, 'поставлено: ' + what + ' · у черзі ' + res.queued +
                      ' · task ' + (res.task_ids || []).join(', '));
+  } catch (err) {
+    reportError(err);
+  }
+}
+
+/**
+ * Switch a bank between enabled / frozen / disabled (PATCH /api/banks/{id}).
+ *
+ * The card is refreshed from the response rather than patched in place: going
+ * back to `enabled` queues a catch-up on the backend, so `status` and `queued`
+ * change along with the state, and guessing them here would leave a stale card
+ * until the next poll.
+ */
+async function setBankState(bank, next) {
+  if (bankState(bank) === next) return;
+  try {
+    const info = await api('/api/banks/' + encodeURIComponent(bank.id), {
+      method: 'PATCH',
+      body: { state: next },
+    });
+    hideBanner();
+    applyBank(info);
+    setNote(bank.id, 'стан: ' +
+      (BANK_STATE_LABEL[info.state] || info.state).toLowerCase());
   } catch (err) {
     reportError(err);
   }
@@ -3271,12 +3385,7 @@ function handleEvent(envelope) {
       break;
 
     case 'bank_status':
-      if (data.bank) {
-        const i = state.banks.findIndex((b) => b.id === data.bank.id);
-        if (i >= 0) state.banks[i] = data.bank;
-        else state.banks.push(data.bank);
-        renderBanks();
-      }
+      if (data.bank) applyBank(data.bank);
       break;
 
     case 'query':

@@ -215,6 +215,13 @@ _ERROR_STATUS: dict[str, int] = {
     # writing. `internal` said only "something broke"; this names the cause
     # and the fix, and it is a state the user can actually resolve.
     "index_locked": 409,
+    # [NEW beyond §9.2] The vectors in the index were built by a different
+    # provider than the one that would embed the query. Answering anyway is
+    # not an option: at a different width sqlite-vec raises, and — worse — at
+    # the SAME width it does not, and quietly ranks one vector space against
+    # another. Its own 409 rather than `internal`, because this is a state
+    # with a fix the caller can carry out (rebuild the bank).
+    "bank_stale": 409,
     "internal": 500,
 }
 
@@ -316,9 +323,10 @@ def _resolve_bank(ref: str, *, require_enabled: bool = True) -> Bank:
         raise ApiError("bank_ambiguous", str(exc), ref=ref) from exc
     except BankNotFound as exc:
         raise ApiError("bank_not_found", str(exc), ref=ref) from exc
-    if require_enabled and not bank.enabled:
-        # A disabled bank is not watched, not indexed and not searchable —
-        # it must not look like an empty one (§6.1).
+    # The gate is `searchable`, not `enabled`: a **frozen** bank is reachable
+    # by every read path — its index is held still, not switched off. Only a
+    # disabled bank is hidden, and it must not look like an empty one (§6.1).
+    if require_enabled and not bank.searchable:
         raise ApiError("bank_not_found", f"bank {bank.name!r} is disabled", ref=ref)
     return bank
 
@@ -403,6 +411,42 @@ def _provider_identity(spec: str | None) -> tuple[dict, str | None]:
     }, None
 
 
+def _stale_index_error(bank: Bank, index_key: str | None) -> ApiError | None:
+    """``bank_stale`` when the index holds another provider's vectors.
+
+    Comparing the whole ``provider_key`` (``name:model:dim``), never the width
+    alone: the dangerous case is two different models that agree on width —
+    e5-large and bge-m3 are both 1024 — where nothing raises and the ranking
+    is simply meaningless. `store.needs_rebuild` compares the same key for the
+    same reason.
+
+    Normally unreachable, because the queue rebuilds a bank as soon as the
+    provider changes. It is reachable for a **frozen** bank, which is the
+    point of freezing, and briefly for any bank between the settings change
+    and the rebuild.
+    """
+    if not index_key:
+        return None
+    active, _ = _provider_identity(bank.provider)
+    live = active.get("key")
+    if not live or live == index_key:
+        return None
+    hint = (
+        "unfreeze the bank and rebuild it"
+        if bank.state == registry.STATE_FROZEN
+        else "the rebuild is queued — retry shortly"
+    )
+    return ApiError(
+        "bank_stale",
+        f"bank {bank.name!r} is indexed with {index_key}, but {live} is "
+        f"active now — {hint}",
+        ref=bank.name,
+        index_provider_key=index_key,
+        provider_key=live,
+        state=bank.state,
+    )
+
+
 def _bank_info(bank: Bank) -> dict:
     """The one bank shape the API returns (§9.5)."""
     # Queue state FIRST: reading chunk_count first leaves a window where a
@@ -429,6 +473,9 @@ def _bank_info(bank: Bank) -> dict:
         "name": bank.name,
         "root": bank.root.as_posix(),
         "provider": bank.provider,
+        "state": bank.state,
+        # Derived, and kept because a client written against the older shape
+        # reads it. It is output only — the registry stores `state` alone.
         "enabled": bank.enabled,
         "exists": bank.exists,
         "git": bank.is_git,
@@ -740,7 +787,10 @@ def _reconcile_on_start() -> None:
         log.info("reconcile-on-start skipped: no work queue yet (phase 3)")
         return
     for bank in registry.load():
-        if not bank.enabled:
+        # `watched`: a frozen bank is deliberately left as it is, including
+        # across a restart. Catching it up here would undo the freeze on the
+        # next service start, which is the one moment the user is not looking.
+        if not bank.watched:
             continue
         rebuild = False
         if bank.db_path.exists():
@@ -1022,6 +1072,18 @@ class ReindexRequest(BaseModel):
     full: bool = False
 
 
+class PatchBankRequest(BaseModel):
+    """Editable fields of a registered bank. Omitted means unchanged.
+
+    ``root`` is absent on purpose: the bank id is derived from it, so moving
+    a root is a remove plus an add, never an edit (`registry.update`).
+    """
+
+    state: str | None = None
+    name: str | None = None
+    provider: str | None = None
+
+
 # -------------------------------------------------------------- endpoints
 
 
@@ -1074,14 +1136,28 @@ def _engine_search(conn, req: SearchRequest, bank: Bank) -> list[Any]:
             "src/search.py still has the v2 signature (no `conn`); "
             "the v3 search contract (§5) is not in place yet",
         )
-    return search_mod.search(
-        conn,
-        req.query,
-        provider=get_provider(bank.provider),
-        top_k=req.top_k,
-        path_prefix=req.path_prefix,
-        expand_window=req.expand_window,
-    )
+    try:
+        return search_mod.search(
+            conn,
+            req.query,
+            provider=get_provider(bank.provider),
+            top_k=req.top_k,
+            path_prefix=req.path_prefix,
+            expand_window=req.expand_window,
+        )
+    except search_mod.DimensionMismatch as exc:
+        # The width check above should have caught this from the provider key
+        # alone. It is repeated here because the key is only as good as what
+        # the last writer recorded, and this one is measured against the
+        # actual column — a `500 internal` for a knowable state is the worst
+        # of the available answers.
+        raise ApiError(
+            "bank_stale",
+            f"bank {bank.name!r} holds vectors of a different width — "
+            f"rebuild it ({exc})",
+            ref=bank.name,
+            state=bank.state,
+        ) from exc
 
 
 @app.post("/api/search", include_in_schema=False)
@@ -1100,6 +1176,12 @@ def api_search(req: SearchRequest) -> dict:
         status, queued = _status_from(status_probe, chunks)
         # No chunks means no possible match — never load a model to prove it.
         if chunks:
+            # Refuse before embedding, not after: this is a property of the
+            # index, and asking the provider first would spend a model load
+            # (or a paid API call) to reach the same answer.
+            stale = _stale_index_error(bank, store.get_meta(conn).get("provider_key"))
+            if stale is not None:
+                raise stale
             try:
                 hits = _engine_search(conn, req, bank)
             except EmbeddingUnavailable as exc:
@@ -1171,6 +1253,44 @@ def api_add_bank(req: AddBankRequest) -> dict:
 @app.get("/api/banks/{bank_id}", include_in_schema=False)
 def api_bank(bank_id: str) -> dict:
     return _bank_info(_resolve_bank(bank_id, require_enabled=False))
+
+
+@app.patch("/api/banks/{bank_id}", include_in_schema=False)
+def api_patch_bank(bank_id: str, req: PatchBankRequest) -> dict:
+    """Change a bank's state (or its name / provider).
+
+    Leaving `enabled` behind for `state` is what makes three states possible
+    at all; the one thing this endpoint must get right is what happens on the
+    way *back* to `enabled`. A bank that was frozen or off has been ignoring
+    its files for however long it was in that state, so switching it on and
+    leaving the index as it was would present stale content as current. The
+    catch-up is queued here, once, rather than waited for: the watcher only
+    sees changes from now on, and `reconcile-on-start` would not run until
+    the next restart.
+    """
+    bank = _resolve_bank(bank_id, require_enabled=False)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise ApiError("bad_request", "nothing to change", ref=bank_id)
+
+    was_dormant = not bank.watched
+    try:
+        updated = registry.update(bank.id, **fields)
+    except BankExists as exc:
+        raise ApiError("bank_exists", str(exc), ref=bank_id) from exc
+    except ValueError as exc:
+        raise ApiError("bad_request", str(exc), ref=bank_id) from exc
+
+    if was_dormant and updated.watched:
+        q = _queue()
+        if q is not None:
+            with suppress(Exception):
+                q.enqueue_bulk(updated.id, trigger="api")
+
+    info = _bank_info(updated)
+    hub.publish("bank_status", {"bank": info}, updated.id)
+    log.info("bank %s is now %s", updated.name, updated.state)
+    return info
 
 
 # --------------------------------------------------------- per-bank tokens
@@ -1450,7 +1570,15 @@ def api_fs_dirs(path: str | None = None) -> dict:
 
 @app.post("/api/reindex", status_code=202, include_in_schema=False)
 def api_reindex(req: ReindexRequest) -> dict:
-    bank = _resolve_bank(req.bank)
+    # `require_enabled=False`, so a **frozen** bank can be reindexed on
+    # request: the freeze stops the watcher, not the owner. The queue makes
+    # the same distinction by trigger (`workqueue._may_run`), and a disabled
+    # bank is still refused — by `searchable`, one line down.
+    bank = _resolve_bank(req.bank, require_enabled=False)
+    if not bank.searchable:
+        raise ApiError(
+            "bank_not_found", f"bank {bank.name!r} is disabled", ref=req.bank
+        )
     q = _require_queue()
     if req.path:
         rel = _safe_relpath(bank, req.path)

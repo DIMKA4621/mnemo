@@ -217,7 +217,10 @@ def _cmd_doctor() -> int:
     for bank in banks:
         flags = []
         if not bank.enabled:
-            flags.append("disabled")
+            # Names the actual state: "frozen" and "disabled" differ in
+            # whether the bank still answers a search, which is the whole
+            # question someone runs `doctor` to settle.
+            flags.append(bank.state)
         if not bank.exists:
             flags.append("ROOT MISSING")
         suffix = f"  [{', '.join(flags)}]" if flags else ""
@@ -482,29 +485,72 @@ def _cmd_reindex(args: argparse.Namespace) -> int:
     return _run_api(call)
 
 
+# `banks freeze|unfreeze|disable` -> the state each one sets. `unfreeze` is
+# the way back from either dormant state, which is why it is not called
+# `enable`: what a user wants named is the thing they are undoing.
+_BANK_STATE_ACTIONS = {
+    "freeze": "frozen",
+    "unfreeze": "enabled",
+    "disable": "disabled",
+}
+
+_STATE_SAID = {
+    "frozen": "frozen — its index is held as it is, and still searchable",
+    "enabled": "enabled — following its files again; catching up now",
+    "disabled": "disabled — not watched, not searchable, still registered",
+}
+
+
+def _find_bank(c, ref: str) -> dict:
+    """A bank from the API's own listing, by name or id. Exits 1 on a miss."""
+    banks = {b["name"]: b for b in c.banks()}
+    target = banks.get(ref) or next(
+        (b for b in banks.values() if b["id"] == ref), None
+    )
+    if target is None:
+        print(f"mnemo: no bank named {ref!r}", file=sys.stderr)
+        raise SystemExit(EXIT_ERROR)
+    return target
+
+
 def _cmd_banks(args: argparse.Namespace) -> int:
+    # `path` is optional because `list` takes none. Every other action needs
+    # it, and without this check they reported "no bank named None" — an
+    # error about the wrong thing.
+    if args.action != "list" and not args.path:
+        need = ("the root folder to register" if args.action == "add"
+                else "a bank name or id")
+        print(f"mnemo: banks {args.action} needs {need}", file=sys.stderr)
+        return EXIT_ERROR
+
     def call(c):
         if args.action == "list":
             banks = c.banks()
             if not banks:
                 print("No banks registered.")
                 return
-            print(f"{'NAME':<20} {'STATUS':<9} {'FILES':>6} {'CHUNKS':>7}  ROOT")
+            print(f"{'NAME':<20} {'STATE':<9} {'STATUS':<9} {'FILES':>6} "
+                  f"{'CHUNKS':>7}  ROOT")
             for b in banks:
-                print(f"{b['name']:<20} {b['status']:<9} {b['files']:>6} "
+                # `state` is what the registry holds, `status` what the index
+                # is doing. A pre-`state` backend omits the former.
+                print(f"{b['name']:<20} {b.get('state', 'enabled'):<9} "
+                      f"{b['status']:<9} {b['files']:>6} "
                       f"{b['chunks']:>7}  {b['root']}")
         elif args.action == "add":
             info = c.add_bank(str(Path(args.path).expanduser().resolve()),
                               name=args.name, provider=args.provider)
             print(f"registered {info['name']}  ({info['id']})  {info['root']}")
+        elif args.action in _BANK_STATE_ACTIONS:
+            want = _BANK_STATE_ACTIONS[args.action]
+            target = _find_bank(c, args.path)
+            if target.get("state") == want:
+                print(f"{target['name']} is already {want}")
+                return
+            info = c.set_bank_state(target["id"], want)
+            print(f"{info['name']} is now {_STATE_SAID[info['state']]}")
         else:
-            banks = {b["name"]: b for b in c.banks()}
-            target = banks.get(args.path) or next(
-                (b for b in banks.values() if b["id"] == args.path), None
-            )
-            if target is None:
-                print(f"mnemo: no bank named {args.path!r}", file=sys.stderr)
-                raise SystemExit(EXIT_ERROR)
+            target = _find_bank(c, args.path)
             c.remove_bank(target["id"], drop_index=not args.keep_index)
             if args.keep_index:
                 print(f"removed {target['name']} from the registry; its index "
@@ -828,13 +874,17 @@ def _build_parser() -> argparse.ArgumentParser:
         help="The registry of memory roots this machine serves.",
     )
     pb.add_argument(
-        "action", choices=("list", "add", "remove"),
-        help="list: name, status, files, chunks, root · add: register a "
+        "action", choices=("list", "add", "remove",
+                           "freeze", "unfreeze", "disable"),
+        help="list: name, state, files, chunks, root · add: register a "
              "folder of .md · remove: unregister it (the .md are never "
-             "touched).",
+             "touched) · freeze: stop following the files, keep it "
+             "searchable · unfreeze: follow them again and catch up · "
+             "disable: switch it off entirely, keeping the registration.",
     )
     pb.add_argument("path", nargs="?", default=None,
-                    help="add: the root folder; remove: a name or id.")
+                    help="add: the root folder; every other action: a name "
+                         "or id.")
     pb.add_argument("--name", default=None,
                     help="add: what to call it. Default: derived from the "
                          "path; a clash gets a -2 suffix.")

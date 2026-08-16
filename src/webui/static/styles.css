@@ -63,6 +63,11 @@
   --badge-off-fg: #d0a0a0;
   --badge-off-border: #4a3030;
   --badge-off-bg: #2c2020;
+  /* Frozen is not an error and not health — its own colour, cold on purpose,
+     and distinct from `indexing` amber so the two never read as one state. */
+  --badge-frozen-fg: #8fc6dd;
+  --badge-frozen-border: #2f4756;
+  --badge-frozen-bg: #1b2a33;
   --badge-ready-fg: #8ee0ac;
   --badge-ready-border: #2e4d3a;
   --badge-ready-bg: #1c2b23;
@@ -138,6 +143,9 @@
   --badge-off-fg: #8a3a3a;
   --badge-off-border: #eab3b3;
   --badge-off-bg: #fbe9e9;
+  --badge-frozen-fg: #1c5a75;
+  --badge-frozen-border: #a8d2e4;
+  --badge-frozen-bg: #e6f3f9;
   --badge-ready-fg: #1f6b3f;
   --badge-ready-border: #a9e0bf;
   --badge-ready-bg: #e4f7ec;
@@ -700,16 +708,38 @@ h2 {
 .menu-item.is-danger { color: var(--menu-danger-fg); }
 .menu-item.is-danger:hover { background: var(--danger-bg); }
 
+/* The state group: a heading, and a check on the one in force. The mark is a
+   pseudo-element so the label text stays aligned whether or not it is set —
+   a tick prepended to the text would shift every other row. */
+.menu-label {
+  padding: 5px 9px 3px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.menu-item[role="menuitemradio"] { padding-left: 24px; position: relative; }
+
+.menu-item[role="menuitemradio"].is-current::before {
+  content: '✓';
+  position: absolute;
+  left: 9px;
+  color: var(--accent);
+}
+
 .menu-sep {
   height: 1px;
   margin: 4px 5px;
   background: var(--line);
 }
 
-/* `auto` on the left margin is what puts this at the far end of the title
-   row, past however many badges the bank happens to carry. */
+/* Pushed to the far end by `.bank-head` taking the remaining space, and kept
+   from shrinking so a long name never squeezes the glyph. `margin-left: auto`
+   did this job while the row was one wrapping list; it is harmless now and
+   left out, because the layout no longer depends on it. */
 .btn-menu {
-  margin-left: auto;
+  flex: none;
   padding: 0 7px 3px;
   font-weight: 700;
   line-height: 1.5;
@@ -1127,11 +1157,24 @@ h2 {
 .bank.is-selected { background: var(--sel-bg); box-shadow: inset 2px 0 0 var(--accent); }
 .bank.is-disabled .bank-name { color: var(--fg-mute); }
 
+/* The title row is two boxes, not one wrapping list: the name and its badges
+   wrap among themselves, and the menu button stays on the first line however
+   many badges there are. `min-width: 0` lets the left box actually shrink —
+   a flex item defaults to its content width and would otherwise push the
+   button out of the row rather than wrap. */
 .bank-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.bank-head {
   display: flex;
   align-items: center;
   gap: 7px;
   flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
 }
 
 .bank-name {
@@ -1190,6 +1233,7 @@ h2 {
 .badge-git    { color: var(--badge-git-fg); border-color: var(--badge-git-border); background: var(--badge-git-bg); }
 .badge-nogit  { color: var(--fg-mute); }
 .badge-off    { color: var(--badge-off-fg); border-color: var(--badge-off-border); background: var(--badge-off-bg); }
+.badge-frozen { color: var(--badge-frozen-fg); border-color: var(--badge-frozen-border); background: var(--badge-frozen-bg); }
 
 .badge-ready    { color: var(--badge-ready-fg); border-color: var(--badge-ready-border); background: var(--badge-ready-bg); }
 .badge-indexing { color: var(--badge-indexing-fg); border-color: var(--badge-indexing-border); background: var(--badge-indexing-bg); }

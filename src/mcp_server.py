@@ -149,6 +149,12 @@ def _domain_problem(exc: Exception) -> str:
     a 401 the holder cannot tell from a wrong token. But `api_search` raises
     `bank_not_found` for a disabled bank, and an exception out of a tool ends
     the agent's turn. So it is caught and spoken.
+
+    The same path carries `bank_stale`, which an agent can act on in the one
+    way that matters: it says the answer is missing because the index was
+    built by a different embedding model, not because the memory is empty.
+    Those two are indistinguishable from the outside, and confusing them is
+    how an agent concludes nothing was ever recorded.
     """
     from .api import ApiError
 

@@ -192,7 +192,10 @@ def _flush_due() -> None:
     banks = {b.id: b for b in registry.load()}
     for bank_id, rel in due:
         bank = banks.get(bank_id)
-        if bank is None or not bank.enabled:
+        # A change queued before the bank was frozen must still not be
+        # indexed: the state is read here, at flush time, not when the event
+        # was recorded.
+        if bank is None or not bank.watched:
             continue
         try:
             _flush_one(bank, rel)
@@ -206,7 +209,11 @@ def _sync_watches() -> None:
     if observer is None:
         return
     try:
-        banks = {b.id: b for b in registry.load() if b.enabled and b.exists}
+        # `watched`, not `searchable`: a frozen bank is dropped from the
+        # observer here, which is what freezing means — the index stops
+        # following the files. `_sync_watches` runs every tick, so freezing
+        # and unfreezing both take effect without restarting anything.
+        banks = {b.id: b for b in registry.load() if b.watched and b.exists}
     except Exception:  # noqa: BLE001
         return
     with _lock:
@@ -240,7 +247,7 @@ def _loop() -> None:
             if interval and time.monotonic() - _last_rescan >= interval:
                 _last_rescan = time.monotonic()
                 for bank in registry.load():
-                    if bank.enabled and bank.exists:
+                    if bank.watched and bank.exists:
                         _rescan_bank(bank.id, trigger="watcher")
         except Exception:  # noqa: BLE001 - the loop outlives any one failure
             log.exception("watcher tick failed")
