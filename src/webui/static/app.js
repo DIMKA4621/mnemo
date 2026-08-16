@@ -2077,6 +2077,9 @@ const settings = {
   autostart: null,     // GET /api/autostart — its own request, its own failure
   autostartWant: null, // the selected state, null when it matches the machine
   autostartError: null,
+  embed: null,         // GET /api/embed/state — what the backend holds now
+  embedError: null,
+  embedBusy: false,    // an unload/load is in flight
 };
 
 /**
@@ -2242,6 +2245,10 @@ async function openSettings() {
       settings.autostart = null;
       settings.autostartError = err.message;
     }
+    // Same shape and the same reason as autostart: asking can cost a round
+    // trip to Ollama, so it is fetched when this screen opens rather than on
+    // every indexing event — and its failure must not cost the whole form.
+    await refreshEmbedState();
   } catch (err) {
     if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
     settings.errorText = err.message;
@@ -2408,6 +2415,9 @@ function renderEmbedSection(body) {
       document.createTextNode('Нічого налаштовувати не треба; жоден байт памʼяті ' +
                               'не залишає машину.'),
     ]));
+    // The resident is what holds the most (~1.5 GB), so the one backend with
+    // nothing to configure is the one where this block matters most.
+    if (settings.backendId === backendForSettings()) renderEmbedMemory(body);
     // Switching TO local is a save like any other, and this branch returns
     // early — without this the one backend that needs no configuration was
     // also the one whose «Збережено» never appeared, so the click read as
@@ -2524,6 +2534,12 @@ function renderEmbedSection(body) {
     if (keyOverride) body.appendChild(keyOverride);
   }
 
+  // -- memory ------------------------------------------------------------
+  // Only for the backend that is actually in use. `settings.embed` describes
+  // the machine as configured, so showing it under a tab the user is merely
+  // *considering* would report another backend's memory as this one's.
+  if (settings.backendId === backendForSettings()) renderEmbedMemory(body);
+
   // -- consequences -----------------------------------------------------
   body.appendChild(el('p', { className: 'set-warn' }, [
     document.createTextNode('Зміна моделі або ширини — це новий ключ перебудови: ' +
@@ -2532,6 +2548,141 @@ function renderEmbedSection(body) {
   ]));
 
   renderSettingsMessages();
+}
+
+// -------------------------------------------------------- backend memory
+//
+// «Вивантажити» is NOT an off switch, and the copy has to keep saying so:
+// the model comes back on the next search or indexed file, paying ~7-8 s
+// once. A backend that is off is not a mode, it is a fault — what this
+// offers is the memory back on purpose, which is the trade the engine
+// deliberately left to a command instead of an idle timer.
+
+const HOLD_LABEL = {
+  loaded: 'у памʼяті',
+  unloaded: 'не завантажена',
+  'n/a': 'нічого не тримає',
+  unknown: 'невідомо',
+};
+
+async function refreshEmbedState() {
+  settings.embedError = null;
+  try {
+    settings.embed = await api('/api/embed/state');
+  } catch (err) {
+    if (isAuthError(err)) throw err;
+    settings.embed = null;
+    settings.embedError = err.message;
+  }
+}
+
+/**
+ * The memory block, appended under the backend form.
+ *
+ * Deliberately NOT gated behind «Зберегти»: this section's rule is that
+ * nothing applies on click — but that rule is about *settings*, values that
+ * describe the machine and are saved. Unloading is not a setting, it is an
+ * action with an immediate effect and no stored form, the same category as
+ * a bank's reindex. Putting it behind Save would mean saving to make it
+ * happen and then having nothing left to un-save.
+ */
+function renderEmbedMemory(body) {
+  const info = settings.embed;
+  const box = el('div', { className: 'set-mem' });
+
+  if (settings.embedError) {
+    box.appendChild(el('p', { className: 'set-note', text: settings.embedError }));
+    body.appendChild(setField('Памʼять', box, null));
+    return;
+  }
+  if (!info) {
+    box.appendChild(el('p', { className: 'empty-hint', text: 'Стан ще не отримано.' }));
+    body.appendChild(setField('Памʼять', box, null));
+    return;
+  }
+
+  const held = info.holding;
+  const line = el('div', { className: 'set-mem-line' }, [
+    el('span', {
+      // `badge-empty`, never the red `badge-off`: an unloaded model is a
+      // normal state that costs one wake-up, not a fault — the same reason
+      // `frozen` got its own cold colour instead of the error one.
+      className: 'badge ' + (held === 'loaded' ? 'badge-ready' : 'badge-empty'),
+      text: HOLD_LABEL[held] || String(held),
+    }),
+    el('span', { className: 'set-mem-what', text: info.model || '—' }),
+  ]);
+  box.appendChild(line);
+
+  const buttons = el('div', { className: 'set-mem-actions' });
+  if (held === 'loaded') {
+    buttons.appendChild(el('button', {
+      className: 'btn',
+      text: 'Вивантажити',
+      attrs: settings.embedBusy ? { disabled: '' } : {},
+      on: { click: () => embedAction('unload') },
+    }));
+  }
+  if (held === 'unloaded' || held === 'loaded') {
+    buttons.appendChild(el('button', {
+      className: 'btn',
+      // «Перевірити» when it is already up: the call is the same probe
+      // embedding, and naming it "load" for a model that is loaded would
+      // describe the mechanism instead of what the click is good for.
+      text: held === 'loaded' ? 'Перевірити' : 'Завантажити',
+      attrs: settings.embedBusy ? { disabled: '' } : {},
+      on: { click: () => embedAction('load') },
+    }));
+  }
+  if (buttons.childNodes.length) box.appendChild(buttons);
+
+  const notes = [];
+  if (held === 'n/a') {
+    // The cabinet's own wording, not the backend's `detail`. A steady state
+    // that every client renders the same way belongs to the interface — the
+    // API stays English by convention, and echoing it here would put one
+    // English line in the middle of a Ukrainian screen.
+    notes.push('Цей ендпоінт не тримає нічого на цій машині — модель живе ' +
+               'на боці постачальника, тож звільняти нічого.');
+  }
+  if (held === 'loaded' && info.wake_s) {
+    notes.push('Вивантаження звільняє памʼять зараз; наступний пошук або ' +
+               'збережений файл підніме модель назад за ~' +
+               Math.round(info.wake_s) + ' с. Це не вимикач.');
+  }
+  if (info.expires_at) notes.push('Бекенд тримає її до ' + info.expires_at + '.');
+  if (info.others_held) {
+    // A count, never the names: the other models are somebody else's, and
+    // this cabinet unloads ours alone.
+    notes.push('Там же ще ' + info.others_held + ' модел(і/ей) — не наші, ' +
+               'їх не чіпаємо.');
+  }
+  if (info.probe_dim) notes.push('Пробний вектор: ' + info.probe_dim + ' вимірів.');
+  if (info.detail) notes.push(info.detail);
+  for (const text of notes) {
+    box.appendChild(el('p', { className: 'set-note', text: text }));
+  }
+
+  body.appendChild(setField('Памʼять', box, null));
+}
+
+async function embedAction(what) {
+  settings.embedBusy = true;
+  settings.embedError = null;
+  settings.note = null;
+  renderSettings();
+  try {
+    settings.embed = await api('/api/embed/' + what, { method: 'POST' });
+    settings.note = what === 'unload'
+      ? 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.'
+      : 'Бекенд відповів — модель у памʼяті.';
+  } catch (err) {
+    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
+    settings.embedError = err.message;
+  } finally {
+    settings.embedBusy = false;
+    renderSettings();
+  }
 }
 
 /** A read-only `caption — value` line, for the sections that report rather

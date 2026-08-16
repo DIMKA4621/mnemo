@@ -151,12 +151,17 @@ for _backend in BACKENDS:
         KNOWN_MODELS.setdefault(_full.rsplit("/", 1)[-1], _model)
 
 
-def _normalise(name: str) -> str:
+def normalise(name: str) -> str:
     """Strip the decorations the same weights travel under.
 
     ``bge-m3:latest`` (Ollama's tag), ``BAAI/bge-m3`` (the HF namespace) and
     ``bge-m3`` are one model, and a lookup that missed the difference would
     silently drop the prefixes of whichever spelling was not listed.
+
+    Public because the same question is asked outside prefix lookup:
+    ``embedctl`` compares the name a backend *reports* holding against the
+    name we *configured*, and Ollama answers ``bge-m3:latest`` for a model
+    configured as ``bge-m3``. One spelling rule, one place.
     """
     text = name.strip().lower()
     if ":" in text:
@@ -174,7 +179,7 @@ def find_model(name: str) -> ModelPreset | None:
     """
     if not name:
         return None
-    text = _normalise(name)
+    text = normalise(name)
     for candidate in (text, text.rsplit("/", 1)[-1]):
         found = KNOWN_MODELS.get(candidate)
         if found is not None:

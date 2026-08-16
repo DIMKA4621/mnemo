@@ -69,6 +69,18 @@ Engine (the `.md → vectors` pipeline):
 - `src/providers/` — `base.py` embedding-provider interface, `local.py`
   over the resident daemon (`api.py` arrives at phase 7).
 - `src/embed_server.py` — warm resident model daemon (loopback TCP).
+- `src/embedctl.py` — backend **memory**: what holds a model right now, and
+  giving it back. Not an off switch — a backend that is off is a fault, not
+  a mode; the model returns on the next search, paying ~7–8 s once, which is
+  the trade `MNEMO_EMBED_IDLE_TIMEOUT = 0` deliberately left to a command
+  rather than a timer. `local` stops the resident (~1.5 GB, found by port and
+  by our token, never by a PID we think we spawned); Ollama gets
+  `keep_alive: 0` **on its native `/api/embed`** — the OpenAI-compatible
+  `/v1/embeddings` accepts that field and silently ignores it (measured: 200,
+  a correct vector, and the model still resident), so routing this through
+  `ApiProvider` would ship a button that reports success and frees nothing.
+  **Only our own model is unloaded**; other models there belong to whoever
+  loaded them and are counted, never named.
 - `src/store.py` — sqlite-vec + FTS5 + hashes + `meta`; flat schema, no
   `scope`/`agent_name`; an incompatible schema is dropped and rebuilt.
 - `src/index.py` — walk + sha256-diff + reindex changed + prune.
@@ -221,6 +233,8 @@ mnemo banks list|add|remove         registry, through the API
 mnemo banks freeze|unfreeze         a bank's state: frozen keeps it searchable
      |disable <ref>                 while it stops following its files
 mnemo status | logs | tree | ui     service state, journal, tree, cabinet
+mnemo embed [status|unload|load]    what the backend holds in memory, and give
+                                    it back — NOT an off switch
 mnemo doctor                        engine, provider, model, tokens, ports, banks,
                                     orphans, and the projects needing rewiring
 mnemo clean-orphans [--dry-run]     delete index files no bank claims; asks first

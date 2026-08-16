@@ -644,6 +644,59 @@ def _cmd_status() -> int:
     return _run_api(call)
 
 
+_HOLD_SAID = {
+    "loaded": "loaded",
+    "unloaded": "not loaded (returns on the next search)",
+    # Each client phrases the steady states itself; the service sends `detail`
+    # only for what it alone knows (an unreachable address, a mismatched
+    # width), so these lines are not echoes of a field.
+    "n/a": "nothing — this endpoint holds no model on this machine",
+    "unknown": "unknown — could not ask the backend",
+}
+
+
+def _print_embed_state(info: dict) -> None:
+    print(f"backend   {info.get('backend') or '—'}")
+    print(f"model     {info.get('model') or '—'}")
+    print(f"where     {info.get('where') or '—'}")
+    held = info.get("holding")
+    line = _HOLD_SAID.get(held, str(held))
+    wake = info.get("wake_s")
+    if held == "loaded" and wake:
+        # The wake-up cost belongs next to "loaded", because it is the whole
+        # argument for what unloading actually trades away.
+        line += f" — unloading costs ~{wake:.0f}s on the next embed"
+    print(f"holding   {line}")
+    if info.get("expires_at"):
+        print(f"expires   {info['expires_at']}")
+    if info.get("cached") is not None:
+        print(f"cached    {info['cached']}")
+    if info.get("others_held"):
+        # Named as a count, never by model: the others are somebody else's,
+        # and this command neither lists nor touches them.
+        print(f"note      {info['others_held']} other model(s) held there — "
+              f"not ours, left alone")
+    if info.get("probe_dim"):
+        print(f"probe     ok, {info['probe_dim']}-wide vector")
+    if info.get("detail"):
+        print(f"          {info['detail']}")
+
+
+def _cmd_embed(args: argparse.Namespace) -> int:
+    action = getattr(args, "action", "status") or "status"
+
+    def call(c):
+        if action == "unload":
+            info = c.embed_unload()
+        elif action == "load":
+            info = c.embed_load()
+        else:
+            info = c.embed_state()
+        _print_embed_state(info)
+
+    return _run_api(call)
+
+
 def _cmd_logs(args: argparse.Namespace) -> int:
     def call(c):
         body = c.logs(args.kind, bank=args.bank, since=args.since,
@@ -915,6 +968,19 @@ def _build_parser() -> argparse.ArgumentParser:
              "no browser.",
     )
 
+    pe = sub.add_parser(
+        "embed",
+        help="What the embedding backend is holding in memory, and give it "
+             "back. Not an off switch — the model returns on the next search.",
+    )
+    pe.add_argument(
+        "action", nargs="?", choices=("status", "unload", "load"),
+        default="status",
+        help="status: what is held right now (default) · unload: release it "
+             "(~1.5 GB local, ~0.7 GB VRAM on Ollama) · load: bring it back "
+             "with a probe embedding, which also proves the backend answers.",
+    )
+
     pl = sub.add_parser(
         "logs",
         help="The service journal: what was searched and what was indexed, "
@@ -1007,6 +1073,8 @@ def main(argv: list[str] | None = None) -> int:
         return _cmd_status()
     if cmd == "ui":
         return _cmd_ui()
+    if cmd == "embed":
+        return _cmd_embed(args)
     if cmd == "logs":
         return _cmd_logs(args)
     if cmd == "ingest":

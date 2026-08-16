@@ -181,11 +181,15 @@ class Client:
         }
 
     def _send(self, method: str, path: str, **kw: Any):
+        # Popped rather than passed through: `timeout` is already given
+        # below, so letting a caller's copy ride in **kw would be a duplicate
+        # keyword and a TypeError on the one call that needed a longer wait.
+        timeout = kw.pop("timeout", None)
         return httpx.request(
             method,
             f"{self.base_url}{path}",
             headers=self._headers(),
-            timeout=self.timeout,
+            timeout=self.timeout if timeout is None else timeout,
             **kw,
         )
 
@@ -287,6 +291,20 @@ class Client:
 
     def status(self) -> dict:
         return self._request("GET", "/api/status")
+
+    def embed_state(self) -> dict:
+        """What the embedding backend is holding in memory right now."""
+        return self._request("GET", "/api/embed/state")
+
+    def embed_unload(self) -> dict:
+        # Longer than the default: `local` waits for the resident to exit,
+        # and Ollama's native call goes through its own request queue.
+        return self._request("POST", "/api/embed/unload", timeout=30.0)
+
+    def embed_load(self) -> dict:
+        # A cold load is ~7-8 s measured, and the probe embedding follows it;
+        # the default 10 s would time out on exactly the successful path.
+        return self._request("POST", "/api/embed/load", timeout=60.0)
 
     def logs(self, kind: str, **kw: Any) -> dict:
         params = {"kind": kind}

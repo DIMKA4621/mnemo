@@ -1952,6 +1952,95 @@ def test_bank_states() -> None:
                   row.get("note") == "hand-written" and row["state"] == "enabled")
 
 
+def test_embed_memory_control() -> None:
+    """Unload/load: which backend holds what, and only ever our own model.
+
+    The assertion that matters most is the wire one. Ollama's
+    OpenAI-compatible ``/v1/embeddings`` *accepts* ``keep_alive`` and
+    *ignores* it — measured on a live server: the model stayed resident with
+    its expiry merely pushed out. So an unload routed through ``ApiProvider``
+    would report success and free nothing, which is the one outcome a user
+    cannot detect. This pins the native endpoint.
+    """
+    print("\n=== embed memory control ===")
+    from src import embedctl
+    from src import settings as settings_mod
+
+    # -- which URLs are Ollama at all ------------------------------------
+    check("the catalogue's Ollama URL is recognised",
+          embedctl._is_ollama("http://127.0.0.1:11434/v1/embeddings"))
+    check("a trailing slash does not hide it",
+          embedctl._is_ollama("http://127.0.0.1:11434/v1/embeddings/"))
+    check("OpenAI is not Ollama",
+          not embedctl._is_ollama("https://api.openai.com/v1/embeddings"))
+    check("a bare host is not an embeddings URL at all",
+          embedctl._ollama_root("http://127.0.0.1:11434") is None)
+
+    # -- ours vs somebody else's -----------------------------------------
+    # Ollama reports the tagged name for a model configured untagged; a plain
+    # equality check would answer "not ours" about our own model and refuse
+    # to unload the very thing the button exists for.
+    check("a tagged name matches the untagged config",
+          embedctl._same_model("bge-m3:latest", "bge-m3"))
+    check("the HF namespace matches too",
+          embedctl._same_model("BAAI/bge-m3", "bge-m3"))
+    check("a different model is not ours",
+          not embedctl._same_model("llama3:8b", "bge-m3"))
+
+    # -- the wire: native endpoint, keep_alive 0, our model only ----------
+    calls: list[dict] = []
+
+    class _Resp:
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return {"models": []}
+
+    def _fake_post(url, json=None, timeout=None):  # noqa: A002 - httpx's name
+        calls.append({"url": url, "body": json})
+        return _Resp()
+
+    def _fake_get(url, timeout=None):
+        return _Resp()
+
+    import httpx
+
+    with patch.object(httpx, "post", _fake_post), \
+         patch.object(httpx, "get", _fake_get), \
+         patch.object(settings_mod, "provider", lambda: "api"), \
+         patch.object(settings_mod, "api_url",
+                      lambda: "http://127.0.0.1:11434/v1/embeddings"), \
+         patch.object(settings_mod, "api_model", lambda: "bge-m3"), \
+         patch.object(settings_mod, "api_timeout", lambda: 30.0):
+        embedctl.unload()
+
+    check("unload made exactly one call", len(calls) == 1, str(len(calls)))
+    sent = calls[0] if calls else {"url": "", "body": {}}
+    check("unload uses the NATIVE endpoint, not /v1/embeddings",
+          sent["url"].endswith("/api/embed"), sent["url"])
+    check("unload does not go through the OpenAI-compatible path",
+          "/v1/" not in sent["url"], sent["url"])
+    check("unload asks for keep_alive 0",
+          (sent["body"] or {}).get("keep_alive") == 0, str(sent["body"]))
+    check("unload names OUR model and no other",
+          (sent["body"] or {}).get("model") == "bge-m3", str(sent["body"]))
+
+    # -- an endpoint that holds nothing refuses, it does not pretend ------
+    refused = ""
+    with patch.object(settings_mod, "provider", lambda: "api"), \
+         patch.object(settings_mod, "api_url",
+                      lambda: "https://api.openai.com/v1/embeddings"), \
+         patch.object(settings_mod, "api_model",
+                      lambda: "text-embedding-3-small"):
+        try:
+            embedctl.unload()
+        except embedctl.EmbedControlUnavailable as exc:
+            refused = str(exc)
+    check("unloading a hosted endpoint is refused, not faked",
+          "nothing to unload" in refused, refused or "<no refusal>")
+
+
 def test_env_file() -> None:
     """``<state>/mnemo.env`` reaches a process that inherited no environment.
 
@@ -2346,6 +2435,7 @@ def main() -> int:
     test_orphan_indexes()
     test_bank_resolution()
     test_bank_states()
+    test_embed_memory_control()
     test_model_cache_validation()
     test_env_file()
     test_machine_settings()

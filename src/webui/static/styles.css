@@ -573,6 +573,33 @@ h2 {
 .set-row { display: flex; gap: 12px; }
 .set-row .set-field { flex: 0 0 auto; }
 
+/* Backend memory: a state line, then the actions it allows. Boxed like
+   `.set-stats` because it reports as much as it acts, and the border is what
+   keeps «Вивантажити» from reading as a second Save for the form above it. */
+.set-mem {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 9px 11px;
+}
+.set-mem-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Same two-box lesson as `.bank-row`: the badge and the model name wrap
+     between themselves rather than pushing the row wider than the column. */
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.set-mem-what {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.set-mem-actions { display: flex; gap: 7px; margin-top: 9px; flex-wrap: wrap; }
+.set-mem .set-note { margin-top: 7px; }
+
 .set-wide { width: 100%; }
 .set-narrow { width: 110px; }
 

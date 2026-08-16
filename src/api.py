@@ -222,6 +222,15 @@ _ERROR_STATUS: dict[str, int] = {
     # another. Its own 409 rather than `internal`, because this is a state
     # with a fix the caller can carry out (rebuild the bank).
     "bank_stale": 409,
+    # [NEW beyond §9.2] Unload/load asked for while the worker is indexing.
+    # 409 rather than 503: nothing is broken and nothing is unreachable —
+    # the machine is simply in a state where this action would damage work
+    # already underway, and it will not be a moment from now.
+    "embed_busy": 409,
+    # [NEW beyond §9.2] The unload/load itself did not take: a resident that
+    # answers someone else's token, an Ollama that cannot be reached, an
+    # endpoint that refused the probe.
+    "embed_control_failed": 502,
     "internal": 500,
 }
 
@@ -1912,6 +1921,63 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
     forget_providers()
     return {"ok": True, "path": str(settings.settings_file()),
             "restart_required": True, **api_settings()}
+
+
+@app.get("/api/embed/state", include_in_schema=False)
+def api_embed_state() -> dict:
+    """What the active embedding backend is holding in memory.
+
+    Its own endpoint rather than a field on `/api/status`, for the reason
+    `/api/autostart` is separate: answering can cost an HTTP round trip to
+    Ollama, and the cabinet refetches status on every indexing event. This
+    is read when the settings screen opens.
+    """
+    from . import embedctl
+
+    return embedctl.state()
+
+
+def _embed_action(action) -> dict:
+    """Shared shell for unload/load: refuse while the queue is working."""
+    from . import embedctl
+
+    snapshot = _queue_snapshot_json()
+    depth = int(snapshot.get("depth") or 0)
+    current = snapshot.get("current")
+    if depth or current:
+        # Refused, not queued behind the work. The worker embeds through the
+        # same backend, so pulling the model out from under it raises
+        # `EmbeddingUnavailable` mid-file and leaves the bank half-indexed —
+        # a cost paid later, by someone who will not connect it to a button
+        # pressed now.
+        raise ApiError(
+            "embed_busy",
+            f"the queue is still working ({depth} task(s) pending) — the "
+            f"worker embeds through this backend, so wait for it to drain",
+            depth=depth,
+        )
+    try:
+        return action()
+    except embedctl.EmbedControlUnavailable as exc:
+        raise ApiError("embed_control_failed", str(exc)) from exc
+
+
+@app.post("/api/embed/unload", include_in_schema=False)
+def api_embed_unload() -> dict:
+    """Release the memory the backend is holding. NOT an off switch —
+    the next search or indexed file brings the model back, paying ~7-8 s."""
+    from . import embedctl
+
+    return _embed_action(embedctl.unload)
+
+
+@app.post("/api/embed/load", include_in_schema=False)
+def api_embed_load() -> dict:
+    """Bring the model back with a probe embedding, which also proves the
+    backend answers and at what width."""
+    from . import embedctl
+
+    return _embed_action(embedctl.load)
 
 
 @app.get("/api/autostart", include_in_schema=False)

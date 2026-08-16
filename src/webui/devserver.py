@@ -175,6 +175,12 @@ _AUTOSTART: dict[str, Any] = {
     "name": "mnemo service",
 }
 
+# Backend memory, faked for the same reason as autostart: unloading for real
+# would stop this machine's actual resident from a dev fixture. It flips in
+# memory, which is all the two buttons need. Starts `loaded`, because that is
+# the state where both of them are reachable.
+_EMBED_HELD: dict[str, Any] = {"holding": "loaded", "probe_dim": None}
+
 
 def _settings_presets() -> list[dict]:
     import sys
@@ -183,6 +189,64 @@ def _settings_presets() -> list[dict]:
     from src import presets
 
     return presets.as_json()
+
+
+def embed_state_payload() -> dict:
+    """Mirror of `/api/embed/state`, driven by the fixture's own provider.
+
+    Both branches are reachable in dev by switching the backend tab and
+    saving: `local` reports a resident, an `api` backend whose URL looks like
+    Ollama reports a held model, and OpenAI reports that it holds nothing —
+    which is the branch that renders no buttons at all.
+    """
+    provider = _SETTINGS.get("provider") or "local"
+    url = (_SETTINGS.get("api") or {}).get("url") or ""
+    model = (_SETTINGS.get("api") or {}).get("model") or ""
+    if provider == "local":
+        out = {
+            "backend": "local",
+            "model": "intfloat/multilingual-e5-large",
+            "holding": _EMBED_HELD["holding"],
+            "cached": True,
+            "where": "127.0.0.1:8917",
+            "wake_s": 7.6,
+            "detail": None,
+        }
+    elif "11434" in url:
+        out = {
+            "backend": "ollama",
+            "model": model or "bge-m3",
+            "holding": _EMBED_HELD["holding"],
+            "cached": None,
+            "where": url,
+            "wake_s": 8.4,
+            "detail": None,
+            # A second model, so the "not ours, left alone" line is visible
+            # in dev — it is the whole point of unloading only our own.
+            "others_held": 1,
+        }
+        if _EMBED_HELD["holding"] == "loaded":
+            out["expires_at"] = "2026-08-16T23:51:57+02:00"
+    else:
+        out = {
+            "backend": "api",
+            "model": model or "text-embedding-3-small",
+            "holding": "n/a",
+            "cached": None,
+            "where": url,
+            "wake_s": None,
+            # Empty, like the real endpoint: `holding: n/a` is the whole
+            # answer and the client words it. `detail` carries only what the
+            # service alone knows.
+            "detail": None,
+        }
+    # Only where a probe could have happened. The flag is remembered across
+    # requests, so without this guard switching the backend tab carried the
+    # last `load`'s result onto an endpoint nothing had called — dev showing
+    # evidence of a check that never ran.
+    if _EMBED_HELD.get("probe_dim") and out["holding"] == "loaded":
+        out["probe_dim"] = _EMBED_HELD["probe_dim"]
+    return out
 
 
 def settings_payload() -> dict:
@@ -753,6 +817,24 @@ class Handler(BaseHTTPRequestHandler):
             _AUTOSTART["enabled"] = bool(body["enabled"])
             self.json_out(200, dict(_AUTOSTART))
             return
+        if parsed.path in ("/api/embed/unload", "/api/embed/load"):
+            state = embed_state_payload()
+            if state["holding"] == "n/a":
+                # Same refusal as the real endpoint: an endpoint that holds
+                # nothing has nothing to release, and pretending otherwise
+                # would let the cabinet ship a button that always "worked".
+                self.fail(502, "embed_control_failed",
+                          "this endpoint holds nothing on this machine — "
+                          "there is nothing to unload")
+                return
+            if parsed.path.endswith("/unload"):
+                _EMBED_HELD["holding"] = "unloaded"
+                _EMBED_HELD["probe_dim"] = None
+            else:
+                _EMBED_HELD["holding"] = "loaded"
+                _EMBED_HELD["probe_dim"] = 1024
+            self.json_out(200, embed_state_payload())
+            return
         if parsed.path.startswith("/api/banks/") and parsed.path.endswith("/token"):
             ref = parsed.path[len("/api/banks/"): -len("/token")]
             bank = find_bank(unquote(ref))
@@ -789,6 +871,10 @@ class Handler(BaseHTTPRequestHandler):
                           "host": "127.0.0.1", "port": 8917}}
 
     def handle_api_get(self, path: str, query: dict) -> None:
+        if path == "/api/embed/state":
+            self.json_out(200, embed_state_payload())
+            return
+
         if path == "/api/banks":
             self.json_out(200, {"banks": [bank_info(b) for b in BANKS]})
             return
