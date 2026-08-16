@@ -164,6 +164,17 @@ _SETTINGS: dict[str, Any] = {
 # because it is the least consequential: nothing else in the form is blocked.
 _SETTINGS_ENV = {"api.timeout": "MNEMO_API_EMBED_TIMEOUT"}
 
+# Autostart, faked. Registering a real logon task from a dev fixture would
+# reach past the browser and change the machine — the one thing a mock server
+# must never do. It flips in memory, which is all the checkbox needs to be
+# exercised.
+_AUTOSTART: dict[str, Any] = {
+    "supported": True,
+    "enabled": True,
+    "mechanism": "Task Scheduler (фікстура)",
+    "name": "mnemo service",
+}
+
 
 def _settings_presets() -> list[dict]:
     import sys
@@ -696,6 +707,13 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/banks":
             self.post_bank(body)
             return
+        if parsed.path == "/api/autostart":
+            if "enabled" not in body:
+                self.fail(400, "bad_request", "expected 'enabled'")
+                return
+            _AUTOSTART["enabled"] = bool(body["enabled"])
+            self.json_out(200, dict(_AUTOSTART))
+            return
         if parsed.path.startswith("/api/banks/") and parsed.path.endswith("/token"):
             ref = parsed.path[len("/api/banks/"): -len("/token")]
             bank = find_bank(unquote(ref))
@@ -821,6 +839,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/settings":
             self.json_out(200, settings_payload())
+            return
+
+        if path == "/api/autostart":
+            self.json_out(200, dict(_AUTOSTART))
             return
 
         self.fail(404, "internal", "no route " + path)

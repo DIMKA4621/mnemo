@@ -402,19 +402,80 @@ h2 {
   background: var(--bg-sunken);
 }
 
+/* Sections down the left, the chosen one to the right of them. The screen
+   grew past one form: the backend, the resident and the service are separate
+   subjects, and stacking them into a single scroll would make the field you
+   came for something you have to hunt down. */
+.screen-main {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+}
+
+.set-nav {
+  flex: none;
+  width: 200px;
+  overflow: auto;
+  padding: 12px 0;
+  border-right: 1px solid var(--line);
+  background: var(--bg-sunken);
+  display: flex;
+  flex-direction: column;
+}
+
+/* Deliberately not `.segmented`: that component is a row of mutually
+   exclusive filters sized to its content, and turning it vertical and
+   full-width would leave it a segmented control in name only. The shared
+   look comes from the same tokens, not from the same class. */
+.set-nav-item {
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  padding: 8px 14px;
+  background: transparent;
+  color: var(--fg-dim);
+  border: none;
+  border-left: 2px solid transparent;
+  cursor: pointer;
+}
+
+.set-nav-item:hover { background: var(--bg-hover); }
+
+.set-nav-item.is-active {
+  background: var(--sel-bg);
+  border-left-color: var(--accent);
+  color: var(--fg);
+}
+
+/* No overflow of its own: `.set-body` already scrolls, and two nested scroll
+   containers give the page two scrollbars and a wheel that moves the wrong
+   one. This exists only to hold the capped form beside the nav.
+
+   Left-aligned, not centred: the form is capped at 620px, so centring it in
+   the remaining width pushes it further from the nav the wider the window
+   gets, until the section list and the section's own fields no longer read
+   as one thing. */
+.set-pane {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  justify-content: flex-start;
+}
+
 /* The form is a column of fields, capped rather than stretched: full-window
-   text inputs are harder to read, not easier. */
+   text inputs are harder to read, not easier. Capped and left-aligned — it
+   used to be centred, which was right when it WAS the screen and wrong now
+   that a nav sits beside it (see `.set-pane`). */
 .set-body {
   flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 20px 16px;
+  padding: 20px 24px;
   display: flex;
   flex-direction: column;
   gap: 14px;
   width: 100%;
   max-width: 620px;
-  margin: 0 auto;
 }
 
 .set-field { display: flex; flex-direction: column; gap: 5px; }
@@ -465,7 +526,41 @@ h2 {
   border-radius: var(--radius);
 }
 
-.set-tabs { align-self: flex-start; }
+/* Reported facts, not editable fields: a caption column and a value column,
+   so the values line up and can be scanned down rather than read across. */
+.set-stats {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.set-stat {
+  display: flex;
+  gap: 12px;
+  padding: 7px 11px;
+  font-size: 12px;
+}
+
+.set-stat + .set-stat { border-top: 1px solid var(--line); }
+
+.set-stat-label {
+  flex: none;
+  width: 150px;
+  color: var(--fg-dim);
+}
+
+.set-stat-value { color: var(--fg); word-break: break-word; }
+.set-stat-value.is-mono { font-family: var(--mono); }
+
+/* Both are `.segmented` inside a `.set-field`, which is a flex column — left
+   alone they would stretch to the full field width and read as a toolbar
+   rather than as a choice between two states. */
+.set-tabs,
+.set-toggle { align-self: flex-start; }
+
+.set-toggle .seg[disabled] { opacity: 0.55; cursor: default; }
 
 .set-row { display: flex; gap: 12px; }
 .set-row .set-field { flex: 0 0 auto; }

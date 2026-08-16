@@ -1953,13 +1953,41 @@ function renderTokenPanel() {
 const settings = {
   root: null,
   data: null,          // the last GET /api/settings response
+  section: 'embed',    // which section of the left nav is open
   backendId: null,     // which tab is open
   form: null,          // {model, url, dim, timeout, key} — the edited values
   busy: false,
   errorText: null,
   note: null,
   keyTouched: false,   // the key field was typed into; otherwise leave stored
+  autostart: null,     // GET /api/autostart — its own request, its own failure
+  autostartWant: null, // the selected state, null when it matches the machine
+  autostartError: null,
 };
+
+/**
+ * The sections down the left, in order.
+ *
+ * A table rather than a chain of ifs so that adding one is a line here plus a
+ * render function — the nav, the routing and the footer all read from this,
+ * and there is no fourth place to forget.
+ *
+ * `submit` is both the footer's Save handler and the answer to whether there
+ * is a Save button at all. A section that changes machine state gets one and
+ * applies nothing until it is pressed — including the autostart control,
+ * which could just as easily have acted on click. One screen with two habits
+ * would make every future control something you have to remember the rules
+ * for; a section that only reports (`submit: null`) shows no button.
+ */
+const SETTINGS_SECTIONS = [
+  { id: 'embed', label: 'Модель ембедингу', render: renderEmbedSection, submit: submitSettings },
+  { id: 'service', label: 'Служба', render: renderServiceSection, submit: submitService },
+  { id: 'maint', label: 'Обслуговування', render: renderMaintSection, submit: null },
+];
+
+function settingsSection(id) {
+  return SETTINGS_SECTIONS.find((s) => s.id === id) || SETTINGS_SECTIONS[0];
+}
 
 /** The catalogue entry for a backend id, or null. */
 function backendPreset(id) {
@@ -2001,10 +2029,17 @@ function backendForSettings() {
 
 function buildSettings() {
   settings.body = el('div', { className: 'set-body' });
+  settings.nav = el('div', { className: 'set-nav' });
   settings.save = el('button', {
     className: 'btn btn-primary',
     text: 'Зберегти',
-    on: { click: () => submitSettings() },
+    // Routed through the section table rather than bound to one handler: the
+    // button belongs to the screen, but what it saves belongs to whatever is
+    // open in it.
+    on: { click: () => {
+      const section = settingsSection(settings.section);
+      if (section.submit) section.submit();
+    } },
   });
 
   settings.root = el('div', { className: 'screen', attrs: { hidden: '' } }, [
@@ -2017,7 +2052,10 @@ function buildSettings() {
         on: { click: () => closeSettings() },
       }),
     ]),
-    settings.body,
+    el('div', { className: 'screen-main' }, [
+      settings.nav,
+      el('div', { className: 'set-pane' }, [settings.body]),
+    ]),
     el('div', { className: 'screen-foot' }, [
       el('button', { className: 'btn', text: 'Закрити', on: { click: () => closeSettings() } }),
       settings.save,
@@ -2030,6 +2068,40 @@ function buildSettings() {
   });
 }
 
+/**
+ * Move to another section.
+ *
+ * The save verdict is dropped on the way out: «Збережено» belongs to the form
+ * that produced it, and carrying it to a section with no form would make it
+ * read as a report about whatever is on screen now.
+ */
+function chooseSettingsSection(id) {
+  if (settings.section === id) return;
+  settings.section = id;
+  settings.errorText = null;
+  settings.note = null;
+  // Same rule for the autostart failure: it describes an attempt made in the
+  // section being left, and leaving it to reappear on the way back would
+  // report a stale problem as a current one.
+  settings.autostartError = null;
+  // The unsaved selection goes too. Leaving is not saving, and a draft that
+  // survived the trip would show the control on «Вимкнено» for a machine
+  // whose autostart is on — the same lie as an unsaved edit that looks stored.
+  settings.autostartWant = null;
+  renderSettings();
+}
+
+function renderSettingsNav() {
+  clear(settings.nav);
+  for (const section of SETTINGS_SECTIONS) {
+    settings.nav.appendChild(el('button', {
+      className: 'set-nav-item' + (section.id === settings.section ? ' is-active' : ''),
+      text: section.label,
+      on: { click: () => chooseSettingsSection(section.id) },
+    }));
+  }
+}
+
 async function openSettings() {
   settings.root.hidden = false;
   settings.errorText = null;
@@ -2040,6 +2112,22 @@ async function openSettings() {
     settings.data = await api('/api/settings');
     settings.backendId = backendForSettings();
     seedSettingsForm();
+    // The service section reports uptime and pid out of `state.service`, which
+    // is only refreshed on events — opening this screen during a quiet spell
+    // would otherwise show numbers from whenever the last one happened.
+    await loadStatus().catch(() => {});
+    // Its own request, and its own failure: costing a subprocess it is not
+    // part of `/api/status`, and a machine where the query fails must still
+    // get a working backend form. Caught rather than awaited into the outer
+    // try for exactly that reason.
+    settings.autostartError = null;
+    try {
+      settings.autostart = await api('/api/autostart');
+    } catch (err) {
+      if (isAuthError(err)) throw err;
+      settings.autostart = null;
+      settings.autostartError = err.message;
+    }
   } catch (err) {
     if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
     settings.errorText = err.message;
@@ -2055,6 +2143,9 @@ function closeSettings() {
   // The key is a credential: do not leave it in memory behind a closed screen.
   if (settings.form) settings.form.key = '';
   settings.keyTouched = false;
+  // Unsaved selections do not survive the screen either — reopening must show
+  // the machine, not what somebody nearly did to it last time.
+  settings.autostartWant = null;
 }
 
 /** Fill the form from what is stored, for the currently selected backend. */
@@ -2152,6 +2243,13 @@ function overrideNote(key) {
 function renderSettings() {
   const body = settings.body;
   clear(body);
+  renderSettingsNav();
+
+  const section = settingsSection(settings.section);
+  // Only a section that can change something gets a Save button. Hidden
+  // rather than disabled: a permanently greyed-out control reads as something
+  // that ought to work and does not.
+  settings.save.hidden = !section.submit;
 
   if (settings.busy && !settings.data) {
     body.appendChild(el('p', { className: 'empty-hint', text: 'Завантаження…' }));
@@ -2162,6 +2260,11 @@ function renderSettings() {
     return;
   }
 
+  section.render(body);
+}
+
+/** Backend, model, endpoint — the settings that decide what produces vectors. */
+function renderEmbedSection(body) {
   const presetList = settings.data.presets || [];
   const backend = backendPreset(settings.backendId);
 
@@ -2315,6 +2418,212 @@ function renderSettings() {
   ]));
 
   renderSettingsMessages();
+}
+
+/** A read-only `caption — value` line, for the sections that report rather
+ *  than edit. */
+function setStat(label, value, mono) {
+  return el('div', { className: 'set-stat' }, [
+    el('span', { className: 'set-stat-label', text: label }),
+    el('span', {
+      className: 'set-stat-value' + (mono ? ' is-mono' : ''),
+      text: value == null || value === '' ? '—' : String(value),
+    }),
+  ]);
+}
+
+/** Seconds as `2 год 14 хв` / `3 хв 05 с` / `47 с`. */
+function humanUptime(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  const h = Math.floor(total / 3600);
+  const m = Math.floor((total % 3600) / 60);
+  const s = total % 60;
+  if (h) return h + ' год ' + m + ' хв';
+  if (m) return m + ' хв ' + String(s).padStart(2, '0') + ' с';
+  return s + ' с';
+}
+
+/**
+ * What is running, and where.
+ *
+ * Reports only. Stopping and restarting the backend are deliberately absent:
+ * this page is served BY that process, so a stop button would kill the page
+ * that offers it and leave no way back except a terminal — the exact
+ * "press here, then finish it in the shell" split the cabinet is supposed to
+ * remove, only worse for being a trap. Restart is the same problem wearing a
+ * friendlier label: something has to outlive the process to start its
+ * successor, and handing the port over is a race. So the honest thing is to
+ * show the state and name the command.
+ */
+function renderServiceSection(body) {
+  const svc = state.service;
+  if (!svc) {
+    body.appendChild(el('p', { className: 'empty-hint', text: 'Стан служби ще не отримано.' }));
+    return;
+  }
+
+  body.appendChild(el('p', {
+    className: 'set-lead',
+    text: 'Бекенд, який тримає реєстр, індекс, вотчер і цю сторінку.',
+  }));
+
+  // What you can change comes first; what merely reports sits under it. The
+  // section used to open with five read-only rows, which put the one control
+  // on the page below a wall of facts nobody came here to read.
+  renderAutostart(body);
+
+  const box = el('div', { className: 'set-stats' }, [
+    setStat('Версія', svc.version, true),
+    setStat('PID', svc.pid, true),
+    setStat('Адреса', (svc.host || '—') + ':' + (svc.port != null ? svc.port : '—'), true),
+    setStat('Працює', humanUptime(svc.uptime_s)),
+    setStat('Черга пріоритетів', svc.priority_enabled ? 'увімкнена' : 'вимкнена'),
+  ]);
+  body.appendChild(setField('Стан', box, null));
+
+  body.appendChild(el('p', {
+    className: 'set-warn',
+    text: 'Зупинку й перезапуск робить лише команда — mnemo service ' +
+          'stop | restart. Кнопка тут обірвала б сторінку, яка нею ж і ' +
+          'подається, а підняти службу назад мусить хтось поза нею.',
+  }));
+
+  renderSettingsMessages();
+}
+
+/**
+ * Start at logon — a `.segmented` pair, the control this cabinet already uses
+ * for a two-state choice.
+ *
+ * Unlike stopping the service this is safe to offer: registering a scheduled
+ * task changes what happens at the NEXT logon and touches nothing running, so
+ * the page it is served from survives the change either way.
+ *
+ * Clicking selects, it does not apply — «Зберегти» does, exactly as in the
+ * backend form. One screen with two habits (this control acts at once, that
+ * one waits for the button) would make every future control a thing you have
+ * to remember the rules for. The installer switches autostart on by default
+ * (`-NoAutostart` opts out), so a normally-installed machine opens this
+ * already on: the control reports a state that exists rather than proposing
+ * one.
+ */
+function renderAutostart(body) {
+  const auto = settings.autostart;
+  if (!auto) {
+    body.appendChild(setField('Автозапуск', el('p', {
+      className: 'set-note',
+      text: settings.autostartError || 'стан не отримано',
+    }), null));
+    return;
+  }
+  if (!auto.supported) {
+    body.appendChild(setField('Автозапуск', el('p', {
+      className: 'set-note',
+      text: 'на цій системі не підтримується',
+    }), null));
+    return;
+  }
+
+  // `.segmented`, the cabinet's own two-state control — the same one the
+  // topbar uses for Темна│Світла and the journal for Запити│Індексація. A
+  // native checkbox paints itself in the browser's accent colour and ignores
+  // the theme entirely, which is exactly the mismatch this component exists
+  // to avoid.
+  const chosen = autostartWanted();
+  const seg = el('div', { className: 'segmented set-toggle' });
+  for (const option of [{ on: true, label: 'Увімкнено' }, { on: false, label: 'Вимкнено' }]) {
+    seg.appendChild(el('button', {
+      className: 'seg' + (chosen === option.on ? ' is-active' : ''),
+      text: option.label,
+      attrs: settings.busy ? { disabled: '' } : {},
+      on: { click: () => chooseAutostart(option.on) },
+    }));
+  }
+
+  body.appendChild(setField('Запускати службу при вході в систему', seg,
+    'Реєструється як ' + (auto.mechanism || '—') +
+    (auto.name ? ' — «' + auto.name + '»' : '') +
+    '. Діє з наступного входу; те, що працює зараз, не зачіпає.'));
+
+  // Said plainly, because the control now shows an intention rather than the
+  // machine: without this line a page left open on «Вимкнено» reads as a
+  // machine with autostart off.
+  if (chosen !== !!auto.enabled) {
+    body.appendChild(el('p', {
+      className: 'set-override',
+      text: 'не збережено — зараз ' + (auto.enabled ? 'увімкнено' : 'вимкнено') +
+            '; натисніть «Зберегти», щоб застосувати',
+    }));
+  }
+}
+
+/** The autostart state the form is showing: the edit if there is one, else
+ *  what the machine reports. */
+function autostartWanted() {
+  if (settings.autostartWant != null) return settings.autostartWant;
+  return !!(settings.autostart && settings.autostart.enabled);
+}
+
+/** Select an autostart state. Nothing is registered until Save. */
+function chooseAutostart(want) {
+  if (settings.busy) return;
+  // Back to the stored value -> no pending edit at all, rather than an edit
+  // that happens to match. Otherwise Save would fire a request that changes
+  // nothing, and the "не збережено" line would need to guess.
+  settings.autostartWant =
+    (!!want === !!(settings.autostart && settings.autostart.enabled)) ? null : !!want;
+  settings.errorText = null;
+  settings.note = null;
+  renderSettings();
+}
+
+/**
+ * Apply the selected autostart state, then adopt whatever the service reports.
+ *
+ * The click is never trusted as the new state: the POST returns the
+ * registration as re-read, so a task the scheduler refused leaves the control
+ * showing the machine instead of showing an intention as a fact.
+ */
+async function submitService() {
+  if (settings.autostartWant == null) {
+    settings.note = 'Нічого не змінено.';
+    renderSettings();
+    return;
+  }
+  const want = settings.autostartWant;
+  settings.busy = true;
+  settings.save.disabled = true;
+  settings.errorText = null;
+  settings.note = null;
+  renderSettings();
+  try {
+    settings.autostart = await api('/api/autostart', {
+      method: 'POST', body: { enabled: want },
+    });
+    settings.autostartWant = null;
+    settings.note = settings.autostart.enabled
+      ? 'Збережено. Служба підніматиметься при вході в систему.'
+      : 'Збережено. Автозапуску більше немає — службу доведеться піднімати самому.';
+  } catch (err) {
+    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
+    settings.errorText = err.message;
+  } finally {
+    settings.busy = false;
+    settings.save.disabled = false;
+    renderSettings();
+  }
+}
+
+/** Diagnostics and cleanup — the rare commands, kept off the main screen. */
+function renderMaintSection(body) {
+  body.appendChild(el('p', {
+    className: 'set-lead',
+    text: 'Діагностика й прибирання: доктор і індекси-сироти.',
+  }));
+  body.appendChild(el('p', {
+    className: 'empty-hint',
+    text: 'Ще не зроблено — поки що mnemo doctor і mnemo clean-orphans у терміналі.',
+  }));
 }
 
 /** The last save's verdict. Called from every branch of `renderSettings`,

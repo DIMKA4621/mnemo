@@ -343,6 +343,50 @@ def _macos_status() -> int:
 # ------------------------------------------------------------ dispatch
 
 
+def state() -> dict:
+    """Is autostart registered, as data rather than as printed lines.
+
+    The ``*_status`` functions above print and return an exit code, which is
+    right for a terminal and useless to the API — a caller that needed the
+    answer would have to parse the very text we are free to reword. This is
+    the same question asked once, in the form both faces can use.
+
+    Read-only and side-effect free by contract: it is answered inside
+    ``/api/status``, which the cabinet polls, so registering or repairing
+    anything from here would turn opening a page into changing the machine.
+
+    ``supported`` is what keeps the cabinet honest about an OS we do not
+    register on: absent is not the same fact as "not applicable here", and a
+    checkbox cannot show the difference on its own.
+    """
+    mechanism = {
+        "nt": "Task Scheduler",
+        "darwin": "launchd",
+    }.get("nt" if os.name == "nt" else sys.platform, "systemd --user")
+
+    if os.name == "nt":
+        result = _run(["schtasks", "/Query", "/TN", TASK_NAME])
+        return {
+            "supported": True,
+            "enabled": result.returncode == 0,
+            "mechanism": mechanism,
+            "name": TASK_NAME,
+        }
+    if sys.platform == "darwin":
+        return {
+            "supported": True,
+            "enabled": _plist_path().is_file(),
+            "mechanism": mechanism,
+            "name": LAUNCHD_LABEL,
+        }
+    return {
+        "supported": True,
+        "enabled": (_systemd_dir() / SYSTEMD_UNIT).is_file(),
+        "mechanism": mechanism,
+        "name": SYSTEMD_UNIT,
+    }
+
+
 def enable() -> int:
     if os.name == "nt":
         return _windows_enable()

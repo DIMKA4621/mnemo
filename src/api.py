@@ -1786,6 +1786,59 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
             "restart_required": True, **api_settings()}
 
 
+@app.get("/api/autostart", include_in_schema=False)
+def api_autostart() -> dict:
+    """Is the service registered to start at logon.
+
+    Its own endpoint rather than a field in `/api/status`: answering costs a
+    `schtasks` (or `systemctl`) subprocess, ~45 ms measured, and the cabinet
+    refetches status on every indexing event. That is a real cost paid
+    constantly for a fact that changes when somebody deliberately changes it,
+    so it is fetched when the settings screen opens instead.
+    """
+    from . import autostart
+
+    return autostart.state()
+
+
+@app.post("/api/autostart", include_in_schema=False)
+def api_autostart_set(payload: dict = Body(...)) -> dict:
+    """Register or remove the logon entry.
+
+    Returns the state as re-read afterwards, not the state we intended: the
+    registration can fail (a missing launcher, a policy that forbids the task)
+    and a cabinet that ticked its own checkbox on an optimistic reply would
+    then show autostart as on while nothing was registered.
+    """
+    from . import autostart
+
+    if "enabled" not in payload:
+        raise ApiError("bad_request", "expected 'enabled'")
+    want = bool(payload["enabled"])
+    if want:
+        autostart.enable()
+    else:
+        autostart.disable()
+
+    # The verdict is the re-read, not the exit code. `disable()` reports
+    # EXIT_ABSENT when there was nothing to remove — a failure by its own
+    # numbering, and exactly the outcome the caller asked for. What the caller
+    # wants to know is where the machine ended up, and only this answers that.
+    now = autostart.state()
+    if bool(now.get("enabled")) is not want:
+        # The underlying helpers print their reason to a stdout that is
+        # DEVNULL under the windowless service, so there is nothing more
+        # specific to pass on than the fact that it did not take.
+        raise ApiError(
+            "autostart_failed",
+            ("could not register the logon entry — check that the engine "
+             "launcher exists and that policy allows the task"
+             if want else
+             "could not remove the logon entry"),
+        )
+    return now
+
+
 @app.get("/api/logs", include_in_schema=False)
 # NOTE for internal callers (the admin MCP tools call this directly, as they
 # must): `limit` and `offset` default to `Query(...)` descriptors, not to

@@ -180,6 +180,65 @@ def test_windows_registration(work: Path) -> None:
     check("the test task was removed", gone.returncode != 0)
 
 
+def test_state_is_data_and_reads_only() -> None:
+    """`state()` answers the registration question without changing it.
+
+    Two properties, and the second is the one worth a test. The API answers
+    `GET /api/autostart` with this, so if asking could register, repair or
+    remove anything, then merely OPENING the settings screen would change the
+    machine — and the failure would look like the scheduler doing something
+    on its own.
+
+    The registration is left exactly as found: this suite runs on the
+    developer's real machine, and a check that silently switched autostart off
+    would be indistinguishable from the bug it is meant to catch.
+    """
+    # The registration as it stands BEFORE our module is asked anything, read
+    # with the platform's own tool. This ordering is the whole test: a first
+    # call that registers what it found missing leaves every later observation
+    # agreeing with every other one, so a baseline taken afterwards would be a
+    # snapshot of the damage rather than of the machine.
+    outside_before = None
+    if os.name == "nt":
+        outside_before = schtasks("/Query", "/TN", autostart.TASK_NAME).returncode == 0
+
+    before = autostart.state()
+    check(
+        "state() answers with the four fields the API promises",
+        set(before) >= {"supported", "enabled", "mechanism", "name"},
+        detail=str(before),
+    )
+    check(
+        "`enabled` is a real boolean, not an exit code",
+        isinstance(before.get("enabled"), bool),
+        detail=repr(before.get("enabled")),
+    )
+    if outside_before is not None:
+        check(
+            "state() reports what the scheduler already said",
+            before["enabled"] == outside_before,
+            detail=f"state={before['enabled']} scheduler={outside_before}",
+        )
+
+    again = [autostart.state() for _ in range(3)]
+    check(
+        "asking repeatedly never changes the answer",
+        all(item == before for item in again),
+        detail=f"{before} -> {again}",
+    )
+
+    if outside_before is not None:
+        # The one that matters. Asked four times by now — if any of those calls
+        # registered, repaired or removed the task, the scheduler disagrees
+        # with where it started, and no amount of internal consistency hides it.
+        outside_after = schtasks("/Query", "/TN", autostart.TASK_NAME).returncode == 0
+        check(
+            "asking left the real registration exactly as it was",
+            outside_after == outside_before,
+            detail=f"scheduler before={outside_before} after={outside_after}",
+        )
+
+
 def test_powershell_profile(work: Path) -> None:
     """The installer's profile block: fenced, idempotent, non-destructive."""
     if os.name != "nt":
@@ -224,6 +283,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mnemo autostart ") as raw:
         work = Path(raw)
         test_artifacts()
+        test_state_is_data_and_reads_only()
         test_windows_registration(work)
         test_powershell_profile(work)
 
