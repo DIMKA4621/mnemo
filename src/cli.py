@@ -130,247 +130,12 @@ def _cmd_warmup(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor() -> int:
-    """One place that answers "why is memory not working" (§11.1)."""
-    from . import config, registry
-    from .client import ServiceDown
-    from .embed_server import server_is_up
-    from .embedder import is_model_cached
+    """One report, rendered for the terminal from the cabinet's same data."""
+    from . import diagnostics
 
-    print(f"engine home      {config.USER_HOME}")
-    print(f"state dir        {config.STATE_DIR}")
-    print(f"python           {Path(sys.executable).as_posix()}")
-
-    # Which provider actually produces vectors decides whether the next three
-    # lines are diagnostics or noise. Under `api` the model cache is empty by
-    # design and the resident never starts, so reporting them the same way
-    # would put a permanent false alarm at the top of the one command a user
-    # runs when something is wrong.
-    banks_for_providers = _banks_quietly()
-    machine, overrides = _providers_in_use(banks_for_providers)
-    local_in_use = "local" in {machine, *overrides}
-    detail = f" (+ {', '.join(overrides)} on some banks)" if overrides else ""
-    print(f"provider         {machine}{detail}")
-
-    if local_in_use:
-        print(f"model cached     {is_model_cached()}")
-    else:
-        print(f"model cached     {is_model_cached()} — not needed under "
-              f"`{machine}`")
-    # Asked before anything else that could fail, because when this is the
-    # answer nothing else in the report matters: no bank can be opened at all.
-    from .store import vector_support
-
-    unsupported = vector_support()
-    print(f"sqlite-vec       {'ok' if unsupported is None else 'UNAVAILABLE'}")
-    if unsupported is not None:
-        print(f"                 {unsupported}")
-    if local_in_use:
-        # "down" is the normal state of a machine that has not searched yet —
-        # the resident is started on demand and holds ~1.5 GB, so it does not
-        # sit there from boot. Saying only "down" right after an install reads
-        # as a broken install, and that is the first thing a new user sees.
-        resident = ("up" if server_is_up() else "down (starts on first search)")
-        print(f"embed resident   {resident} "
-              f"({config.EMBED_HOST}:{config.EMBED_PORT})")
-    else:
-        # Not probed at all: the resident is irrelevant here, and asking costs
-        # a connection attempt whose answer would mean nothing.
-        print(f"embed resident   n/a under `{machine}`")
-    _report_endpoint(machine, overrides)
-
-    client = _client(timeout=3.0)
-    print(f"backend url      {client.base_url}")
-    print(f"api token        {'present' if client.token else 'MISSING'}")
-    try:
-        health = client.health()
-        # Two PIDs, and both are real. On Windows a venv's pythonw.exe is a
-        # redirector that launches the interpreter as a child: service.pid
-        # records what we spawned, service.json what actually serves the
-        # socket. Printing one unlabelled number next to `service status`
-        # printing the other is how a user ends up hunting the wrong process
-        # in Task Manager.
-        serving = health.get("pid")
-        launcher = None
-        try:
-            from . import service_ctl
-
-            identity = service_ctl.read_identity() or {}
-            launcher = identity.get("pid")
-        except Exception:  # noqa: BLE001 - diagnostics never fail
-            pass
-        pids = f"serving pid {serving}"
-        if launcher and launcher != serving:
-            pids += f", launcher pid {launcher}"
-        print(f"backend          up ({pids}, {health.get('banks')} banks, "
-              f"queue {health.get('queue_depth')})")
-    except ServiceDown as exc:
-        print(f"backend          DOWN — {exc}")
-    # Read again rather than reusing `banks_for_providers`: there the registry
-    # was only a hint about providers and an unreadable one is survivable,
-    # here it IS the diagnosis and must be reported.
-    try:
-        banks = registry.load()
-    except Exception as exc:  # noqa: BLE001
-        print(f"registry         UNREADABLE — {exc}")
-        return EXIT_ERROR
-    print(f"banks            {len(banks)}")
-    for bank in banks:
-        flags = []
-        if not bank.enabled:
-            # Names the actual state: "frozen" and "disabled" differ in
-            # whether the bank still answers a search, which is the whole
-            # question someone runs `doctor` to settle.
-            flags.append(bank.state)
-        if not bank.exists:
-            flags.append("ROOT MISSING")
-        suffix = f"  [{', '.join(flags)}]" if flags else ""
-        print(f"  {bank.name:<20} {bank.root.as_posix()}{suffix}")
-
-    # Reported, never cleaned here: `doctor` is a diagnosis. A diagnostic that
-    # also deletes is one a user stops running when they only want to look.
-    try:
-        orphans = registry.orphan_indexes()
-    except Exception as exc:  # noqa: BLE001 - diagnostics never fail
-        print(f"orphan indexes   UNKNOWN — {exc}")
-        return EXIT_OK
-    if orphans:
-        total = _human_bytes(sum(o.size for o in orphans))
-        print(f"orphan indexes   {len(orphans)} ({total}) — "
-              f"run `mnemo clean-orphans`")
-    else:
-        print("orphan indexes   none")
-
-    _report_project_wiring(banks)
-    return EXIT_OK
-
-
-def _report_endpoint(machine: str, overrides: list[str]) -> None:
-    """What the `api` provider is pointed at, when anything uses it.
-
-    Configuration only — the endpoint is never called. A diagnostic that
-    embeds a probe would cost money on a metered API and burn a rate limit,
-    and `doctor` is the command people run repeatedly while fixing something.
-    """
-    if "api" not in {machine, *overrides}:
-        return
-    from . import settings
-    from .providers import get_provider
-
-    try:
-        provider = get_provider("api")
-    except ValueError as exc:
-        print(f"api endpoint     NOT CONFIGURED — {exc}")
-        return
-    except Exception as exc:  # noqa: BLE001 - diagnostics never fail
-        print(f"api endpoint     UNKNOWN — {type(exc).__name__}: {exc}")
-        return
-    print(f"api endpoint     {settings.api_url()}")
-    print(f"                 model {provider.model}, dim {provider.dim}"
-          + (", key set" if settings.api_key() else ", no key"))
-
-
-def _report_project_wiring(banks) -> None:
-    """Projects whose mnemo wiring no longer matches this machine.
-
-    Two ways a project ends up here, and both are invisible from inside it:
-
-      * it carries a shape from an older generation — a stdio entry, a hook
-        the watcher replaced — which only `--migrate` rewrites;
-      * its wiring is current, but no registered bank covers it. That is the
-        state every project is in after a v2→v3 upgrade or a reinstall:
-        `banks.json` is the one thing that does not rebuild from the `.md`,
-        so the token in the project's config addresses a bank that is gone.
-
-    Deliberately a report. The commands touch someone else's working tree,
-    which may be dirty, mid-rebase, or simply not something they want edited
-    today — printing them keeps that decision where it belongs.
-    """
-    try:
-        from .scaffold import adopted_projects
-
-        projects = adopted_projects()
-    except Exception as exc:  # noqa: BLE001 - diagnostics never fail
-        print(f"project wiring   UNKNOWN — {exc}")
-        return
-
-    def covering(root: Path):
-        for bank in banks:
-            try:
-                if bank.root.is_relative_to(root):
-                    return bank
-            except (OSError, ValueError):
-                continue
-        return None
-
-    def why(proj) -> str | None:
-        """Why this project needs rewiring, or None if it is fine."""
-        if proj.migrate:
-            extra = (f" +{len(proj.findings) - 1} more"
-                     if len(proj.findings) > 1 else "")
-            return f"{proj.findings[0]}{extra}"
-        bank = covering(proj.root)
-        if bank is None:
-            return "no registered bank covers it"
-        # A registered bank is not enough. Tokens are minted, never derived,
-        # so a reinstall gives the same bank a new secret while the project's
-        # config keeps the old one — the wiring looks right, points at a live
-        # bank, and is rejected at the door. Nothing inside the project can
-        # tell; the session just finds no memory tools.
-        if proj.token and proj.token != bank.token:
-            return f"its token is not the one bank {bank.name!r} now carries"
-        return None
-
-    reasons = [(p, why(p)) for p in projects]
-    stale = [(p, r) for p, r in reasons if r is not None]
-    if not stale:
-        print(f"project wiring   {len(projects)} project(s), all current")
-        return
-
-    print(f"project wiring   {len(stale)} of {len(projects)} project(s) "
-          f"need rewiring")
-    for proj, reason in stale:
-        print(f"  {proj.command()}")
-        print(f"      {reason}")
-
-
-def _human_bytes(size: int) -> str:
-    value = float(size)
-    for unit in ("B", "KiB", "MiB"):
-        if value < 1024:
-            return f"{value:.0f} B" if unit == "B" else f"{value:.1f} {unit}"
-        value /= 1024
-    return f"{value:.1f} GiB"
-
-
-def _abbreviate(path: str) -> str:
-    """Shorten a recorded root with ``~`` — these lines get long and the
-    interesting part of a temp path is always its tail."""
-    home = Path.home().as_posix()
-    return f"~{path[len(home):]}" if path.startswith(home) else path
-
-
-def _orphan_line(orphan) -> str:
-    if orphan.error:
-        where = f"(unreadable — {orphan.error})"
-    elif orphan.root:
-        where = _abbreviate(orphan.root)
-        if orphan.root_exists:
-            # Worth saying out loud: the folder is still there, so this may be
-            # a bank someone meant to keep. Deleting only costs a reindex, but
-            # the user should get to make that call knowingly.
-            where += "   [root still on disk]"
-    elif orphan.files is None:
-        # No ``files`` table at all — not merely an old schema but a database
-        # nothing ever finished writing. Worth distinguishing: it says the
-        # index was abandoned mid-creation, not superseded.
-        where = "(empty file — no index was ever written)"
-    elif orphan.schema is None:
-        where = "(pre-v3 index — no root recorded)"
-    else:
-        where = "(no root recorded)"
-    files = "?" if orphan.files is None else str(orphan.files)
-    unit = "file " if orphan.files == 1 else "files"
-    return f"  {orphan.id}  {_human_bytes(orphan.size):>9}  {files:>3} {unit}  {where}"
+    report = diagnostics.collect()
+    print(diagnostics.render_text(report))
+    return EXIT_OK if report["registry"].get("ok") else EXIT_ERROR
 
 
 def _cmd_clean_orphans(args: argparse.Namespace) -> int:
@@ -380,7 +145,7 @@ def _cmd_clean_orphans(args: argparse.Namespace) -> int:
     nothing holds them open, and the command must work when the backend is
     down — which is exactly when someone goes looking at disk usage.
     """
-    from . import registry
+    from . import diagnostics, registry
 
     try:
         orphans = registry.orphan_indexes()
@@ -394,12 +159,12 @@ def _cmd_clean_orphans(args: argparse.Namespace) -> int:
         print("no orphan indexes — every index file belongs to a registered bank")
         return EXIT_OK
 
-    total = _human_bytes(sum(o.size for o in orphans))
+    total = diagnostics.human_bytes(sum(item.size for item in orphans))
     verb = "would remove" if args.dry_run else "will remove"
     print(f"{verb} {len(orphans)} orphan index"
           f"{'es' if len(orphans) != 1 else ''} ({total}):")
     for orphan in orphans:
-        print(_orphan_line(orphan))
+        print(diagnostics.orphan_line(diagnostics.orphan_json(orphan)))
 
     if args.dry_run:
         return EXIT_OK
@@ -413,26 +178,22 @@ def _cmd_clean_orphans(args: argparse.Namespace) -> int:
             print("nothing removed")
             return EXIT_OK
 
-    removed, freed, failures = 0, 0, []
-    for orphan in orphans:
-        try:
-            _, failed = registry.delete_index(orphan.id)
-        except ValueError as exc:
-            # Raised when the registry gained this bank between listing and
-            # confirming. Skipped, and said out loud.
-            print(f"  skipped {orphan.id}: {exc}")
-            continue
-        if failed:
-            failures.extend(failed)
-        else:
-            removed += 1
-            freed += orphan.size
-    # Counted from what was actually deleted, not from what was listed: a
-    # skipped or locked file must not be reported as space recovered.
-    print(f"removed {removed} of {len(orphans)} ({_human_bytes(freed)} freed)")
-    for path in failures:
-        print(f"  locked: {path.as_posix()}", file=sys.stderr)
-    return EXIT_ERROR if failures else EXIT_OK
+    try:
+        result = diagnostics.delete_orphans(item.id for item in orphans)
+    except diagnostics.OrphanCleanupRefused as exc:
+        print(f"mnemo: {exc}\n       nothing was removed.", file=sys.stderr)
+        return EXIT_ERROR
+
+    for item in result["skipped"]:
+        print(f"  skipped {item['id']}: {item['reason']}")
+    for item in result["locked"]:
+        for path in item["paths"]:
+            print(f"  locked: {path}", file=sys.stderr)
+    print(
+        f"removed {len(result['removed'])} of {len(orphans)} "
+        f"({diagnostics.human_bytes(result['freed_bytes'])} freed)"
+    )
+    return EXIT_ERROR if result["locked"] else EXIT_OK
 
 
 # -------------------------------------------------------------- API commands

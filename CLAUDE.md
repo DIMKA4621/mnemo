@@ -103,7 +103,8 @@ Service (the persistent backend):
 - `src/api.py` — FastAPI/uvicorn loopback host, and the router that
   decides which credential opens which face. **Private** `/api/*` for the
   cabinet (`/search`, `/reindex`, `/tree`, `/status`, `/banks`,
-  `/banks/{id}/token`, `/fs/dirs`, `/file`, `/logs` — hidden from
+  `/banks/{id}/token`, `/fs/dirs`, `/file`, `/logs`, `/settings`, `/embed/*`,
+  `/autostart`, `/doctor`, `/clean-orphans` — hidden from
   OpenAPI); **external** `/mcp-tools/<tool_name>`, the tools as plain
   HTTP for a human with curl or Swagger; and the two mounted MCP faces,
   `/mcp` and `/mcp-admin`. Bearer token everywhere; `/mcp`, `/mcp-admin`
@@ -133,7 +134,13 @@ Service (the persistent backend):
   the tabs come from `presets`, and choosing a model fills in its URL, width
   and prefixes together. That is the point rather than a convenience — a
   prefix field is a field somebody forgets, which is the same silent failure
-  the catalogue exists to remove.
+  the catalogue exists to remove. Provider changes apply **without a service
+  restart**; a warning banner names every `REBUILD PENDING` bank and queues the
+  existing full-reindex action after one confirmation (disabled and already-
+  indexing banks are never duplicated). «Обслуговування» renders the structured
+  doctor report and removes only the orphan ids just shown, after an inline
+  confirmation. Hosted APIs get a metered «Перевірити ендпоінт» probe, never an
+  unload button.
 
 Faces:
 
@@ -159,6 +166,10 @@ Faces:
   `init`, `doctor`, `clean-orphans` stay local. **No hook targets any
   more** beyond the `hook-postedit` no-op shim: the discipline lives in
   the rule, not in an injection.
+- `src/diagnostics.py` — one structured `doctor` report shared by CLI and
+  cabinet. CLI renders text; `GET /api/doctor` returns the same facts; neither
+  echoes credentials nor probes a metered endpoint. Owns race-safe explicit
+  orphan cleanup for both CLI and `POST /api/clean-orphans`.
 - `src/scaffold.py` — `mnemo init`: additive, idempotent, refuses on
   conflict. Registers the project's memory root as a bank and writes
   **that bank's literal token** into the wiring. It **builds the template
@@ -176,7 +187,11 @@ Faces:
   every other server it had. A tracked `.mcp.json` / `.mcp.env` is not a
   refusal any more: `init` explains, asks, and runs `git rm --cached`
   itself (`--yes` for scripts; **without a terminal it does nothing** and
-  prints the command). Writes **no hook at
+  prints the command). After seeding memory it also runs read-only
+  `git check-ignore -v`: a broad `**/.claude` no longer lets `init` promise
+  portability while git silently drops the bank. It prints the matching rule
+  and narrow exceptions, but never rewrites the project's broad ignore policy.
+  Writes **no hook at
   all**, and no flag makes it write one; `--migrate` unwires every hook
   mnemo ever wrote and rewrites the superseded `/mcp/<bank>` URL. The
   `mcpServers` key it writes is **`mnemo-memory`** (tools namespace as

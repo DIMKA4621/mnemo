@@ -181,6 +181,35 @@ _AUTOSTART: dict[str, Any] = {
 # the state where both of them are reachable.
 _EMBED_HELD: dict[str, Any] = {"holding": "loaded", "probe_dim": None}
 
+# Disposable fixture indexes only — never paths in the real state directory.
+# Two shapes keep the maintenance UI honest: one whose source root still
+# exists (deleting it is a meaningful choice), and one pre-v3 index with no
+# recorded root at all.
+_ORPHANS: list[dict[str, Any]] = [
+    {
+        "id": "deadbeefdeadbeef",
+        "path": "/home/dev/.claude/mnemo/state/deadbeefdeadbeef.db",
+        "size": 7340032,
+        "root": "/home/dev/old-project/.claude/memory",
+        "root_exists": True,
+        "schema": "3",
+        "files": 18,
+        "last_indexed": "2026-07-20T18:14:00+03:00",
+        "error": None,
+    },
+    {
+        "id": "facefeedfacefeed",
+        "path": "/home/dev/.claude/mnemo/state/facefeedfacefeed.db",
+        "size": 1048576,
+        "root": None,
+        "root_exists": False,
+        "schema": None,
+        "files": 4,
+        "last_indexed": None,
+        "error": None,
+    },
+]
+
 
 def _settings_presets() -> list[dict]:
     import sys
@@ -197,7 +226,7 @@ def embed_state_payload() -> dict:
     Both branches are reachable in dev by switching the backend tab and
     saving: `local` reports a resident, an `api` backend whose URL looks like
     Ollama reports a held model, and OpenAI reports that it holds nothing —
-    which is the branch that renders no buttons at all.
+    so it gets a probe button but never an unload button.
     """
     provider = _SETTINGS.get("provider") or "local"
     url = (_SETTINGS.get("api") or {}).get("url") or ""
@@ -244,8 +273,15 @@ def embed_state_payload() -> dict:
     # requests, so without this guard switching the backend tab carried the
     # last `load`'s result onto an endpoint nothing had called — dev showing
     # evidence of a check that never ran.
-    if _EMBED_HELD.get("probe_dim") and out["holding"] == "loaded":
+    if _EMBED_HELD.get("probe_dim") and out["holding"] in ("loaded", "n/a"):
         out["probe_dim"] = _EMBED_HELD["probe_dim"]
+        expected = int((_SETTINGS.get("api") or {}).get("dim") or 1024)
+        if out["probe_dim"] != expected:
+            out["detail"] = (
+                f"the endpoint returned {out['probe_dim']}-wide vectors but "
+                f"this machine is configured for {expected}; fix the width "
+                "before indexing"
+            )
     return out
 
 
@@ -270,6 +306,103 @@ def settings_payload() -> dict:
         },
         "readonly": {"api_host": "127.0.0.1", "api_port": 8918},
         "presets": _settings_presets(),
+    }
+
+
+def doctor_payload() -> dict[str, Any]:
+    """Fixture of the one structured report shared by CLI and API."""
+    machine = _SETTINGS.get("provider") or "local"
+    overrides = sorted({
+        bank.get("provider")
+        for bank in BANKS
+        if bank.get("provider") and bank.get("provider") != machine
+    })
+    local_in_use = "local" in {machine, *overrides}
+    api = _SETTINGS.get("api") or {}
+    endpoint = {"applicable": "api" in {machine, *overrides}}
+    if endpoint["applicable"]:
+        configured = bool(api.get("url") and api.get("model") and api.get("dim"))
+        endpoint.update({
+            "configured": configured,
+            "url": api.get("url"),
+            "model": api.get("model"),
+            "dim": api.get("dim"),
+            "key_set": bool(api.get("key")),
+            "error": None if configured else "url, model and dim are required",
+        })
+
+    return {
+        "engine": {
+            "home": "/home/dev/.claude/mnemo",
+            "state_dir": "/home/dev/.claude/mnemo/state",
+            "python": "/home/dev/.claude/mnemo/.venv/bin/python",
+        },
+        "provider": {
+            "machine": machine,
+            "overrides": overrides,
+            "local_in_use": local_in_use,
+        },
+        "model": {"cached": True, "needed": local_in_use},
+        "sqlite_vec": {"ok": True, "error": None},
+        "resident": {
+            "applicable": local_in_use,
+            "up": True if local_in_use else None,
+            "host": "127.0.0.1",
+            "port": 8917,
+            "scope": "machine_port",
+        },
+        "endpoint": endpoint,
+        "backend": {
+            "up": True,
+            "url": "http://127.0.0.1:8919",
+            "scope": "machine_port",
+            "error": None,
+            "serving_pid": 0,
+            "launcher_pid": None,
+            "banks": len(BANKS),
+            "queue_depth": queue_snapshot()["depth"],
+        },
+        "token": {
+            "present": True,
+            "source": "fixture",
+            "where": "dev fixture token",
+            "scope": "fixture",
+        },
+        "registry": {
+            "ok": True,
+            "error": None,
+            "count": len(BANKS),
+            "banks": [
+                {
+                    "id": bank["id"],
+                    "name": bank["name"],
+                    "root": bank["root"],
+                    "state": bank.get("state") or "enabled",
+                    "exists": bank.get("exists", True),
+                }
+                for bank in BANKS
+            ],
+        },
+        "orphans": {
+            "ok": True,
+            "error": None,
+            "count": len(_ORPHANS),
+            "bytes": sum(item["size"] for item in _ORPHANS),
+            "items": [dict(item) for item in _ORPHANS],
+        },
+        "wiring": {
+            "ok": True,
+            "error": None,
+            "total": 3,
+            "stale": [
+                {
+                    "root": "/home/dev/projects/old-memory",
+                    "command": "mnemo init --migrate --root \"/home/dev/projects/old-memory\"",
+                    "reason": ".mcp.json: mnemo is a legacy stdio entry",
+                    "migrate": True,
+                }
+            ],
+        },
     }
 
 
@@ -454,10 +587,27 @@ def _log_index(bank_id: str, **fields) -> dict:
     return row
 
 
+def _fixture_provider_key(bank: dict) -> tuple[str, str]:
+    chosen = bank.get("provider") or _SETTINGS.get("provider") or "local"
+    if chosen == "local":
+        return "local", "local:intfloat/multilingual-e5-large:1024"
+    api = _SETTINGS.get("api") or {}
+    model = api.get("model") or "unconfigured"
+    dim = api.get("dim") or 0
+    return "api", f"api:{model}:{dim}"
+
+
 def bank_info(bank: dict) -> dict:
-    """BankInfo (contract 9.5) — the fixture row is already exactly that shape."""
+    """BankInfo (contract 9.5), including active vs indexed provider."""
     with _lock:
-        return dict(bank)
+        out = dict(bank)
+        active, key = _fixture_provider_key(bank)
+        indexed = out.get("index_provider_key")
+        out["provider_active"] = active
+        out["provider_key"] = key
+        out["rebuild_pending"] = bool(indexed and indexed != key)
+        out["provider_error"] = None
+        return out
 
 
 def _find_tree_node(node: dict, rel: str) -> dict | None:
@@ -582,6 +732,10 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
         if not path:
             bank["chunks"] = total_chunks
             bank["files"] = len(files)  # every .md in the bank, indexed or not
+            # A completed rebuild now carries the active provider identity, so
+            # the cabinet's REBUILD PENDING banner has a real transition to
+            # observe rather than a fixture that warns forever.
+            bank["index_provider_key"] = _fixture_provider_key(bank)[1]
     set_queue(depth=0, high=0, normal=0, low=0, current=None)
     broadcast("bank_status", bank_id, {"bank": bank_info(bank)})
 
@@ -784,7 +938,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.fail(400, "bad_request", "timeout must be a number")
                     return
 
-        self.json_out(200, {"ok": True, "restart_required": True,
+        self.json_out(200, {"ok": True, "restart_required": False,
                             **settings_payload()})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib name
@@ -817,12 +971,46 @@ class Handler(BaseHTTPRequestHandler):
             _AUTOSTART["enabled"] = bool(body["enabled"])
             self.json_out(200, dict(_AUTOSTART))
             return
+        if parsed.path == "/api/clean-orphans":
+            requested = list(dict.fromkeys(str(item) for item in body.get("ids", []) if item))
+            if not requested:
+                self.fail(400, "bad_request", "expected at least one orphan index id")
+                return
+            removed, skipped, locked, freed = [], [], [], 0
+            with _lock:
+                current = {item["id"]: item for item in _ORPHANS}
+                for index_id in requested:
+                    item = current.get(index_id)
+                    if item is None:
+                        skipped.append({"id": index_id,
+                                        "reason": "not in the current orphan list"})
+                        continue
+                    # One stubborn sidecar makes the partial-result branch
+                    # reachable in dev; no real file is touched.
+                    if index_id == "facefeedfacefeed":
+                        locked.append({
+                            "id": index_id,
+                            "paths": [item["path"] + "-wal"],
+                        })
+                        continue
+                    _ORPHANS.remove(item)
+                    removed.append({"id": index_id, "files_removed": 1,
+                                    "bytes": item["size"]})
+                    freed += item["size"]
+            self.json_out(200, {
+                "requested": requested,
+                "removed": removed,
+                "skipped": skipped,
+                "locked": locked,
+                "freed_bytes": freed,
+            })
+            return
         if parsed.path in ("/api/embed/unload", "/api/embed/load"):
             state = embed_state_payload()
-            if state["holding"] == "n/a":
-                # Same refusal as the real endpoint: an endpoint that holds
-                # nothing has nothing to release, and pretending otherwise
-                # would let the cabinet ship a button that always "worked".
+            if state["holding"] == "n/a" and parsed.path.endswith("/unload"):
+                # Hosted endpoints have no memory here to release. `load` is
+                # different: it means an explicit probe embedding and is the
+                # useful action this branch exists to expose.
                 self.fail(502, "embed_control_failed",
                           "this endpoint holds nothing on this machine — "
                           "there is nothing to unload")
@@ -873,6 +1061,14 @@ class Handler(BaseHTTPRequestHandler):
     def handle_api_get(self, path: str, query: dict) -> None:
         if path == "/api/embed/state":
             self.json_out(200, embed_state_payload())
+            return
+
+        if path == "/api/doctor":
+            report = doctor_payload()
+            report["backend"]["url"] = (
+                f"http://{self.server.server_address[0]}:{self.server.server_port}"
+            )
+            self.json_out(200, report)
             return
 
         if path == "/api/banks":
@@ -1018,7 +1214,8 @@ class Handler(BaseHTTPRequestHandler):
             "id": hashlib.sha256(root.encode("utf-8")).hexdigest()[:16],
             "name": name,
             "root": root,
-            "provider": body.get("provider") or "local",
+            "provider": body.get("provider"),
+            "index_provider_key": None,
             "state": "enabled",
             "enabled": True,
             "exists": True,
@@ -1051,8 +1248,8 @@ class Handler(BaseHTTPRequestHandler):
         if not bank:
             self.fail(404, "bank_not_found", f"no bank matches {ref!r}", {"ref": ref})
             return
-        if bank.get("enabled") is False:
-            self.fail(400, "bad_request", "bank is disabled", {"bank": bank["name"]})
+        if (bank.get("state") or "enabled") == "disabled":
+            self.fail(404, "bank_not_found", "bank is disabled", {"bank": bank["name"]})
             return
 
         rel = body.get("path")

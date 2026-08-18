@@ -259,6 +259,26 @@ h2 {
   font-family: var(--mono);
 }
 
+/* A stale-provider index is not an error response. It gets its own durable
+   warning lane, so a successful request cannot hide the machine state that
+   still needs action. Two boxes, wrapping like the bank title row: long bank
+   counts shrink the text rather than pushing the button out of the viewport. */
+.rebuild-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--badge-indexing-bg);
+  border-bottom: 1px solid var(--badge-indexing-border);
+  color: var(--badge-indexing-fg);
+  font-size: 12px;
+}
+
+.rebuild-banner[hidden] { display: none; }
+.rebuild-banner-text { flex: 1 1 auto; min-width: 0; }
+.rebuild-banner .btn { flex: none; }
+
 /* ---- token gate ------------------------------------------------------- */
 
 .gate {
@@ -599,6 +619,53 @@ h2 {
 }
 .set-mem-actions { display: flex; gap: 7px; margin-top: 9px; flex-wrap: wrap; }
 .set-mem .set-note { margin-top: 7px; }
+
+/* Maintenance: the same facts as CLI doctor, grouped for scanning rather than
+   poured into a preformatted transcript. Reuses the settings tokens and the
+   inline confirmation already used by token rotation; no new interaction
+   pattern is introduced for cleanup. */
+.maint-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.maint-head .set-lead { flex: 1 1 260px; min-width: 0; }
+.maint-head .btn { flex: none; }
+
+.maint-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.maint-item { padding: 8px 10px; }
+.maint-item + .maint-item { border-top: 1px solid var(--line); }
+.maint-item.is-warn { background: var(--badge-indexing-bg); }
+.maint-item.is-error { background: var(--danger-bg); }
+.maint-item.is-ok { background: var(--success-bg); }
+
+.maint-item-line {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.maint-item-line strong { font-size: 12px; }
+.maint-item-line code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.maint-item .set-note { margin-top: 3px; overflow-wrap: anywhere; }
+.maint-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 
 .set-wide { width: 100%; }
 .set-narrow { width: 110px; }
@@ -1481,6 +1548,49 @@ h2 {
    inverts at the bottom of this range: at a 1001px window, 1001 - W - 345
    must still exceed the 345px file list. Widening it further means moving
    the 1000px cut up as well. */
+/* The settings rail is useful while there is room beside it. On a narrow
+   window it becomes a scrollable top row; leaving the fixed 200px rail beside
+   a 160px pane made every 150px statistic label create a horizontal scrollbar.
+   Report rows stack too — the caption is not more important than the value. */
+@media (max-width: 620px) {
+  .topbar { gap: 8px; padding: 6px 8px; }
+  .brand-sub,
+  .service { display: none; }
+
+  .pane-log .pane-head { flex-wrap: wrap; }
+  .pane-log .pane-actions { margin-left: 0; flex-wrap: wrap; }
+
+  .screen-main { flex-direction: column; }
+
+  .set-nav {
+    width: 100%;
+    flex-direction: row;
+    overflow-x: auto;
+    overflow-y: hidden;
+    padding: 0;
+    border-right: none;
+    border-bottom: 1px solid var(--line);
+  }
+
+  .set-nav-item {
+    flex: none;
+    white-space: nowrap;
+    border-left: none;
+    border-bottom: 2px solid transparent;
+  }
+
+  .set-nav-item.is-active {
+    border-left-color: transparent;
+    border-bottom-color: var(--accent);
+  }
+
+  .set-pane { min-height: 0; }
+  .set-body { max-width: none; padding: 16px; }
+  .set-row { flex-wrap: wrap; }
+  .set-stat { flex-direction: column; gap: 2px; }
+  .set-stat-label { width: auto; }
+}
+
 @media (max-width: 1400px) {
   .layout { grid-template-columns: 300px 345px minmax(0, 1fr); }
 }

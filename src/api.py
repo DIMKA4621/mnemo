@@ -231,6 +231,11 @@ _ERROR_STATUS: dict[str, int] = {
     # answers someone else's token, an Ollama that cannot be reached, an
     # endpoint that refused the probe.
     "embed_control_failed": 502,
+    # The orphan list could not be trusted (most importantly: banks.json was
+    # unreadable). 409 because the request conflicts with the machine's current
+    # state; retrying after the registry is fixed is the remedy, not a server
+    # restart and never a guess that every index is disposable.
+    "orphan_cleanup_refused": 409,
     "internal": 500,
 }
 
@@ -1081,6 +1086,13 @@ class ReindexRequest(BaseModel):
     full: bool = False
 
 
+class CleanOrphansRequest(BaseModel):
+    # The ids the cabinet just displayed. The endpoint re-lists and re-checks
+    # each one; accepting "all" would let an index that appeared after the
+    # confirmation be deleted without ever having been shown.
+    ids: list[str] = Field(default_factory=list, max_length=1000)
+
+
 class PatchBankRequest(BaseModel):
     """Editable fields of a registered bank. Omitted means unchanged.
 
@@ -1838,6 +1850,68 @@ def api_status() -> dict:
     }
 
 
+@app.get("/api/doctor", include_in_schema=False)
+def api_doctor() -> dict:
+    """Structured machine diagnostics — the same facts `mnemo doctor` prints.
+
+    The service describes itself rather than making an HTTP request back into
+    its own loopback socket. Everything else comes from `diagnostics.collect`,
+    which is the single source shared with the CLI. No token value and no
+    external embedding request crosses this endpoint.
+    """
+    from . import diagnostics, service_ctl
+
+    launcher = (service_ctl.read_identity() or {}).get("pid")
+    try:
+        bank_count: int | None = len(registry.load())
+    except Exception:  # noqa: BLE001 - collect() reports the registry error
+        bank_count = None
+    backend = {
+        "up": True,
+        "url": f"http://{API_HOST}:{API_PORT}",
+        "scope": "machine_port",
+        "error": None,
+        "serving_pid": os.getpid(),
+        "launcher_pid": launcher,
+        "banks": bank_count,
+        "queue_depth": _queued(),
+    }
+    env_token = bool((os.environ.get("MNEMO_API_TOKEN") or "").strip())
+    persisted = token_file().is_file()
+    if env_token:
+        token_source, token_where, token_scope = (
+            "env", "MNEMO_API_TOKEN", "machine"
+        )
+    elif persisted:
+        token_source, token_where, token_scope = (
+            "state_file", token_file().as_posix(), "engine_home"
+        )
+    else:
+        token_source, token_where, token_scope = (
+            "service_memory", "service process memory", "engine_home"
+        )
+    token = {
+        "present": True,
+        "source": token_source,
+        "where": token_where,
+        "scope": token_scope,
+    }
+    return diagnostics.collect(backend=backend, token=token)
+
+
+@app.post("/api/clean-orphans", include_in_schema=False)
+def api_clean_orphans(req: CleanOrphansRequest) -> dict:
+    """Delete only orphan ids shown to and confirmed by the caller."""
+    from . import diagnostics
+
+    if not req.ids:
+        raise ApiError("bad_request", "expected at least one orphan index id")
+    try:
+        return diagnostics.delete_orphans(req.ids)
+    except diagnostics.OrphanCleanupRefused as exc:
+        raise ApiError("orphan_cleanup_refused", str(exc)) from exc
+
+
 @app.get("/api/settings", include_in_schema=False)
 def api_settings() -> dict:
     """Machine settings, each with the value AND where it came from.
@@ -1875,11 +1949,13 @@ def api_settings() -> dict:
 
 @app.put("/api/settings", include_in_schema=False)
 def api_settings_save(payload: dict = Body(...)) -> dict:
-    """Store settings. Applies on the next service start, and says so.
+    """Store settings and make the new provider active for subsequent work.
 
-    Hot application is deliberately not promised: `dim` and `model` are part
-    of every bank's `provider_key`, so swapping them under a running index is
-    how two vector spaces end up in one database.
+    `forget_providers()` below drops every handle that snapshots url/model/dim.
+    An in-flight file keeps the provider it opened with; the next file sees the
+    new key, refuses to mix vector spaces and queues a rebuild. The indexes are
+    therefore stale — and explicitly reported as such — but the service itself
+    does not need a restart.
     """
     doc: dict = {}
     if "provider" in payload:
@@ -1920,7 +1996,7 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
     # until a restart even where a restart is not needed.
     forget_providers()
     return {"ok": True, "path": str(settings.settings_file()),
-            "restart_required": True, **api_settings()}
+            "restart_required": False, **api_settings()}
 
 
 @app.get("/api/embed/state", include_in_schema=False)

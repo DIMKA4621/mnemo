@@ -30,7 +30,7 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8", errors="replace")
 
-from src import config, embedder  # noqa: E402
+from src import config, diagnostics, embedder  # noqa: E402
 from src.index import scan_bank  # noqa: E402
 from src import scaffold  # noqa: E402
 from src.scaffold import (  # noqa: E402
@@ -43,6 +43,7 @@ from src.scaffold import (  # noqa: E402
     _NeedsUntrack,
     _Refuse,
     _git_tracked,
+    _ignored_memory_note,
     _plan_mcp,
     _plan_settings,
     _plan_wiring,
@@ -1395,6 +1396,67 @@ def test_scaffold_gitignore() -> None:
               detail=str([p.name for p, _ in again.writes]))
 
 
+def test_scaffold_warns_when_memory_is_ignored() -> None:
+    """`init` may wire a project successfully while git drops the source of truth.
+
+    The warning is read-only and actionable: it names the matching rule, says
+    the cross-machine promise is broken, and the suggested exceptions really
+    make git stop ignoring both the bank and its binding rule.
+    """
+    import subprocess
+
+    with tempfile.TemporaryDirectory(prefix="mnemo ignored memory ") as raw:
+        proj = Path(raw) / "repo"
+        proj.mkdir()
+        try:
+            subprocess.run(
+                ["git", "init", "-q"], cwd=proj, check=True,
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        except (OSError, subprocess.CalledProcessError):
+            print("SKIP  ignored-memory warning: no usable git binary")
+            return
+
+        broad = "**/.claude\n"
+        _write(proj / ".gitignore", broad)
+        _seed_tree(proj / ".claude", [])
+        note = _ignored_memory_note(proj) or ""
+        check("init detects a broad rule hiding the memory bank",
+              ".claude/memory/MEMORY.md" in note and "NOT ride with a commit" in note,
+              detail=note[:500])
+        check("the warning names the git rule that matched",
+              "**/.claude" in note, detail=note[:500])
+        check("the read-only probe does not rewrite the broad rule",
+              _read(proj / ".gitignore") == broad,
+              detail=_read(proj / ".gitignore"))
+
+        exceptions = (
+            "!.claude/\n"
+            ".claude/*\n"
+            "!.claude/memory/\n"
+            "!.claude/memory/**\n"
+            "!.claude/rules/\n"
+            ".claude/rules/*\n"
+            "!.claude/rules/mnemo-memory.md\n"
+        )
+        _write(proj / ".gitignore", broad + exceptions)
+        checked = [
+            subprocess.run(
+                ["git", "check-ignore", "-q", "--", target],
+                cwd=proj, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            ).returncode
+            for target in (
+                ".claude/memory/MEMORY.md",
+                ".claude/rules/mnemo-memory.md",
+            )
+        ]
+        check("the suggested exceptions are effective", checked == [1, 1],
+              detail=f"git check-ignore returned {checked}")
+        check("and the warning disappears after the fix",
+              _ignored_memory_note(proj) is None,
+              detail=str(_ignored_memory_note(proj)))
+
+
 def test_scaffold_refuses_a_tracked_file() -> None:
     """A literal bank token is never written into a git-tracked file.
 
@@ -1771,6 +1833,98 @@ def test_orphan_indexes() -> None:
                   "index as an orphan", refused)
 
 
+def test_structured_doctor_and_cleanup() -> None:
+    """CLI text and cabinet JSON are two renderings of the same safe facts."""
+    from src import registry
+
+    print("\n=== structured doctor and cleanup ===")
+    with tempfile.TemporaryDirectory(prefix="mnemo doctor ") as raw:
+        root = Path(raw)
+        state = root / "state"
+        home = root / "engine"
+        bank_root = root / "memory"
+        state.mkdir()
+        home.mkdir()
+        bank_root.mkdir()
+
+        secret = "this-secret-must-never-cross-doctor"
+        with patch.object(config, "STATE_DIR", state), \
+             patch.object(config, "USER_HOME", home), \
+             patch.dict(os.environ, {
+                 "MNEMO_PROVIDER": "local",
+                 "MNEMO_API_TOKEN": secret,
+             }, clear=False), \
+             patch("src.embedder.is_model_cached", return_value=False), \
+             patch("src.embed_server.server_is_up", return_value=False), \
+             patch("src.store.vector_support", return_value=None), \
+             patch("src.scaffold.adopted_projects", return_value=[]):
+            bank = registry.add(bank_root, name="doctor-bank")
+            bank.db_path.write_bytes(b"")
+            (state / "service.db").write_bytes(b"journal")
+            orphan = state / "deadbeefdeadbeef.db"
+            orphan.write_bytes(b"orphan")
+
+            backend = {
+                "up": True,
+                "url": "http://127.0.0.1:8918",
+                "scope": "machine_port",
+                "serving_pid": 123,
+                "launcher_pid": 122,
+                "banks": 1,
+                "queue_depth": 0,
+                "error": None,
+            }
+            report = diagnostics.collect(backend=backend)
+            text = diagnostics.render_text(report)
+            encoded = json.dumps(report)
+
+            check("doctor exposes one structured report",
+                  report["registry"]["count"] == 1
+                  and report["orphans"]["count"] == 1,
+                  detail=encoded[:500])
+            check("the CLI renderer reads the same report",
+                  "doctor-bank" in text and "deadbeefdeadbeef" not in text
+                  and "orphan indexes   1" in text,
+                  detail=text[:800])
+            check("machine-port facts are labelled as machine-wide",
+                  text.count("[machine port]") >= 2,
+                  detail=text[:800])
+            check("doctor reports only token presence/source, never the token",
+                  report["token"]["present"] is True
+                  and report["token"]["source"] == "env"
+                  and secret not in encoded and secret not in text,
+                  detail=encoded[:500])
+            check("doctor never calls an embedding endpoint",
+                  report["endpoint"]["applicable"] is False)
+
+            result = diagnostics.delete_orphans([
+                "deadbeefdeadbeef", "service", "../outside",
+            ])
+            check("structured cleanup deletes the displayed orphan",
+                  [item["id"] for item in result["removed"]]
+                  == ["deadbeefdeadbeef"] and not orphan.exists(),
+                  detail=str(result))
+            check("cleanup refuses ids outside the current orphan list",
+                  {item["id"] for item in result["skipped"]}
+                  == {"service", "../outside"}, detail=str(result))
+            check("cleanup never touches service.db",
+                  (state / "service.db").is_file())
+
+            # Corrupting the registry must turn cleanup into a refusal and keep
+            # the candidate file. This is the exact asymmetry that prevents a
+            # broken banks.json from making every live index look disposable.
+            held = state / "facefeedfacefeed.db"
+            held.write_bytes(b"hold")
+            registry.banks_file().write_text("{ not json", encoding="utf-8")
+            refused = False
+            try:
+                diagnostics.delete_orphans(["facefeedfacefeed"])
+            except diagnostics.OrphanCleanupRefused:
+                refused = True
+            check("cleanup refuses an unreadable registry",
+                  refused and held.exists())
+
+
 def test_bank_resolution() -> None:
     """`resolve` looks both ways: up for the bank containing a path, down for
     the bank a project root contains. The canonical layout puts memory *below*
@@ -2040,6 +2194,28 @@ def test_embed_memory_control() -> None:
     check("unloading a hosted endpoint is refused, not faked",
           "nothing to unload" in refused, refused or "<no refusal>")
 
+    # It still has a useful action: one explicit embedding proves the endpoint
+    # answers and reports its actual width. `holding` remains n/a because a
+    # hosted provider never puts memory on this machine.
+    class _HostedProvider:
+        dim = 1536
+
+        def embed_query(self, text):
+            return [0.0] * self.dim
+
+    with patch("src.providers.get_provider", return_value=_HostedProvider()), \
+         patch.object(settings_mod, "provider", lambda: "api"), \
+         patch.object(settings_mod, "api_url",
+                      lambda: "https://api.openai.com/v1/embeddings"), \
+         patch.object(settings_mod, "api_model",
+                      lambda: "text-embedding-3-small"), \
+         patch.object(embedctl, "_ollama_ps", lambda root: None), \
+         patch.object(embedctl, "_is_ollama", lambda url: False):
+        probed = embedctl.load()
+    check("a hosted endpoint can be probed without pretending it holds memory",
+          probed.get("holding") == "n/a" and probed.get("probe_dim") == 1536,
+          detail=str(probed))
+
 
 def test_env_file() -> None:
     """``<state>/mnemo.env`` reaches a process that inherited no environment.
@@ -2197,6 +2373,37 @@ def test_machine_settings() -> None:
               and "sk-secret-value" not in json.dumps(
                   {k: v.value for k, v in report.items()}),
               detail=str({k: v.value for k, v in report.items()}))
+
+        # Saving now applies to subsequent work without restarting the service.
+        # The provider object snapshots url/model/dim, so this also pins the
+        # `forget_providers()` call: a false flag with a stale cached instance
+        # would be a more convincing lie than the old true flag.
+        from src import api as api_mod
+        from src.providers import forget_providers, get_provider
+
+        os.environ["MNEMO_SETTINGS_FILE"] = str(state / "settings.json")
+        try:
+            settings_mod.load(force=True)
+            before = get_provider("api")
+            saved = api_mod.api_settings_save({
+                "provider": "api",
+                "api": {
+                    "url": "https://example.invalid/v1/embeddings",
+                    "model": "new-model",
+                    "dim": 768,
+                },
+            })
+            after = get_provider("api")
+        finally:
+            forget_providers()
+            os.environ.pop("MNEMO_SETTINGS_FILE", None)
+            settings_mod.load(force=True)
+        check("settings save says no service restart is required",
+              saved.get("restart_required") is False, detail=str(saved))
+        check("the cached provider is actually replaced on hot apply",
+              before.model != after.model and after.model == "new-model"
+              and after.dim == 768,
+              detail=f"before={before.model}/{before.dim} after={after.model}/{after.dim}")
 
 
 def test_model_presets() -> None:
@@ -2428,11 +2635,13 @@ def main() -> int:
     test_removal_lifts_the_queue_cancellation()
     test_setup_scripts_agree()
     test_scaffold_gitignore()
+    test_scaffold_warns_when_memory_is_ignored()
     test_scaffold_refuses_a_tracked_file()
     test_git_index_probe()
     test_project_resolution()
     test_index_paths()
     test_orphan_indexes()
+    test_structured_doctor_and_cleanup()
     test_bank_resolution()
     test_bank_states()
     test_embed_memory_control()

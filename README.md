@@ -194,9 +194,11 @@ it had already looked.
 
 **You.** `mnemo ui` prints the link to the cabinet shown above — every
 per-bank action lives in one `···` menu there (sync, full rebuild, MCP
-access, remove). `mnemo search "query"` answers the same question from the
-terminal, and `mnemo doctor` says whether anything on this machine needs
-attention.
+access, remove). A model change raises one `REBUILD PENDING` banner instead
+of pretending a restart is needed; the cabinet can queue every affected bank
+from there. «Обслуговування» shows the same structured facts as `mnemo doctor`
+and, after an explicit confirmation, removes only the orphan index ids it just
+showed. `mnemo search "query"` answers the same question from the terminal.
 
 **Editing memory is editing files.** There is no write tool and there will
 not be one: you use the same editor and the same git as for everything else,
@@ -214,6 +216,7 @@ mnemo banks list | add <path> | remove <ref>  the registry
 mnemo reindex [--bank B] [--full]             force the issue (the watcher is automatic)
 mnemo service start | stop | status | restart
 mnemo doctor                                  engine, model, tokens, ports, banks, wiring
+mnemo clean-orphans [--dry-run] [--yes]       explicit cleanup of unclaimed indexes
 mnemo warmup                                  explicit model download — never implicit
 ```
 

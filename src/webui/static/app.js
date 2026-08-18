@@ -444,9 +444,202 @@ function renderService() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// stale-provider rebuild notice
+// ---------------------------------------------------------------------------
+//
+// Separate from `#banner`, which is an error channel. A provider change is not
+// a failed request: it is durable machine state with a remedy, and hiding it
+// because some later request succeeded would be the same silence that made the
+// settings switch look as if it did nothing.
+
+const rebuildNotice = { root: null, text: null, action: null };
+const rebuildDialog = {
+  root: null, body: null, submit: null,
+  banks: [], busy: false, errorText: null,
+};
+
+function pendingRebuilds() {
+  const pending = state.banks.filter((bank) => !!bank.rebuild_pending);
+  return {
+    actionable: pending.filter((bank) =>
+      bankState(bank) !== 'disabled' && bank.status !== 'indexing' && !bank.indexing),
+    running: pending.filter((bank) =>
+      bankState(bank) !== 'disabled' && (bank.status === 'indexing' || bank.indexing)),
+    disabled: pending.filter((bank) => bankState(bank) === 'disabled'),
+  };
+}
+
+function buildRebuildNotice() {
+  rebuildNotice.text = el('div', { className: 'rebuild-banner-text' });
+  rebuildNotice.action = el('button', {
+    className: 'btn',
+    text: 'Перегенерувати',
+    on: { click: () => openRebuildDialog() },
+  });
+  rebuildNotice.root = el('div', {
+    className: 'rebuild-banner',
+    attrs: { hidden: '', role: 'status' },
+  }, [rebuildNotice.text, rebuildNotice.action]);
+
+  const errorBanner = $('banner');
+  errorBanner.parentNode.insertBefore(rebuildNotice.root, errorBanner.nextSibling);
+}
+
+function renderRebuildNotice() {
+  if (!rebuildNotice.root) return;
+  const groups = pendingRebuilds();
+  const total = groups.actionable.length + groups.running.length + groups.disabled.length;
+  rebuildNotice.root.hidden = total === 0;
+  if (!total) return;
+
+  const parts = [];
+  if (groups.actionable.length) {
+    parts.push(groups.actionable.length + ' банк(и) мають індекс від попередньої моделі');
+  }
+  if (groups.running.length) {
+    parts.push(groups.running.length + ' вже перегенеровуються');
+  }
+  if (groups.disabled.length) {
+    parts.push(groups.disabled.length + ' вимкнено — спершу їх треба увімкнути');
+  }
+  rebuildNotice.text.textContent = parts.join(' · ') +
+    '. Пошук по застарілих векторах відмовляє, а не змішує два простори.';
+  rebuildNotice.action.hidden = groups.actionable.length === 0;
+  rebuildNotice.action.disabled = rebuildDialog.busy;
+}
+
+function buildRebuildDialog() {
+  rebuildDialog.body = el('div', { className: 'modal-body' });
+  rebuildDialog.submit = el('button', {
+    className: 'btn btn-primary',
+    text: 'Перегенерувати',
+    on: { click: () => submitPendingRebuilds() },
+  });
+  const box = el('div', {
+    className: 'modal-box',
+    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Перегенерувати індекси' },
+    on: { click: (ev) => ev.stopPropagation() },
+  }, [
+    el('div', { className: 'modal-head' }, [
+      el('h2', { text: 'Перегенерувати індекси' }),
+      el('button', {
+        className: 'btn btn-ghost', text: '✕', title: 'Закрити (Esc)',
+        on: { click: () => closeRebuildDialog() },
+      }),
+    ]),
+    rebuildDialog.body,
+    el('div', { className: 'modal-foot' }, [
+      el('button', {
+        className: 'btn', text: 'Скасувати',
+        on: { click: () => closeRebuildDialog() },
+      }),
+      rebuildDialog.submit,
+    ]),
+  ]);
+  rebuildDialog.root = el('div', {
+    className: 'modal', attrs: { hidden: '' },
+    on: { click: () => closeRebuildDialog() },
+  }, [box]);
+  document.body.appendChild(rebuildDialog.root);
+
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape' && !rebuildDialog.root.hidden) closeRebuildDialog();
+  });
+}
+
+function openRebuildDialog() {
+  rebuildDialog.banks = pendingRebuilds().actionable;
+  if (!rebuildDialog.banks.length) return;
+  rebuildDialog.errorText = null;
+  rebuildDialog.busy = false;
+  rebuildDialog.root.hidden = false;
+  renderRebuildDialog();
+}
+
+function closeRebuildDialog() {
+  if (rebuildDialog.busy) return;
+  rebuildDialog.root.hidden = true;
+  rebuildDialog.banks = [];
+  rebuildDialog.errorText = null;
+}
+
+function renderRebuildDialog() {
+  clear(rebuildDialog.body);
+  rebuildDialog.body.appendChild(el('p', {
+    className: 'rm-lead',
+    text: 'Повний реіндекс буде поставлено для ' + rebuildDialog.banks.length +
+          ' банк(ів). Старі derived-індекси буде стерто й зібрано з .md заново.',
+  }));
+
+  const list = el('div', { className: 'set-stats' });
+  for (const bank of rebuildDialog.banks) {
+    list.appendChild(setStat(bank.name, bank.chunks + ' чанків', true));
+  }
+  rebuildDialog.body.appendChild(list);
+  rebuildDialog.body.appendChild(el('p', {
+    className: 'set-note',
+    text: 'Файли .md не змінюються. Час пропорційний обсягу: у виміряному ' +
+          'переході local CPU → Ollama GPU весь конвеєр став приблизно у 3× ' +
+          'швидшим — не у 8.8×, бо 8.8× стосувалось лише ембедингу.',
+  }));
+  if (rebuildDialog.errorText) {
+    rebuildDialog.body.appendChild(el('p', {
+      className: 'modal-error', text: rebuildDialog.errorText,
+    }));
+  }
+  rebuildDialog.submit.disabled = rebuildDialog.busy || !rebuildDialog.banks.length;
+  rebuildDialog.submit.textContent = rebuildDialog.busy ? 'Ставимо в чергу…' : 'Перегенерувати';
+}
+
+async function submitPendingRebuilds() {
+  const banks = rebuildDialog.banks.slice();
+  if (!banks.length || rebuildDialog.busy) return;
+  rebuildDialog.busy = true;
+  rebuildDialog.errorText = null;
+  renderRebuildDialog();
+
+  const outcomes = await Promise.allSettled(
+    banks.map((bank) => requestReindex(bank, { full: true }))
+  );
+  const failed = [];
+  outcomes.forEach((outcome, index) => {
+    const bank = banks[index];
+    if (outcome.status === 'fulfilled') {
+      const res = outcome.value;
+      setNote(bank.id, 'поставлено: повний реіндекс · у черзі ' + res.queued +
+                       ' · task ' + (res.task_ids || []).join(', '));
+    } else {
+      failed.push({ bank: bank, error: outcome.reason });
+    }
+  });
+
+  const authFailure = failed.find((item) => isAuthError(item.error));
+  if (authFailure) {
+    rebuildDialog.busy = false;
+    closeRebuildDialog();
+    reportError(authFailure.error);
+    return;
+  }
+
+  await Promise.all([loadBanks().catch(() => {}), loadStatus().catch(() => {})]);
+  rebuildDialog.busy = false;
+  renderRebuildNotice();
+  if (!failed.length) {
+    closeRebuildDialog();
+    return;
+  }
+  rebuildDialog.banks = failed.map((item) => item.bank);
+  rebuildDialog.errorText = failed.map((item) =>
+    item.bank.name + ': ' + (item.error && item.error.message ? item.error.message : item.error)
+  ).join(' · ');
+  renderRebuildDialog();
+}
+
 function renderBanks() {
   const list = $('banks-list');
   clear(list);
+  renderRebuildNotice();
 
   if (!state.banks.length) {
     list.appendChild(el('p', {
@@ -1080,10 +1273,16 @@ function setNote(bankId, text) {
 // reindex (contract 9.5 POST /api/reindex)
 // ---------------------------------------------------------------------------
 
+function requestReindex(bank, opts) {
+  return api('/api/reindex', {
+    method: 'POST',
+    body: { bank: bank.name, path: opts.path || null, full: !!opts.full },
+  });
+}
+
 async function reindex(bank, opts) {
-  const body = { bank: bank.name, path: opts.path || null, full: !!opts.full };
   try {
-    const res = await api('/api/reindex', { method: 'POST', body: body });
+    const res = await requestReindex(bank, opts);
     hideBanner();
     const what = opts.path
       ? opts.path
@@ -2080,6 +2279,12 @@ const settings = {
   embed: null,         // GET /api/embed/state — what the backend holds now
   embedError: null,
   embedBusy: false,    // an unload/load is in flight
+  maintenance: null,  // GET /api/doctor — loaded only when this section opens
+  maintenanceBusy: false,
+  maintenanceError: null,
+  cleanupBusy: false,
+  cleanupConfirming: false,
+  cleanupNote: null,
 };
 
 /**
@@ -2205,7 +2410,13 @@ function chooseSettingsSection(id) {
   // survived the trip would show the control on «Вимкнено» for a machine
   // whose autostart is on — the same lie as an unsaved edit that looks stored.
   settings.autostartWant = null;
+  settings.maintenanceError = null;
+  settings.cleanupConfirming = false;
+  settings.cleanupNote = null;
   renderSettings();
+  if (id === 'maint' && !settings.maintenance && !settings.maintenanceBusy) {
+    refreshMaintenance();
+  }
 }
 
 function renderSettingsNav() {
@@ -2255,6 +2466,9 @@ async function openSettings() {
   } finally {
     settings.busy = false;
     renderSettings();
+    if (settings.section === 'maint' && !settings.maintenanceBusy) {
+      refreshMaintenance();
+    }
   }
 }
 
@@ -2267,6 +2481,8 @@ function closeSettings() {
   // Unsaved selections do not survive the screen either — reopening must show
   // the machine, not what somebody nearly did to it last time.
   settings.autostartWant = null;
+  settings.cleanupConfirming = false;
+  settings.cleanupNote = null;
 }
 
 /** Fill the form from what is stored, for the currently selected backend. */
@@ -2542,9 +2758,10 @@ function renderEmbedSection(body) {
 
   // -- consequences -----------------------------------------------------
   body.appendChild(el('p', { className: 'set-warn' }, [
-    document.createTextNode('Зміна моделі або ширини — це новий ключ перебудови: ' +
-      'кожен банк переембедиться повністю при наступній синхронізації. ' +
-      'Наберає чинності після перезапуску служби.'),
+    document.createTextNode('Зміна моделі або ширини — це новий ключ перебудови. ' +
+      'Конфігурація діє одразу для нової роботи; старі індекси отримають ' +
+      'REBUILD PENDING і пошук по них відмовить, доки їх не перегенерувати. ' +
+      'Спершу перевірте ендпоінт кнопкою вище.'),
   ]));
 
   renderSettingsMessages();
@@ -2623,13 +2840,17 @@ function renderEmbedMemory(body) {
       on: { click: () => embedAction('unload') },
     }));
   }
-  if (held === 'unloaded' || held === 'loaded') {
+  if (['unloaded', 'loaded', 'n/a', 'unknown'].includes(held)) {
     buttons.appendChild(el('button', {
       className: 'btn',
-      // «Перевірити» when it is already up: the call is the same probe
-      // embedding, and naming it "load" for a model that is loaded would
-      // describe the mechanism instead of what the click is good for.
-      text: held === 'loaded' ? 'Перевірити' : 'Завантажити',
+      // The same probe has three useful names. A cold local/Ollama backend is
+      // loaded; one already holding the model is checked; a remote endpoint
+      // never holds our memory at all, so only its answer can be verified.
+      text: held === 'unloaded'
+        ? 'Завантажити'
+        : (held === 'n/a' || held === 'unknown')
+          ? 'Перевірити ендпоінт'
+          : 'Перевірити',
       attrs: settings.embedBusy ? { disabled: '' } : {},
       on: { click: () => embedAction('load') },
     }));
@@ -2644,6 +2865,8 @@ function renderEmbedMemory(body) {
     // English line in the middle of a Ukrainian screen.
     notes.push('Цей ендпоінт не тримає нічого на цій машині — модель живе ' +
                'на боці постачальника, тож звільняти нічого.');
+    notes.push('«Перевірити ендпоінт» зробить один embedding request. Для ' +
+               'тарифікованого API це може бути платний виклик.');
   }
   if (held === 'loaded' && info.wake_s) {
     notes.push('Вивантаження звільняє памʼять зараз; наступний пошук або ' +
@@ -2673,9 +2896,15 @@ async function embedAction(what) {
   renderSettings();
   try {
     settings.embed = await api('/api/embed/' + what, { method: 'POST' });
-    settings.note = what === 'unload'
-      ? 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.'
-      : 'Бекенд відповів — модель у памʼяті.';
+    if (what === 'unload') {
+      settings.note = 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.';
+    } else if (settings.embed.holding === 'n/a') {
+      settings.note = 'Ендпоінт відповів' + (settings.embed.probe_dim
+        ? ' — пробний вектор має ' + settings.embed.probe_dim + ' вимірів.'
+        : '.');
+    } else {
+      settings.note = 'Бекенд відповів — модель у памʼяті.';
+    }
   } catch (err) {
     if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
     settings.embedError = err.message;
@@ -2879,16 +3108,263 @@ async function submitService() {
   }
 }
 
+/** Fetch the structured report only when Maintenance is actually opened. */
+async function refreshMaintenance(options) {
+  if (settings.maintenanceBusy) return;
+  const keepNote = options && options.keepNote;
+  settings.maintenanceBusy = true;
+  settings.maintenanceError = null;
+  if (!keepNote) settings.cleanupNote = null;
+  if (settings.section === 'maint') renderSettings();
+  try {
+    settings.maintenance = await api('/api/doctor');
+  } catch (err) {
+    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
+    settings.maintenanceError = err.message;
+  } finally {
+    settings.maintenanceBusy = false;
+    if (settings.section === 'maint') renderSettings();
+  }
+}
+
+function maintItem(title, value, note, tone) {
+  return el('div', { className: 'maint-item' + (tone ? ' is-' + tone : '') }, [
+    el('div', { className: 'maint-item-line' }, [
+      el('strong', { text: title }),
+      value ? el('code', { text: value }) : null,
+    ]),
+    note ? el('p', { className: 'set-note', text: note }) : null,
+  ]);
+}
+
 /** Diagnostics and cleanup — the rare commands, kept off the main screen. */
 function renderMaintSection(body) {
-  body.appendChild(el('p', {
-    className: 'set-lead',
-    text: 'Діагностика й прибирання: доктор і індекси-сироти.',
-  }));
-  body.appendChild(el('p', {
-    className: 'empty-hint',
-    text: 'Ще не зроблено — поки що mnemo doctor і mnemo clean-orphans у терміналі.',
-  }));
+  const report = settings.maintenance;
+  body.appendChild(el('div', { className: 'maint-head' }, [
+    el('p', {
+      className: 'set-lead',
+      text: 'Ті самі перевірки, що друкує mnemo doctor; тут вони показані ' +
+            'структуровано, без парсингу CLI-тексту.',
+    }),
+    el('button', {
+      className: 'btn',
+      text: settings.maintenanceBusy ? 'Оновлюємо…' : 'Оновити діагностику',
+      attrs: settings.maintenanceBusy ? { disabled: '' } : {},
+      on: { click: () => refreshMaintenance() },
+    }),
+  ]));
+
+  if (settings.maintenanceError) {
+    body.appendChild(el('p', { className: 'modal-error', text: settings.maintenanceError }));
+  }
+  if (!report) {
+    body.appendChild(el('p', {
+      className: 'empty-hint',
+      text: settings.maintenanceBusy ? 'Збираємо діагностику…' : 'Звіт ще не отримано.',
+    }));
+    return;
+  }
+
+  const engine = report.engine || {};
+  body.appendChild(setField('Рушій', el('div', { className: 'set-stats' }, [
+    setStat('Engine home', engine.home, true),
+    setStat('State dir', engine.state_dir, true),
+    setStat('Python', engine.python, true),
+  ]), null));
+
+  const provider = report.provider || {};
+  const model = report.model || {};
+  const vec = report.sqlite_vec || {};
+  const resident = report.resident || {};
+  const endpoint = report.endpoint || {};
+  const providerValue = provider.machine + ((provider.overrides || []).length
+    ? ' · overrides: ' + provider.overrides.join(', ')
+    : '');
+  const providerStats = [
+    setStat('Провайдер', providerValue, true),
+    setStat('Локальна модель', model.needed
+      ? (model.cached ? 'кеш повний' : 'НЕ ЗАВАНТАЖЕНА')
+      : (model.cached ? 'є, але не потрібна' : 'не потрібна')),
+    setStat('sqlite-vec', vec.ok ? 'ok' : 'НЕДОСТУПНИЙ'),
+    setStat('Резидент', resident.applicable
+      ? ((resident.up ? 'працює' : 'не завантажений') +
+         ' · ' + resident.host + ':' + resident.port + ' · машинний порт')
+      : 'n/a для цього провайдера'),
+  ];
+  if (endpoint.applicable) {
+    providerStats.push(setStat('API endpoint', endpoint.configured
+      ? endpoint.url + ' · ' + endpoint.model + ' · ' + endpoint.dim + ' вимірів' +
+        (endpoint.key_set ? ' · key set' : ' · no key')
+      : 'НЕ НАЛАШТОВАНО — ' + (endpoint.error || 'невідомо'), true));
+  }
+  body.appendChild(setField('Ембединг', el('div', { className: 'set-stats' }, providerStats), null));
+  if (vec.error) body.appendChild(el('p', { className: 'modal-error', text: vec.error }));
+
+  const backend = report.backend || {};
+  const tokenFact = report.token || {};
+  body.appendChild(setField('Служба', el('div', { className: 'set-stats' }, [
+    setStat('Backend', backend.up
+      ? 'працює · pid ' + backend.serving_pid + ' · машинний порт'
+      : 'НЕ ДОСТУПНИЙ — ' + (backend.error || 'невідомо')),
+    setStat('URL', backend.url, true),
+    setStat('Черга', backend.queue_depth),
+    setStat('API token', (tokenFact.present ? 'present' : 'MISSING') +
+      ' · ' + (tokenFact.where || tokenFact.source || 'unknown') +
+      ' · ' + (tokenFact.scope || 'unknown scope'), true),
+  ]), null));
+
+  const registry = report.registry || {};
+  if (!registry.ok) {
+    body.appendChild(setField('Реєстр', el('p', {
+      className: 'modal-error',
+      text: 'НЕЧИТАНИЙ — ' + (registry.error || 'невідомо'),
+    }), null));
+  } else {
+    const registryBox = el('div', { className: 'maint-list' });
+    registryBox.appendChild(maintItem(
+      registry.count + ' банк(ів)', null, 'Реєстр читається.', 'ok'));
+    for (const bank of registry.banks || []) {
+      const flags = [];
+      if (bank.state !== 'enabled') flags.push(bank.state);
+      if (!bank.exists) flags.push('нема кореня');
+      registryBox.appendChild(maintItem(
+        bank.name,
+        flags.length ? flags.join(' · ') : 'ok',
+        bank.root,
+        flags.length ? 'warn' : null));
+    }
+    body.appendChild(setField('Реєстр', registryBox, null));
+  }
+
+  const wiring = report.wiring || {};
+  const wiringBox = el('div', { className: 'maint-list' });
+  if (!wiring.ok) {
+    wiringBox.appendChild(maintItem('Невідомо', null, wiring.error || 'помилка', 'error'));
+  } else if (!(wiring.stale || []).length) {
+    wiringBox.appendChild(maintItem(
+      (wiring.total || 0) + ' проєкт(ів)', 'усі актуальні', null, 'ok'));
+  } else {
+    for (const project of wiring.stale) {
+      wiringBox.appendChild(maintItem(
+        project.root,
+        project.command,
+        project.reason,
+        'warn'));
+    }
+  }
+  body.appendChild(setField('Project wiring', wiringBox, null));
+
+  renderOrphanMaintenance(body, report.orphans || {});
+}
+
+function renderOrphanMaintenance(body, orphans) {
+  const box = el('div', { className: 'maint-list' });
+  if (!orphans.ok) {
+    box.appendChild(maintItem(
+      'Список недоступний', null,
+      'Видалення заборонене: ' + (orphans.error || 'реєстр не можна перевірити'),
+      'error'));
+  } else if (!orphans.count) {
+    box.appendChild(maintItem('Сиріт немає', '0 B', 'Кожен index належить банку.', 'ok'));
+  } else {
+    for (const orphan of orphans.items || []) {
+      let note = orphan.error
+        ? 'не читається — ' + orphan.error
+        : orphan.root || (orphan.schema == null
+          ? 'pre-v3 index — root не записаний'
+          : 'root не записаний');
+      if (orphan.root_exists) note += ' · root досі є на диску';
+      box.appendChild(maintItem(
+        orphan.id,
+        fmtBytes(orphan.size),
+        (orphan.files == null ? '? файлів' : orphan.files + ' файлів') + ' · ' + note,
+        'warn'));
+    }
+  }
+  body.appendChild(setField(
+    'Індекси-сироти' + (orphans.ok && orphans.count
+      ? ' · ' + orphans.count + ' · ' + fmtBytes(orphans.bytes)
+      : ''),
+    box,
+    'Doctor лише показує. Прибирає тільки окрема підтверджена дія — ніколи ' +
+    'автоматично й ніколи разом із діагностикою.'));
+
+  if (settings.cleanupNote) {
+    body.appendChild(el('p', { className: 'tok-ok', text: settings.cleanupNote }));
+  }
+  if (!orphans.ok || !orphans.count) return;
+
+  if (!settings.cleanupConfirming) {
+    body.appendChild(el('div', { className: 'maint-actions' }, [
+      el('button', {
+        className: 'btn',
+        text: 'Прибрати сироти',
+        attrs: settings.cleanupBusy ? { disabled: '' } : {},
+        on: { click: () => {
+          settings.cleanupConfirming = true;
+          renderSettings();
+        } },
+      }),
+    ]));
+    return;
+  }
+
+  const ids = (orphans.items || []).map((item) => item.id);
+  body.appendChild(el('div', { className: 'tok-confirm' }, [
+    el('p', {
+      className: 'tok-confirm-text',
+      text: 'Буде видалено тільки ці показані derived index id: ' + ids.join(', ') +
+            '. Перед кожним видаленням реєстр перевіряється знову; .md не чіпаються.',
+    }),
+    el('div', { className: 'tok-confirm-row' }, [
+      el('button', {
+        className: 'btn', text: 'Скасувати',
+        attrs: settings.cleanupBusy ? { disabled: '' } : {},
+        on: { click: () => {
+          settings.cleanupConfirming = false;
+          renderSettings();
+        } },
+      }),
+      el('button', {
+        className: 'btn btn-danger',
+        text: settings.cleanupBusy ? 'Прибираємо…' : 'Видалити ' + ids.length,
+        attrs: settings.cleanupBusy ? { disabled: '' } : {},
+        on: { click: () => submitOrphanCleanup(ids) },
+      }),
+    ]),
+  ]));
+}
+
+async function submitOrphanCleanup(ids) {
+  if (settings.cleanupBusy || !ids.length) return;
+  settings.cleanupBusy = true;
+  settings.maintenanceError = null;
+  settings.cleanupNote = null;
+  renderSettings();
+  try {
+    const result = await api('/api/clean-orphans', {
+      method: 'POST', body: { ids: ids },
+    });
+    const parts = [
+      'видалено ' + result.removed.length + ' з ' + result.requested.length,
+      'звільнено ' + fmtBytes(result.freed_bytes),
+    ];
+    if (result.skipped.length) parts.push('пропущено ' + result.skipped.length);
+    if (result.locked.length) parts.push('locked ' + result.locked.length);
+    settings.cleanupNote = parts.join(' · ');
+    settings.cleanupConfirming = false;
+    settings.maintenance = await api('/api/doctor');
+    if (result.locked.length) {
+      settings.maintenanceError = 'Не всі файли видалено: ' + result.locked.map((item) =>
+        item.id + ' (' + item.paths.join(', ') + ')').join(' · ');
+    }
+  } catch (err) {
+    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
+    settings.maintenanceError = err.message;
+  } finally {
+    settings.cleanupBusy = false;
+    if (settings.section === 'maint') renderSettings();
+  }
 }
 
 /** The last save's verdict. Called from every branch of `renderSettings`,
@@ -2943,9 +3419,24 @@ async function submitSettings() {
     settings.data = data;
     settings.keyTouched = false;
     settings.form.key = '';
+    // The provider cache is already dropped by the PUT. Re-read every view of
+    // that fact now: the memory block must point at the saved endpoint, and the
+    // main screen must expose the resulting stale indexes immediately.
+    await refreshEmbedState();
+    const refreshed = await Promise.allSettled([loadBanks(), loadStatus()]);
+    const refreshFailed = refreshed.some((item) => item.status === 'rejected');
+    const pending = pendingRebuilds();
+    const pendingCount = pending.actionable.length + pending.running.length + pending.disabled.length;
     settings.note = data.restart_required
       ? 'Збережено. Набере чинності після перезапуску служби.'
-      : 'Збережено.';
+      : 'Збережено й застосовано. Перевірте бекенд кнопкою вище' +
+        (pendingCount
+          ? ', потім перегенеруйте банки з REBUILD PENDING на головному екрані.'
+          : '.');
+    if (refreshFailed) {
+      settings.errorText = 'Налаштування збережено, але не всі стани вдалося ' +
+        'перечитати. Оновіть сторінку — повторно зберігати не потрібно.';
+    }
   } catch (err) {
     if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
     settings.errorText = err.message;
@@ -3652,6 +4143,8 @@ async function boot() {
   buildTokenPanel();
   buildBankMenu();
   buildRemoval();
+  buildRebuildNotice();
+  buildRebuildDialog();
   buildSettings();
   renderService();
   if (!token) {

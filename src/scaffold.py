@@ -1402,6 +1402,78 @@ def _git_tracked(proj: Path, name: str) -> bool | None:
     return rel in paths
 
 
+def _ignored_memory_note(proj: Path) -> str | None:
+    """Explain when git will not carry the memory `init` just seeded.
+
+    This is intentionally a real ``git check-ignore`` rather than a home-grown
+    parser. Ignore rules may come from parent files, ``.git/info/exclude`` or a
+    global excludes file, and reproducing their precedence would create a
+    second git with worse answers. The command is read-only. If git is absent
+    or the probe itself fails, init continues: this is a portability warning,
+    not the token-safety boundary enforced by `_refuse_if_tracked`.
+
+    Tracked files are not reported by ``git check-ignore`` without
+    ``--no-index``, which is exactly right. A tracked memory file already rides
+    with the commit even if a broad rule would ignore a new copy of it.
+    """
+    if _git_worktree(proj) is None:
+        return None
+
+    import subprocess  # noqa: PLC0415 - only this optional probe needs git
+
+    targets = [
+        ".claude/memory/MEMORY.md",
+        ".claude/rules/mnemo-memory.md",
+    ]
+    try:
+        done = subprocess.run(
+            ["git", "check-ignore", "-v", "--", *targets],
+            cwd=str(proj), capture_output=True, text=True, timeout=15,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if done.returncode != 0 or not done.stdout.strip():
+        return None
+
+    matches = []
+    for raw in done.stdout.splitlines():
+        line = raw.strip()
+        if not line:
+            continue
+        # `git check-ignore -v` also prints the NEGATION pattern that rescued a
+        # path (`!.claude/memory/**`). A non-empty stdout therefore does not by
+        # itself mean "ignored". The pattern is the last colon-delimited field
+        # before the tab; drive letters may add an earlier colon on Windows, so
+        # split from the right.
+        source, _, shown_path = line.partition("\t")
+        pattern = source.rsplit(":", 1)[-1]
+        if pattern.startswith("!"):
+            continue
+        matches.append(
+            (source + ("  ->  " + shown_path if shown_path else "")).strip()
+        )
+    if not matches:
+        return None
+
+    return (
+        "git ignores memory files that mnemo just created:\n"
+        + "\n".join(f"    {line}" for line in matches)
+        + "\n  They will NOT ride with a commit, so another clone will have "
+          "an empty bank. mnemo did not rewrite your broad ignore rule.\n"
+          "  Add narrow exceptions AFTER that rule (adapt them if your layout "
+          "differs):\n"
+          "    !.claude/\n"
+          "    .claude/*\n"
+          "    !.claude/memory/\n"
+          "    !.claude/memory/**\n"
+          "    !.claude/rules/\n"
+          "    .claude/rules/*\n"
+          "    !.claude/rules/mnemo-memory.md\n"
+          "  Then verify with `git check-ignore -v "
+          ".claude/memory/MEMORY.md` and `git status`."
+    )
+
+
 def _is_mnemo_cmd(command: object, subcmd: str) -> bool:
     """A hook command that targets `mnemo <subcmd>` (any launcher path)."""
     if not isinstance(command, str):
@@ -2116,6 +2188,10 @@ def init_project(root: str | None, *, migrate: bool = False,
     log: list[str] = []
     settings_path.parent.mkdir(parents=True, exist_ok=True)
     _seed_tree(proj / ".claude", log)
+    portability_notes: list[str] = []
+    ignored_note = _ignored_memory_note(proj)
+    if ignored_note:
+        portability_notes.append(ignored_note)
 
     report: list[str] = []
     try:
@@ -2124,6 +2200,8 @@ def init_project(root: str | None, *, migrate: bool = False,
         print(f"mnemo init: project = {proj}")
         for line in log + report:
             print(line)
+        for note in portability_notes:
+            print(f"  NOTE                 {note}")
         print(f"mnemo init: could not register the bank ({exc}); the MCP "
               f"wiring needs its token, so it was NOT written.")
         return 1
@@ -2148,7 +2226,7 @@ def init_project(root: str | None, *, migrate: bool = False,
     print(f"mnemo init: project = {proj}")
     for line in log + wiring.log + report:
         print(line)
-    for note in wiring.notes:
+    for note in portability_notes + wiring.notes:
         print(f"  NOTE                 {note}")
     if (proj / ".mcp.json.template").exists():
         setup = proj / "mcp-setup.sh"

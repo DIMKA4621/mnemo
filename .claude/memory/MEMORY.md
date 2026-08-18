@@ -18,7 +18,8 @@ detail lives in `topics/`, day notes in `logs/`.
   доповнюється**), `.mcp.json` генерований і gitignored проти шару
   template + `.mcp.env` + `mcp-setup.*`, **динамічні** підстановки (відсутня
   змінна = помилка, а не дослівний `{{TOKEN}}` при `exit 0`), оновлення
-  правила за sha256 і чому `edited` ≠ «правили руками». Хуків немає жодних.
+  правила за sha256, `git check-ignore -v` після seed (broad `.claude` більше
+  не ховає memory мовчки) і чому `edited` ≠ «правили руками». Хуків немає.
 - [Встановлення й життєвий цикл](topics/install-lifecycle.md) — два рівні
   (інсталятор = машина, `init` = тека), знесення як дзеркало, осиротілі
   індекси, ознака v2 і чому список v2-проєктів не відновлюється. Головне:
@@ -27,8 +28,9 @@ detail lives in `topics/`, day notes in `logs/`.
 - [Кабінет](topics/cabinet-ui.md) — вибір теки обходить ФС на боці бекенда
   (`webkitdirectory` шляху не дає), усі дії банку в одному меню `···`,
   налаштування як **екран, а не модалка** (затемнений фон показував би
-  застарілий стан), і правило «ніщо не застосовується по кліку — тільки по
-  «Зберегти»».
+  застарілий стан), окремий warning lane для `REBUILD PENDING` і structured
+  «Обслуговування»: CLI/UI читають один doctor-report, cleanup приймає лише
+  щойно показані orphan id.
 - [Native Windows support](topics/windows-native-support.md) — PowerShell 5.1
   installer, canonical launcher contract, portable wiring, and verification.
 - [Пропускна здатність ембедингу](topics/embedding-throughput.md) — наш
@@ -77,8 +79,9 @@ detail lives in `topics/`, day notes in `logs/`.
   0.54 / 0.81. `test_search.py` лишається порогом регресії, не інструментом
   порівняння.
 - Індекс зветься `sha1(корінь)[:16].db`; звʼязок односторонній, тож зняті банки
-  лишають осиротілі файли — `doctor` рахує, `clean-orphans` прибирає з
-  підтвердженням, автоматично ніколи.
+  лишають осиротілі файли. `src/diagnostics.py` — **одне** structured джерело
+  для CLI doctor й кабінету; cleanup явний і приймає тільки показані id,
+  перечитуючи registry двічі. Автоматично — ніколи.
 - **Стан банку — одне поле `state`** (`enabled|frozen|disabled`), не пара
   булеанів: `banks.json` редагують руками, а два поля про один факт розходяться.
   `frozen` — не стежимо, **але шукається**. `Bank.enabled` лишилась
@@ -91,6 +94,12 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-17](logs/2026-08-17-cabinet-parity.md) — крок D: окремий
+  `REBUILD PENDING` banner + масовий existing-reindex, structured doctor для
+  CLI/UI, explicit orphan cleanup лише за показаними id, hot settings без
+  фальшивого рестарту, hosted endpoint probe і гучний `git check-ignore`
+  warning. **Пастка:** verbose git показує й negation; непорожній stdout ≠
+  ignored.
 - [2026-08-16 (третє)](logs/2026-08-16-embed-memory.md) — віддати пам'ять
   бекенда кнопкою (`mnemo embed`, `/api/embed/*`, `src/embedctl.py`). **Не
   вимикач:** модель повертається на першому пошуку за ~7–8 с — той самий
