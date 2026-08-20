@@ -197,6 +197,7 @@ def _hit_json(hit: Any) -> dict[str, Any]:
         "chunk_index": getattr(hit, "chunk_index", None),
         "score": getattr(hit, "score", None),
         "sim": getattr(hit, "sim", None),
+        "content": getattr(hit, "content", None),
     }
 
 

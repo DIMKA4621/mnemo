@@ -122,7 +122,14 @@ FS_FIXTURE: dict[str, list[str]] = {
     "/home/dev/projects": ["mnemo", "voice-agent"],
     "/home/dev/projects/mnemo": ["docs"],
     "/home/dev/projects/mnemo/docs": [],
-    "/home/dev/projects/voice-agent": [],
+    # `.claude/memory` here specifically, so the add-bank picker's "одразу
+    # підключити проєкт (MCP)" checkbox has a second eligible target — one
+    # whose fixture `init` outcome (`_mock_init_result`) is the *honest
+    # refusal* shape (`ok: true`, log carries a git-rm-cached message),
+    # distinct from `/home/dev/.claude/memory`'s plain success.
+    "/home/dev/projects/voice-agent": [".claude"],
+    "/home/dev/projects/voice-agent/.claude": ["memory"],
+    "/home/dev/projects/voice-agent/.claude/memory": [],
     "/home/dev/empty-folder": [],
     "/srv": [],
 }
@@ -137,6 +144,9 @@ FS_MD: dict[str, int] = {
     "/home/dev/projects": 0,
     "/home/dev/projects/mnemo": 9,
     "/home/dev/projects/mnemo/docs": 9,
+    "/home/dev/projects/voice-agent": 5,
+    "/home/dev/projects/voice-agent/.claude": 5,
+    "/home/dev/projects/voice-agent/.claude/memory": 5,
 }
 
 
@@ -180,6 +190,11 @@ _AUTOSTART: dict[str, Any] = {
 # memory, which is all the two buttons need. Starts `loaded`, because that is
 # the state where both of them are reachable.
 _EMBED_HELD: dict[str, Any] = {"holding": "loaded", "probe_dim": None}
+# `cached=False` by default so the freshly-added "Завантажити модель" button
+# (contract: `GET /api/embed/state`'s `download` field) is on screen without
+# extra clicks — the whole point of this fixture is to exercise that branch.
+_MODEL_CACHED: dict[str, Any] = {"value": False}
+_DOWNLOAD: dict[str, Any] = {"active": False, "failed": False}
 
 # Disposable fixture indexes only — never paths in the real state directory.
 # Two shapes keep the maintenance UI honest: one whose source root still
@@ -236,7 +251,7 @@ def embed_state_payload() -> dict:
             "backend": "local",
             "model": "intfloat/multilingual-e5-large",
             "holding": _EMBED_HELD["holding"],
-            "cached": True,
+            "cached": _MODEL_CACHED["value"],
             "where": "127.0.0.1:8917",
             "wake_s": 7.6,
             "detail": None,
@@ -282,7 +297,20 @@ def embed_state_payload() -> dict:
                 f"this machine is configured for {expected}; fix the width "
                 "before indexing"
             )
+    # Merged in unconditionally, matching `api.py`'s
+    # `{**embedctl.state(), "download": _download_status()}` — present for
+    # every provider even though only `local`/Ollama can ever have
+    # `cached is False` and show the button.
+    out["download"] = {"active": _DOWNLOAD["active"], "failed": _DOWNLOAD["failed"]}
     return out
+
+
+def _finish_download() -> None:
+    """Runs on a timer thread: coarse status only, no progress reporting —
+    same shape as the real backend's detached `warmup --force`."""
+    time.sleep(4.0)
+    _MODEL_CACHED["value"] = True
+    _DOWNLOAD["active"] = False
 
 
 def settings_payload() -> dict:
@@ -608,6 +636,36 @@ def bank_info(bank: dict) -> dict:
         out["rebuild_pending"] = bool(indexed and indexed != key)
         out["provider_error"] = None
         return out
+
+
+def _mock_init_result(root: str) -> dict:
+    """Fixture-only stand-in for what `POST /api/banks`'s optional `init`
+    would report from a real `mnemo init --root <project>` run (contract:
+    `{"ok": true, "log": [...]}` or `{"ok": false, "skipped": true,
+    "reason": ...}`). Never runs `mnemo init` for real — this server answers
+    shapes, not the product — so the log is canned, picked by project root
+    to keep both real-world outcomes reachable from the picker.
+    """
+    suffix = "/.claude/memory"
+    if not root.endswith(suffix):
+        # Only reachable if a client sent `init: true` for an ineligible
+        # root — the picker's checkbox stays disabled+unchecked for those,
+        # but the server does not trust the client to have honoured that.
+        return {"ok": False, "skipped": True,
+                "reason": "bank root is not <project>/.claude/memory"}
+    project = root[: -len(suffix)]
+    if project.endswith("voice-agent"):
+        return {"ok": True, "log": [
+            ".mcp.json уже відстежується git — mnemo не переписує токен "
+            "у трекований файл",
+            "виконайте вручну: git rm --cached .mcp.json",
+            "після цього запустіть mnemo init ще раз",
+        ]}
+    return {"ok": True, "log": [
+        "додано .mcp.json.template, .mcp.env, mcp-setup.sh/.ps1",
+        "зареєстровано сервер mnemo-memory з токеном цього банку",
+        "готово — .mcp.json підключено",
+    ]}
 
 
 def _find_tree_node(node: dict, rel: str) -> dict | None:
@@ -1005,6 +1063,20 @@ class Handler(BaseHTTPRequestHandler):
                 "freed_bytes": freed,
             })
             return
+        if parsed.path == "/api/embed/download":
+            if _MODEL_CACHED["value"]:
+                self.fail(409, "already_cached",
+                          "the model is already cached — nothing to download")
+                return
+            if _DOWNLOAD["active"]:
+                self.fail(409, "download_in_progress",
+                          "a download is already running")
+                return
+            _DOWNLOAD["active"] = True
+            _DOWNLOAD["failed"] = False
+            threading.Thread(target=_finish_download, daemon=True).start()
+            self.json_out(200, {"started": True})
+            return
         if parsed.path in ("/api/embed/unload", "/api/embed/load"):
             state = embed_state_payload()
             if state["holding"] == "n/a" and parsed.path.endswith("/unload"):
@@ -1240,7 +1312,10 @@ class Handler(BaseHTTPRequestHandler):
             kwargs={"kind": "bulk", "path": None, "batch_ms": Handler.batch_ms},
             daemon=True,
         ).start()
-        self.json_out(201, bank_info(bank))
+        info = bank_info(bank)
+        if body.get("init"):
+            info["init"] = _mock_init_result(root)
+        self.json_out(201, info)
 
     def post_reindex(self, body: dict) -> None:
         ref = body.get("bank") or ""

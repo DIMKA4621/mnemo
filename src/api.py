@@ -28,6 +28,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import io
 import json
 import logging
 import os
@@ -35,7 +36,7 @@ import re
 import secrets
 import threading
 import time
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, redirect_stdout, suppress
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal
@@ -231,6 +232,14 @@ _ERROR_STATUS: dict[str, int] = {
     # answers someone else's token, an Ollama that cannot be reached, an
     # endpoint that refused the probe.
     "embed_control_failed": 502,
+    # [NEW beyond §9.2] `POST /api/embed/download` refused: the model is
+    # already on disk, so a download would only repeat 2.2 GB of work the
+    # button exists to avoid.
+    "already_cached": 409,
+    # [NEW beyond §9.2] A previously spawned `warmup --force` is still
+    # running. Not `embed_busy` — the queue is uninvolved — but the same
+    # shape: nothing is broken, the action just cannot run twice at once.
+    "download_in_progress": 409,
     # The orphan list could not be trusted (most importantly: banks.json was
     # unreadable). 409 because the request conflicts with the machine's current
     # state; retrying after the registry is fixed is the remedy, not a server
@@ -1078,6 +1087,10 @@ class AddBankRequest(BaseModel):
     root: str
     name: str | None = None
     provider: str | None = None
+    # "connect the project (MCP)" checkbox in the add-bank dialog — runs
+    # `mnemo init` against the project the bank root implies, right after
+    # registration.
+    init: bool = False
 
 
 class ReindexRequest(BaseModel):
@@ -1252,6 +1265,46 @@ def api_banks() -> dict:
     return {"banks": [_bank_info(b) for b in registry.load()]}
 
 
+def _project_root_from_bank(bank_root: Path) -> Path | None:
+    """`<project>/.claude/memory` -> `<project>`, else None (ineligible).
+
+    `scaffold.init_project` always computes the bank folder itself as
+    `<root>/.claude/memory` and never accepts an arbitrary one, so this is
+    the only shape `init` can be pointed at.
+    """
+    parts = bank_root.parts
+    if len(parts) >= 2 and parts[-1].lower() == "memory" and parts[-2].lower() == ".claude":
+        return bank_root.parents[1]
+    return None
+
+
+def _run_init_for_bank(bank: Bank) -> dict:
+    """Run `mnemo init` for the project this bank's root implies.
+
+    Uses the bank's *registered* root, never the client-supplied one —
+    defense in depth, the same principle already used for bank tokens
+    elsewhere here. `init_project` is print-based; its stdout is captured
+    rather than refactoring it into a callback, which is out of scope.
+    """
+    project_root = _project_root_from_bank(bank.root)
+    if project_root is None:
+        return {
+            "ok": False,
+            "skipped": True,
+            "reason": "bank root does not end in .claude/memory — no "
+                      "project root to wire",
+        }
+    from . import scaffold
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        exit_code = scaffold.init_project(
+            root=str(project_root), yes=False, migrate=False
+        )
+    log_lines = [line for line in buf.getvalue().splitlines() if line.strip()]
+    return {"ok": exit_code == 0, "log": log_lines}
+
+
 @app.post("/api/banks", status_code=201, include_in_schema=False)
 def api_add_bank(req: AddBankRequest) -> dict:
     try:
@@ -1268,6 +1321,11 @@ def api_add_bank(req: AddBankRequest) -> dict:
             q.enqueue_bulk(bank.id, trigger="api")
     else:
         log.info("bank %s registered; indexing waits for the queue", bank.name)
+    if req.init:
+        # The bank is already registered and must not be undone by an init
+        # that fails or is skipped — hence a key on the response, not a
+        # raised error.
+        info["init"] = _run_init_for_bank(bank)
     return info
 
 
@@ -1999,6 +2057,35 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
             "restart_required": False, **api_settings()}
 
 
+# A `warmup --force` we spawned, tracked by PID so a page reload (or a
+# second cabinet tab) still sees it in progress. Module-level and
+# single-slot: only one download can be in flight at a time, which is also
+# what `download_in_progress` refuses against.
+_download: dict[str, Any] = {"pid": None, "started_at": None, "failed": False}
+
+
+def _download_status() -> dict:
+    """Reconcile `_download` against reality, then report it.
+
+    Lazy rather than a polling thread: the cabinet already refetches
+    `/api/embed/state` every few seconds while the button is disabled, so a
+    check made right here catches the transition just as fast for a lot less
+    code. Once the tracked PID has exited, the model being cached is success
+    (nothing further to flag) and it not being cached is the only failure
+    signal a subprocess we did not wait on can give us.
+    """
+    from .embedder import is_model_cached
+    from .service_ctl import _pid_alive
+
+    pid = _download.get("pid")
+    if pid is not None and not _pid_alive(pid):
+        _download["pid"] = None
+        if not is_model_cached():
+            _download["failed"] = True
+    return {"active": _download.get("pid") is not None,
+            "failed": bool(_download.get("failed"))}
+
+
 @app.get("/api/embed/state", include_in_schema=False)
 def api_embed_state() -> dict:
     """What the active embedding backend is holding in memory.
@@ -2010,7 +2097,35 @@ def api_embed_state() -> dict:
     """
     from . import embedctl
 
-    return embedctl.state()
+    return {**embedctl.state(), "download": _download_status()}
+
+
+@app.post("/api/embed/download", include_in_schema=False)
+def api_embed_download() -> dict:
+    """Spawn `warmup --force` to cache the model, windowless and detached.
+
+    Coarse status only (idle / downloading / ready / failed) by explicit
+    choice — no byte-level progress, no new IPC. `warmup()` is synchronous
+    and would otherwise load the model into the FastAPI process itself,
+    right next to the resident that is supposed to hold it.
+    """
+    from . import embedctl
+    from .service_ctl import spawn_detached, windowless_python
+
+    if embedctl.state().get("cached"):
+        raise ApiError("already_cached", "the model is already cached — "
+                        "nothing to download")
+    if _download_status()["active"]:
+        raise ApiError("download_in_progress",
+                        "a download is already running", pid=_download["pid"])
+
+    engine_root = Path(__file__).resolve().parent.parent
+    cmd = [windowless_python(), "-m", "src.cli", "warmup", "--force"]
+    pid = spawn_detached(cmd, cwd=engine_root)
+    _download["pid"] = pid
+    _download["started_at"] = time.time()
+    _download["failed"] = False
+    return {"started": True}
 
 
 def _embed_action(action) -> dict:

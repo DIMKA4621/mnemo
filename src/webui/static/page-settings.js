@@ -243,6 +243,7 @@ function settingsOnLeave() {
   settings.autostartWant = null;
   settings.cleanupConfirming = false;
   settings.cleanupNote = null;
+  stopDownloadPolling();
 }
 
 /** Fill the form from what is stored, for the currently selected backend. */
@@ -636,6 +637,32 @@ function renderEmbedMemory(body) {
   }
   if (buttons.childNodes.length) box.appendChild(buttons);
 
+  // `cached === false` only happens under `local`/Ollama-shaped `api` (§
+  // `_describe_local`/`_describe_api`) — a hosted API reports `cached: null`
+  // and never reaches this branch. Separate from the `held` buttons above:
+  // this is "put the weights on disk", not "wake the resident".
+  if (info.cached === false) {
+    const download = info.download || {};
+    if (download.active) {
+      box.appendChild(el('div', { className: 'set-mem-line' }, [
+        el('i', { className: 'dot busy' }),
+        el('span', { text: 'Завантаження моделі…' }),
+      ]));
+    } else {
+      if (download.failed) {
+        box.appendChild(el('p', { className: 'set-note', text: 'Завантаження не вдалося — спробуйте ще раз.' }));
+      }
+      box.appendChild(el('div', { className: 'set-mem-actions' }, [
+        el('button', {
+          className: 'btn',
+          text: 'Завантажити модель (2.2 ГБ)',
+          attrs: settings.embedBusy ? { disabled: '' } : {},
+          on: { click: () => startEmbedDownload() },
+        }),
+      ]));
+    }
+  }
+
   const notes = [];
   if (held === 'n/a') {
     // The cabinet's own wording, not the backend's `detail`. A steady state
@@ -689,6 +716,54 @@ async function embedAction(what) {
     settings.embedError = err.message;
   } finally {
     settings.embedBusy = false;
+    renderSettings();
+  }
+}
+
+/** Poll `/api/embed/state` while a download is running, so the button's
+ *  three states (idle / downloading / failed) track the detached `warmup
+ *  --force` without any new IPC — same reasoning as the backend's own
+ *  lazy `_download_status()` reconciliation. */
+let downloadTimer = null;
+
+function stopDownloadPolling() {
+  if (downloadTimer) {
+    clearInterval(downloadTimer);
+    downloadTimer = null;
+  }
+}
+
+function startDownloadPolling() {
+  if (downloadTimer) return;
+  downloadTimer = setInterval(async () => {
+    await refreshEmbedState();
+    if (!settings.embed || !settings.embed.download || !settings.embed.download.active) {
+      stopDownloadPolling();
+    }
+    renderSettings();
+  }, 3000);
+}
+
+/** The button's own click handler — the label is the explicit consent, no
+ *  confirm dialog on top (same decision as the terminal `warmup`). */
+async function startEmbedDownload() {
+  settings.embedError = null;
+  settings.note = null;
+  try {
+    await api('/api/embed/download', { method: 'POST' });
+    await refreshEmbedState();
+    startDownloadPolling();
+  } catch (err) {
+    if (isAuthError(err)) { openGate('rejected'); return; }
+    if (err.code === 'already_cached' || err.code === 'download_in_progress') {
+      await refreshEmbedState();
+      if (settings.embed && settings.embed.download && settings.embed.download.active) {
+        startDownloadPolling();
+      }
+    } else {
+      settings.embedError = err.message;
+    }
+  } finally {
     renderSettings();
   }
 }

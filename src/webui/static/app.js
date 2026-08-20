@@ -679,6 +679,18 @@ function buildPicker() {
       },
     },
   });
+  picker.initCheckbox = el('input', {
+    attrs: { type: 'checkbox', id: 'fs-init-mcp' },
+  });
+  picker.initRow = el('div', { className: 'fs-init-row' }, [
+    picker.initCheckbox,
+    el('label', {
+      text: 'Одразу підключити проєкт (MCP)',
+      attrs: { for: 'fs-init-mcp' },
+    }),
+  ]);
+  picker.initHint = el('p', { className: 'fs-hint' });
+  picker.initBox = el('p', { className: 'fs-init-result', attrs: { hidden: '' } });
   picker.error = el('p', { className: 'modal-error', attrs: { hidden: '' } });
   picker.submit = el('button', {
     className: 'btn btn-primary',
@@ -717,7 +729,10 @@ function buildPicker() {
         attrs: { for: 'fs-bank-name' },
       }),
       picker.name,
+      picker.initRow,
+      picker.initHint,
       picker.error,
+      picker.initBox,
     ]),
     el('div', { className: 'modal-foot' }, [
       el('button', { className: 'btn', text: 'Скасувати', on: { click: () => closePicker() } }),
@@ -740,11 +755,45 @@ function buildPicker() {
 function openPicker() {
   picker.root.hidden = false;
   picker.error.hidden = true;
+  picker.initBox.hidden = true;
   picker.name.value = '';
+  picker.initEvaluatedPath = null;
   // Resume where the last look around ended — adding two banks from one folder
   // should not mean walking down from home twice.
   pickerGo(sessionStorage.getItem(LAST_DIR_KEY) || null);
   picker.input.focus();
+}
+
+/** `<project>/.claude/memory` → `<project>`, or null when `path` is not
+ *  shaped that way. `GET /api/fs/dirs` reports `path` as posix
+ *  (`Path.as_posix()`, api.py) even on Windows, but `\` is normalised too
+ *  in case a pasted path reaches here before a round trip through the API. */
+function projectRootForBankPath(path) {
+  if (!path) return null;
+  const norm = path.replace(/\\/g, '/').replace(/\/+$/, '');
+  const suffix = '.claude/memory';
+  if (!norm.endsWith('/' + suffix)) return null;
+  const root = norm.slice(0, norm.length - suffix.length - 1);
+  return root || null;
+}
+
+/** Recomputed on every `renderPicker()`, i.e. whenever `picker.path`
+ *  changes. Only resets the checkbox to its default when the *path* itself
+ *  changed — a `pickerGo()` re-render for the same path (e.g. the busy
+ *  toggle around its fetch) must not fight a manual uncheck. */
+function pickerUpdateInitEligibility() {
+  const root = projectRootForBankPath(picker.path);
+  const eligible = root !== null;
+  picker.initCheckbox.disabled = !eligible;
+  if (picker.path !== picker.initEvaluatedPath) {
+    picker.initEvaluatedPath = picker.path;
+    picker.initCheckbox.checked = eligible;
+  }
+  if (!eligible) picker.initCheckbox.checked = false;
+  picker.initHint.textContent = eligible
+    ? 'Проєкт: ' + root
+    : 'доступно лише для банку в «<проєкт>/.claude/memory»';
+  picker.initHint.classList.toggle('fs-warn', !eligible);
 }
 
 function closePicker() {
@@ -865,16 +914,45 @@ function renderPicker() {
 
   picker.submit.disabled = picker.busy || !data || !!data.registered;
   picker.submit.textContent = picker.busy ? 'читаю…' : 'Додати цю теку';
+
+  pickerUpdateInitEligibility();
+}
+
+/** Renders `info.init` (contract: `{ok, log}` on an attempt, `{ok:false,
+ *  skipped:true, reason}` when the bank root was not `<project>/.claude/
+ *  memory`) into the picker's own result area. A failed or skipped init is
+ *  never presented as the add-bank action failing — the bank is already
+ *  registered by the time this runs — so this appends to the dialog rather
+ *  than routing through `pickerError()`. */
+function renderInitResult(initInfo) {
+  clear(picker.initBox);
+  picker.initBox.hidden = false;
+  if (initInfo.skipped) {
+    picker.initBox.appendChild(el('strong', { text: 'MCP не підключено: ' }));
+    picker.initBox.appendChild(document.createTextNode(initInfo.reason || '—'));
+    return;
+  }
+  picker.initBox.appendChild(el('strong', {
+    text: initInfo.ok ? 'Проєкт підключено (MCP):' : 'Підключення MCP:',
+  }));
+  for (const line of initInfo.log || []) {
+    picker.initBox.appendChild(el('br'));
+    picker.initBox.appendChild(document.createTextNode(line));
+  }
 }
 
 async function pickerSubmit() {
   if (!picker.path || picker.busy) return;
-  const body = { root: picker.path, name: picker.name.value.trim() || null };
+  const body = {
+    root: picker.path,
+    name: picker.name.value.trim() || null,
+    init: !!(picker.initCheckbox && picker.initCheckbox.checked),
+  };
   picker.busy = true;
+  picker.initBox.hidden = true;
   renderPicker();
   try {
     const info = await api('/api/banks', { method: 'POST', body: body });
-    closePicker();
     hideBanner();
     state.banks = state.banks.concat([info]);
     renderBanks();
@@ -883,6 +961,10 @@ async function pickerSubmit() {
     setNote(info.id, 'банк додано · індексація стала в чергу');
     selectBank(info.id);
     loadBanks().catch(() => {});
+    // Only the `init` outcome keeps the dialog open — a plain add (no
+    // checkbox, or not eligible) closes exactly as it always did.
+    if (info.init) renderInitResult(info.init);
+    else closePicker();
   } catch (err) {
     if (isAuthError(err)) { closePicker(); reportError(err); return; }
     // `root_not_found` and `bank_exists` are both fixable right here, so the

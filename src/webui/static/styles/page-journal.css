@@ -77,6 +77,7 @@
 .hit-p { font: 12px/1.45 var(--mono); overflow-wrap: anywhere; }
 .hit-h { margin-top: 2px; color: var(--fg-mute); font-size: 11px; }
 .hit-s { flex: none; text-align: right; color: var(--fg-mute); font: 10.5px/1.5 var(--mono); }
+.hit-snap { margin: 8px 0 0 23px; padding: 9px 11px; border-radius: var(--radius); background: var(--bg-sunken); color: var(--fg-dim); font: 11.5px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word; }
 .hit-foot { margin: 8px 0 0 23px; display: flex; align-items: center; gap: 9px; color: var(--fg-mute); font-size: 11px; }
 .hit-foot .btn { margin-left: auto; }
 .note { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--warn-border); border-radius: var(--radius); background: var(--warn-bg); color: var(--warn-fg); font-size: 12px; line-height: 1.6; }
@@ -98,5 +99,5 @@
 @media (max-width: 620px) {
   .filters .grow { display: none; }
   .filters .control { flex: 1; min-width: 104px; }
-  .hit-foot { margin-left: 0; }
+  .hit-snap, .hit-foot { margin-left: 0; }
 }

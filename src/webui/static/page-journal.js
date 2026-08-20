@@ -6,11 +6,11 @@
  * confirmed with the user): the `status` select and the free-text `jq`
  * search. `bank` and `period` stay — the API already accepts `bank`/`since`.
  *
- * Also dropped: the mockup's quoted "snapshot" text under each hit.
- * `hits_json` (contract 7.2) only carries `path`/`heading`/`chunk_index`/
- * `score`/`sim` — no `content` — so the hit list below shows exactly those
- * facts and nothing else. No "text unavailable" placeholder either: that
- * whole branch is the deferred feature, not a state to fake.
+ * The mockup's quoted "snapshot" text under each hit (`.hit-snap`) is landed:
+ * each hit's `content` (contract 7.2) is a per-event snapshot — rows written
+ * before the field existed simply lack it, which reads the same as `null`.
+ * No "text unavailable" placeholder for that case either: that branch is
+ * still not drawn, only omitted, not faked.
  */
 'use strict';
 
@@ -216,7 +216,7 @@ function openInMemory(bankId, path) {
 }
 
 function hitRow(hit, index, bankId) {
-  return el('article', { className: 'hit' }, [
+  const children = [
     el('div', { className: 'hit-top' }, [
       el('span', { className: 'hit-r', text: String(index + 1) }),
       el('div', { className: 'hit-l' }, [
@@ -229,6 +229,9 @@ function hitRow(hit, index, bankId) {
         document.createTextNode('sim ' + fmtScore(hit.sim)),
       ]),
     ]),
+  ];
+  if (hit.content) children.push(el('div', { className: 'hit-snap', text: hit.content }));
+  children.push(
     el('div', { className: 'hit-foot' }, [
       el('button', {
         className: 'btn btn-ghost btn-sm',
@@ -236,7 +239,8 @@ function hitRow(hit, index, bankId) {
         on: { click: () => openInMemory(bankId, hit.path) },
       }),
     ]),
-  ]);
+  );
+  return el('article', { className: 'hit' }, children);
 }
 
 function renderQueryDetail(box, ev) {

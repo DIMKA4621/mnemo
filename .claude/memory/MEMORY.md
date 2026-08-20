@@ -34,8 +34,10 @@ detail lives in `topics/`, day notes in `logs/`.
   `src/webui/static/` (сайдбар = три маршрути, хедер = сторінка, підвал
   сайдбару = машина) з `docs/cabinet-design.html` як еталоном; `app.js`
   розбитий на `shell.js`/`page-{memory,journal,settings}.js`, CSS — на
-  `styles/*.css`. Не зроблено: snapshot-текст хіта в Журналі (бекенд не
-  зберігає `content`), фільтр статусу й повнотекстовий пошук журналу.
+  `styles/*.css`. Journal snapshot-текст, кнопка завантаження моделі й
+  чекбокс `init` у діалозі банку **зроблені** 2026-08-20 (друге) —
+  `logs/2026-08-20-cabinet-followups.md`. Не зроблено: фільтр статусу й
+  повнотекстовий пошук журналу.
 - [Native Windows support](topics/windows-native-support.md) — PowerShell 5.1
   installer, canonical launcher contract, portable wiring, and verification.
 - [Пропускна здатність ембедингу](topics/embedding-throughput.md) — наш
