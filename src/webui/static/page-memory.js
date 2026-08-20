@@ -705,7 +705,7 @@ function chunkDivider(chunk) {
 
 const PANE_WIDTH_MIN = 180;
 const PANE_WIDTH_MAX = 640;
-const PANE_WIDTH_DEFAULT = [300, 300];
+const PANE_WIDTH_DEFAULT = [369, 484];
 
 function clampPaneWidth(px) {
   return Math.min(PANE_WIDTH_MAX, Math.max(PANE_WIDTH_MIN, Math.round(px)));
