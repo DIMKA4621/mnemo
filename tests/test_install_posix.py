@@ -156,7 +156,10 @@ def main() -> int:
 
         first = run(install)
         launcher = engine / "bin" / "mnemo"
-        venv_python = engine / ".venv" / "bin" / "python"
+        # src/ and .venv live under the versioned tree (versions/local/);
+        # `current` is the symlink install.sh's `ln -sfn` repoints (bug C
+        # fix) -- the POSIX mirror of install.ps1's `current` junction.
+        venv_python = engine / "current" / ".venv" / "bin" / "python"
         assert launcher.is_file(), launcher
         assert os.access(launcher, os.X_OK), "the launcher is not executable"
         assert venv_python.exists(), venv_python
@@ -225,7 +228,8 @@ def main() -> int:
 
         # --deps-only must refresh the venv without re-mirroring src/, so it
         # is safe to run while the repository's engine code is mid-refactor.
-        in_flight = engine / "src" / "in flight.py"
+        # src/ lives under `current` (-> versions/local), not the engine root.
+        in_flight = engine / "current" / "src" / "in flight.py"
         in_flight.write_text("# uncommitted engine work\n", encoding="utf-8")
         deps_only = run(install + ["--deps-only"])
         assert "deps-only" in deps_only.stdout, deps_only.stdout
@@ -291,6 +295,21 @@ def main() -> int:
         assert "isolated home:" in dry.stdout, dry.stdout
         assert launcher.is_file(), "a dry run deleted the engine"
         survey = uninstall_report(dry.stdout)
+        # NOTE (step 12 consolidated review): uninstall.sh's own survey line
+        # still tests `[ -f "$MNEMO_HOME/src/cli.py" ]` -- the pre-bug-C flat
+        # path. Since install.sh (bug C, fixed) now builds src/ under
+        # versions/local/ instead, that file never exists at the flat path
+        # any more, so this survey line always prints "MISSING" today, even
+        # right after a real install -- unlike uninstall.ps1's Windows
+        # counterpart, whose survey block was already updated to read
+        # `current`/`versions`. This assertion is left checking the CORRECT
+        # (post-fix) value rather than the currently-wrong one on purpose:
+        # softening it would hide the gap instead of surfacing it. It will
+        # fail on a real POSIX run until uninstall.sh's survey block gets the
+        # same versions/current-aware fix install.sh's build logic already
+        # has -- flagged, not fixed here (uninstall.sh is out of this task's
+        # scope). The actual removal logic is unaffected: it walks
+        # $MNEMO_HOME's children generically and does not depend on this path.
         assert survey["engine code"] == "src/, launcher, requirements", survey
         assert survey["service"] == "not running", survey
         # An isolated home must not even *offer* to remove the machine-level
@@ -309,7 +328,12 @@ def main() -> int:
         ok("uninstall refuses to delete without a terminal or --yes")
 
         kept = run(uninstall + ["--keep-model", "--keep-state", "--yes"])
-        assert not (engine / ".venv").exists(), kept.stdout
+        # Engine code + venv live under versions/local/, referenced through
+        # the `current` symlink -- both must go; state/ and model-cache/
+        # (checked below) must not.
+        assert not (engine / "versions").exists(), kept.stdout
+        assert not (engine / "current").exists(), kept.stdout
+        assert not venv_python.exists(), kept.stdout
         assert not launcher.exists(), kept.stdout
         assert state_sentinel.read_text(encoding="utf-8") == "state"
         assert cache_sentinel.read_text(encoding="utf-8") == "cache"
