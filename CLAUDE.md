@@ -227,7 +227,11 @@ Around it:
   tools it mirrors. The bundled fixture corpus uses the canonical layout
   (`.claude/memory/` with `logs/`, `agents/<role>/` inside).
 - Installed engine: `~/.claude/mnemo/` (`bin/mnemo`, a real `bin\mnemo.exe`
-  on Windows, `.venv`, `model-cache`, `state/`). Project wiring:
+  on Windows — a subprocess dispatcher resolving itself from `sys.argv[0]`,
+  never `sys.prefix`, and spawning `current/.venv/.../python -m src.cli`;
+  `versions/<tag>/{src,.venv}` one full tree per installed release,
+  `current` a junction/symlink naming the active one; `model-cache` and
+  `state/` shared across versions). Project wiring:
   `.mcp.json` — **git-ignored**, since it holds a bank token — or the
   `.mcp.json.template` / `.mcp.env` / `mcp-setup.sh` layer where a project
   uses that convention, plus `.claude/settings.json`. Adoption skill + its

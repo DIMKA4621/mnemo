@@ -63,7 +63,8 @@
 | `src/diagnostics.py` | K | 6 | service-dev **[NEW]** — одне structured джерело для `doctor` у CLI й кабінеті |
 | `src/scaffold.py` | K | 4 | service-dev **[NEW]** — не було в мапі тимліда |
 | `src/inject_log.py` | — | 2 | service-dev — **видаляється** (див. 8.5) **[NEW]** |
-| `src/service_ctl.py` | L | 5 | **platform-dev** |
+| `src/service_ctl.py` | L | 5 | **platform-dev** — версійні інстали додали `versions_dir()`/`current_link()`/`switch_current(tag)`/`update_lock()`/`prune_versions()` (самооновлення рушія, рішення #33) **[NEW]** |
+| `mnemo_bootstrap.py` | — | 5 | **platform-dev** — subprocess-диспетчер до `current/.venv/…/python -m src.cli`, більше не in-process import (§15.4) **[NEW]** |
 | `src/embedctl.py` | — | 6 | **engine-dev** — памʼять бекенда: що тримається і як віддати (§6.6.4) **[NEW]** |
 | `install.sh`, `install.ps1`, `requirements.txt` | — | 5 | platform-dev **[NEW]** |
 | `src/webui/**` | — | 6 | **ui-dev** |
@@ -2877,28 +2878,56 @@ git-ігнорований), тож правило розділилось над
 
 **`test_model_cache_validation`** — не зачеплений v3, лишається як є.
 
-### 15.4 `mnemo_bootstrap.py` — контракт тримається, з однією добудовою **[NEW]**
+### 15.4 `mnemo_bootstrap.py` — контракт **не** тримається: subprocess-диспетчер, не in-process import **[UPDATED]**
 
-Пряма відповідь на питання: **так, тримається без змін.** Bootstrap робить
-три речі — знаходить engine home від `sys.prefix`, ставить `MNEMO_HOME`,
-імпортує `src.cli:main`. v3 зберігає і `src/cli.py`, і `main()`, тож жоден із
-трьох кроків не зачеплений тим, що всередині CLI тепер HTTP-клієнт.
+Виправлення до себе самого. Раніше тут стояло «так, тримається без змін:
+bootstrap знаходить engine home від `sys.prefix`, ставить `MNEMO_HOME`,
+імпортує `src.cli:main`» — це було правильно, поки рушій стояв пласко
+(`USER_HOME/src` + `USER_HOME/.venv`). Версійні інстали
+(`versions/<tag>/{src,.venv}` + `current`, рішення `Memory-design-v3.md`
+§13 #33) зробили цю відповідь неправдивою, і виправлено тут, а не новим
+файлом, бо контракт той самий файл, лише інша реалізація.
 
-**UTF-8-налаштування лишається потрібним** — і це не самоочевидно, бо його
-писали «for hook and MCP pipes», а MCP більше не pipe. Воно тримається на
-трьох інших споживачах: `hook-inject` друкує українські секції в stdout для
-інжекту; `mnemo search` / `logs` друкують український вміст у Windows-консоль
-з не-UTF8 кодовою сторінкою; `mnemo status` виводить назви банків. Прибрати
-його — регресія. *Дія:* лише оновити коментар, щоб він не називав MCP.
+**Реальний контракт (підтверджено спайком, крок 0, 2026-08-20).** Bootstrap
+більше **не імпортує `src.cli` in-process**. Він резолвить `ENGINE_HOME` від
+**`sys.argv[0]`** — не від `sys.prefix` / `sys.executable` / `__file__`, усі
+три лишаються прив'язані до venv, який зібрав `mnemo.exe` **на етапі білда**
+(`pip install --no-deps` генерує лаунчер зі зашитим на той момент шляхом до
+python.exe) і не рухаються, навіть якщо exe скопійовано в іншу теку —
+перевірено емпірично. Далі bootstrap **спавнить subprocess**:
+`current/.venv/Scripts/(python|pythonw).exe -m src.cli <argv>`, зі
+успадкованим stdio, і повертає код завершення дочірнього процесу (Ctrl-C на
+foreground-виклику мапиться на конвенційний `130`).
 
-**Добудова для фази 5.** `pyproject.toml` оголошує тільки
-`[project.scripts] mnemo` → консольний `mnemo.exe`. Для тихого спавну
-бекенда й резидента (NFR-1) зручний **другий** entry point:
-`[project.gui-scripts] mnemow = "mnemo_bootstrap:main"` → `mnemow.exe`,
-зібраний під `pythonw`. Це рівно те, чого правила вимагають замість самого
-`DETACHED_PROCESS`. Альтернатива — `CREATE_NO_WINDOW` над наявним
-`mnemo.exe`; вибір за platform-dev, але **варіант має бути свідомим**, бо
-зараз його немає взагалі.
+Чому не in-process: заміна власних файлів під час виконання неможлива на
+Windows (файли заблоковані на запис у процесу, що їх виконує), і жоден
+процес не може надійно вбити сам себе посеред заміни й самостійно
+піднятись. Subprocess-диспетчеризація натомість читає `current` **щоразу
+заново** при кожному виклику — перемикання версії діє з наступної команди
+без жодних змін у самому лаунчері.
+
+`src/service_ctl.py` **не потребує правок заради цього**: `windowless_python()`
+/ `_default_target()` резолвлюють `sys.executable` **всередині вже
+задиспетчерованого процесу** — до моменту, коли цей код виконується,
+`mnemo_bootstrap` уже спавнив subprocess під `current`-версією, тож нема
+чого версіонувати вдруге.
+
+**UTF-8-налаштування лишається потрібним**, але тепер вужче — лише на
+**власному** stderr bootstrap-диспетчера, для повідомлення «engine не
+знайдено» до того, як дочірній процес встиг переналаштувати своє стдіо.
+Дочірній `src.cli.main` і далі окремо реконфігурує власне stdio для тих
+самих причин, що раніше: `hook-inject` друкує українські секції в stdout
+для інжекту; `mnemo search` / `logs` / `status` друкують український вміст
+у Windows-консоль з не-UTF8 кодовою сторінкою.
+
+**Windowless-двійник — уже реалізований, не «добудова для фази 5».**
+`pyproject.toml` має `[project.gui-scripts] mnemow =
+"mnemo_bootstrap:main_gui"` → `mnemow.exe`, зібраний під `pythonw` (лендить
+разом із фазою 5, `service_ctl` — windowless process control). `main_gui()`
+гейтить команди множиною `_BACKGROUND_ONLY` (`serve`, `service`,
+`autostart`, `embed-server`) і відмовляє з ненульовим кодом на всьому
+іншому — без цього стдіо-обличчя запущене під `pythonw` мовчки не робило б
+нічого (`sys.stdout is None`, `print` не кидає винятку).
 
 ### 15.5 CI: що можна додати і що зламається **[NEW]**
 
