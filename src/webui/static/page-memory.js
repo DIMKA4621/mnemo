@@ -228,9 +228,8 @@ function renderRebuildDialog() {
   rebuildDialog.body.appendChild(list);
   rebuildDialog.body.appendChild(el('p', {
     className: 'set-note',
-    text: 'Файли .md не змінюються. Час пропорційний обсягу: у виміряному ' +
-          'переході local CPU → Ollama GPU весь конвеєр став приблизно у 3× ' +
-          'швидшим — не у 8.8×, бо 8.8× стосувалось лише ембедингу.',
+    text: 'Файли .md не змінюються. Час пропорційний обсягу; конкретна ' +
+          'швидкість залежить від бекенда й заліза цієї машини.',
   }));
   if (rebuildDialog.errorText) {
     rebuildDialog.body.appendChild(el('p', {
@@ -744,23 +743,14 @@ function wirePaneResizers() {
   applyPaneWidths(widths);
 
   const wireOne = (id, index) => {
-    $(id).addEventListener('mousedown', (ev) => {
-      ev.preventDefault();
-      const startX = ev.clientX;
-      const startWidth = widths[index];
-      document.body.classList.add('is-resizing-pane');
-      const onMove = (moveEv) => {
-        widths[index] = clampPaneWidth(startWidth + (moveEv.clientX - startX));
+    let base = 0;
+    wireColumnResizer($(id), {
+      onStart: () => { base = widths[index]; },
+      onDrag: (deltaX) => {
+        widths[index] = clampPaneWidth(base + deltaX);
         applyPaneWidths(widths);
-      };
-      const onUp = () => {
-        document.removeEventListener('mousemove', onMove);
-        document.removeEventListener('mouseup', onUp);
-        document.body.classList.remove('is-resizing-pane');
-        localStorage.setItem('mnemo_pane_widths', JSON.stringify(widths));
-      };
-      document.addEventListener('mousemove', onMove);
-      document.addEventListener('mouseup', onUp);
+      },
+      onCommit: () => localStorage.setItem('mnemo_pane_widths', JSON.stringify(widths)),
     });
   };
   wireOne('pane-resizer-1', 0);

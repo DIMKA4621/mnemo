@@ -111,20 +111,30 @@ function indexEventTitle(ev) {
   return 'Синхронізація індексу';
 }
 
-function evStatusDot(ev) {
+/**
+ * A `.badge` pill, not the old dot-plus-word: in `.ev-bot`/`.d-kick` the
+ * status sat in the same weight as the bank name, the trigger and the
+ * timestamp next to it — four identical grey mono spans in a row read as
+ * one blurred line, and status is the one fact worth seeing first.
+ */
+function evStatusBadgeClass(ev) {
   if (state.logKind === 'query') {
-    if (ev.status === 'indexing') return 'dot busy';
-    if (ev.status === 'empty') return 'dot idle';
-    return 'dot';
+    if (ev.status === 'indexing') return 'badge-indexing';
+    if (ev.status === 'empty') return 'badge-empty';
+    return 'badge-ready';
   }
-  if (ev.result === 'error') return 'dot err';
-  if (ev.result === 'skipped') return 'dot idle';
-  return 'dot';
+  if (ev.result === 'error') return 'badge-off';
+  if (ev.result === 'skipped') return 'badge-empty';
+  return 'badge-ready';
 }
 
 function evStatusWord(ev) {
   if (state.logKind === 'query') return STATUS_LABEL[ev.status] || ev.status;
   return ev.result === 'error' ? 'помилка' : ev.result;
+}
+
+function evStatusBadge(ev) {
+  return el('span', { className: 'badge ' + evStatusBadgeClass(ev), text: evStatusWord(ev) });
 }
 
 function evCard(ev, selected) {
@@ -152,10 +162,7 @@ function evCard(ev, selected) {
       ]),
     ]),
     el('div', { className: 'ev-bot' }, [
-      el('span', { className: 'st' }, [
-        el('i', { className: evStatusDot(ev) }),
-        document.createTextNode(evStatusWord(ev)),
-      ]),
+      evStatusBadge(ev),
       el('span', { text: bankLabel(ev.bank_id) }),
       el('span', { text: metaWord || '—' }),
       el('span', { className: 't', text: fmtDateTime(ev.ts) }),
@@ -204,15 +211,62 @@ function fmtScore(v) {
   return v == null ? '—' : Number(v).toFixed(4);
 }
 
-/** "Відкрити в Памʼяті" switches both the bank and the page, then opens the
+/** "Відкрити файл" switches both the bank and the page, then opens the
  *  file — reuses `selectBank()`/`openFile()` from page-memory.js, which is
- *  exactly why that file loads before this one. */
+ *  exactly why that file loads before this one. It lands on Памʼять either
+ *  way, so the button says what it does (opens the file), not where it
+ *  happens to land. */
 function openInMemory(bankId, path) {
   const bank = bankById(bankId);
   if (!bank) return;
   selectBank(bank.id);
   setPage('memory');
   openFile(path);
+}
+
+/**
+ * Splits on sentence-ending punctuation followed by whitespace. Good enough
+ * for a preview cutoff — this is not a parser, and a chunk that never hits
+ * `. `/`? `/`! ` (a bullet list, a code block) just comes back as one
+ * "sentence", which correctly skips the preview below.
+ */
+function splitSentences(text) {
+  return text.match(/[^.!?…]+[.!?…]+(\s+|$)|[^.!?…]+$/g) || [text];
+}
+
+const HIT_SNAP_PREVIEW_SENTENCES = 2;
+
+/**
+ * The snapshot block: first two sentences, with a toggle that expands to
+ * the full chunk **in the same block** rather than a separate area — the
+ * mockup's "show more" jumping the reader to a fresh box elsewhere read as
+ * navigating away from what they were just reading.
+ */
+function hitSnapBlock(content) {
+  const trimmed = content.trim();
+  const sentences = splitSentences(trimmed);
+  const box = el('div', { className: 'hit-snap' });
+  if (sentences.length <= HIT_SNAP_PREVIEW_SENTENCES) {
+    box.textContent = trimmed;
+    return box;
+  }
+  const preview = sentences.slice(0, HIT_SNAP_PREVIEW_SENTENCES).join('').trim();
+  const textEl = el('span', { text: preview });
+  const toggle = el('button', {
+    className: 'hit-snap-more',
+    text: 'показати повністю',
+    on: {
+      click: () => {
+        const expanded = box.classList.toggle('is-expanded');
+        textEl.textContent = expanded ? trimmed : preview;
+        toggle.textContent = expanded ? 'згорнути' : 'показати повністю';
+      },
+    },
+  });
+  box.appendChild(textEl);
+  box.appendChild(document.createTextNode(' '));
+  box.appendChild(toggle);
+  return box;
 }
 
 function hitRow(hit, index, bankId) {
@@ -230,12 +284,12 @@ function hitRow(hit, index, bankId) {
       ]),
     ]),
   ];
-  if (hit.content) children.push(el('div', { className: 'hit-snap', text: hit.content }));
+  if (hit.content) children.push(hitSnapBlock(hit.content));
   children.push(
     el('div', { className: 'hit-foot' }, [
       el('button', {
-        className: 'btn btn-ghost btn-sm',
-        text: 'Відкрити в Памʼяті',
+        className: 'btn btn-sm',
+        text: 'Відкрити файл',
         on: { click: () => openInMemory(bankId, hit.path) },
       }),
     ]),
@@ -246,8 +300,7 @@ function hitRow(hit, index, bankId) {
 function renderQueryDetail(box, ev) {
   box.appendChild(el('div', { className: 'd-kick' }, [
     el('span', { text: 'запит · #' + ev.id }),
-    el('i', { className: evStatusDot(ev) }),
-    el('span', { text: evStatusWord(ev) }),
+    evStatusBadge(ev),
   ]));
   box.appendChild(el('h2', { className: 'd-h', text: ev.query }));
   box.appendChild(factsRow([
@@ -274,8 +327,7 @@ function renderQueryDetail(box, ev) {
 function renderIndexDetail(box, ev) {
   box.appendChild(el('div', { className: 'd-kick' }, [
     el('span', { text: 'індексація · #' + ev.id }),
-    el('i', { className: evStatusDot(ev) }),
-    el('span', { text: evStatusWord(ev) }),
+    evStatusBadge(ev),
   ]));
   box.appendChild(el('h2', { className: 'd-h', text: indexEventTitle(ev) }));
   box.appendChild(factsRow([
@@ -311,8 +363,8 @@ function renderIndexDetail(box, ev) {
       ]),
       el('div', { className: 'hit-foot' }, [
         el('button', {
-          className: 'btn btn-ghost btn-sm',
-          text: 'Відкрити в Памʼяті',
+          className: 'btn btn-sm',
+          text: 'Відкрити файл',
           on: { click: () => openInMemory(ev.bank_id, ev.path) },
         }),
       ]),
@@ -339,3 +391,55 @@ function renderJournal() {
   renderList();
   renderDetail();
 }
+
+// ---------------------------------------------------------------------------
+// resizable events/detail split — same handle and drag mechanics as Памʼять
+// (`wireColumnResizer`, app.js), one width instead of two.
+// ---------------------------------------------------------------------------
+
+const JOURNAL_WIDTH_MIN = 260;
+const JOURNAL_WIDTH_MAX = 720;
+const JOURNAL_WIDTH_DEFAULT = 400;
+const JOURNAL_STACK_BREAKPOINT = 940;
+
+function clampJournalWidth(px) {
+  return Math.min(JOURNAL_WIDTH_MAX, Math.max(JOURNAL_WIDTH_MIN, Math.round(px)));
+}
+
+function loadJournalWidth() {
+  const raw = Number(localStorage.getItem('mnemo_journal_width'));
+  return Number.isFinite(raw) && raw > 0 ? clampJournalWidth(raw) : JOURNAL_WIDTH_DEFAULT;
+}
+
+/**
+ * Below `JOURNAL_STACK_BREAKPOINT` the stylesheet switches `.jl` from two
+ * columns to one column of two stacked rows (`page-journal.css`) — an inline
+ * `grid-template-columns` would win over that media query at any width, so
+ * it is only set above the breakpoint; `removeProperty` below it lets the
+ * media query rule again, same as a column a mouse never touched.
+ */
+function applyJournalWidth(px) {
+  const jl = document.querySelector('.jl');
+  if (window.innerWidth > JOURNAL_STACK_BREAKPOINT) {
+    jl.style.gridTemplateColumns = px + 'px 6px minmax(0, 1fr)';
+  } else {
+    jl.style.removeProperty('grid-template-columns');
+  }
+}
+
+function wireJournalResizer() {
+  let width = loadJournalWidth();
+  applyJournalWidth(width);
+  let base = 0;
+  wireColumnResizer($('journal-resizer'), {
+    onStart: () => { base = width; },
+    onDrag: (deltaX) => {
+      width = clampJournalWidth(base + deltaX);
+      applyJournalWidth(width);
+    },
+    onCommit: () => localStorage.setItem('mnemo_journal_width', String(width)),
+  });
+  window.addEventListener('resize', () => applyJournalWidth(width));
+}
+
+wireJournalResizer();

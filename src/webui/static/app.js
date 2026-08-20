@@ -48,7 +48,7 @@ function resolveTheme() {
  * Sets the attribute the CSS keys off and persists the choice.
  *
  * There is no permanent theme control in the shell any more — it moved into
- * Налаштування → Служба (design decision, `.claude/memory/topics/cabinet-ui.md`)
+ * Налаштування → Загальні (design decision, `.claude/memory/topics/cabinet-ui.md`)
  * as the one control on that screen that applies on click rather than
  * waiting for «Зберегти». Whatever renders that control is responsible for
  * reflecting the active choice; this function only ever sets it.
@@ -107,6 +107,42 @@ function el(tag, opts, children) {
 
 function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+// ---------------------------------------------------------------------------
+// draggable column dividers — shared by Памʼять (two handles) and Журнал
+// (one); only the mouse tracking is common, each page owns its own clamping
+// and what the delta actually resizes (an indexed width vs. a single one).
+// ---------------------------------------------------------------------------
+
+/**
+ * Wires one `.pane-resizer` handle. `onStart()` fires once on mousedown, for
+ * capturing whatever the drag is about to move from; `onDrag(deltaX)` fires
+ * on every mousemove with the offset from where the drag started, and the
+ * caller clamps and applies it to whatever it is resizing; `onCommit()`
+ * fires once on mouseup, for persisting the final value.
+ *
+ * Listens on `document`, not the 6px handle itself, so a fast mouse
+ * movement that slips off the narrow track mid-drag does not drop the
+ * resize. `body.is-resizing-pane` keeps the handle lit and the cursor a
+ * resize arrow for the whole gesture (styles/base.css).
+ */
+function wireColumnResizer(handleEl, { onStart, onDrag, onCommit }) {
+  handleEl.addEventListener('mousedown', (ev) => {
+    ev.preventDefault();
+    const startX = ev.clientX;
+    if (onStart) onStart();
+    document.body.classList.add('is-resizing-pane');
+    const onMove = (moveEv) => onDrag(moveEv.clientX - startX);
+    const onUp = () => {
+      document.removeEventListener('mousemove', onMove);
+      document.removeEventListener('mouseup', onUp);
+      document.body.classList.remove('is-resizing-pane');
+      onCommit();
+    };
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
 }
 
 // ---------------------------------------------------------------------------

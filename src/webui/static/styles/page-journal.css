@@ -1,5 +1,9 @@
 /* Журнал: master-detail, new for the real cabinet. Ported from
- * docs/cabinet-design.html's fixture almost unchanged. */
+ * docs/cabinet-design.html's fixture almost unchanged.
+ *
+ * The events/detail split is drag-resizable, same `.pane-resizer` (base.css)
+ * and `wireColumnResizer` (app.js) as Памʼять — `.jl`'s grid-template-columns
+ * below is only the fallback for the instant before page-journal.js runs. */
 
 .filters {
   flex: none;
@@ -20,7 +24,7 @@
   color: var(--fg-dim);
   font-size: 12px;
 }
-.jl { flex: 1; min-height: 0; display: grid; grid-template-columns: 400px minmax(0, 1fr); }
+.jl { flex: 1; min-height: 0; display: grid; grid-template-columns: 400px 6px minmax(0, 1fr); }
 .events { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-pane); border-right: 1px solid var(--line); }
 .events-head {
   flex: none;
@@ -56,7 +60,7 @@
 .ev-n { flex: none; text-align: right; color: var(--fg-dim); font: 12px/1.4 var(--mono); }
 .ev-n small { display: block; margin-top: 2px; color: var(--fg-mute); font: 10px/1 var(--mono); }
 .ev-bot { margin-top: 7px; display: flex; align-items: center; gap: 8px; color: var(--fg-mute); font: 10.5px/1 var(--mono); }
-.ev-bot .st { display: inline-flex; align-items: center; gap: 5px; }
+.ev-bot .badge { flex: none; }
 .ev-bot .t { margin-left: auto; }
 
 .detail { min-width: 0; min-height: 0; overflow: auto; background: var(--bg-pane); }
@@ -78,6 +82,21 @@
 .hit-h { margin-top: 2px; color: var(--fg-mute); font-size: 11px; }
 .hit-s { flex: none; text-align: right; color: var(--fg-mute); font: 10.5px/1.5 var(--mono); }
 .hit-snap { margin: 8px 0 0 23px; padding: 9px 11px; border-radius: var(--radius); background: var(--bg-sunken); color: var(--fg-dim); font: 11.5px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word; }
+
+/* An inline disclosure toggle, not an action — text-styled on purpose so it
+   reads as part of the sentence it follows, unlike `.hit-foot .btn` below
+   which is a real bordered button because it navigates away from this row. */
+.hit-snap-more {
+  display: inline;
+  padding: 0;
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+.hit-snap-more:hover { opacity: .8; }
 .hit-foot { margin: 8px 0 0 23px; display: flex; align-items: center; gap: 9px; color: var(--fg-mute); font-size: 11px; }
 .hit-foot .btn { margin-left: auto; }
 .note { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--warn-border); border-radius: var(--radius); background: var(--warn-bg); color: var(--warn-fg); font-size: 12px; line-height: 1.6; }
@@ -87,13 +106,14 @@
 .num { font: 500 19px/1.2 var(--mono); }
 .num-k { margin-top: 3px; color: var(--fg-mute); font-size: 11px; }
 
-@media (max-width: 1180px) {
-  .jl { grid-template-columns: 352px minmax(0, 1fr); }
-}
-
+/* Below this, `.jl` stacks into rows instead of columns (right below) — the
+   inline width page-journal.js applies above it is cleared back to `auto`
+   at this same breakpoint so the media query's `1fr` can take over; nothing
+   left to drag, so the handle goes with it. */
 @media (max-width: 940px) {
   .jl { grid-template-columns: 1fr; grid-template-rows: minmax(200px, 34%) minmax(0, 1fr); }
   .events { border-right: 0; border-bottom: 1px solid var(--line); }
+  .jl .pane-resizer { display: none; }
 }
 
 @media (max-width: 620px) {

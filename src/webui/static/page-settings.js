@@ -556,9 +556,15 @@ function renderEmbedSection(body) {
 // offers is the memory back on purpose, which is the trade the engine
 // deliberately left to a command instead of an idle timer.
 
+/**
+ * `unloaded` reads «не в памʼяті», never «не завантажена» — that word also
+ * names the *download* action right below it (2.2 GB, disk), and the two
+ * meanings sitting one line apart is exactly what read as "did it get
+ * deleted?" A RAM state needs a RAM word; the file on disk is untouched.
+ */
 const HOLD_LABEL = {
   loaded: 'у памʼяті',
-  unloaded: 'не завантажена',
+  unloaded: 'не в памʼяті',
   'n/a': 'нічого не тримає',
   unknown: 'невідомо',
 };
@@ -590,12 +596,12 @@ function renderEmbedMemory(body) {
 
   if (settings.embedError) {
     box.appendChild(el('p', { className: 'set-note', text: settings.embedError }));
-    body.appendChild(setField('Памʼять', box, null));
+    body.appendChild(setField('Оперативна памʼять', box, null));
     return;
   }
   if (!info) {
     box.appendChild(el('p', { className: 'empty-hint', text: 'Стан ще не отримано.' }));
-    body.appendChild(setField('Памʼять', box, null));
+    body.appendChild(setField('Оперативна памʼять', box, null));
     return;
   }
 
@@ -621,14 +627,21 @@ function renderEmbedMemory(body) {
       on: { click: () => embedAction('unload') },
     }));
   }
-  if (['unloaded', 'loaded', 'n/a', 'unknown'].includes(held)) {
+  // `unloaded` is excluded when nothing is cached: the probe would only
+  // fail naming `warmup`, and the download block right below is the actual
+  // next step in that case — showing both reads as two competing "load"
+  // actions for the same empty state.
+  const showProbe = held === 'loaded' || held === 'n/a' || held === 'unknown' ||
+    (held === 'unloaded' && info.cached !== false);
+  if (showProbe) {
     buttons.appendChild(el('button', {
       className: 'btn',
-      // The same probe has three useful names. A cold local/Ollama backend is
-      // loaded; one already holding the model is checked; a remote endpoint
-      // never holds our memory at all, so only its answer can be verified.
+      // The same probe has three useful names. A cold local/Ollama backend
+      // gets pulled back into RAM; one already holding the model is
+      // checked; a remote endpoint never holds our memory at all, so only
+      // its answer can be verified.
       text: held === 'unloaded'
-        ? 'Завантажити'
+        ? 'Підняти в памʼять'
         : (held === 'n/a' || held === 'unknown')
           ? 'Перевірити ендпоінт'
           : 'Перевірити',
@@ -641,7 +654,8 @@ function renderEmbedMemory(body) {
   // `cached === false` only happens under `local`/Ollama-shaped `api` (§
   // `_describe_local`/`_describe_api`) — a hosted API reports `cached: null`
   // and never reaches this branch. Separate from the `held` buttons above:
-  // this is "put the weights on disk", not "wake the resident".
+  // this is "put the weights on disk", not "wake the resident" — the label
+  // says "на диск" so it never reads like the RAM action above it.
   if (info.cached === false) {
     const download = info.download || {};
     if (download.active) {
@@ -656,7 +670,7 @@ function renderEmbedMemory(body) {
       box.appendChild(el('div', { className: 'set-mem-actions' }, [
         el('button', {
           className: 'btn',
-          text: 'Завантажити модель (2.2 ГБ)',
+          text: 'Завантажити модель на диск (2.2 ГБ)',
           attrs: settings.embedBusy ? { disabled: '' } : {},
           on: { click: () => startEmbedDownload() },
         }),
@@ -665,6 +679,13 @@ function renderEmbedMemory(body) {
   }
 
   const notes = [];
+  // Said plainly, because «не в памʼяті» sits one line above a button whose
+  // own label carries the word «диск» — but only once, and the reassurance
+  // belongs here, not repeated on every render of the badge itself.
+  if (held === 'unloaded' && info.cached !== false) {
+    notes.push('Файл моделі лишається на диску — просто зараз не в ' +
+               'оперативній памʼяті. Підніметься сам при першому пошуку.');
+  }
   if (held === 'n/a') {
     // The cabinet's own wording, not the backend's `detail`. A steady state
     // that every client renders the same way belongs to the interface — the
@@ -693,7 +714,7 @@ function renderEmbedMemory(body) {
     box.appendChild(el('p', { className: 'set-note', text: text }));
   }
 
-  body.appendChild(setField('Памʼять', box, null));
+  body.appendChild(setField('Оперативна памʼять', box, null));
 }
 
 async function embedAction(what) {

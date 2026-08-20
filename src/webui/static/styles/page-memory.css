@@ -18,34 +18,6 @@
   grid-template-columns: 300px 6px 300px 6px minmax(0, 1fr);
 }
 
-/* The drag handle between two panes. Widened hit area via `::after` rather
-   than a wider element — the visible seam stays a hairline, matching every
-   other `--line` divider on this page, while the draggable area is still
-   comfortable. */
-.pane-resizer {
-  position: relative;
-  cursor: col-resize;
-  background: var(--line);
-}
-
-.pane-resizer::after {
-  content: '';
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -3px;
-  right: -3px;
-}
-
-.pane-resizer:hover,
-body.is-resizing-pane .pane-resizer { background: var(--accent); }
-
-/* Dragging any resizer sets this on `<body>` so a fast mouse movement that
-   slips off the 6px track mid-drag does not drop the resize — the listeners
-   are on `document`, this class just keeps the handle itself lit and the
-   cursor a resize arrow (below) for the whole gesture. */
-body.is-resizing-pane { cursor: col-resize; user-select: none; }
-
 .pane {
   display: flex;
   flex-direction: column;
