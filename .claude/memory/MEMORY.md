@@ -122,6 +122,10 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-20 (тринадцяте)](logs/2026-08-20-engine-self-update-update-available-fix.md)
+  — фікс `update_available`-протухання з кроку 11 закритий: перераховується
+  на місці в `record_installed()`, коли `status="active"` міняє `current`.
+  18/18 юніт + 13/13 живий сценарій. **Кроки 0–11 усі готові й закомічені.**
 - [2026-08-20 (дванадцяте)](logs/2026-08-20-engine-self-update-step11.md) —
   самооновлення рушія, крок 11 UI (**кроки 0–11 усі готові**): банер +
   модалка + прогрес (`update.js`), reconnect-логіка WS перевикористана як
