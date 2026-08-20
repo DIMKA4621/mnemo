@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import mimetypes
+import socket
 import struct
 import threading
 import time
@@ -224,6 +225,127 @@ _ORPHANS: list[dict[str, Any]] = [
         "error": None,
     },
 ]
+
+
+# --------------------------------------------------------------------------
+# self-update fixture state (contract: src/api.py GET/POST /api/update/*,
+# WS `update_progress` from `engine_update._emit_progress`; step 11, ui-dev)
+# --------------------------------------------------------------------------
+#
+# Starts with an update already available so the sidebar banner is on screen
+# without extra setup. `simulate_update_apply()` below never downloads,
+# builds a venv or restarts anything real — it walks the same event sequence
+# the real backend does (WS `update_progress` for download/venv/done, then a
+# `switching` window with every open socket forcibly closed, matching the
+# real backend stopping itself to switch versions) purely in memory, so the
+# frontend's poll-plus-WS-disconnect handling is exercisable without a real
+# release or a real service restart.
+#
+# `tag` containing "fail" (case-insensitive) simulates a forced rollback —
+# the one path `topics/engine-self-update-design.md`'s point 5 calls out by
+# name ("проблема, відкотили назад") and the one this fixture exists to make
+# reachable from the browser.
+
+_UPDATE_LOCK = threading.RLock()
+_UPDATE_STATE: dict[str, Any] = {
+    "current_tag": "v3.1.0",
+    "current_installed_at": "2026-08-15T10:00:00+03:00",
+    "current_commit": "abc1234",
+    "latest_tag": "v3.2.0",
+    "checked_at": "2026-08-20T09:00:00+03:00",
+    "update_available": True,
+    "check_error": None,
+    "apply": {
+        "state": "idle", "tag": None, "step": None, "error": None,
+        "started_at": None, "finished_at": None,
+    },
+    "history": [
+        {"tag": "v3.1.0", "installed_at": "2026-08-15T10:00:00+03:00",
+         "commit": "abc1234", "status": "active"},
+        {"tag": "v3.0.0", "installed_at": "2026-07-01T10:00:00+03:00",
+         "commit": "def5678", "status": "previous"},
+    ],
+}
+
+
+def update_status_payload() -> dict:
+    """Mirror of `GET /api/update/status`'s shape (`api_update_status`)."""
+    with _UPDATE_LOCK:
+        s = _UPDATE_STATE
+        return {
+            "current": {"tag": s["current_tag"], "installed_at": s["current_installed_at"],
+                        "commit": s["current_commit"]},
+            "latest_known": {"tag": s["latest_tag"], "checked_at": s["checked_at"],
+                             "update_available": bool(s["update_available"])},
+            "check": {"in_progress": False, "error": s["check_error"]},
+            "apply": dict(s["apply"]),
+            "history": [dict(e) for e in s["history"]],
+            "retention": {"keep": 3},
+        }
+
+
+def _force_disconnect_all() -> None:
+    """Sever every open WS connection right now — the fixture's stand-in for
+    the real backend stopping itself mid-`update-apply` (design topic's
+    documented trap, confirmed in `_run_staged_apply`/`_spawn_update_apply_
+    breakaway`). Closing the raw socket from this thread while the handler
+    thread blocks on it is what makes that thread's `read_frame` fail and
+    the connection tear down — the same shape a real process death produces
+    from the browser's point of view."""
+    with _clients_lock:
+        targets = list(CLIENTS)
+        CLIENTS.clear()
+    for client in targets:
+        client.alive = False
+        try:
+            client.conn.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        try:
+            client.conn.close()
+        except OSError:
+            pass
+
+
+def simulate_update_apply(tag: str) -> None:
+    """Fixture body for `POST /api/update/apply`'s background thread —
+    mirrors `_run_staged_apply` (staging: download/venv/done over WS) plus
+    `update-apply`'s stop/switch/start/health window (simulated by severing
+    every socket, then sleeping), never a real download, venv build or
+    process restart."""
+    broadcast("update_progress", None, {"step": "download", "tag": tag, "detail": None, "error": None})
+    time.sleep(1.5)
+    broadcast("update_progress", None, {"step": "venv", "tag": tag, "detail": None, "error": None})
+    time.sleep(1.5)
+    broadcast("update_progress", None, {"step": "done", "tag": tag, "detail": None, "error": None})
+
+    with _UPDATE_LOCK:
+        _UPDATE_STATE["apply"]["state"] = "switching"
+        _UPDATE_STATE["apply"]["step"] = None
+
+    _force_disconnect_all()
+    time.sleep(2.5)  # simulated stop -> repoint junction -> start -> health
+
+    with _UPDATE_LOCK:
+        if "fail" in tag.lower():
+            _UPDATE_STATE["apply"].update({
+                "state": "rolled_back",
+                "error": "simulated health check failure (fixture)",
+                "finished_at": now_iso(),
+            })
+            # current_tag is left untouched -- a rollback undoes the switch.
+        else:
+            for entry in _UPDATE_STATE["history"]:
+                if entry["status"] == "active":
+                    entry["status"] = "previous"
+            commit = "sim" + hashlib.sha256(tag.encode("utf-8")).hexdigest()[:7]
+            _UPDATE_STATE["history"].insert(0, {
+                "tag": tag, "installed_at": now_iso(), "commit": commit, "status": "active",
+            })
+            _UPDATE_STATE["current_tag"] = tag
+            _UPDATE_STATE["current_installed_at"] = now_iso()
+            _UPDATE_STATE["current_commit"] = commit
+            _UPDATE_STATE["apply"].update({"state": "done", "error": None, "finished_at": now_iso()})
 
 
 def _settings_presets() -> list[dict]:
@@ -1095,6 +1217,44 @@ class Handler(BaseHTTPRequestHandler):
                 _EMBED_HELD["probe_dim"] = 1024
             self.json_out(200, embed_state_payload())
             return
+        if parsed.path == "/api/update/check":
+            with _UPDATE_LOCK:
+                _UPDATE_STATE["checked_at"] = now_iso()
+                _UPDATE_STATE["update_available"] = (
+                    _UPDATE_STATE["latest_tag"] != _UPDATE_STATE["current_tag"]
+                )
+                out = {
+                    "latest_tag": _UPDATE_STATE["latest_tag"],
+                    "current_tag": _UPDATE_STATE["current_tag"],
+                    "update_available": _UPDATE_STATE["update_available"],
+                    "checked_at": _UPDATE_STATE["checked_at"],
+                    "error": _UPDATE_STATE["check_error"],
+                }
+            self.json_out(200, out)
+            return
+
+        if parsed.path == "/api/update/apply":
+            tag = str(body.get("tag") or "")
+            with _UPDATE_LOCK:
+                if tag != _UPDATE_STATE["latest_tag"] or not _UPDATE_STATE["update_available"]:
+                    self.fail(409, "stale_target",
+                              f"{tag!r} does not match the last known latest tag "
+                              f"({_UPDATE_STATE['latest_tag']!r}) — run a check again",
+                              {"tag": tag, "latest_tag": _UPDATE_STATE["latest_tag"]})
+                    return
+                if _UPDATE_STATE["apply"]["state"] not in ("idle", "done", "failed", "rolled_back"):
+                    self.fail(409, "update_in_progress",
+                              f"an update is already {_UPDATE_STATE['apply']['state']} "
+                              f"(tag {_UPDATE_STATE['apply'].get('tag')!r})")
+                    return
+                _UPDATE_STATE["apply"] = {
+                    "state": "staging", "tag": tag, "step": "download", "error": None,
+                    "started_at": now_iso(), "finished_at": None,
+                }
+            threading.Thread(target=simulate_update_apply, args=(tag,), daemon=True).start()
+            self.json_out(202, {"accepted": True, "tag": tag})
+            return
+
         if parsed.path.startswith("/api/banks/") and parsed.path.endswith("/token"):
             ref = parsed.path[len("/api/banks/"): -len("/token")]
             bank = find_bank(unquote(ref))
@@ -1236,6 +1396,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/autostart":
             self.json_out(200, dict(_AUTOSTART))
+            return
+
+        if path == "/api/update/status":
+            self.json_out(200, update_status_payload())
             return
 
         self.fail(404, "internal", "no route " + path)

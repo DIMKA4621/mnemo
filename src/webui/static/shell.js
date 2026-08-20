@@ -364,6 +364,17 @@ function handleEvent(envelope) {
       if (data.bank) applyBank(data.bank);
       break;
 
+    // Self-update (design: engine-self-update-design.md, contract:
+    // engine_update._emit_progress). bank_id is always null here — a
+    // machine-level event, not a per-bank one — and the socket that carries
+    // it is the SAME process that stops itself a moment later to switch
+    // versions, so update.js's own poll (not this socket's onclose) is what
+    // learns the final outcome. See update.js's file header for the full
+    // reasoning.
+    case 'update_progress':
+      onUpdateProgress(data);
+      break;
+
     case 'query':
       pushLiveLog('query', {
         id: null, ts: envelope.ts, bank_id: bankId, face: data.face,

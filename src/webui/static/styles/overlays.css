@@ -522,6 +522,61 @@
 /* `.modal-foot` pushes everything right; this one belongs on the other side. */
 .tok-regen { margin-right: auto; }
 
+/* ---- self-update modal (update.js) -----------------------------------------
+   Reuses .modal/.modal-box/.modal-head/.modal-body/.modal-foot verbatim, and
+   for status text: .tok-confirm/.tok-confirm-text (the irreversible-action
+   warning, same pattern as the token regenerate confirmation), .tok-ok
+   (success) and .modal-error (failure/rollback) — no new color language. */
+
+.upd-row { margin: 0; }
+.upd-row code { font-family: var(--mono); }
+
+.upd-note {
+  margin: 0;
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.upd-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+}
+
+.upd-step {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-mute);
+  font-size: 12.5px;
+}
+
+.upd-step.is-active { color: var(--fg); }
+.upd-step.is-done { color: var(--fg-dim); }
+
+.upd-step-mark {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--fg-mute);
+  font-family: var(--mono);
+  font-size: 10px;
+}
+
+.upd-step.is-active .upd-step-mark { border-color: var(--busy); color: var(--busy); }
+.upd-step.is-done .upd-step-mark { border-color: var(--ok); color: var(--ok); }
+
+/* Indented under the label, not the mark — same .bar/.bar.is-indeterminate
+   used for a bank's live index progress (styles/page-memory.css). */
+.upd-step-bar { margin: 2px 0 2px 26px; }
+
 /* Off-screen sink for the pre-clipboard-API copy path. Not `display: none`:
    a hidden textarea cannot be selected, and the selection is the whole point. */
 .tok-copysink {

@@ -52,6 +52,12 @@
       </button>
     </nav>
 
+    <!-- Self-update banner (design: engine-self-update-design.md's UX flow,
+         point 1 — "плашка знизу-зліва, де вже показується версія"). Wired
+         and rendered entirely by update.js; hidden until GET
+         /api/update/status says a newer tag exists or an apply is running. -->
+    <button class="sb-update-banner" id="sb-update-banner" hidden></button>
+
     <!-- The machine's own three facts — online/offline, provider, version —
          not a page's. `renderService()`/`setConnState()` in shell.js target
          these. -->
@@ -159,6 +165,7 @@
 
 <script src="app.js"></script>
 <script src="shell.js"></script>
+<script src="update.js"></script>
 <script src="page-memory.js"></script>
 <script src="page-journal.js"></script>
 <script src="page-settings.js"></script>

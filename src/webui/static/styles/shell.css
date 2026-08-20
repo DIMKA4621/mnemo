@@ -68,6 +68,29 @@
 .is-collapsed .sb-item { justify-content: center; padding: 0; }
 .is-collapsed .sb-item .lbl, .is-collapsed .sb-item .cnt { display: none; }
 
+/* Self-update banner (update.js) — sits directly above the machine footer,
+   same corner of the sidebar the design's "плашка знизу-зліва" points at.
+   A real <button>, like .sb-item / .chip elsewhere: it opens the update
+   modal (or, mid-update, reopens the progress view). */
+.sb-update-banner {
+  flex: none;
+  display: block;
+  width: calc(100% - 16px);
+  margin: 0 8px 6px;
+  padding: 6px 8px;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--bg-pane);
+  color: var(--accent);
+  font-size: 11px;
+  text-align: left;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.sb-update-banner:hover { background: var(--bg-hover); }
+.sb-update-banner.is-busy { border-color: var(--busy); color: var(--busy); }
+.is-collapsed .sb-update-banner { display: none; }
+
 /* The machine's three facts sit at the bottom of the sidebar, where an app
    usually puts the account chip. They belong to the machine, not to a page,
    so they must not ride in the header — that space is for a page's actions. */
@@ -123,6 +146,10 @@
   .sb-brand { display: none; }
   .sb-foot { justify-content: center; padding: 8px 4px; }
   .sb-foot .txt, .sb-foot .sep, .sb-foot .ver { display: none; }
+  /* The rail is too narrow for a sentence; the update modal is still
+     reachable once the viewport widens, and this is a v1 cabinet meant for
+     loopback desktop use, not a mobile-first surface. */
+  .sb-update-banner { display: none; }
   .sb-item { justify-content: center; padding: 0; }
   .sb-item .lbl, .sb-item .cnt { display: none; }
   .sb-toggle { display: none; }

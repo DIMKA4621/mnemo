@@ -72,6 +72,7 @@ const state = {
   filePath: null,
   chunkViz: true,
   service: null,
+  update: null,                 // last GET /api/update/status response (update.js)
   queue: null,
   progress: new Map(),          // bank_id -> live index_progress snapshot
   notes: new Map(),             // bank_id -> transient one-line note
@@ -2013,6 +2014,10 @@ async function start() {
     renderJournal();
   }
   connectSocket();
+  // Not part of the try/catch above: a self-update check failing must not
+  // block the rest of the cabinet, and it has its own error handling (it
+  // simply stays silent — see update.js).
+  refreshUpdateStatus();
 }
 
 async function boot() {
@@ -2022,6 +2027,7 @@ async function boot() {
   buildTokenPanel();
   buildBankMenu();
   buildRemoval();
+  buildUpdateModal();
   initShell();
   renderService();
   if (!token) {
