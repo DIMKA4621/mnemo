@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
@@ -47,6 +48,32 @@ def check(name: str, ok: bool, detail: str = "") -> None:
     else:
         _failed += 1
         print(f"FAIL  {name}  {detail}")
+
+
+def _read_shebang(exe_path: Path) -> str:
+    """The absolute interpreter path pip baked into a console-script exe.
+
+    Same technique tester used to prove Bug A (step 12): a pip/distlib
+    launcher exe is a small stub PE with a plain-text ``#!<path>`` line
+    immediately followed by an appended zip archive -- read raw, no PE
+    parsing needed.
+
+    Anchored on the zip archive's magic bytes (``PK\\x03\\x04``), not on
+    the first ``#!`` in the whole file: a multi-hundred-KB PE stub is
+    dense enough binary data that the two-byte sequence ``#!`` (0x23 0x21)
+    turns up there by pure chance too, well before the real shebang --
+    hit exactly this scanning a real exe, decoded garbage with
+    ``errors="replace"`` and crashed printing it. The real shebang line is
+    always the text immediately preceding the zip start, so search
+    backwards from there in a small window instead.
+    """
+    data = exe_path.read_bytes()
+    zip_start = data.find(b"PK\x03\x04")
+    assert zip_start != -1, f"no appended zip archive found in {exe_path}"
+    window = data[max(0, zip_start - 1024):zip_start]
+    idx = window.rfind(b"#!")
+    assert idx != -1, f"no shebang found immediately before the zip archive in {exe_path}"
+    return window[idx:].rstrip(b"\r\n").decode("utf-8")
 
 
 def _network_up() -> bool:
@@ -479,13 +506,74 @@ def test_stage_release_real_pipeline(work: Path) -> None:
             check("the staging temp dir was cleaned up",
                   not (state_dir / "tmp" / f"update-{tag}").exists())
 
+            # --- Bug A (tester, step 12): build-into-staging-then-move baked
+            # a shebang pointing at the STAGING dir, which then got deleted.
+            # Byte-level proof the fix is real: the shebang must name the
+            # FINAL versions/<tag>/ location, which still exists.
+            mnemo_exe = final_dir / ".venv" / "Scripts" / "mnemo.exe"
+            shebang = _read_shebang(mnemo_exe)
+            print(f"  mnemo.exe shebang: {shebang}")
+            # distlib quotes the path when it contains a space -- this
+            # temp dir's own name does (tempfile.TemporaryDirectory's
+            # prefix), so strip a possible surrounding '"' before comparing.
+            shebang_path = shebang[2:].strip('"')
+            check("shebang points at the FINAL version dir, not a staging path",
+                  shebang_path.startswith(str(final_dir)), detail=shebang)
+            check("shebang does NOT mention state/tmp (the old staging root)",
+                  "state" not in shebang.lower() or "tmp" not in shebang.lower(),
+                  detail=shebang)
+            check("the shebang's own interpreter path actually exists on disk",
+                  Path(shebang_path).is_file(), detail=shebang)
+
+            # Live run, proving it end to end, not just the embedded string:
+            # invoked directly from .venv/Scripts (not the copied bin/
+            # launcher), so mnemo_bootstrap's OWN engine-home resolution
+            # will correctly report "no engine found" (rc=3, real stderr) --
+            # what matters here is that it is NOT the old silent rc=1 death
+            # (pip's launcher stub failing before Python ever starts).
+            direct = subprocess.run([str(mnemo_exe), "--help"], capture_output=True,
+                                     text=True, timeout=30)
+            print(f"  direct run: rc={direct.returncode} "
+                  f"stdout={direct.stdout[:80]!r} stderr={direct.stderr[:120]!r}")
+            check("mnemo.exe invoked directly no longer dies with the silent "
+                  "launcher-stub rc=1 (it now finds its own python.exe)",
+                  direct.returncode != 1 or bool(direct.stdout or direct.stderr),
+                  detail=f"rc={direct.returncode}")
+
+            # Stronger, unambiguous proof: set this build up as `current`
+            # (real service_ctl.switch_current, same throwaway
+            # VERSIONS_DIR already patched above) and run the exe from a
+            # copied bin/ location -- exactly how a real install invokes
+            # it -- and confirm a genuinely clean rc=0 with real --help text.
+            #
+            # mnemo_bootstrap.py resolves its OWN engine home from
+            # `sys.argv[0]` (never from config, which it cannot import yet)
+            # as `<argv0>/../.. / "current"` -- the directory MUST be
+            # named literally "current", one level above wherever the exe
+            # sits, or the bootstrap dispatcher will never find it.
+            engine_home = work / "install-shape"
+            current_link = engine_home / "current"
+            bin_dir = engine_home / "bin"
+            bin_dir.mkdir(parents=True, exist_ok=True)
+            with patch.object(config, "CURRENT_LINK", current_link):
+                service_ctl.switch_current(tag)
+            bin_mnemo = bin_dir / "mnemo.exe"
+            shutil.copy2(mnemo_exe, bin_mnemo)
+            full = subprocess.run([str(bin_mnemo), "--help"], capture_output=True,
+                                   text=True, timeout=30)
+            print(f"  bin/mnemo.exe --help: rc={full.returncode} "
+                  f"stdout[:120]={full.stdout[:120]!r}")
+            check("bin/mnemo.exe --help (real install shape) succeeds cleanly",
+                  full.returncode == 0 and bool(full.stdout), detail=full.stderr[:300])
+
             steps = [p["step"] for p in progress]
             check("progress went download -> venv -> done",
                   steps == ["download", "venv", "done"], detail=str(steps))
 
             # Re-staging the SAME tag must be idempotent (fresh build, old
-            # one replaced) -- exercises _finalize_version_dir's "stale
-            # final_dir" branch for real, not just by inspection.
+            # one replaced) -- exercises stage_release's "stale final_dir"
+            # branch (rmtree before building directly into it) for real,
+            # not just by inspection.
             final_dir_2 = engine_update.stage_release(tag, tarball_url=url, build_timeout=1800)
             check("re-staging the same tag succeeds and replaces the old tree",
                   final_dir_2 == final_dir and (final_dir_2 / "VERSION").is_file())

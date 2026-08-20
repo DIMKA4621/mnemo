@@ -595,30 +595,6 @@ def _build_engine_version(repo_root: Path, version_dir: Path, *, timeout: float 
         )
 
 
-def _finalize_version_dir(build_dir: Path, final_dir: Path) -> None:
-    """Move a fully-built version tree into place.
-
-    Same "prepare beside, then swap" shape as
-    ``service_ctl.switch_current()``: a stale ``final_dir`` (leftover from a
-    previous, incomplete stage of the same tag) is removed first, then the
-    freshly-built tree is renamed in. ``os.replace`` is atomic when staging
-    and ``versions/`` share a filesystem — the normal case, both live under
-    ``USER_HOME``. ``shutil.move`` is the fallback for ``MNEMO_STATE_DIR``
-    pointed at a different volume than ``USER_HOME`` (see ``config.STATE_DIR``'s
-    own container-relocation docstring) — a plain rename cannot cross
-    filesystems at all, and this module's staging area is deliberately
-    ``state/tmp/...`` per the design (relocatable), while ``versions/`` is
-    not.
-    """
-    final_dir.parent.mkdir(parents=True, exist_ok=True)
-    if final_dir.exists():
-        shutil.rmtree(final_dir)
-    try:
-        os.replace(build_dir, final_dir)
-    except OSError:
-        shutil.move(str(build_dir), str(final_dir))
-
-
 def stage_release(
     tag: str,
     *,
@@ -639,31 +615,58 @@ def stage_release(
     function (network I/O, then a ``subprocess.run`` that can take minutes),
     never from the event loop.
 
-    Staging happens under ``state/tmp/update-<tag>/`` first (per the
-    design), never directly under ``versions/``, so a crash or a failed
-    build can never leave a half-built tree where ``switch_current()`` would
-    look for a real one. That staging directory — the downloaded tarball and
-    the extracted tree — is always removed in ``finally``, success or
-    failure alike ("не лишити напіврозпаковану теку"); only a fully built
-    tree ever reaches ``versions/<tag>/``.
+    **Builds DIRECTLY into ``versions/<tag>/`` — no staging-dir-then-move.**
+    An earlier version of this function built into
+    ``state/tmp/update-<tag>/build/`` and moved the finished tree into place
+    afterwards, on the theory that a stage+swap is the same "prepare beside,
+    then rename in" shape ``service_ctl.switch_current()`` already uses for
+    atomicity. **That was wrong, found live by tester (step 12, "Bug A"),
+    confirmed by a byte-level read of a real built exe.** A venv's
+    interpreter tolerates being moved; a pip-generated CONSOLE-SCRIPT exe
+    (``mnemo.exe``, ``mnemow.exe``, ``pip.exe`` — anything from
+    ``[project.scripts]``/``[project.gui-scripts]``) does not: pip bakes an
+    ABSOLUTE shebang path into it at build time
+    (``#!<VersionDir>\\.venv\\Scripts\\python.exe``), and after the move
+    that path no longer exists — the exe fails immediately, no stdout, no
+    stderr. The backend itself was never affected (``target_for_version()``/
+    ``windowless_python()`` spawn ``pythonw.exe`` directly, never through
+    these exe), but ``mnemo.exe`` is exactly what the human CLI, the
+    PowerShell profile function and Task Scheduler autostart all resolve
+    through — every successful self-update was silently breaking the `mnemo`
+    command.
+
+    Atomicity does not need the move at all: "ready to apply" was ALREADY
+    defined (step 7/8's own contract) as "``versions/<tag>/VERSION`` exists
+    and matches the tag" — a filesystem marker, not "the directory exists".
+    A build that dies partway simply leaves ``versions/<tag>/`` without that
+    marker, exactly as an incomplete stage always looked from the outside;
+    the ``finally`` below removes the half-built tree so it never lingers
+    looking like a real (if broken) release.
+
+    Only the download and extraction still happen under
+    ``state/tmp/update-<tag>/`` (per the design) — those produce no
+    absolute-path artifacts, so there is nothing wrong with staging them;
+    that directory is always removed in ``finally``, success or failure
+    alike ("не лишити напіврозпаковану теку").
 
     Emits ``update_progress`` (§9.7) at each step: ``download``, ``venv``,
     then ``done`` or ``failed``. Raises on any failure — the caller (the
     apply handler) decides what a failed stage means for the running
     service; this function's only side effect on failure is that nothing
-    new exists under ``versions/``.
+    usable exists under ``versions/<tag>/`` (no ``VERSION`` marker, and the
+    directory itself is removed).
     """
     url = tarball_url or _tarball_url(tag)
     staging_root = service_ctl.state_dir() / "tmp" / f"update-{tag}"
     archive = staging_root / "download.tar.gz"
     extract_dir = staging_root / "extract"
-    build_dir = staging_root / "build"
     final_dir = service_ctl.versions_dir() / tag
 
     if staging_root.exists():
         shutil.rmtree(staging_root)  # leftover from a previous, failed attempt
     staging_root.mkdir(parents=True, exist_ok=True)
 
+    built = False
     try:
         _emit_progress(tag, "download", detail=url)
         _download(url, archive, timeout=download_timeout)
@@ -671,11 +674,13 @@ def stage_release(
         repo_root = _extract_tarball(archive, extract_dir)
 
         _emit_progress(tag, "venv")
-        _build_engine_version(repo_root, build_dir, timeout=build_timeout)
+        final_dir.parent.mkdir(parents=True, exist_ok=True)
+        if final_dir.exists():
+            shutil.rmtree(final_dir)  # a stale, incomplete stage of this same tag
+        _build_engine_version(repo_root, final_dir, timeout=build_timeout)
 
-        (build_dir / "VERSION").write_text(tag, encoding="utf-8")
-
-        _finalize_version_dir(build_dir, final_dir)
+        (final_dir / "VERSION").write_text(tag, encoding="utf-8")
+        built = True
 
         _emit_progress(tag, "done", detail=str(final_dir))
         return final_dir
@@ -685,3 +690,6 @@ def stage_release(
     finally:
         with suppress(OSError):
             shutil.rmtree(staging_root, ignore_errors=True)
+        if not built:
+            with suppress(OSError):
+                shutil.rmtree(final_dir, ignore_errors=True)
