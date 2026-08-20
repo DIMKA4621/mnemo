@@ -54,7 +54,15 @@ done
 LAUNCHER="$MNEMO_HOME/bin/mnemo"
 STATE_DIR="$MNEMO_HOME/state"
 MODEL_DIR="$MNEMO_HOME/model-cache"
-VENV_DIR="$MNEMO_HOME/.venv"
+# Versioned layout (self-update): src/ and .venv live under versions/<tag>/,
+# not directly under $MNEMO_HOME any more (bug C, same class as install.sh's
+# own pre-fix layout, this time on the uninstall/survey side). `versions/`
+# covers every retained tag's size in one measurement; `current` is only
+# ever a symlink alias (its own tree size is ~0 — `du` does not follow it —
+# the real bytes are counted once under versions/). Mirrors uninstall.ps1's
+# $versionsDir/$currentLink exactly.
+VERSIONS_DIR="$MNEMO_HOME/versions"
+CURRENT_LINK="$MNEMO_HOME/current"
 SYSTEMD_UNIT="${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/mnemo.service"
 LAUNCHD_PLIST="$HOME/Library/LaunchAgents/dev.mnemo.service.plist"
 BEGIN_MARK="# >>> mnemo >>>"
@@ -150,7 +158,7 @@ say "engine home: $MNEMO_HOME"
 TOTAL_SIZE="$(tree_size "$MNEMO_HOME")"
 STATE_SIZE="$(tree_size "$STATE_DIR")"
 MODEL_SIZE="$(tree_size "$MODEL_DIR")"
-VENV_SIZE="$(tree_size "$VENV_DIR")"
+VERSIONS_SIZE="$(tree_size "$VERSIONS_DIR")"
 RUNNING="$(recorded_pids | tr '\n' ' ' | sed 's/ $//')"
 INDEX_COUNT="$(find "$STATE_DIR" -maxdepth 1 -name '*.db' -type f 2>/dev/null | wc -l | tr -d ' ')"
 PROFILE_FILE="$(profile_file)"
@@ -162,12 +170,12 @@ GOING_SIZE="$TOTAL_SIZE"
 [ "$KEEP_STATE" -eq 1 ] && GOING_SIZE=$((GOING_SIZE - STATE_SIZE))
 
 say "this would remove --"
-if [ -f "$MNEMO_HOME/src/cli.py" ]; then
-	line "engine code" "src/, launcher, requirements"
+if [ -f "$CURRENT_LINK/src/cli.py" ]; then
+	line "engine code" "src/, launcher, requirements (versions/, current)"
 else
 	line "engine code" MISSING
 fi
-line "virtualenv" "$([ "$VENV_SIZE" -gt 0 ] && human "$VENV_SIZE" || echo absent)"
+line "versions (code + venv)" "$([ "$VERSIONS_SIZE" -gt 0 ] && human "$VERSIONS_SIZE" || echo absent)"
 if [ "$KEEP_MODEL" -eq 1 ]; then
 	line "model cache" "KEPT ($(human "$MODEL_SIZE"))"
 else
