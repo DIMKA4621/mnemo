@@ -34,7 +34,7 @@ const settings = {
   body: null,           // #set-body
   save: null,           // #settings-save
   data: null,          // the last GET /api/settings response
-  section: 'embed',    // which tab is open
+  section: 'general',  // which tab is open
   backendId: null,     // which backend tab is open
   form: null,          // {model, url, dim, timeout, key} — the edited values
   busy: false,
@@ -70,17 +70,18 @@ const settings = {
  * permanently greyed-out control reads as broken, not as irrelevant.
  */
 const SETTINGS_SECTIONS = [
+  { id: 'general', label: 'Загальні', render: renderGeneralSection, submit: submitGeneral },
   { id: 'embed', label: 'Модель ембедингу', render: renderEmbedSection, submit: submitSettings },
-  { id: 'service', label: 'Служба', render: renderServiceSection, submit: submitService },
   { id: 'maint', label: 'Обслуговування', render: renderMaintSection, submit: null },
 ];
 
 const SECTION_LEDE = {
+  general: 'Тема кабінету, автозапуск при вході в систему й стан процесу цієї ' +
+           'машини. Кабінет не пропонує кнопку, яка вбиває процес, що віддає ' +
+           'саму сторінку.',
   embed: 'Бекенд обирається пресетом: URL, модель, ширина вектора й префікси ' +
          'змінюються разом — поле, яке можна забути, відтворило б ту саму тиху ' +
          'ваду.',
-  service: 'Стан процесу, machine-port факти й автозапуск. Кабінет не ' +
-           'пропонує кнопку, яка вбиває процес, що віддає саму сторінку.',
   maint: 'Той самий структурований doctor report, який CLI показує текстом. ' +
          'Перевірки запускаються лише при відкритті цього розділу.',
 };
@@ -799,20 +800,23 @@ function humanUptime(seconds) {
  * that offers it and leave no way back except a terminal. So the honest thing
  * is to show the state and name the command.
  */
-function renderServiceSection(body) {
+/**
+ * What applies to this machine's cabinet regardless of which bank is open:
+ * the browser's own preference first (theme — applies on click, nothing for
+ * Save to do with it), then what changes the machine (autostart — needs
+ * Save), then what merely reports (process facts, sitting under both since
+ * nobody opens this section to read them first).
+ */
+function renderGeneralSection(body) {
+  renderTheme(body);
+  renderAutostart(body);
+
   const svc = state.service;
   if (!svc) {
     body.appendChild(el('p', { className: 'empty-hint', text: 'Стан служби ще не отримано.' }));
+    renderSettingsMessages();
     return;
   }
-
-  body.appendChild(el('p', {
-    className: 'set-lead',
-    text: 'Бекенд, який тримає реєстр, індекс, вотчер і цю сторінку.',
-  }));
-
-  // What you can change comes first; what merely reports sits under it.
-  renderAutostart(body);
 
   const box = el('div', { className: 'set-stats' }, [
     setStat('Версія', svc.version, true),
@@ -831,17 +835,16 @@ function renderServiceSection(body) {
           'подається, а підняти службу назад мусить хтось поза нею.',
   }));
 
-  // Moved here from the old topbar (design decision,
-  // `.claude/memory/logs/2026-08-19-cabinet-tabs.md`): the one control on
-  // this page that applies on click rather than waiting for «Зберегти» — a
-  // browser preference has nothing for Save to send.
-  renderTheme(body);
-
   renderSettingsMessages();
 }
 
+/**
+ * `.segmented set-toggle`, the same compact left-aligned control autostart
+ * uses below it — not the bare `.segmented`, which stretches to the field's
+ * full width and reads as a table row rather than a two-state switch.
+ */
 function renderTheme(body) {
-  const seg = el('div', { className: 'segmented', attrs: { id: 'theme' } });
+  const seg = el('div', { className: 'segmented set-toggle', attrs: { id: 'theme' } });
   const current = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
   for (const [value, label] of [['dark', 'Темна'], ['light', 'Світла']]) {
     seg.appendChild(el('button', {
@@ -948,7 +951,7 @@ function chooseAutostart(want) {
  * registration as re-read, so a task the scheduler refused leaves the control
  * showing the machine instead of showing an intention as a fact.
  */
-async function submitService() {
+async function submitGeneral() {
   if (settings.autostartWant == null) {
     settings.note = 'Нічого не змінено.';
     renderSettings();

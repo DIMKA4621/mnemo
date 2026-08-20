@@ -701,6 +701,73 @@ function chunkDivider(chunk) {
 }
 
 // ---------------------------------------------------------------------------
+// resizable columns
+// ---------------------------------------------------------------------------
+
+const PANE_WIDTH_MIN = 180;
+const PANE_WIDTH_MAX = 640;
+const PANE_WIDTH_DEFAULT = [300, 300];
+
+function clampPaneWidth(px) {
+  return Math.min(PANE_WIDTH_MAX, Math.max(PANE_WIDTH_MIN, Math.round(px)));
+}
+
+/** The stored [Банки, Файли] widths, or the default when nothing was ever
+ *  dragged (or the stored value is corrupt — same "fall through, don't
+ *  throw" rule as every other localStorage read in this cabinet). */
+function loadPaneWidths() {
+  try {
+    const raw = JSON.parse(localStorage.getItem('mnemo_pane_widths'));
+    if (Array.isArray(raw) && raw.length === 2 && Number.isFinite(raw[0]) && Number.isFinite(raw[1])) {
+      return [clampPaneWidth(raw[0]), clampPaneWidth(raw[1])];
+    }
+  } catch (_) { /* no stored value, or a corrupt one */ }
+  return PANE_WIDTH_DEFAULT.slice();
+}
+
+function applyPaneWidths(widths) {
+  document.querySelector('.layout').style.gridTemplateColumns =
+    widths[0] + 'px 6px ' + widths[1] + 'px 6px minmax(0, 1fr)';
+}
+
+/**
+ * Wire both handles to drag-resize the Банки/Файли columns; Вміст always
+ * takes what is left (`minmax(0, 1fr)`), so only two widths ever need
+ * tracking or storing.
+ *
+ * Restored here rather than pre-paint (mirrors the `mnemo_sidebar` pattern,
+ * `shell.js`): a column a few pixels off its saved width for one frame is a
+ * minor resize, not the color flash a late theme switch would be.
+ */
+function wirePaneResizers() {
+  const widths = loadPaneWidths();
+  applyPaneWidths(widths);
+
+  const wireOne = (id, index) => {
+    $(id).addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      const startX = ev.clientX;
+      const startWidth = widths[index];
+      document.body.classList.add('is-resizing-pane');
+      const onMove = (moveEv) => {
+        widths[index] = clampPaneWidth(startWidth + (moveEv.clientX - startX));
+        applyPaneWidths(widths);
+      };
+      const onUp = () => {
+        document.removeEventListener('mousemove', onMove);
+        document.removeEventListener('mouseup', onUp);
+        document.body.classList.remove('is-resizing-pane');
+        localStorage.setItem('mnemo_pane_widths', JSON.stringify(widths));
+      };
+      document.addEventListener('mousemove', onMove);
+      document.addEventListener('mouseup', onUp);
+    });
+  };
+  wireOne('pane-resizer-1', 0);
+  wireOne('pane-resizer-2', 1);
+}
+
+// ---------------------------------------------------------------------------
 // wiring (static elements — this pane's markup never gets rebuilt wholesale)
 // ---------------------------------------------------------------------------
 
@@ -718,6 +785,8 @@ $('file-reindex').addEventListener('click', () => {
   const bank = bankById(state.selectedBankId);
   if (bank && state.filePath) reindex(bank, { path: state.filePath });
 });
+
+wirePaneResizers();
 
 buildRebuildNotice();
 buildRebuildDialog();

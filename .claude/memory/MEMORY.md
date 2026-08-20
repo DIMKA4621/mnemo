@@ -101,6 +101,14 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-20 (третє)](logs/2026-08-20-settings-general-pane-resize.md) —
+  Settings-розділ «Служба» → «Загальні», перенесений першим (тема кабінету →
+  автозапуск → стан процесу); тема отримала `.set-toggle`, якого їй бракувало
+  (без нього `.segmented` розтягується на всю ширину поля). Памʼять: три
+  заголовки колонок (Банки/Файли/Вміст) вирівняні до однакової `height`
+  (раніше — різна `min-height` через різний вміст); Банки/Файли тепер
+  тягнуться мишкою (`.pane-resizer`), збережено в
+  `localStorage['mnemo_pane_widths']`.
 - [2026-08-17](logs/2026-08-17-cabinet-parity.md) — крок D: окремий
   `REBUILD PENDING` banner + масовий existing-reindex, structured doctor для
   CLI/UI, explicit orphan cleanup лише за показаними id, hot settings без

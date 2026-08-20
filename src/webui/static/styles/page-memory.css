@@ -2,9 +2,49 @@
  * `.layout`/`.pane*`/`.bank*`/`.tree*`/`.doc*` rules almost unchanged — only
  * the three fixed columns (320/450/1fr) shrink to the mockup's 300/300/1fr
  * now that the machine facts moved out of the header, plus the mobile
- * pane-switch that a single-page layout never needed. */
+ * pane-switch that a single-page layout never needed.
+ *
+ * The first two column widths are drag-resizable (page-memory.js wires
+ * `.pane-resizer`), so `grid-template-columns` here is only the fallback for
+ * the instant before that script runs; the two 6px tracks are the resizer
+ * handles themselves, sitting between the panes as real grid columns rather
+ * than an overlay, so dragging one never has to fight the pane it sits on
+ * for hit-testing. */
 
-.layout { flex: 1 1 auto; min-height: 0; display: grid; grid-template-columns: 300px 300px minmax(0, 1fr); }
+.layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 300px 6px 300px 6px minmax(0, 1fr);
+}
+
+/* The drag handle between two panes. Widened hit area via `::after` rather
+   than a wider element — the visible seam stays a hairline, matching every
+   other `--line` divider on this page, while the draggable area is still
+   comfortable. */
+.pane-resizer {
+  position: relative;
+  cursor: col-resize;
+  background: var(--line);
+}
+
+.pane-resizer::after {
+  content: '';
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  right: -3px;
+}
+
+.pane-resizer:hover,
+body.is-resizing-pane .pane-resizer { background: var(--accent); }
+
+/* Dragging any resizer sets this on `<body>` so a fast mouse movement that
+   slips off the 6px track mid-drag does not drop the resize — the listeners
+   are on `document`, this class just keeps the handle itself lit and the
+   cursor a resize arrow (below) for the whole gesture. */
+body.is-resizing-pane { cursor: col-resize; user-select: none; }
 
 .pane {
   display: flex;
@@ -17,15 +57,21 @@
 
 .pane:last-child { border-right: none; }
 
+/* Fixed, not `min-height`: the three heads carry different content (a lone
+   refresh icon, a subtitle span, a checkbox plus a text button), so a
+   min-height only clamped the shortest one — the other two grew past it by
+   however much their tallest child needed, and the three rows sat at visibly
+   different heights. A fixed height plus `align-items: center` makes every
+   row the same regardless of what it holds. */
 .pane-head {
   flex: none;
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 7px 12px;
+  padding: 0 12px;
   border-bottom: 1px solid var(--line);
   background: var(--bg-sunken);
-  min-height: 34px;
+  height: 37px;
 }
 
 .pane-head h2 { white-space: nowrap; }
@@ -301,18 +347,18 @@
    control below picks which of the three fills the page. */
 .mob-panes { display: none; }
 
-@media (max-width: 1180px) {
-  .layout { grid-template-columns: 270px 262px minmax(0, 1fr); }
-}
-
+/* Below 940px the three columns stack into one mobile pane switch instead of
+   sitting side by side (below) — nothing left to drag, so the resizers go
+   with the rest of `.layout`'s grid tracks. */
 @media (max-width: 940px) {
   .layout { display: block; position: relative; }
   .layout .pane { position: absolute; inset: 0; display: none; border-right: 0; }
   .layout .pane.is-mob { display: flex; }
+  .pane-resizer { display: none; }
   .mob-panes { display: inline-flex; }
 }
 
 @media (max-width: 620px) {
-  .pane-head { flex-wrap: wrap; }
+  .pane-head { height: auto; min-height: 34px; flex-wrap: wrap; padding: 7px 12px; }
   .pane-actions { margin-left: 0; }
 }

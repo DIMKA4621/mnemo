@@ -205,11 +205,12 @@
 
 .set-select:focus { outline: none; border-color: var(--accent); }
 
-/* Theme lives here (Служба section) as a `.segmented`, the one control on
-   this screen that applies on click rather than waiting for «Зберегти»: it
-   is a browser preference, nothing is sent to the backend, so there is
-   nothing for Save to do with it. Uses the shared `.segmented`/`.seg`
-   component (base.css) — no dedicated rule needed. */
+/* Theme lives here (Загальні section, first) as a `.segmented set-toggle`,
+   the one control on this screen that applies on click rather than waiting
+   for «Зберегти»: it is a browser preference, nothing is sent to the
+   backend, so there is nothing for Save to do with it. Uses the shared
+   `.segmented`/`.seg` component (base.css) plus `.set-toggle` below, so it
+   sits at content width like the autostart switch instead of stretching. */
 
 @media (max-width: 620px) {
   .set-body { padding: 0; }
