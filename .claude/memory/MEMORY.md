@@ -124,10 +124,11 @@ detail lives in `topics/`, day notes in `logs/`.
 
 - [2026-08-21 (третє)](logs/2026-08-21-posix-test-and-uninstall-survey.md)
   — `test_install_posix.py` закрито (той самий клас фіксу, що
-  `test_install_windows.py` у кроці 12). Ще один маленький розрив
-  знайдений, не полагоджений: `uninstall.sh`'s survey-рядок "engine code"
-  перевіряє немігровану пласку `src/cli.py` — завжди друкує `MISSING`
-  після реального інсталу (звітність, не логіка видалення). → platform-dev.
+  `test_install_windows.py` у кроці 12); `uninstall.sh`'s survey-рядок
+  теж виправлений (мігровано під `versions`/`current`, дзеркалячи вже
+  коректний `uninstall.ps1`) — реporting-only, логіка видалення не
+  зачеплена. **Усі 13 кроків самооновлення рушія технічно готові й
+  закомічені.** Лишається крок 13: фінальна синхронізація доків.
 - [2026-08-21 (друге)](logs/2026-08-21-final-consolidated-verification.md)
   — самооновлення рушія: фінальна консолідована перевірка (усі три баги
   разом, свіжим прогоном) — усе чисто, **536 passed**, forced-fail
