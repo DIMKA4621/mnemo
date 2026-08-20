@@ -13,6 +13,8 @@ Two rules for anything added here:
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import re
@@ -1350,6 +1352,123 @@ def test_setup_scripts_agree() -> None:
               and "ODD_VALUE" in stderr, detail=stderr.strip()[:160])
 
 
+def _init_project_offline(proj: Path, *, migrate: bool = False,
+                          yes: bool = True) -> tuple[int, str]:
+    """Run `init_project()` for real, with the live-service probe forced
+    down so `_register_bank` takes the offline `registry.add()` path.
+
+    Callers still need `patch.object(config, "STATE_DIR", ...)` around this
+    — this only stops `_register_bank` from reaching an actually-running
+    mnemo service; it says nothing about where the registry itself lives.
+    Without both, a throwaway test bank could land in this machine's real
+    `banks.json`, or worse, register against its real running service.
+
+    Returns `(returncode, everything init printed)`.
+    """
+    from src.client import ServiceDown
+
+    buf = io.StringIO()
+    with patch("src.client.Client") as mock_client_cls:
+        mock_client_cls.return_value.add_bank.side_effect = ServiceDown()
+        with contextlib.redirect_stdout(buf):
+            code = scaffold.init_project(root=str(proj), migrate=migrate,
+                                         yes=yes)
+    return code, buf.getvalue()
+
+
+def test_init_runs_setup_script() -> None:
+    """`init_project()` end-to-end — the first test to call it directly
+    rather than only the planning functions underneath it (`_plan_wiring`
+    and friends, exercised elsewhere in this file).
+
+    Confirms the actual point of the change: after `init` returns,
+    `.mcp.json` already carries real values. No separate `bash mcp-setup.sh`
+    step, and nothing in the output tells the user to run one.
+    """
+    with tempfile.TemporaryDirectory(prefix="mnemo init-run ") as raw:
+        state = Path(raw) / "state"
+        state.mkdir()
+        proj = Path(raw) / "project"
+        proj.mkdir()
+
+        with patch.object(config, "STATE_DIR", state):
+            code, out = _init_project_offline(proj)
+
+        check("init_project returns 0", code == 0, detail=out)
+        check("init ran the setup script itself",
+              "mnemo init: ran mcp-setup" in out, detail=out)
+        check("init did not fall back to the manual instructions",
+              "regenerate .mcp.json by hand" not in out, detail=out)
+
+        mcp_path = proj / ".mcp.json"
+        check(".mcp.json exists right after init, unprompted",
+              mcp_path.exists())
+        if not mcp_path.exists():
+            return
+        text = mcp_path.read_text(encoding="utf-8")
+        check("no placeholder left in .mcp.json",
+              not re.search(r"\{\{[A-Z0-9_]+\}\}", text), detail=text)
+        doc = json.loads(text)
+        url = doc.get("mcpServers", {}).get("mnemo-memory", {}).get("url", "")
+        check("mnemo-memory url is loopback",
+              re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\]):\S+",
+                           url) is not None, detail=url)
+        token = url.partition("?token=")[2]
+        check("mnemo-memory url carries a literal 48-hex bank token",
+              re.fullmatch(r"[0-9a-f]{48}", token) is not None, detail=token)
+
+
+def test_init_setup_script_failure_falls_back() -> None:
+    """A hand-edited (`edited`-state) setup script that now fails must not
+    take the rest of `init` down with it — `init` still returns 0, and the
+    manual fallback instructions reappear so the user is not left guessing.
+    """
+    with tempfile.TemporaryDirectory(prefix="mnemo init-fail ") as raw:
+        state = Path(raw) / "state"
+        state.mkdir()
+        proj = Path(raw) / "project"
+        proj.mkdir()
+
+        with patch.object(config, "STATE_DIR", state):
+            first_code, first_out = _init_project_offline(proj)
+            check("first init succeeds", first_code == 0, detail=first_out)
+
+            script = proj / ("mcp-setup.ps1" if os.name == "nt"
+                             else "mcp-setup.sh")
+            check("setup script exists after the first init", script.exists())
+            if not script.exists():
+                return
+
+            # Force a deterministic failure while keeping mnemo's marker —
+            # this is `_setup_state`'s "edited" branch (marker present, bytes
+            # mnemo never wrote), which `init` leaves untouched by design. A
+            # `.sh` needs its shebang to stay the first line to still run at
+            # all; a `.ps1` has no such requirement.
+            original = script.read_text(encoding="utf-8")
+            if script.suffix == ".sh":
+                lines = original.splitlines(keepends=True)
+                corrupted = lines[0] + "exit 1\n" + "".join(lines[1:])
+            else:
+                corrupted = "exit 1\r\n" + original
+            script.write_text(corrupted, encoding="utf-8")
+            if script.suffix == ".sh":
+                script.chmod(script.stat().st_mode | 0o111)
+
+            code, out = _init_project_offline(proj)
+
+        check("init still returns 0 on a broken setup script",
+              code == 0, detail=out)
+        check("init reports the setup script could not run",
+              f"could not run {script.name} automatically" in out
+              or f"{script.name} exited" in out, detail=out)
+        check("init falls back to the manual instructions",
+              "regenerate .mcp.json by hand with either of:" in out,
+              detail=out)
+        check("mnemo's own script is recognised as edited, not overwritten",
+              "carries mnemo's marker but not text mnemo wrote" in out,
+              detail=out)
+
+
 def test_scaffold_gitignore() -> None:
     """The plain branch: a literal token means git must not carry the file."""
     with tempfile.TemporaryDirectory(prefix="mnemo ignore ") as raw:
@@ -2634,6 +2753,8 @@ def main() -> int:
     test_adopted_project_discovery()
     test_removal_lifts_the_queue_cancellation()
     test_setup_scripts_agree()
+    test_init_runs_setup_script()
+    test_init_setup_script_failure_falls_back()
     test_scaffold_gitignore()
     test_scaffold_warns_when_memory_is_ignored()
     test_scaffold_refuses_a_tracked_file()

@@ -54,6 +54,7 @@ import hashlib
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
@@ -2095,6 +2096,66 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
     return wiring
 
 
+def _run_setup_script(proj: Path) -> tuple[bool, list[str], Path | None]:
+    """Run the platform's `mcp-setup.*` right after `init` writes it, so
+    `.mcp.json` exists with real values before `init` returns — no separate
+    "now run this" step. This is exactly the command a person would type next
+    (`logs/2026-08-11-migration.md`: `mnemo init` -> `bash mcp-setup.sh`); the
+    only thing this function automates is typing it.
+
+    Returns `(ok, lines, script)` — `lines` is either the script's own stdout
+    (on success) or a short failure diagnosis (on failure); `script` is the
+    file that was (attempted to be) run, or `None` if there was none for this
+    platform to run. Never raises: a failed or skipped regeneration is a
+    convenience that did not pan out, not a reason to fail the whole `init`.
+    Neither half owns writing `.mcp.json` directly — that stays the script's
+    job, in both the manual and the automatic case, so there is exactly one
+    place that turns the template into the real file.
+    """
+    if os.name == "nt":
+        script = proj / "mcp-setup.ps1"
+        runner = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+                 "-File", str(script)]
+    else:
+        # Run the shebang directly rather than hunting for `bash` on PATH.
+        # `init_project` already chmod +x's a freshly written/refreshed
+        # script (`wiring.executable`), so this is the same invocation a
+        # person typing `./mcp-setup.sh` would make. The `bash`-on-PATH probe
+        # tests use (`usable_bash()`) exists for a Windows-CI quirk (a WSL
+        # launcher stub in System32) that does not apply on a real POSIX host.
+        script = proj / "mcp-setup.sh"
+        runner = [str(script)]
+    if not script.exists():
+        return False, [], None
+
+    # `init` (and therefore this) also runs inside the windowless
+    # FastAPI/uvicorn service process — the cabinet's add-bank "init"
+    # checkbox calls `init_project` directly, no console attached. Without
+    # this flag a bare `subprocess.run(["powershell", ...])` there would
+    # flash a visible console window on the user's desktop for no reason;
+    # `service_ctl._windowless_kwargs` documents the same constant for the
+    # same reason on the detached-spawn side. Harmless when a console
+    # already exists (the plain CLI case): it only suppresses a NEW one.
+    kwargs: dict = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    try:
+        done = subprocess.run(runner, cwd=str(proj), capture_output=True,
+                              timeout=30, **kwargs)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, [f"could not run {script.name}: {exc}"], script
+
+    if done.returncode == 0:
+        out = done.stdout.decode("utf-8", "replace").strip()
+        return True, [line for line in out.splitlines() if line], script
+
+    err = done.stderr.decode("utf-8", "replace").strip()
+    lines = [f"{script.name} exited {done.returncode}"]
+    if err:
+        lines.extend(f"  {line}" for line in err.splitlines()[:5])
+    return False, lines, script
+
+
 def _register_bank(bank_root: Path, report: list[str]) -> str:
     """Register the project's memory root and return its **token**.
 
@@ -2229,32 +2290,46 @@ def init_project(root: str | None, *, migrate: bool = False,
     for note in portability_notes + wiring.notes:
         print(f"  NOTE                 {note}")
     if (proj / ".mcp.json.template").exists():
-        setup = proj / "mcp-setup.sh"
-        ours = setup.exists() and _SETUP_MARKER_ANY in _read_text(setup)
-        print("mnemo init: the entry went into .mcp.json.template — "
-              "regenerate .mcp.json with either of:")
-        print("              bash mcp-setup.sh")
-        print("              powershell -NoProfile -File .\\mcp-setup.ps1")
-        if ours:
-            # Nothing else to say: this script derives its substitutions from
-            # the template, so there is no list to keep in step and no way to
-            # forget an entry. Adding a bank is the template plus `.mcp.env`.
-            print("            Both discover their substitutions from the "
-                  "template, so adding another")
-            print("            bank later means editing only "
-                  ".mcp.json.template and .mcp.env.")
+        ok, run_lines, script = _run_setup_script(proj)
+        if ok:
+            # The script printed its own confirmation (`mcp-setup: wrote
+            # .mcp.json`); echoing it is enough, no need to say it twice.
+            print(f"mnemo init: ran {script.name} — .mcp.json is ready.")
+            for line in run_lines:
+                print(f"  {line}")
         else:
-            # A script from an older generation lists one `-e` per
-            # placeholder, and `sed` copies an unmatched `{{PLACEHOLDER}}`
-            # through verbatim: it prints its success tick, exits 0, and
-            # leaves a `.mcp.json` that simply never connects. `init` adds the
-            # lines for its own variables; a hand-pasted fragment gets none.
-            print("            If a URL in .mcp.json still shows "
-                  "{{MNEMO_TOKEN}} afterwards, mcp-setup.sh\n"
-                  "            is missing that placeholder's `-e` line — sed "
-                  "copies unmatched ones through\n"
-                  "            and still exits 0. `mnemo init` adds them; "
-                  "hand-pasting the fragment does not.")
+            setup = proj / "mcp-setup.sh"
+            ours = setup.exists() and _SETUP_MARKER_ANY in _read_text(setup)
+            if script is not None:
+                print(f"mnemo init: could not run {script.name} "
+                      f"automatically:")
+                for line in run_lines:
+                    print(f"  {line}")
+            print("mnemo init: regenerate .mcp.json by hand with either of:")
+            print("              bash mcp-setup.sh")
+            print("              powershell -NoProfile -File .\\mcp-setup.ps1")
+            if ours:
+                # Nothing else to say: this script derives its substitutions
+                # from the template, so there is no list to keep in step and
+                # no way to forget an entry. Adding a bank is the template
+                # plus `.mcp.env`.
+                print("            Both discover their substitutions from "
+                      "the template, so adding another")
+                print("            bank later means editing only "
+                      ".mcp.json.template and .mcp.env.")
+            else:
+                # A script from an older generation lists one `-e` per
+                # placeholder, and `sed` copies an unmatched `{{PLACEHOLDER}}`
+                # through verbatim: it prints its success tick, exits 0, and
+                # leaves a `.mcp.json` that simply never connects. `init`
+                # adds the lines for its own variables; a hand-pasted
+                # fragment gets none.
+                print("            If a URL in .mcp.json still shows "
+                      "{{MNEMO_TOKEN}} afterwards, mcp-setup.sh\n"
+                      "            is missing that placeholder's `-e` line "
+                      "— sed copies unmatched ones through\n"
+                      "            and still exits 0. `mnemo init` adds "
+                      "them; hand-pasting the fragment does not.")
     print("mnemo init: done. Review the changes, then commit them "
           "(and trust the project in Claude Code).")
     return 0

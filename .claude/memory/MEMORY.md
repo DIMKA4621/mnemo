@@ -101,6 +101,13 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-20 (п'яте)](logs/2026-08-20-init-auto-mcp-setup.md) — `mnemo init`
+  тепер сам запускає `mcp-setup.sh`/`.ps1` останнім кроком (`_run_setup_script`,
+  `scaffold.py`), замість друкувати «run it yourself» — `.mcp.json` готовий
+  без ручної команди. Невдача (зламаний `edited`-скрипт) не валить `init`,
+  лише фолбекає на стару інструкцію. Перші наскрізні тести `init_project()` в
+  суїті; безпечний спосіб тестувати його без ризику підняти реальний сервіс —
+  мокати `src.client.Client` цілком, не просто вказувати недосяжний порт.
 - [2026-08-20 (четверте)](logs/2026-08-20-embed-wording-journal-polish.md) —
   особисті GPU-заміри (8.8×, RX 580) прибрано з **глобального** UI-тексту
   (`presets.py`'s Ollama note, rebuild-діалог) — не замінені на «правильне»
