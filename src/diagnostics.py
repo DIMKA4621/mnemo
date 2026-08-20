@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -70,6 +71,54 @@ def _token_fact() -> dict[str, Any]:
         "source": "state_file",
         "where": path.as_posix(),
         "scope": "engine_home",
+    }
+
+
+def _self_update_fact() -> dict[str, Any]:
+    """Self-update state (block M, ``state/engine_version.json``): the
+    active tag, the last GitHub check, and whether a detached
+    ``update-apply`` (step 8) looks stuck.
+
+    "Stuck" means ``last_apply.started_at`` is set, ``finished_at`` is still
+    null, and reasonably more time has passed than the apply orchestration
+    could plausibly still be inside — i.e. the detached process died
+    mid-flight (crashed, was killed, or hit an exception outside every path
+    that writes a terminal state) and nothing else will ever report it,
+    because the one process that could write "finished" no longer exists.
+    The threshold is deliberately generous: a FAILED switch retries the
+    whole stop -> start sequence again for rollback, so the worst realistic
+    timeline is twice one attempt's stop+ready budget, plus a buffer for
+    ``prune_versions()``/registry writes around the edges — not once, not
+    a guess.
+    """
+    from . import engine_update
+
+    state = engine_update.read_state()
+    last_check = state.get("last_check") or {}
+    last_apply = state.get("last_apply") or {}
+
+    stuck: dict[str, Any] | None = None
+    started_raw = last_apply.get("started_at")
+    if started_raw and not last_apply.get("finished_at"):
+        try:
+            started = datetime.fromisoformat(started_raw)
+            elapsed = (datetime.now(started.tzinfo) - started).total_seconds()
+        except (ValueError, TypeError):
+            elapsed = None
+        threshold = 2 * (config.SERVICE_STOP_TIMEOUT + config.SERVICE_READY_TIMEOUT) + 30
+        if elapsed is not None and elapsed > threshold:
+            stuck = {
+                "tag": last_apply.get("tag"),
+                "started_at": started_raw,
+                "elapsed_s": round(elapsed),
+            }
+
+    return {
+        "current_tag": state.get("current"),
+        "last_check_at": last_check.get("at"),
+        "update_available": bool(last_check.get("update_available")),
+        "latest_tag": last_check.get("latest_tag"),
+        "stuck_apply": stuck,
     }
 
 
@@ -313,6 +362,7 @@ def collect(
             "total": None,
             "stale": [],
         },
+        "self_update": _self_update_fact(),
     }
     return report
 
@@ -460,6 +510,25 @@ def render_text(report: dict[str, Any]) -> str:
             for project in stale:
                 lines.append(f"  {project['command']}")
                 lines.append(f"      {project['reason']}")
+
+    self_update = report.get("self_update") or {}
+    current_tag = self_update.get("current_tag")
+    if current_tag:
+        detail = (
+            f", {self_update['latest_tag']} available"
+            if self_update.get("update_available") and self_update.get("latest_tag")
+            else ""
+        )
+        lines.append(f"self-update      current {current_tag}{detail}")
+    else:
+        lines.append("self-update      no self-update recorded yet (plain install)")
+    stuck = self_update.get("stuck_apply")
+    if stuck:
+        lines.append(
+            f"                 STUCK APPLY — {stuck['tag']} started "
+            f"{stuck['started_at']} ({stuck['elapsed_s']}s ago, no terminal "
+            "state) — check `mnemo service status` / apply it again"
+        )
     return "\n".join(lines)
 
 

@@ -52,7 +52,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, presets, registry, servicelog, settings, store
+from . import config, engine_update, presets, registry, servicelog, settings, store
 from .config import TOP_K
 from .providers import EmbeddingUnavailable, forget_providers, get_provider
 from .registry import AmbiguousBankRef, Bank, BankExists, BankNotFound
@@ -245,6 +245,19 @@ _ERROR_STATUS: dict[str, int] = {
     # state; retrying after the registry is fixed is the remedy, not a server
     # restart and never a guess that every index is disposable.
     "orphan_cleanup_refused": 409,
+    # [NEW beyond §9.2] `POST /api/update/apply`'s `tag` no longer matches
+    # `last_check.latest_tag` — the same principle as orphan cleanup only
+    # accepting ids it just showed: a target confirmed a moment ago can be
+    # stale by the time the request lands (a newer release appeared, or the
+    # tag was already applied by another client). 409, not 400: the request
+    # is well-formed, it just no longer matches the machine's current state.
+    "stale_target": 409,
+    # [NEW beyond §9.2] A staging/apply cycle from an earlier `POST
+    # /api/update/apply` is already running in this process. Same shape as
+    # `download_in_progress`: nothing is broken, the action just cannot run
+    # twice at once (two concurrent `stage_release()` calls would race each
+    # other building the same `versions/<tag>/`).
+    "update_in_progress": 409,
     "internal": 500,
 }
 
@@ -846,6 +859,8 @@ async def lifespan(app: FastAPI):
     api_token()
     servicelog.connect()
     servicelog.start_pruner()
+    with suppress(Exception):
+        engine_update.start_checker()
     registry.load(force=True)
     # Banks registered before per-bank tokens existed get one here, in place:
     # a migration that adds a field, not a rewrite of the document.
@@ -898,6 +913,8 @@ async def _shutdown(ping, q, watcher_mod) -> None:
     if q is not None:
         with suppress(Exception):
             q.stop()
+    with suppress(Exception):
+        engine_update.stop_checker()
     servicelog.stop_pruner()
     servicelog.close()
     with suppress(OSError):
@@ -1104,6 +1121,15 @@ class CleanOrphansRequest(BaseModel):
     # each one; accepting "all" would let an index that appeared after the
     # confirmation be deleted without ever having been shown.
     ids: list[str] = Field(default_factory=list, max_length=1000)
+
+
+class UpdateApplyRequest(BaseModel):
+    # Must equal the CURRENT `last_check.latest_tag` — see api_update_apply's
+    # "stale_target" check. Not optional/defaulted: an apply with no tag
+    # named would be applying whatever the server happens to think is
+    # latest at the moment the request is finally handled, not what the
+    # caller saw when they decided to click.
+    tag: str
 
 
 class PatchBankRequest(BaseModel):
@@ -2222,6 +2248,327 @@ def api_autostart_set(payload: dict = Body(...)) -> dict:
              "could not remove the logon entry"),
         )
     return now
+
+
+# ---------------------------------------------------------- self-update (M)
+#
+# Step 9 of .claude/memory/topics/engine-self-update-design.md. Three
+# endpoints: a read-only aggregate, a synchronous check, and an apply that
+# returns immediately and does the real work (stage, then hand off to the
+# detached `update-apply` CLI, step 8) on a background thread.
+#
+# "Ready to apply" is deliberately read the same way step 8's CLI reads it
+# (accepted as the contract for this step, not reinvented here):
+# `last_check.update_available` plus a `versions/<tag>/VERSION` marker that
+# matches `last_check.latest_tag`. No separate "staged" field exists or is
+# added — a second field recording the same fact would just be one more
+# thing that could disagree with the marker on disk.
+
+# In-process view of the CURRENT apply cycle this API process is running,
+# for GET /api/update/status to merge with what is on disk. Deliberately
+# NOT persisted anywhere: it exists only because this process itself is the
+# one background-staging a release, and it dies (see below) the moment
+# `update-apply` calls `service_ctl.stop()` on it — so by construction there
+# is nothing here worth surviving a restart.
+_apply_progress: dict[str, Any] = {
+    "state": "idle", "tag": None, "step": None, "error": None,
+    "started_at": None, "finished_at": None,
+}
+# Wall-clock time of the last _apply_progress mutation — see _apply_view's
+# docstring for why freshness, not "which side is idle", is what decides
+# which one GET /api/update/status trusts.
+_apply_progress_touched_at = 0.0
+
+
+def _touch_apply_progress(**fields: Any) -> None:
+    global _apply_progress_touched_at
+    _apply_progress.update(fields)
+    _apply_progress_touched_at = time.time()
+
+
+def _spawn_update_apply_breakaway(argv: list[str], cwd: Path) -> None:
+    """Spawn ``update-apply`` so it survives calling ``service_ctl.stop()``
+    on ITS OWN SPAWNER — the backend running this function.
+
+    **Found and proven live (step 9), not reasoned from a doc.** A plain
+    ``service_ctl.spawn_detached(argv, cwd=...)`` makes the new process a
+    genuine Win32 child of THIS process — ``CREATE_NEW_PROCESS_GROUP`` /
+    ``CREATE_NO_WINDOW`` change console/signal behaviour, not the recorded
+    parent PID. ``update-apply``'s first real action is
+    ``service_ctl.stop()``, which on Windows runs
+    ``taskkill /PID <backend_pid> /T /F`` — ``/T`` kills the target AND
+    EVERY PROCESS WHOSE PARENT CHAIN LEADS BACK TO IT, which includes
+    ``update-apply`` itself if it was spawned directly. Confirmed with a
+    minimal two-process experiment: a directly-spawned child issuing
+    ``taskkill /T`` against its own parent was ALWAYS killed alongside it.
+    In production this meant `update-apply` reliably died the instant it
+    tried to stop the backend that launched it — `last_apply.started_at`
+    set, nothing after it, `current` never repointed, no rollback (nothing
+    left alive to attempt one).
+
+    **The fix**: break the direct parent-child link before `update-apply`
+    ever calls ``stop()``. ``cmd.exe /c <path to a tiny .bat>`` running
+    ``start "" /B <target>`` makes ``cmd.exe`` — not this process — the
+    real parent; ``cmd.exe`` exits within milliseconds, so by the time
+    `update-apply` calls `stop()`, its recorded parent is already gone and
+    a parent-rooted ``taskkill /T`` cannot reach it (there is no live node
+    to recurse through). Confirmed with the same experiment: the
+    shim-launched child survived the exact same kill that took down its
+    logical parent. A ``.bat`` file is used (not an inline ``cmd /c
+    "start ... "`` string) because ``subprocess``'s own list-based argv
+    quoting on Windows re-quotes a single string element in a way that
+    breaks ``cmd``'s notoriously idiosyncratic ``/c`` parsing — writing the
+    line to a file sidesteps that class of quoting bug entirely.
+
+    Windows-only, matching the rest of self-update; POSIX's
+    ``spawn_detached`` already puts every child in its own new session
+    (``start_new_session=True``), so a ``killpg`` targeting the backend's
+    process group never reaches a child spawned that way — POSIX had no
+    version of this bug to begin with.
+
+    ``cwd`` is threaded through via ``start``'s own ``/D`` switch (not left
+    to whatever directory ``cmd.exe`` happens to inherit) for the same
+    reason ``service_ctl.target_for_version()`` exists at all: `update-apply`
+    is itself invoked as ``-m src.cli update-apply``, and ``-m`` resolution
+    depends on the CHILD's cwd, not on `cmd.exe`'s. Getting this wrong would
+    reintroduce the cwd bug one level up, for `update-apply`'s own launch
+    instead of the switch it performs internally.
+    """
+    import tempfile
+
+    from . import service_ctl  # noqa: PLC0415
+
+    if os.name != "nt":
+        raise NotImplementedError(
+            "update-apply spawning is Windows-only for now (self-update's "
+            "own scope) -- see the design topic's migration-risk decision"
+        )
+
+    tmp_dir = service_ctl.state_dir() / "tmp"
+    tmp_dir.mkdir(parents=True, exist_ok=True)  # not guaranteed by stage_release's own cleanup
+    bat_fd, bat_path = tempfile.mkstemp(
+        suffix=".bat", prefix="mnemo-update-apply-", dir=str(tmp_dir)
+    )
+    quoted = " ".join(f'"{part}"' for part in argv)
+    with os.fdopen(bat_fd, "w", encoding="utf-8") as fh:
+        fh.write(f'start "" /D "{cwd}" /B {quoted}\r\n')
+    # cmd.exe itself is still spawned as a direct child of this process --
+    # that is fine and expected. It is `update-apply` (cmd's own child,
+    # launched via `start /B`) that needs the broken link, and it gets one
+    # the moment cmd.exe exits, milliseconds after issuing `start`.
+    service_ctl.spawn_detached(["cmd.exe", "/c", bat_path])
+
+
+def _run_staged_apply(tag: str) -> None:
+    """Background body of ``POST /api/update/apply``.
+
+    Runs on its own daemon thread inside the API process — the current
+    version keeps answering every OTHER request throughout staging (design
+    topic, point 4 of the UX flow: staging never blocks the backend). The
+    only outage is the brief stop -> switch -> start `update-apply` performs
+    afterwards, and that happens in a SEPARATE detached process — spawned via
+    :func:`_spawn_update_apply_breakaway`, not a plain ``spawn_detached``;
+    see that function's docstring for why the distinction is load-bearing.
+
+    Deliberately stops updating ``_apply_progress`` once ``update-apply`` is
+    spawned, rather than trying to track "switching"/"health" from here:
+    the very next thing `update-apply` does is `service_ctl.stop()`, and
+    that stops THIS backend process (the one running this thread) — so
+    there is no live process left to keep narrating, and no GET request
+    could reach it to ask even if there were. See `api_update_status`'s own
+    comment for the fuller version of this reasoning: those two states are,
+    by construction, never observable from a live HTTP response.
+    """
+    from . import engine_update, service_ctl
+
+    def _on_progress(payload: dict) -> None:
+        if payload.get("tag") != tag:
+            return
+        _touch_apply_progress(
+            step=payload.get("step"),
+            error=payload.get("error") if payload.get("step") == "failed" else _apply_progress["error"],
+        )
+
+    _touch_apply_progress(
+        state="staging", tag=tag, step="download", error=None,
+        started_at=_now_iso(), finished_at=None,
+    )
+    engine_update.add_progress_listener(_on_progress)
+    try:
+        engine_update.stage_release(tag)
+    except Exception as exc:  # noqa: BLE001 - reported via _apply_progress, not raised into a void
+        _touch_apply_progress(
+            state="failed", step="failed", error=str(exc), finished_at=_now_iso()
+        )
+        return
+    finally:
+        engine_update.remove_progress_listener(_on_progress)
+
+    _touch_apply_progress(state="switching", step=None, finished_at=None)
+    engine_root = Path(__file__).resolve().parent.parent
+    cmd = [service_ctl.windowless_python(), "-m", "src.cli", "update-apply"]
+    try:
+        _spawn_update_apply_breakaway(cmd, engine_root)
+    except OSError as exc:
+        # Staging succeeded but we could not even START update-apply (a
+        # broken interpreter, a permissions error) -- the running service is
+        # completely untouched at this point (stage_release never touches
+        # `current`), so this is a clean failure, not a half-applied one.
+        _touch_apply_progress(
+            state="failed", step="failed",
+            error=f"could not spawn update-apply: {exc}", finished_at=_now_iso(),
+        )
+
+
+def _apply_view(state: dict) -> dict:
+    """Merge this process's own (in-flight or just-finished) staging state
+    with what ``engine_version.json`` durably records.
+
+    ``_apply_progress`` reflects only a staging attempt STARTED BY THIS
+    PROCESS, and it never resets itself. A naive "prefer disk only while we
+    are idle" rule would make one failed staging attempt repeat that same
+    verdict forever afterwards — masking a genuinely newer ``last_apply``
+    written by a completely different `update-apply` run (by hand, from a
+    different process, or a retry after this process's own attempt failed).
+
+    Comparing the two sides' ``started_at`` VALUES does not work either: a
+    stuck apply is, by definition, one whose ``started_at`` is old — using
+    it as a recency signal would make a genuinely stuck record lose to a
+    fresher-looking (but actually stale) in-memory state. What actually
+    answers "which side changed most recently" is **when each side was last
+    WRITTEN**, not what either one's `started_at` field says happened. So
+    this compares the state file's own mtime (when anything last wrote a
+    NEW `engine_version.json` — a real switch-time signal `update-apply`,
+    hand edits, or a different process all produce) against
+    ``_apply_progress_touched_at`` (when THIS process's in-memory tracker
+    last changed) — whichever happened more recently in wall-clock time
+    wins.
+    """
+    from . import engine_update  # noqa: PLC0415
+
+    last_apply = state.get("last_apply") or {}
+    disk_tag = last_apply.get("tag")
+    disk_mtime = 0.0
+    with suppress(OSError):
+        disk_mtime = engine_update.version_state_file().stat().st_mtime
+
+    if disk_tag and disk_mtime >= _apply_progress_touched_at:
+        if last_apply.get("finished_at"):
+            result_to_state = {
+                "applied": "done", "rolled_back": "rolled_back", "failed": "failed",
+            }
+            return {
+                "state": result_to_state.get(last_apply.get("result"), "failed"),
+                "tag": disk_tag, "step": None, "error": last_apply.get("error"),
+                "started_at": last_apply.get("started_at"),
+                "finished_at": last_apply.get("finished_at"),
+            }
+        return {
+            "state": "switching", "tag": disk_tag, "step": None, "error": None,
+            "started_at": last_apply.get("started_at"), "finished_at": None,
+        }
+    return dict(_apply_progress)
+
+
+@app.get("/api/update/status", include_in_schema=False)
+def api_update_status() -> dict:
+    """Read-only aggregate of ``engine_version.json`` plus this process's
+    own in-flight staging state, if any (merged by :func:`_apply_view`).
+
+    ``apply.state`` for "started but not finished, and we are not the one
+    staging it right now" is reported as ``"switching"`` — the closest
+    honest single label available. It genuinely cannot distinguish
+    `update-apply`'s "switching" phase from its "health" phase: that
+    process (a) is not this one and (b) writes no intermediate step to
+    disk, only a start and a terminal finish. This is not a gap that
+    matters in practice: the OLD backend that could serve THIS endpoint is
+    the one `update-apply` stops to perform both phases, so no live HTTP
+    response can ever originate from inside them anyway — by the time
+    something answers `/api/update/status` again, the switch has already
+    either succeeded (a new process, serving the new tag) or failed and
+    rolled back (a new process, serving the old tag again) or died
+    entirely (nothing answers; that is `mnemo doctor`'s job, step 10).
+    """
+    from . import engine_update
+
+    state = engine_update.read_state()
+    current_tag = state.get("current")
+    current_entry = next(
+        (e for e in state.get("installed", []) if e.get("tag") == current_tag), None
+    )
+    last_check = state.get("last_check") or {}
+    apply_view = _apply_view(state)
+
+    return {
+        "current": {
+            "tag": current_tag,
+            "installed_at": (current_entry or {}).get("installed_at"),
+            "commit": (current_entry or {}).get("commit"),
+        },
+        "latest_known": {
+            "tag": last_check.get("latest_tag"),
+            "checked_at": last_check.get("at"),
+            "update_available": bool(last_check.get("update_available")),
+        },
+        "check": {
+            "in_progress": engine_update.check_in_progress(),
+            "error": last_check.get("error"),
+        },
+        "apply": apply_view,
+        "history": state.get("installed", []),
+        "retention": {"keep": config.UPDATE_RETENTION_COUNT},
+    }
+
+
+@app.post("/api/update/check", include_in_schema=False)
+def api_update_check() -> dict:
+    """Synchronous ``check_latest_release()`` + ``record_check()`` (step 6,
+    unchanged) — one real GitHub round trip, budgeted by
+    ``config.UPDATE_CHECK_TIMEOUT_S``.
+    """
+    from . import engine_update
+
+    state = engine_update.check_now()
+    last_check = state.get("last_check") or {}
+    return {
+        "latest_tag": last_check.get("latest_tag"),
+        "current_tag": state.get("current"),
+        "update_available": bool(last_check.get("update_available")),
+        "checked_at": last_check.get("at"),
+        "error": last_check.get("error"),
+    }
+
+
+@app.post("/api/update/apply", status_code=202, include_in_schema=False)
+def api_update_apply(req: UpdateApplyRequest) -> dict:
+    """Stage ``req.tag`` and, on success, hand off to the detached
+    `update-apply` CLI (step 8). Returns immediately; the real work happens
+    on a background thread started here.
+    """
+    from . import engine_update
+
+    state = engine_update.read_state()
+    last_check = state.get("last_check") or {}
+    if req.tag != last_check.get("latest_tag") or not last_check.get("update_available"):
+        raise ApiError(
+            "stale_target",
+            f"{req.tag!r} does not match the last known latest tag "
+            f"({last_check.get('latest_tag')!r}) — run a check again",
+            tag=req.tag, latest_tag=last_check.get("latest_tag"),
+        )
+    if _apply_progress["state"] not in ("idle", "done", "failed", "rolled_back"):
+        raise ApiError(
+            "update_in_progress",
+            f"an update is already {_apply_progress['state']} "
+            f"(tag {_apply_progress.get('tag')!r})",
+        )
+
+    thread = threading.Thread(
+        target=_run_staged_apply, args=(req.tag,),
+        name=f"mnemo-update-apply-{req.tag}", daemon=True,
+    )
+    thread.start()
+    return {"accepted": True, "tag": req.tag}
 
 
 @app.get("/api/logs", include_in_schema=False)
