@@ -260,11 +260,15 @@ mnemo clean-orphans [--dry-run]     delete index files no bank claims; asks firs
      [--yes]                        skip the prompt (scripts)
 ```
 
-Six more are **hidden from `--help` but still work**, because nothing types
+Five more are **hidden from `--help` but still work**, because nothing types
 them and something calls them: `serve` (what `service start` spawns),
 `embed-server` (what the backend spawns), `hook-postedit` (a no-op that
-exists *only* so an already-wired v2 hook does not fail) and `ingest`
-(deprecated alias, still warns). The two hook seeds are **gone**, not
+exists *only* so an already-wired v2 hook does not fail), `ingest`
+(deprecated alias, still warns), and `update-apply` (engine self-update's
+`stop → switch current → start → health-gate → rollback`, spawned detached
+by the cabinet's apply button; also runnable by hand for diagnostics — exit
+0/1/2/3 = applied / rolled back / nothing staged / both apply and rollback
+failed, service down). The two hook seeds are **gone**, not
 hidden. Hidden by omitting `help=` on the subparser: `argparse.SUPPRESS`
 there prints `==SUPPRESS==` instead of hiding.
 
@@ -406,11 +410,23 @@ git pull                                  # if updating from a remote
 & .\install.ps1 -Check                    # optional: verify engine state
 ```
 
-`install.sh` / `install.ps1` is idempotent and safe to re-run: it
-re-mirrors `src/`, reinstalls deps (pip), and rewrites the launcher. It
+`install.sh` / `install.ps1` is idempotent and safe to re-run: it builds
+`versions/local/` fresh from this checkout, repoints `current` at it, and
+republishes the `bin/` launchers — reinstalling deps along the way. It
 **never** touches `state/` (per-project indexes) or `model-cache/`, so no
 re-warmup and no re-index are needed for a code-only update. No skill is
 required — this is a plain shell command, not a `mnemo` subcommand.
+
+**This git-pull path is one of two ways the engine updates now.** The other
+is self-update from the cabinet (design decision #33, `docs/
+Memory-contracts-v3.md` §9.9): the backend checks GitHub tags on a timer (or
+on demand), and a click stages and applies a *tagged release* under
+`versions/<tag>/` with a health-gated rollback if the new build doesn't come
+up healthy. That path is for end users running a released `mnemo` — it pulls
+nothing from a local checkout and knows nothing about uncommitted work. This
+manual path stays the one for developing mnemo itself: it always rebuilds
+the fixed `versions/local/` from whatever is in `src/` right now, committed
+or not.
 
 Extra steps only when:
 - the embedding model changed in `src/config.py` → also run

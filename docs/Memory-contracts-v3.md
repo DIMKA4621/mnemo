@@ -63,8 +63,9 @@
 | `src/diagnostics.py` | K | 6 | service-dev **[NEW]** — одне structured джерело для `doctor` у CLI й кабінеті |
 | `src/scaffold.py` | K | 4 | service-dev **[NEW]** — не було в мапі тимліда |
 | `src/inject_log.py` | — | 2 | service-dev — **видаляється** (див. 8.5) **[NEW]** |
-| `src/service_ctl.py` | L | 5 | **platform-dev** — версійні інстали додали `versions_dir()`/`current_link()`/`switch_current(tag)`/`update_lock()`/`prune_versions()` (самооновлення рушія, рішення #33) **[NEW]** |
+| `src/service_ctl.py` | L | 5 | **platform-dev** — версійні інстали додали `versions_dir()`/`current_link()`/`switch_current(tag)`/`update_lock()`/`prune_versions()`/`target_for_version(dir)`/`publish_launchers(dir)` (самооновлення рушія, рішення #33) **[NEW]**, 11.2.2 |
 | `mnemo_bootstrap.py` | — | 5 | **platform-dev** — subprocess-диспетчер до `current/.venv/…/python -m src.cli`, більше не in-process import (§15.4) **[NEW]** |
+| `src/engine_update.py` | M | — | **service-dev** — самооновлення рушія (рішення #33, поза фазами 0–7): `state/engine_version.json`, фоновий GitHub-check, `stage_release()` **[NEW]**, 9.9 |
 | `src/embedctl.py` | — | 6 | **engine-dev** — памʼять бекенда: що тримається і як віддати (§6.6.4) **[NEW]** |
 | `install.sh`, `install.ps1`, `requirements.txt` | — | 5 | platform-dev **[NEW]** |
 | `src/webui/**` | — | 6 | **ui-dev** |
@@ -101,6 +102,8 @@
 # --- queue & watcher (E, F) ---------------------  service-dev
 # --- service log & retention (I) ----------------  service-dev
 # --- process lifecycle (L) ----------------------  platform-dev
+# --- versioned engine layout (self-update, L) ---  platform-dev
+# --- self-update check (M) ----------------------  service-dev
 ```
 
 Порядок секцій — фіксований (як вище), нові ключі дописуються **в кінець своєї
@@ -1553,6 +1556,8 @@ API token» відправило б її шукати неіснуючу про�
 | `embed_busy` | 409 | **[NEW]** `unload`/`load` попросили, поки воркер індексує. Не 503: нічого не зламано й нічого не недосяжне — просто зараз ця дія знищила б уже розпочату роботу, а за мить буде можна |
 | `embed_control_failed` | 502 | **[NEW]** сама дія не відбулась: резидент відповідає чужим токеном, Ollama недосяжна, ендпоінт не тримає нічого |
 | `orphan_cleanup_refused` | 409 | **[NEW]** registry/orphan-list не можна вважати достовірним; нічого не видалено |
+| `stale_target` | 409 | **[NEW]** `POST /api/update/apply`'s `tag` не збігається з поточним `last_check.latest_tag`, або `update_available` вже `false` — клієнт побачив застарілий екран, треба перевірити знову (9.9) |
+| `update_in_progress` | 409 | **[NEW]** `POST /api/update/apply` уже стейджиться цим процесом — друга спроба відхиляється, а не стає в чергу (9.9) |
 | `internal` | 500 | усе інше |
 
 **Маршрут, якого немає, конверта НЕ має — тіло порожнє.** **[NEW]** Конверт
@@ -1904,6 +1909,7 @@ bge-m3 обидві мають 1024 виміри й усе одно живуть
 | `bank_status` | стан банку змінився | `{"bank": BankInfo}` |
 | `query` | виконано пошук (жива стрічка журналу) | `{"face","query","status","n_hits","took_ms"}` |
 | `ping` | кожні 30 с | `{}` |
+| `update_progress` | під час стейджингу самооновлення (9.9) | `{"step","tag","detail","error"}` — `bank_id: null`, як і решта подій рівня сервісу **[NEW]** |
 
 Клієнт → сервер: тільки `{"type":"subscribe","bank_id":"…"|null}` і
 `{"type":"pong"}`. Будь-що інше ігнорується. **[NEW]**
@@ -1975,6 +1981,111 @@ GET /mcp-tools/search?bank=mnemo&query=черга&top_k=2
 **Журнал.** Виклики пишуться в `query_events` з `face="mcp-tools"` — окремо від
 `face="mcp"`, щоб ручні тики не змішувалися зі справжніми запитами агента у
 статистиці.
+
+### 9.9 `/api/update/*` — самооновлення рушія (блок M, рішення #33) **[NEW]**
+
+Не про банки й не про проєкти — мутує лише сам рушій
+(`~/.claude/mnemo/`). Приватне: сервісний токен, `include_in_schema=False`;
+немає ні MCP-тула, ні `/mcp-tools/*`-дзеркала — ця поверхня для кабінету, не
+для агента.
+
+**Файл стану — `STATE_DIR / "engine_version.json"`** (`src/engine_update.py`),
+той самий людиночитний JSON-з-атомарним-записом патерн, що й
+`service.pid`/`banks.json`:
+
+```json
+{
+  "current": "v3.1.0",
+  "installed": [
+    {"tag": "v3.0.0", "installed_at": "2026-08-01T09:00:00+03:00",
+     "commit": null, "status": "previous"},
+    {"tag": "v3.1.0", "installed_at": "2026-08-20T12:00:00+03:00",
+     "commit": null, "status": "active"}
+  ],
+  "last_check": {"at": "2026-08-21T08:00:00+03:00", "latest_tag": "v3.2.0",
+                 "update_available": true, "error": null},
+  "last_apply": {"tag": "v3.2.0", "started_at": null, "finished_at": null,
+                 "result": null, "error": null}
+}
+```
+
+* `installed[].status` — `active` (рівно один, дзеркалить `current`) |
+  `previous` (перемкнуті раніше, ще на диску) | `failed` (спроба, що не
+  стала активною). `commit` — завжди `null` сьогодні: авто-архів релізу
+  GitHub не несе `.git`, а `stage_release()` окремого виклику API за ним не
+  робить.
+* `last_check.update_available` перераховується на **двох** подіях, а не
+  лише при перевірці: при кожному `check_now()` (`latest_tag != current`) і
+  при кожному успішному switch (`record_installed(status="active")`, за
+  тією самою формулою проти нового `current`) — без другого перерахунку
+  поле протухає назавжди одразу після вдалого апдейту (знайдено живцем,
+  крок 11, полагоджено окремим фіксом того самого дня).
+* Відсутній або битий файл ніколи не кидає — `read_state()` повертає
+  структуру за замовчуванням (усе `null`/`[]`/`false`), той самий
+  «розпізнано або дефолт», що й `read_identity()` у `service_ctl.py`.
+* «Готовий до застосування» — **не окреме поле**:
+  `last_check.update_available == true` **і** `versions/<tag>/VERSION`
+  існує та дорівнює тегу (маркер, який ставить `stage_release()` лише
+  після успішного білда). Той самий контракт читають і CLI `update-apply`
+  (11.1), і `POST /api/update/apply` нижче — друге поле, що могло б
+  розійтися з маркером на диску, не заведено.
+
+**`GET /api/update/status`**
+
+```json
+{"current": {"tag": "v3.1.0", "installed_at": "…", "commit": null},
+ "latest_known": {"tag": "v3.2.0", "checked_at": "…", "update_available": true},
+ "check": {"in_progress": false, "error": null},
+ "apply": {"state": "idle", "tag": null, "step": null, "error": null,
+           "started_at": null, "finished_at": null},
+ "history": [ /* engine_version.json's installed[] */ ],
+ "retention": {"keep": 3}}
+```
+
+`apply.state` — `idle | staging | switching | done | failed | rolled_back`.
+`switching` — навмисно узагальнений ярлик: реальне перемикання виконує
+**окремий** detached-процес (`update-apply`, 11.1), що зупиняє й той бекенд,
+який обслуговує цей самий `GET` — тому жодна жива HTTP-відповідь фізично не
+може прийти з середини «switching» чи «health»-фази, і розрізняти їх тут
+нема з чого. Значення — злиття памʼяті цього процесу (якщо стейджинг веде
+він) з диском, за тим, **що змінилось пізніше** (mtime `engine_version.json`
+проти часу останньої мутації памʼяті) — не за тим, яка сторона зараз
+«idle»: один провалений стейджинг у памʼяті інакше ховав би назавжди
+новіший результат, записаний іншим процесом.
+
+**`POST /api/update/check`** — синхронний `check_now()`, один реальний
+GitHub round-trip:
+
+```json
+{"latest_tag": "v3.2.0", "current_tag": "v3.1.0", "update_available": true,
+ "checked_at": "…", "error": null}
+```
+
+**`POST /api/update/apply`** — тіло `{"tag": "v3.2.0"}` → `202
+{"accepted": true, "tag": "v3.2.0"}`. Асинхронно: стейджинг
+(завантаження + venv) іде на фоновому потоці **цього** процесу — бекенд не
+блокується, стара версія й далі відповідає на все інше (design §13 #33,
+UX-флоу п.4) — тоді спавниться detached `update-apply` (11.1), який робить
+`stop → switch → start → health-gate → rollback` і саме тому вбиває процес,
+що його породив, посеред власного HTTP-запиту.
+
+Guards: `stale_target` (409) — `tag` не збігається з поточним
+`last_check.latest_tag`, або `update_available` вже `false`;
+`update_in_progress` (409) — стейджинг уже йде (`_apply_progress.state`
+поза `{idle, done, failed, rolled_back}`). Обидва в таблиці 9.2.
+
+**WS `update_progress`** (конверт 9.7, `bank_id: null`), лише під час
+стейджингу — до передачі detached `update-apply`:
+
+```json
+{"step": "download", "tag": "v3.2.0", "detail": "https://codeload…", "error": null}
+```
+
+`step` — `download | venv | done | failed`. Сам момент switch не породжує
+подій цим каналом узагалі: WS обслуговує той самий процес, який зупиняється
+в цю мить, тож обрив зʼєднання рівно тут — задокументована точка (design
+§13 #33), яку клієнт має трактувати як «ще працює», а не як помилку, і
+чекати фінальний стан через реконект + поллінг `GET /api/update/status`.
 
 ---
 
@@ -2375,11 +2486,22 @@ git-трекнутому шаблоні означав, що єдиний про
 Зникають: `mnemo mcp` (stdio MCP — MCP тепер HTTP), `mnemo projects`
 (заміняє `banks list`).
 
-**Сховані з `--help`, але робочі — чотири команди.** `serve`,
-`embed-server`, `hook-postedit`, `ingest`. Їх ніхто не набирає, але щось їх
-викликає: `serve` — це те, що спавнить `service start`; `embed-server`
-спавнить бекенд; `hook-postedit` — те, що запускає вже вписаний колись хук.
-Тому вони **сховані, а не видалені**: `hook-postedit` існує лише щоб такий
+**Сховані з `--help`, але робочі — пʼять команд.** `serve`,
+`embed-server`, `hook-postedit`, `ingest`, `update-apply`. Їх ніхто не
+набирає, але щось їх викликає: `serve` — це те, що спавнить `service
+start`; `embed-server` спавнить бекенд; `hook-postedit` — те, що запускає
+вже вписаний колись хук; `update-apply` (блок M, рішення #33) —
+самооновлення: `POST /api/update/apply` (9.9) спавнить її **detached**
+(`_spawn_update_apply_breakaway`, бо звичайний `spawn_detached` робить її
+Win32-дитиною бекенда, і власний `taskkill /T` цієї команди вбив би й саму
+себе), а сама вона робить `stop → switch_current → start → health-gate →
+rollback`. Так само запускна вручну для діагностики. Власні коди виходу (не
+`service_ctl`'ові й не `cli.py`'ові): `0` — застосовано, новий тег
+здоровий; `1` — apply впав, rollback вдався (старий тег знову здоровий);
+`2` — нема готового до застосування тега (`update_available` false, або
+немає `versions/<tag>/VERSION`); `3` — і apply, і rollback впали, сервіс
+down (`mnemo service status`/`doctor` уже це показують). Тому вони
+**сховані, а не видалені**: `hook-postedit` існує лише щоб такий
 хук не падав, тож його видалення спричинило б рівно те, від чого він
 захищає. Двох хукових насінь у цьому переліку більше немає — вони
 **видалені** (design #27). У `--help` лишається **13 команд**.
@@ -2540,6 +2662,71 @@ embed-резидента.
   тримає цей порт*, або **відбиток `(pid, час створення)`**, знятий у момент
   спавну. Не здогадка про те, який процес *мав би* бути нашим.
 
+#### 11.2.2 Версійні інстали й самооновлення — примітиви `service_ctl.py` (блок L/M) **[NEW]**
+
+```python
+def versions_dir() -> Path                          # USER_HOME/versions
+def current_link() -> Path                          # USER_HOME/current
+
+@dataclass(frozen=True)
+class SpawnTarget:
+    argv: list[str]
+    cwd: Path
+
+def target_for_version(version_dir) -> SpawnTarget
+def windowless_python() -> str
+def switch_current(tag: str) -> None
+def current_tag() -> str | None
+def update_lock() -> ContextManager               # exclusive lock, а не state
+def prune_versions(*, keep=None, active=None) -> list[str]
+def publish_launchers(version_dir) -> list[str]
+```
+
+`target_for_version` — не косметика поверх `windowless_python`, а окремий
+примітив із власної помилки, знайденої живцем (третій «застиглий self-
+reference»-баг тієї самої фічі, після лаунчера й `service.pid`): відразу
+після `switch_current()` виклик `start()` без явної цілі бере
+`sys.executable` **того процесу, що це кличе** — версію, з якої щойно
+пішли, не ту, куди щойно перемкнулись. Самого інтерпретатора теж не
+досить — `-m src.cli` резолвить `src` проти **`cwd` дочірнього процесу**,
+і `cwd` б'є `PYTHONPATH` безумовно, тож `SpawnTarget` носить обидва поля
+разом, а не лише `argv`. Дефолтна поведінка `start()` без явної цілі — та
+сама, що й до цього (`Path(__file__).resolve().parent.parent`), жоден
+наявний викликач не зачеплений.
+
+`switch_current` — «atomic-ish», не атомарне: Windows не має атомарного
+rename теки поверх зайнятого імені, тому це влаштувати-набік-потім-
+підмінити (staging-junction → зняти старий лінк → `rename`), три окремі
+виклики, не одна транзакція. Крах у вікні між ними лишає `current`
+відсутнім, що всі читачі вже трактують як «рушія нема», не як биту адресу.
+POSIX отримує справжній `os.replace` на symlink — один атомарний syscall.
+
+`prune_versions` захищає **два** теги незалежно від `keep`: те, на що
+`current` вказує зараз, і опційний `active` (тег, щойно встановлений під
+час апдейту, до підтвердженого switch) — щоб передчасний prune під час
+стейджингу не зніс саме ту теку, куди апдейт збирається перемкнутись.
+Видаляє лише коди+venv під `versions/`; `state/`/`model-cache/` поза
+досяжністю за побудовою.
+
+`publish_launchers` — Python-порт `install.ps1`'s `Publish-Launchers`
+(SHA-256-звірка-потім-копіювання), не shell-out до PowerShell: копіювання
+тривіальне, а спавн `powershell.exe` з викликача, що сам мусить лишатись
+безконсольним, — зайва ціна й ризик. Кличеться **на кожен успішний
+switch**, не лише при першому інсталі (design §13 #33 — інакше `bin\`
+ламається сам собою, щойно джерельна версія випаде за retention), і
+**ніколи на rollback** — версія, куди відкат повертається, вже те, звідки
+`bin\` востаннє перевидавався. Повертає список **пропущених** файлів, а не
+кидає: коли `update-apply` викликаний **як** `bin\mnemo.exe update-apply`,
+Windows відмовляється перезаписати виконуваний файл, поки він замаплений
+власним процесом — очікувано й відновлюється на наступному успішному
+apply, тож це звіт, не помилка.
+
+Windows-only: `versions_dir`/`current_link`/`switch_current`/
+`prune_versions` симетричні на POSIX (`install.sh` веде той самий
+`versions/local/` + symlink `current`), але `publish_launchers` — ні:
+`bin/mnemo` там простий bash-скрипт, що резолвиться щоразу заново
+(15.4), ніколи не запечений бінарник, тож ретеншену там нема чого ламати.
+
 ### 11.3 Сумісність зі вже підключеними проєктами **[NEW]**
 
 У проєктах, що вже прийняли v2, у git лежать хуки `mnemo ingest` (SessionStart)
@@ -2680,6 +2867,11 @@ CLI лишається детермінованим примітивом: або
 | `MNEMO_API_EMBED_DIM` | — | providers / engine-dev | розмірність `api`-провайдера (обовʼязкова); перекриває `api.dim` **[NEW]** |
 | `MNEMO_API_PASSAGE_PREFIX` | з довідника моделі | providers / engine-dev | маркер документа; **порожній рядок = значення** («ця модель без маркерів»), не «не задано» **[NEW]** |
 | `MNEMO_API_QUERY_PREFIX` | з довідника моделі | providers / engine-dev | маркер запиту, те саме правило **[NEW]** |
+| `MNEMO_GITHUB_REPO` | `DIMKA4621/mnemo` | self-update (M) / service-dev | звідки перевіряти `releases/latest` (9.9) **[NEW]** |
+| `MNEMO_UPDATE_CHECK_INTERVAL_S` | `14400` (4 год) | self-update (M) / service-dev | період фонового GitHub-check; `0` вимикає таймер, ручна перевірка й далі працює **[NEW]** |
+| `MNEMO_UPDATE_CHECK_TIMEOUT_S` | `5.0` | self-update (M) / service-dev | бюджет одного GitHub-запиту **[NEW]** |
+| `MNEMO_UPDATE_RETENTION_COUNT` | `3` | versioned layout (L) / platform-dev | скільки `versions/<tag>/` тримати після підтвердженого switch (11.2.2) **[NEW]** |
+| `MNEMO_UPDATE_TARBALL_URL_TEMPLATE` | — | self-update (M) / service-dev | підміняє `codeload.github.com` дзеркалом (`{tag}` — підстановка); порожньо = реальний GitHub **[NEW]** |
 
 Зникають з v2: `INJECT_LOG_*` (JSONL більше немає).
 
@@ -2749,7 +2941,8 @@ CLI лишається детермінованим примітивом: або
 Ухвалено без змін: MCP через наявний `mcp` SDK замість окремого `fastmcp`;
 видалення `inject_log.py` у фазі 2; `chunk_uid`; `GET /api/file` та
 `start_char`/`end_char`; порт 8918; токен у `state/api.token` (Bearer для HTTP,
-`?token=` для WS); 12-кодовий конверт помилки й 13 типів WS-подій; витіснення
+`?token=` для WS); 12-кодовий конверт помилки й 14 типів WS-подій (13 з
+основного контракту + `update_progress`, 9.9); витіснення
 в межах одного батчу; `bank_id` у нижньому регістрі на Windows;
 `MNEMO_EMBED_IDLE_TIMEOUT` → `0`; чистий `search.py` зі статусом, зібраним у
 `api.py`; v2-шими + `mnemo init --migrate`.
@@ -2925,9 +3118,15 @@ Windows (файли заблоковані на запис у процесу, щ
 "mnemo_bootstrap:main_gui"` → `mnemow.exe`, зібраний під `pythonw` (лендить
 разом із фазою 5, `service_ctl` — windowless process control). `main_gui()`
 гейтить команди множиною `_BACKGROUND_ONLY` (`serve`, `service`,
-`autostart`, `embed-server`) і відмовляє з ненульовим кодом на всьому
+`autostart`, `embed-server`, **`update-apply`** — самооновлення додала
+пʼятий, рішення #33, 9.9) і відмовляє з ненульовим кодом на всьому
 іншому — без цього стдіо-обличчя запущене під `pythonw` мовчки не робило б
-нічого (`sys.stdout is None`, `print` не кидає винятку).
+нічого (`sys.stdout is None`, `print` не кидає винятку). GUI-шлях віддає
+цим командам **явний** `subprocess.DEVNULL` на всі три handle, не
+успадковане стдіо: знайдено живцем (крок 12) — успадкування невалідних
+handles через **третій** хоп процесу (`mnemow.exe` → цей диспетчер → `-m
+src.cli update-apply`) не те саме, що їх повна відсутність, і мовчки
+ламало switch, надійний за виклику через консольний `mnemo.exe`.
 
 ### 15.5 CI: що можна додати і що зламається **[NEW]**
 
