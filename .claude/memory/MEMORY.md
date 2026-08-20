@@ -122,6 +122,13 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-21 (друге)](logs/2026-08-21-final-consolidated-verification.md)
+  — самооновлення рушія: фінальна консолідована перевірка (усі три баги
+  разом, свіжим прогоном) — усе чисто, **536 passed**, forced-fail
+  підтверджує `publish_launchers()` не кличеться на rollback. Один
+  знайдений хвіст (не багів роботи, а застарілості тесту):
+  `test_install_posix.py` не оновлений під версійну розкладку, хоч
+  `install.sh` уже виправлений — закривається окремо.
 - [2026-08-21](logs/2026-08-21-bugsBC-and-republish.md) — самооновлення
   рушія: друга половина бага A (republish `bin\` launchers на кожен
   switch), баг B (race у `service_ctl.start()`), баг C (POSIX `install.sh`)
