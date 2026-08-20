@@ -39,6 +39,7 @@ trivial script.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -94,6 +95,13 @@ def versions_dir() -> Path:
 def current_link() -> Path:
     """``current`` -- the stable alias a switch repoints. Derived live."""
     return Path(config.CURRENT_LINK)
+
+
+def bin_dir() -> Path:
+    """``bin/`` -- the one stable, unversioned launcher location. Derived
+    live from ``config.USER_HOME``, same reasoning as the accessors above.
+    """
+    return Path(config.USER_HOME) / "bin"
 
 
 # Exit codes. 3 means "service is down" across the whole CLI (contracts
@@ -906,16 +914,27 @@ def start(
                 print(f"mnemo service: could not start the process: {exc}")
                 return EXIT_DOWN
 
-            # A child that dies instantly (bad interpreter, import error) must
-            # not be recorded as a running service.
-            deadline = time.monotonic() + SERVICE_START_GRACE
-            while time.monotonic() < deadline:
-                if _pid_state(pid) != ALIVE:
-                    _reap(pid)
-                    print("mnemo service: the process exited immediately after start")
-                    return EXIT_DOWN
-                time.sleep(0.05)
-
+            # Record identity IMMEDIATELY -- before the grace-period poll
+            # below, not after it. `service.pid` is what makes a backend
+            # OURS to manage (`owned_process()`'s fingerprint check); every
+            # line of logic between the spawn and the write used to be a
+            # window where the CALLING process could die and leave a
+            # perfectly healthy backend unmanageable ("started by another
+            # launcher") -- confirmed by a real, precisely-timed kill (self-
+            # update step 12, bug B): the old code wrote this only after
+            # the grace-period poll (SERVICE_START_GRACE, ~1.5s), a window
+            # long enough to hit with a plain `kill` at the right moment.
+            # This does not make the race impossible -- `spawn_detached()`
+            # returning and the next line of Python can never be one atomic
+            # step -- but shrinks it from "over a second, reproducible on
+            # demand" to microseconds, which is what a fix confined to this
+            # module can practically do (the alternative -- the spawned
+            # backend writing its own identity -- would need `api.py`'s
+            # startup code, service-dev's territory, and would blur the
+            # "service.pid is written only by this module" invariant
+            # `owned_process()`'s security model leans on). A child that
+            # then dies within the grace window has its identity undone
+            # below, not left to name a corpse.
             fingerprint = process_fingerprint(pid)
             if fingerprint is None:
                 # Without it `stop` will refuse to touch this process, by
@@ -926,7 +945,6 @@ def start(
                     "process start time, so `service stop` will refuse to "
                     f"manage pid {pid}; stop it manually"
                 )
-
             _write_identity(
                 {
                     "pid": pid,
@@ -936,6 +954,19 @@ def start(
                     "argv": argv,
                 }
             )
+
+            # A child that dies instantly (bad interpreter, import error)
+            # must not be recorded as a running service -- undo the
+            # identity just written above.
+            deadline = time.monotonic() + SERVICE_START_GRACE
+            while time.monotonic() < deadline:
+                if _pid_state(pid) != ALIVE:
+                    _reap(pid)
+                    _clear_identity()
+                    print("mnemo service: the process exited immediately after start")
+                    return EXIT_DOWN
+                time.sleep(0.05)
+
             if not wait_ready or SERVICE_READY_TIMEOUT <= 0:
                 print(f"mnemo service: started (pid {pid})")
                 return EXIT_OK
@@ -1250,3 +1281,77 @@ def prune_versions(*, keep: int | None = None, active: str | None = None) -> lis
         shutil.rmtree(entry)
         removed.append(entry.name)
     return removed
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def publish_launchers(version_dir: str | Path) -> list[str]:
+    """Copy ``mnemo[w].exe`` from ``version_dir``'s own venv into the
+    STABLE, unversioned ``bin/`` -- the Python mirror of install.ps1's
+    ``Publish-Launchers`` (same SHA-256-compare-then-copy logic; keep both
+    in sync if either changes).
+
+    Returns the names that could NOT be refreshed -- **not an error by
+    itself**. Confirmed by a real run: when ``update-apply`` is invoked
+    AS ``bin\\mnemo.exe update-apply`` (a human running it by hand, or a
+    future caller that dispatches it the same way `serve` is), that very
+    exe is this process's own running image, and Windows refuses to
+    overwrite an executable while it is mapped as one -- copy2() raises
+    ``PermissionError`` for exactly that file. That is expected and
+    recoverable, not a build problem: the OTHER exe (whichever one is NOT
+    self-locked) still gets refreshed, and the skipped one catches up on
+    the next successful apply or a manual install.ps1 run. Only a missing
+    SOURCE file (the new version's own build never produced it) still
+    raises ``FileNotFoundError`` -- that IS a real problem, not a transient
+    lock.
+
+    **Must be called after EVERY successful self-update switch, not only
+    the first install.** ``bin\\mnemo.exe``'s shebang is baked to a specific
+    venv's ``python.exe`` at build time (see the design topic's launcher
+    note); that venv is exactly what retention (``prune_versions()``)
+    eventually deletes. Skip republishing and `bin\\mnemo.exe` breaks on its
+    own the moment its source version falls out of retention -- independent
+    of any staging bug (self-update step 12, bug A). ``_cmd_update_apply()``
+    calls this after a successful switch, never on rollback: the version a
+    rollback returns to is what `bin/` was already republished from (or the
+    original install), so there is nothing stale to fix there.
+
+    Deliberately NOT a ``powershell -NoProfile -Command`` shell-out to the
+    real PowerShell function, unlike ``engine_update.py``'s reuse of
+    ``Build-EngineVersion`` for staging: that reuse is for genuinely complex,
+    well-tested build logic (venv creation, pip install, the sqlite-vec
+    probe) not worth re-implementing. This is a two-file copy behind a hash
+    check -- small enough that spawning a whole ``powershell.exe`` process
+    for it, on every successful switch, is not worth its startup cost or
+    its own risk of flashing a console (that subprocess call has no
+    ``CREATE_NO_WINDOW`` today) for a caller that must itself stay silent.
+
+    Windows only, like the exes themselves -- a no-op on POSIX, where
+    ``bin/mnemo`` is a plain resolving script, never a baked binary (see
+    the design topic's POSIX note and ``install.sh``'s launcher heredoc).
+    """
+    if os.name != "nt":
+        return []
+    version_dir = Path(version_dir)
+    target_dir = bin_dir()
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    skipped: list[str] = []
+    for name in ("mnemo.exe", "mnemow.exe"):
+        generated = version_dir / ".venv" / "Scripts" / name
+        if not generated.is_file():
+            raise FileNotFoundError(f"no {name} at {generated}")
+        target = target_dir / name
+        if target.is_file() and _sha256(generated) == _sha256(target):
+            continue
+        try:
+            shutil.copy2(generated, target)
+        except OSError:
+            skipped.append(name)
+    return skipped

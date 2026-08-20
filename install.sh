@@ -77,7 +77,34 @@ while [ $# -gt 0 ]; do
 	shift
 done
 
-PY_BIN="$MNEMO_HOME/.venv/bin/python"
+# Versioned layout (self-update, see .claude/memory/topics/
+# engine-self-update-design.md): src/ and .venv live under
+# versions/<tag>/, and `current` is a stable alias a switch repoints.
+# state/ and model-cache/ stay siblings of versions/current -- shared
+# across every version, never duplicated, never touched by anything
+# below. A plain from-source install (this script; no GitHub release
+# involved) always targets the fixed tag "local" -- real release tags
+# ("v3.1.0", ...) are what a self-update apply stages under versions/
+# instead (platform-dev's install.ps1, mirrored on POSIX by nothing yet --
+# staging is Windows-only for now, see the design topic's migration-risk
+# decision). Repeated runs of this script therefore refresh the SAME
+# versions/local/ in place, exactly as idempotent as the old flat layout
+# was.
+#
+# This mirrors install.ps1's Build-EngineVersion / Set-CurrentVersion
+# split structurally (same steps, same ordering) -- see that script's own
+# comments for the fuller rationale behind each choice; not repeated line
+# by line here. One thing genuinely differs and is called out where it
+# matters below: bin/mnemo on POSIX is a plain resolving script (already
+# updated for this layout), never a baked binary, so there is no
+# Publish-Launchers equivalent here or in any future self-update apply --
+# nothing here embeds a venv path at build time for retention to break.
+VERSIONS_DIR="$MNEMO_HOME/versions"
+VERSION_TAG="local"
+VERSION_DIR="$VERSIONS_DIR/$VERSION_TAG"
+CURRENT_LINK="$MNEMO_HOME/current"
+
+PY_BIN="$CURRENT_LINK/.venv/bin/python"
 LAUNCHER="$MNEMO_HOME/bin/mnemo"
 
 line() { printf 'install.sh:   %-13s %s\n' "$1" "$2"; }
@@ -134,10 +161,10 @@ service_endpoint() {
 # --- --check: report only, mutate nothing ------------------------------
 if [ "$CHECK_ONLY" -eq 1 ]; then
 	say "engine home: $MNEMO_HOME"
-	report -d "$MNEMO_HOME"            "home dir"
-	report -f "$MNEMO_HOME/src/cli.py" "engine code"
-	report -x "$PY_BIN"               "venv python"
-	report -x "$LAUNCHER"             "launcher"
+	report -d "$MNEMO_HOME"                  "home dir"
+	report -f "$CURRENT_LINK/src/cli.py"     "engine code"
+	report -x "$PY_BIN"                      "venv python"
+	report -x "$LAUNCHER"                    "launcher"
 	if [ -x "$PY_BIN" ] \
 		&& "$PY_BIN" -c "$DEP_PROBE" 2>/dev/null; then
 		line "python deps" present
@@ -208,18 +235,22 @@ print(len(banks))' "$MNEMO_HOME/state/banks.json" 2>/dev/null)"; then
 	exit 0
 fi
 
-# --- --deps-only: refresh venv packages, leave src/ and the launcher ----
-# Safe to run while the repo's src/ is mid-refactor.
+# --- --deps-only: refresh the CURRENT version's venv packages only ------
+# Safe to run while the repo's src/ is mid-refactor: engine code is left
+# exactly as it is, same as install.ps1's -DepsOnly. There is no launcher
+# metadata to refresh here the way install.ps1 refreshes its pip-generated
+# exe's declared dependencies -- bin/mnemo is a plain script with nothing
+# baked into it.
 if [ "$DEPS_ONLY" -eq 1 ]; then
 	[ -x "$PY_BIN" ] \
 		|| { echo "install.sh: --deps-only needs an installed engine at $MNEMO_HOME" >&2; exit 1; }
 	[ -f "$SRC_REPO/requirements.txt" ] \
 		|| { echo "install.sh: run from the mnemo repo (requirements.txt not found)" >&2; exit 1; }
 	say "engine home: $MNEMO_HOME"
-	cp "$SRC_REPO/requirements.txt" "$MNEMO_HOME/requirements.txt"
+	cp "$SRC_REPO/requirements.txt" "$CURRENT_LINK/requirements.txt"
 	"$PY_BIN" -m pip install --quiet --upgrade pip
-	"$PY_BIN" -m pip install --quiet -r "$MNEMO_HOME/requirements.txt"
-	say "python deps installed (deps-only: engine code and launcher untouched)"
+	"$PY_BIN" -m pip install --quiet -r "$CURRENT_LINK/requirements.txt"
+	say "python deps installed (deps-only: engine code untouched)"
 	exit 0
 fi
 
@@ -235,10 +266,10 @@ fi
 
 # --- 1. layout (state/ and model-cache/ are never deleted) -------------
 mkdir -p \
-	"$MNEMO_HOME/src" \
 	"$MNEMO_HOME/state" \
 	"$MNEMO_HOME/model-cache" \
-	"$MNEMO_HOME/bin"
+	"$MNEMO_HOME/bin" \
+	"$VERSIONS_DIR"
 say "engine home: $MNEMO_HOME"
 
 # --- 1a. is this a v2 engine? ------------------------------------------
@@ -249,7 +280,7 @@ say "engine home: $MNEMO_HOME"
 # was. Absent banks.json plus index files is therefore unambiguous, and safe:
 # with no registry, no index can belong to a live bank.
 #
-# Measured before the mirror, since the mirror is what makes this v3. Acted
+# Measured before the build, since the build is what makes this v3. Acted
 # on after the launcher exists.
 LEGACY_INDEXES=0
 LEGACY_BYTES=0
@@ -266,8 +297,11 @@ if [ "$LEGACY_INDEXES" -gt 0 ]; then
 fi
 
 # --- 2. stop -> refresh -> start ---------------------------------------
-# A running backend holds the venv open; it must be down before the mirror,
-# and it comes back only if it was up to begin with.
+# A running backend holds the (current) venv open; it must be down before
+# the build, and it comes back only if it was up to begin with. Dispatches
+# through the launcher, which resolves `current` fresh -- correct whether
+# `current` exists yet (a real refresh) or not (nothing was running, this
+# whole block is skipped).
 SERVICE_WAS_RUNNING=0
 service_pid="$(live_service_pid)"
 if [ -n "$service_pid" ]; then
@@ -285,37 +319,40 @@ if [ -n "$service_pid" ]; then
 	fi
 fi
 
-# --- 3. mirror the engine code (only ever touches src/) ----------------
+# --- 3. build this version: code mirror + venv + deps -------------------
+# Was Sync-EngineCode + the flat MNEMO_HOME/.venv build; now targets
+# VERSION_DIR (versions/local/) instead of MNEMO_HOME directly -- the same
+# split install.ps1's Build-EngineVersion makes.
+mkdir -p "$VERSION_DIR"
 if command -v rsync >/dev/null 2>&1; then
-	rsync -a --delete --exclude='__pycache__' "$SRC_REPO/src/" "$MNEMO_HOME/src/"
+	rsync -a --delete --exclude='__pycache__' "$SRC_REPO/src/" "$VERSION_DIR/src/"
 else
-	rm -rf "$MNEMO_HOME/src"
-	mkdir -p "$MNEMO_HOME/src"
-	cp -R "$SRC_REPO/src/." "$MNEMO_HOME/src/"
-	find "$MNEMO_HOME/src" -name __pycache__ -type d -prune -exec rm -rf {} +
+	rm -rf "$VERSION_DIR/src"
+	mkdir -p "$VERSION_DIR/src"
+	cp -R "$SRC_REPO/src/." "$VERSION_DIR/src/"
+	find "$VERSION_DIR/src" -name __pycache__ -type d -prune -exec rm -rf {} +
 fi
-cp "$SRC_REPO/requirements.txt" "$MNEMO_HOME/requirements.txt"
-say "engine code refreshed"
+cp "$SRC_REPO/requirements.txt" "$VERSION_DIR/requirements.txt"
+say "engine code refreshed ($VERSION_DIR)"
 
-# --- 3. virtualenv (created once, reused after) ------------------------
-if [ ! -x "$PY_BIN" ]; then
-	python3 -m venv "$MNEMO_HOME/.venv"
+VERSION_PY_BIN="$VERSION_DIR/.venv/bin/python"
+if [ ! -x "$VERSION_PY_BIN" ]; then
+	python3 -m venv "$VERSION_DIR/.venv"
 	say "virtualenv created"
 else
 	say "virtualenv reused"
 fi
 
-# --- 4. dependencies (pip is idempotent) -------------------------------
-"$PY_BIN" -m pip install --quiet --upgrade pip
-"$PY_BIN" -m pip install --quiet -r "$MNEMO_HOME/requirements.txt"
+"$VERSION_PY_BIN" -m pip install --quiet --upgrade pip
+"$VERSION_PY_BIN" -m pip install --quiet -r "$VERSION_DIR/requirements.txt"
 say "python deps installed"
 
 # Fail here rather than at the user's first search. Everything below this
 # line builds an engine that could not open a bank.
-if ! "$PY_BIN" -c "$VEC_PROBE" 2>/dev/null; then
+if ! "$VERSION_PY_BIN" -c "$VEC_PROBE" 2>/dev/null; then
 	printf 'install.sh: ERROR: this Python cannot load SQLite extensions, so\n' >&2
 	printf '            sqlite-vec cannot load and no bank can be opened:\n' >&2
-	printf '              %s\n' "$PY_BIN" >&2
+	printf '              %s\n' "$VERSION_PY_BIN" >&2
 	printf '            The venv is built from whichever python3 is on PATH,\n' >&2
 	printf '            so put one that has them in front of it. On macOS:\n' >&2
 	printf '              brew install python@3.12\n' >&2
@@ -326,22 +363,30 @@ if ! "$PY_BIN" -c "$VEC_PROBE" 2>/dev/null; then
 	exit 1
 fi
 
+# --- 4. current -> VERSION_DIR (repoint) --------------------------------
+# Same "atomic-ish" standard as install.ps1's Set-CurrentVersion -- neither
+# side claims full transactional atomicity (Windows has no atomic directory
+# rename over an existing target either). `-f` replaces an existing
+# `current`; `-n` (portable: a documented option of both GNU coreutils and
+# BSD/macOS `ln`) is the part that actually matters -- without it, `ln -s`
+# treats an EXISTING `current` that is itself a symlink-to-a-directory as
+# "put the new link inside it" rather than "replace it", which is exactly
+# the wrong behaviour here (the same class of mistake `_remove_link()` in
+# service_ctl.py exists to avoid on the Windows/junction side).
+ln -sfn "$VERSION_DIR" "$CURRENT_LINK"
+say "current -> $VERSION_TAG"
+
 # --- 5. launcher: self-locating, no hardcoded home ---------------------
-#
-# Versioned layout (self-update, see .claude/memory/topics/
-# engine-self-update-design.md): src/ and .venv live under
-# versions/<tag>/, and `current` is a stable alias a switch repoints. Unlike
-# the Windows bin\mnemo.exe launcher, this script is plain text -- it
-# resolves HOME_DIR (and now CURRENT_DIR) fresh from BASH_SOURCE on every
-# invocation, so there is no "frozen at build time" problem here and no
-# subprocess-dispatch trick is needed: `exec` replaces this shell with
-# python directly, still one process.
 #
 # Two different things are both called "engine home" and must NOT be
 # conflated: MNEMO_HOME stays the UNVERSIONED root (state/ and
 # model-cache/ are shared across every version, never duplicated), while
 # the interpreter and PYTHONPATH/sys.path must point INSIDE `current` --
-# that is where src/ and .venv actually live now.
+# that is where src/ and .venv actually live now. This script itself is
+# plain text and resolves both fresh from BASH_SOURCE on every invocation
+# -- no "frozen at build time" problem here, and no subprocess-dispatch
+# trick is needed: `exec` replaces this shell with python directly, still
+# one process.
 cat > "$LAUNCHER" <<'LAUNCHER_EOF'
 #!/usr/bin/env bash
 # mnemo launcher (written by install.sh). Resolves its own engine home
@@ -358,6 +403,12 @@ exec env PYTHONPATH="$CURRENT_DIR" MNEMO_HOME="$HOME_DIR" \
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"
 say "launcher written: $LAUNCHER"
+
+# No Publish-Launchers equivalent needed here, or on any future self-update
+# switch: bin/mnemo (above) is a plain resolving script, never a baked
+# binary, so there is nothing for retention to eventually break the way
+# Windows' bin\mnemo.exe can (self-update step 12, bug A) -- it is correct
+# forever, unconditionally, the moment it is written once.
 
 # --- 5a. retire the v2 indexes -----------------------------------------
 # Not a user-scope action -- it only touches the state directory of the home
@@ -399,12 +450,17 @@ PROFILE_FILE="$HOME/.profile"
 BEGIN_MARK="# >>> mnemo >>>"
 END_MARK="# <<< mnemo <<<"
 
+# MNEMO_HOME stays the unversioned root (api_token() reads/writes
+# state/api.token there); sys.path must point at CURRENT_LINK, the
+# versioned tree `src` actually lives under. Same split as model_cached()
+# below.
 API_TOKEN="$("$PY_BIN" -c 'import os,sys
 home = sys.argv[1]
+src = sys.argv[2]
 os.environ["MNEMO_HOME"] = home
-sys.path.insert(0, home)
+sys.path.insert(0, src)
 from src.api import api_token
-print(api_token())' "$MNEMO_HOME" 2>/dev/null || true)"
+print(api_token())' "$MNEMO_HOME" "$CURRENT_LINK" 2>/dev/null || true)"
 
 {
 	printf '%s\n' "$BEGIN_MARK"
@@ -448,11 +504,12 @@ model_cached() {
 	MNEMO_HOME="$MNEMO_HOME" "$PY_BIN" -c '
 import os, sys
 home = sys.argv[1]
+src = sys.argv[2]
 os.environ["MNEMO_HOME"] = home
-sys.path.insert(0, home)
+sys.path.insert(0, src)
 from src.embedder import is_model_cached
 raise SystemExit(0 if is_model_cached() else 1)
-' "$MNEMO_HOME" 2>/dev/null
+' "$MNEMO_HOME" "$CURRENT_LINK" 2>/dev/null
 }
 
 want_model() {

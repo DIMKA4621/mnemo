@@ -280,6 +280,35 @@ def _cmd_update_apply() -> int:
     spawn = service_ctl.target_for_version(version_dir)
     rc = service_ctl.start(target=spawn.argv, cwd=spawn.cwd, wait_ready=True)
     if rc == service_ctl.EXIT_OK:
+        # Republish bin\ from THIS version, not only on the first install:
+        # the launcher exe's shebang is baked to a specific venv at build
+        # time, and that venv is exactly what retention eventually deletes
+        # -- see publish_launchers()'s docstring (self-update step 12, bug
+        # A). Never on rollback (below): the version a rollback returns to
+        # is what bin\ already names, nothing there is stale. A failure
+        # here does not undo an otherwise-healthy switch -- the backend is
+        # fine either way, only the human-facing `mnemo` command would be
+        # stale -- so it is reported, not fatal.
+        try:
+            skipped = service_ctl.publish_launchers(version_dir)
+            if skipped:
+                # Most commonly: whichever exe dispatched THIS update-apply
+                # process is its own running image, and Windows refuses to
+                # overwrite an executable while it is mapped as one. Not
+                # fatal — the other exe still got refreshed, and this one
+                # catches up next time.
+                print(f"mnemo update-apply: bin\\ partially republished from "
+                      f"{tag} (still stale: {', '.join(skipped)} — likely "
+                      f"in use by this very process; catches up on the "
+                      f"next successful apply)")
+            else:
+                print(f"mnemo update-apply: bin\\ republished from {tag}")
+        except OSError as exc:
+            print(f"mnemo update-apply: WARNING - could not republish bin\\ "
+                  f"from {tag}: {exc}\n"
+                  f"       the service is healthy, but the `mnemo` command "
+                  f"may be stale; run install.ps1 or fix bin\\ by hand")
+
         engine_update.record_installed(
             tag=tag, commit=None, status=engine_update.STATUS_ACTIVE
         )

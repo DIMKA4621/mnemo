@@ -119,8 +119,29 @@ def _dispatch(*, gui: bool) -> int:
     )
 
     argv = [str(python), "-m", "src.cli", *sys.argv[1:]]
+    kwargs: dict = {}
+    if gui:
+        # The GUI (mnemow) dispatcher has no real stdio of its own to hand
+        # down -- it was launched under pythonw.exe, which has no console
+        # and no valid stdin/stdout/stderr handles. Leaving subprocess.run's
+        # stdio unset here means "inherit whatever the parent has", and
+        # inheriting invalid/console-less handles through a THIRD process
+        # hop (mnemow.exe -> this dispatcher -> `-m src.cli <cmd>`) is not
+        # the same as having none at all: confirmed by a real run (self-
+        # update step 12) -- `update-apply` invoked via mnemow.exe silently
+        # rolled back a switch that succeeded reliably when invoked via the
+        # console `mnemo.exe`, while the exact same logic driven directly
+        # under pythonw.exe with EXPLICIT stdio (a real file, or DEVNULL)
+        # worked every time. Explicit beats inherited for a background
+        # dispatch the same way ``service_ctl._windowless_kwargs()`` never
+        # leaves the spawned backend's stdio to inheritance either.
+        kwargs = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+        }
     try:
-        completed = subprocess.run(argv, cwd=str(version_root), env=env)
+        completed = subprocess.run(argv, cwd=str(version_root), env=env, **kwargs)
     except KeyboardInterrupt:
         # Ctrl-C on a foreground command (e.g. `mnemo search` waiting on the
         # service) reaches both us and the child directly: no
