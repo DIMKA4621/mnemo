@@ -70,6 +70,27 @@ detail lives in `topics/`, day notes in `logs/`.
 - [Відкладене й черга робіт](topics/deferred.md) — що вирішено зробити пізніше
   і чому саме в такому порядку; там же дрібні вади наскрізної перевірки й
   рішення, які лишились за користувачем.
+- [Самооновлення рушія — дизайн](topics/engine-self-update-design.md) — **ідея,
+  ще не в фазах доки**, але **кроки 0–7 з плану вже реалізовані (unstaged)**
+  2026-08-20 — [кроки 0–4](logs/2026-08-20-engine-self-update-steps0-4.md),
+  [кроки 5–7](logs/2026-08-20-engine-self-update-steps5-7.md): формат
+  `state/engine_version.json` (`src/engine_update.py`, ніколи не кидає на
+  битому файлі), фоновий GitHub-check потоком (не asyncio — навмисно, той
+  самий патерн, що `servicelog.start_pruner`), м'яка відмова на мережевій
+  помилці (не затирає попередній `latest_tag`), пайплайн стейджингу
+  (`stage_release`) через dot-source **чужого** `install.ps1`
+  (координацію розв'язав читанням докстрінгу, не зміною чужого файлу). Теги/
+  релізи (не HEAD master), напівавтоматика (перевірка сама, застосування по
+  кліку), версійні теки `versions/<tag>/` з **окремим venv на версію**
+  (спільний venv уже раз ламав свіжий інстал, рішення #29) і junction
+  `current` для атомарного перемикання, health-gated rollback. Лаунчер
+  (`mnemo_bootstrap.py`) тепер **subprocess-диспетчер** на `sys.argv[0]`
+  (не `sys.prefix` — той прив'язаний до venv часу білда exe, не місця
+  запуску) — деталь, яку `topics/windows-native-support.md` тепер теж
+  відображає. Доки (`Memory-design-v3.md` §13 рішення #33,
+  `Memory-contracts-v3.md` §15.4/§1, `CLAUDE.md`) і тести
+  (`test_install_windows.py`: 4 точкові правки, 29 passed) уже приведені
+  у відповідність.
 
 ## Quick facts
 
@@ -101,6 +122,71 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-20 (одинадцяте)](logs/2026-08-20-engine-self-update-steps9-10.md)
+  — самооновлення рушія, кроки 9–10 (unstaged, **кроки 0–10 усі готові**):
+  `/api/update/status|check|apply` + `stale_target`/`update_in_progress`
+  guards. Два нові баги знайдені й виправлені (той самий service-dev, свій
+  файл): protухання in-memory статусу (фікс — звіряти mtime
+  `engine_version.json`), і — цікавіше — **`update-apply` вбиває сам себе**
+  через `taskkill /PID <backend> /T /F`, який вбиває весь process tree
+  включно з дочірнім `update-apply`. Фікс: `_spawn_update_apply_breakaway()`
+  — `.bat`+`cmd.exe /c`, що розриває ланцюжок батьків за мілісекунди до
+  виклику `stop()`. Це варіант того самого self-update-парадоксу (процес
+  має пережити смерть того, хто його породив), не той самий клас, що три
+  попередні "застиглий self-reference" баги, але той самий корінь. `doctor`
+  отримав секцію `self_update` зі stuck-apply детекцією. Фінальний доказ
+  (12/12): check→apply→switch з `OLD`/`NEW`-маркерами в справді різних
+  білд-деревах. —
+  **третій "застиглий self-reference" баг поспіль** на self-update, знайдено
+  й ескальовано, **того ж дня виправлено й доведено з реально різним
+  кодом**: `service_ctl.start()`'s spawn брав `cwd` від `__file__` поточного
+  модуля безумовно, `target_for_version()` підміняв лише інтерпретатор →
+  `update-apply` після switch піднімав новий venv зі старим кодом, мовчки.
+  Фікс: `target_for_version` → `SpawnTarget(argv, cwd)`, `start()`/`restart()`
+  отримали параметр `cwd` (дефолт без нього — не змінився, нікого зі старих
+  викликачів не зачепило). Доведено маркером у `config.py` (`OLD`/`NEW`,
+  SHA-256-підтверджені різні дерева), який проявляється в `service.json.version`
+  реального процесу — forward apply і forced-rollback обидва підтверджені,
+  89 passed. Патерн вартий пам'ятання сам по собі: код для світу з одним
+  статичним venv тихо припускає "я і є той venv/той код" — щоразу хибно,
+  коли версій кілька; кожен новий self-update-модуль має явно про це питати.
+- [2026-08-20 (дев'яте)](logs/2026-08-20-engine-self-update-step8.md) —
+  самооновлення рушія, крок 8 `update-apply` (unstaged): **два реальні баги
+  знайдені й виправлені живим прогоном**, не логікою. (1) `service_ctl.start()`
+  без явного target брав застиглий `sys.executable` виклику — after-switch
+  старт ішов на **старій** venv, хоча `current` уже вказував на нову; фікс —
+  `target_for_version(dir)`, явний target на місці виклику, не зміна
+  глобального дефолту (не ламає інших викликачів/тести). (2) неперехоплений
+  `OSError` від `spawn_detached()` на битій venv ламав саму rollback-
+  оркестрацію; фікс — у `service_ctl.start()`, той самий контракт "невдача
+  старту — код повернення, не виняток". Forced-rollback перевірено живцем:
+  сервіс лишився здоровим. **Інференс, прийнятий для кроку 9:** "готовий до
+  застосування" = `last_check.update_available` + `VERSION`-маркер збігається.
+- [2026-08-20 (восьме)](logs/2026-08-20-engine-self-update-steps5-7.md) —
+  самооновлення рушія, кроки 5–7 (unstaged): `engine_version.json`
+  (атомарний запис, graceful recovery), GitHub-check живцем (404/реальні
+  релізи/недосяжний хост), фоновий `threading.Thread`-таймер вшитий у
+  `api.py` lifespan, `stage_release()` — реальне живе завантаження з GitHub
+  + справжній `pip install`/venv через dot-sourced `install.ps1`. **52
+  passed** (`test_engine_update.py`), **89 passed** (`test_service_ctl.py`
+  досі зелений). Реальний сервіс не чіпався.
+- [2026-08-20 (сьоме)](logs/2026-08-20-engine-self-update-steps0-4.md) —
+  самооновлення рушія, кроки 0–4 (unstaged): диспетчер-лаунчер підтверджений
+  спайком (`sys.argv[0]`, не `sys.prefix`), `service_ctl.py` отримав
+  `switch_current`/`versions_dir`/`current_link`/`update_lock`/
+  `prune_versions` (89 тестів зелені), `install.ps1` отримав
+  `Build-EngineVersion`/`Set-CurrentVersion`/`Publish-Launchers` (рішення:
+  нова функція, не новий скрипт/прапор — файл уже dot-sourceable
+  бібліотека). Два розриви підняті, не проігноровані: `Memory-contracts-v3.md`
+  §15.4 бреше про старий bootstrap-контракт, `test_install_windows.py`
+  масово впаде на новій розкладці.
+- [2026-08-20 (шосте)](logs/2026-08-20-agents-concept.md) — концепт нової
+  сторінки «Агенти» (керовані персони: своя `CLAUDE.md`, MCP/скіли/руси,
+  памʼять, чат через Claude Agent SDK), повний виклад у новому
+  `docs/Agents-design.md`. Ключове: бекенд запуску — **per-agent**
+  (`launch.json` у теці агента), не машинне налаштування; чат-рантайм живе на
+  бекенді (аналог `workqueue`/`watcher`), перемикання клієнта не спиняє
+  генерацію. Ще не імплементовано.
 - [2026-08-20 (п'яте)](logs/2026-08-20-init-auto-mcp-setup.md) — `mnemo init`
   тепер сам запускає `mcp-setup.sh`/`.ps1` останнім кроком (`_run_setup_script`,
   `scaffold.py`), замість друкувати «run it yourself» — `.mcp.json` готовий
