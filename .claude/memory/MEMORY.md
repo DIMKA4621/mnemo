@@ -122,6 +122,18 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-21](logs/2026-08-21-bugsBC-and-republish.md) — самооновлення
+  рушія: друга половина бага A (republish `bin\` launchers на кожен
+  switch), баг B (race у `service_ctl.start()`), баг C (POSIX `install.sh`)
+  — усі три закриті з реальними доказами. Побічна знахідка, важлива для
+  кроку 9: `bin\mnemow.exe` (GUI pip-stub) **не чекає** дочірній процес
+  (9мс проти 2660мс через `mnemo.exe`) — `update-apply` має спавнитись
+  через `spawn_detached()`+`windowless_python()` напряму, не через
+  `mnemow.exe`; ескальовано service-dev на перевірку. Регресія: **507
+  passed** сумарно (5 суїт). Сесія агента обірвалась через мережеву
+  помилку посеред роботи й відновлена тим самим ID без втрати контексту —
+  урок: не довіряти проміжному "виглядає консистентно" без фінального
+  прогону.
 - [2026-08-20 (п'ятнадцяте)](logs/2026-08-20-engine-self-update-bugA-root-fix.md)
   — баг A (staging+move ламав pip-зашитий shebang) виправлено в корені:
   `stage_release()` білдить напряму у фінальній `versions/<tag>/`, staging-
