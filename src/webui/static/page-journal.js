@@ -1,0 +1,337 @@
+/* Журнал: master-detail — event cards on the left, full detail on the
+ * right. New page (the mockup's one genuine rewrite); driven by the same
+ * `GET /api/logs` (contract 9.5) the old table view used, no backend change.
+ *
+ * Dropped from the mockup on purpose (no backend filter exists for either,
+ * confirmed with the user): the `status` select and the free-text `jq`
+ * search. `bank` and `period` stay — the API already accepts `bank`/`since`.
+ *
+ * Also dropped: the mockup's quoted "snapshot" text under each hit.
+ * `hits_json` (contract 7.2) only carries `path`/`heading`/`chunk_index`/
+ * `score`/`sim` — no `content` — so the hit list below shows exactly those
+ * facts and nothing else. No "text unavailable" placeholder either: that
+ * whole branch is the deferred feature, not a state to fake.
+ */
+'use strict';
+
+function bankLabel(bankId) {
+  const bank = bankById(bankId);
+  return bank ? bank.name : (bankId || '—');
+}
+
+// ---------------------------------------------------------------------------
+// header + filters
+// ---------------------------------------------------------------------------
+
+function journalHeaderHtml() {
+  const seg = (id, label) =>
+    '<button class="seg' + (state.logKind === id ? ' is-active' : '') + '" data-kind="' + id + '">' +
+    label + '</button>';
+  return '<span class="page-title">Журнал</span>' +
+    '<div class="segmented" id="jkind">' + seg('query', 'Запити') + seg('index', 'Індексація') + '</div>' +
+    '<div class="grow"></div>' +
+    '<button class="btn btn-ghost btn-icon btn-sm" id="journal-refresh" ' +
+      'title="Оновити журнал" aria-label="Оновити журнал">↻</button>';
+}
+
+function setLogKind(kind) {
+  if (state.logKind === kind) return;
+  state.logKind = kind;
+  renderHeader();
+  loadLogs().catch(reportError);
+}
+
+/** The bank options mirror `state.banks` — refreshed on every entry to this
+ *  page, since that is cheap and a newly-added bank should show up here. */
+function populateBankFilter() {
+  const select = $('jbank');
+  const current = select.value;
+  clear(select);
+  select.appendChild(el('option', { text: 'Усі банки', attrs: { value: '' } }));
+  for (const bank of state.banks) {
+    select.appendChild(el('option', { text: bank.name, attrs: { value: bank.name } }));
+  }
+  if ([...select.options].some((o) => o.value === current)) select.value = current;
+}
+
+const PERIOD_HOURS = { '1h': 1, '24h': 24, '7d': 24 * 7, '30d': 24 * 30 };
+
+function periodSinceIso(period) {
+  const hours = PERIOD_HOURS[period] || 24;
+  return new Date(Date.now() - hours * 3600 * 1000).toISOString();
+}
+
+$('jbank').addEventListener('change', (ev) => {
+  state.logBank = ev.target.value;
+  loadLogs().catch(reportError);
+});
+
+$('jperiod').addEventListener('change', (ev) => {
+  state.logPeriod = ev.target.value;
+  loadLogs().catch(reportError);
+});
+
+// ---------------------------------------------------------------------------
+// data
+// ---------------------------------------------------------------------------
+
+async function loadLogs() {
+  const params = new URLSearchParams({
+    kind: state.logKind, limit: '200', offset: '0',
+    since: periodSinceIso(state.logPeriod),
+  });
+  if (state.logBank) params.set('bank', state.logBank);
+  const data = await api('/api/logs?' + params.toString());
+  state.logRows = data.events || [];
+  state.logTotal = data.total || 0;
+  renderJournal();
+  updateSidebarCounts();
+}
+
+/** A live WS event is prepended only when the current filter would include it. */
+function pushLiveLog(kind, row) {
+  if (state.logKind !== kind) return;
+  if (state.logBank && bankLabel(row.bank_id) !== state.logBank) return;
+  row.hits = row.hits || [];
+  state.logRows.unshift(row);
+  if (state.logRows.length > 200) state.logRows.pop();
+  state.logTotal += 1;
+  renderJournal();
+  updateSidebarCounts();
+}
+
+// ---------------------------------------------------------------------------
+// list
+// ---------------------------------------------------------------------------
+
+function indexEventTitle(ev) {
+  if (ev.path) return ev.path;
+  if (ev.kind === 'rebuild') return 'Повна перебудова банку';
+  if (ev.kind === 'prune') return 'Зняття з індексу';
+  return 'Синхронізація індексу';
+}
+
+function evStatusDot(ev) {
+  if (state.logKind === 'query') {
+    if (ev.status === 'indexing') return 'dot busy';
+    if (ev.status === 'empty') return 'dot idle';
+    return 'dot';
+  }
+  if (ev.result === 'error') return 'dot err';
+  if (ev.result === 'skipped') return 'dot idle';
+  return 'dot';
+}
+
+function evStatusWord(ev) {
+  if (state.logKind === 'query') return STATUS_LABEL[ev.status] || ev.status;
+  return ev.result === 'error' ? 'помилка' : ev.result;
+}
+
+function evCard(ev, selected) {
+  const isQuery = state.logKind === 'query';
+  const title = isQuery ? ev.query : indexEventTitle(ev);
+  const n = isQuery ? ev.n_hits : ev.chunks_indexed;
+  const metaWord = isQuery ? ev.face : ev.trigger;
+
+  return el('button', {
+    className: 'ev' + (selected ? ' is-selected' : ''),
+    attrs: { 'data-ev': ev.id },
+    on: {
+      click: () => {
+        state.logSelected[state.logKind] = ev.id;
+        renderList();
+        renderDetail();
+      },
+    },
+  }, [
+    el('div', { className: 'ev-top' }, [
+      el('span', { className: 'ev-q', text: title }),
+      el('span', { className: 'ev-n' }, [
+        document.createTextNode(String(n)),
+        el('small', { text: fmtMs(ev.took_ms) }),
+      ]),
+    ]),
+    el('div', { className: 'ev-bot' }, [
+      el('span', { className: 'st' }, [
+        el('i', { className: evStatusDot(ev) }),
+        document.createTextNode(evStatusWord(ev)),
+      ]),
+      el('span', { text: bankLabel(ev.bank_id) }),
+      el('span', { text: metaWord || '—' }),
+      el('span', { className: 't', text: fmtDateTime(ev.ts) }),
+    ]),
+  ]);
+}
+
+function renderList() {
+  const listEl = $('jlist');
+  const countEl = $('jcount');
+  clear(listEl);
+  countEl.textContent = state.logRows.length
+    ? 'Показано ' + state.logRows.length + ' із ' + state.logTotal
+    : 'Порожньо';
+
+  if (!state.logRows.length) {
+    listEl.appendChild(el('p', { className: 'empty-hint', text: 'Подій не знайдено.' }));
+    return;
+  }
+
+  const selectedId = state.logSelected[state.logKind];
+  for (const ev of state.logRows) {
+    listEl.appendChild(evCard(ev, ev.id === selectedId));
+  }
+}
+
+// ---------------------------------------------------------------------------
+// detail
+// ---------------------------------------------------------------------------
+
+function factsRow(pairs) {
+  return el('div', { className: 'd-facts' }, pairs.map(([label, value]) => el('div', {}, [
+    el('div', { className: 'd-k', text: label }),
+    el('div', { className: 'd-v', text: value }),
+  ])));
+}
+
+function numBox(value, label) {
+  return el('div', {}, [
+    el('div', { className: 'num', text: String(value) }),
+    el('div', { className: 'num-k', text: label }),
+  ]);
+}
+
+function fmtScore(v) {
+  return v == null ? '—' : Number(v).toFixed(4);
+}
+
+/** "Відкрити в Памʼяті" switches both the bank and the page, then opens the
+ *  file — reuses `selectBank()`/`openFile()` from page-memory.js, which is
+ *  exactly why that file loads before this one. */
+function openInMemory(bankId, path) {
+  const bank = bankById(bankId);
+  if (!bank) return;
+  selectBank(bank.id);
+  setPage('memory');
+  openFile(path);
+}
+
+function hitRow(hit, index, bankId) {
+  return el('article', { className: 'hit' }, [
+    el('div', { className: 'hit-top' }, [
+      el('span', { className: 'hit-r', text: String(index + 1) }),
+      el('div', { className: 'hit-l' }, [
+        el('div', { className: 'hit-p', text: hit.path }),
+        el('div', { className: 'hit-h', text: (hit.heading || '—') + ' · чанк ' + hit.chunk_index }),
+      ]),
+      el('span', { className: 'hit-s' }, [
+        document.createTextNode('score ' + fmtScore(hit.score)),
+        el('br'),
+        document.createTextNode('sim ' + fmtScore(hit.sim)),
+      ]),
+    ]),
+    el('div', { className: 'hit-foot' }, [
+      el('button', {
+        className: 'btn btn-ghost btn-sm',
+        text: 'Відкрити в Памʼяті',
+        on: { click: () => openInMemory(bankId, hit.path) },
+      }),
+    ]),
+  ]);
+}
+
+function renderQueryDetail(box, ev) {
+  box.appendChild(el('div', { className: 'd-kick' }, [
+    el('span', { text: 'запит · #' + ev.id }),
+    el('i', { className: evStatusDot(ev) }),
+    el('span', { text: evStatusWord(ev) }),
+  ]));
+  box.appendChild(el('h2', { className: 'd-h', text: ev.query }));
+  box.appendChild(factsRow([
+    ['банк', bankLabel(ev.bank_id)],
+    ['обличчя', ev.face],
+    ['префікс', ev.path_prefix || '—'],
+    ['хітів', String(ev.n_hits)],
+    ['час, мс', fmtMs(ev.took_ms)],
+    ['коли', fmtDateTime(ev.ts)],
+  ]));
+  box.appendChild(el('div', { className: 'd-sec' }, [
+    document.createTextNode('Результати '),
+    el('span', { className: 'muted', text: 'у точному ранговому порядку' }),
+  ]));
+
+  const hits = ev.hits || [];
+  if (!hits.length) {
+    box.appendChild(el('p', { className: 'empty-hint', text: 'Жодного влучення.' }));
+    return;
+  }
+  hits.forEach((hit, index) => box.appendChild(hitRow(hit, index, ev.bank_id)));
+}
+
+function renderIndexDetail(box, ev) {
+  box.appendChild(el('div', { className: 'd-kick' }, [
+    el('span', { text: 'індексація · #' + ev.id }),
+    el('i', { className: evStatusDot(ev) }),
+    el('span', { text: evStatusWord(ev) }),
+  ]));
+  box.appendChild(el('h2', { className: 'd-h', text: indexEventTitle(ev) }));
+  box.appendChild(factsRow([
+    ['банк', bankLabel(ev.bank_id)],
+    ['вид', ev.kind],
+    ['тригер', ev.trigger],
+    ['коли', fmtDateTime(ev.ts)],
+  ]));
+  box.appendChild(el('div', { className: 'nums' }, [
+    numBox(ev.files_indexed, 'файлів'),
+    numBox(ev.chunks_indexed, 'чанків'),
+    numBox(ev.files_pruned, 'знято'),
+    numBox(fmtMs(ev.took_ms), 'тривалість'),
+  ]));
+
+  if (ev.error) {
+    box.appendChild(el('div', { className: 'note is-err' }, [
+      el('strong', { text: 'Помилка' }),
+      el('br'),
+      document.createTextNode(ev.error),
+    ]));
+  }
+
+  if (ev.path) {
+    box.appendChild(el('div', { className: 'd-sec', text: 'Файл' }));
+    box.appendChild(el('article', { className: 'hit' }, [
+      el('div', { className: 'hit-top' }, [
+        el('span', { className: 'hit-r', text: '·' }),
+        el('div', { className: 'hit-l' }, [
+          el('div', { className: 'hit-p', text: ev.path }),
+          el('div', { className: 'hit-h', text: 'поточний файл банку ' + bankLabel(ev.bank_id) }),
+        ]),
+      ]),
+      el('div', { className: 'hit-foot' }, [
+        el('button', {
+          className: 'btn btn-ghost btn-sm',
+          text: 'Відкрити в Памʼяті',
+          on: { click: () => openInMemory(ev.bank_id, ev.path) },
+        }),
+      ]),
+    ]));
+  }
+}
+
+function renderDetail() {
+  const box = $('jdetail');
+  clear(box);
+  const selectedId = state.logSelected[state.logKind];
+  const ev = state.logRows.find((row) => row.id === selectedId) || state.logRows[0] || null;
+  if (!ev) {
+    box.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть подію ліворуч.' }));
+    return;
+  }
+  state.logSelected[state.logKind] = ev.id;
+  if (state.logKind === 'query') renderQueryDetail(box, ev);
+  else renderIndexDetail(box, ev);
+}
+
+function renderJournal() {
+  populateBankFilter();
+  renderList();
+  renderDetail();
+}

@@ -1,9 +1,17 @@
-/* mnemo web cabinet (FR-7, v1).
+/* mnemo web cabinet (FR-7, v1) — shared chrome.
  *
  * Thin client over the v3 HTTP API (contract 9.5) and the WebSocket progress
  * channel (contract 9.7). It renders what the backend reports and nothing
  * else: no chunking, no indexing, no editing. Every derived number on screen
  * comes from a response field.
+ *
+ * This file holds what every page depends on: the token, theme, shared
+ * state, the tiny DOM/HTTP helpers, the token gate, formatting helpers, bank
+ * data fetchers, task-progress bookkeeping, reindex/state actions, and the
+ * bank-scoped dialogs (folder picker, token panel, per-bank menu, removal).
+ * Routing, the sidebar/header and the WebSocket channel live in shell.js;
+ * each page's own rendering lives in page-memory.js / page-journal.js /
+ * page-settings.js, loaded after this file and after shell.js.
  */
 'use strict';
 
@@ -36,19 +44,26 @@ function resolveTheme() {
   return localStorage.getItem('mnemo_theme') === 'light' ? 'light' : 'dark';
 }
 
-/** Sets the attribute the CSS keys off and syncs the segmented control. */
+/**
+ * Sets the attribute the CSS keys off and persists the choice.
+ *
+ * There is no permanent theme control in the shell any more — it moved into
+ * Налаштування → Служба (design decision, `.claude/memory/topics/cabinet-ui.md`)
+ * as the one control on that screen that applies on click rather than
+ * waiting for «Зберегти». Whatever renders that control is responsible for
+ * reflecting the active choice; this function only ever sets it.
+ */
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
-  for (const button of $('theme-toggle').querySelectorAll('.seg')) {
-    button.classList.toggle('is-active', button.dataset.theme === theme);
-  }
+  localStorage.setItem('mnemo_theme', theme);
 }
 
 // ---------------------------------------------------------------------------
-// state
+// state — shared by every page
 // ---------------------------------------------------------------------------
 
 const state = {
+  page: 'memory',
   banks: [],
   selectedBankId: null,
   tree: null,
@@ -61,9 +76,11 @@ const state = {
   progress: new Map(),          // bank_id -> live index_progress snapshot
   notes: new Map(),             // bank_id -> transient one-line note
   logKind: 'query',
-  logScope: 'all',
+  logBank: '',                  // '' = every bank
+  logPeriod: '24h',             // '1h' | '24h' | '7d' | '30d'
   logRows: [],
   logTotal: 0,
+  logSelected: { query: null, index: null },   // selected event id per kind
   gated: false,                 // token gate is up: no requests, no socket
 };
 
@@ -340,56 +357,8 @@ function fmtMs(v) {
 
 const STATUS_LABEL = { ready: 'готово', indexing: 'індексується', empty: 'порожньо' };
 
-/**
- * A bank's registry state: 'enabled' | 'frozen' | 'disabled'.
- *
- * `status` and `state` are different questions and the card shows both:
- * `status` is what the index is doing right now (ready / indexing / empty),
- * `state` is what the user set it to. A frozen bank reads `ready` — its index
- * is complete, it simply stopped following the files.
- *
- * Falls back to the boolean it replaced, so the page keeps working against a
- * backend older than this field.
- */
-function bankState(bank) {
-  if (bank.state) return bank.state;
-  return bank.enabled === false ? 'disabled' : 'enabled';
-}
-
-const BANK_STATE_LABEL = {
-  enabled: 'Активний',
-  frozen: 'Заморожений',
-  disabled: 'Вимкнений',
-};
-
-const BANK_STATE_NOTE = {
-  enabled: 'Стежимо за файлами, індекс оновлюється сам, пошук працює.',
-  frozen: 'За файлами не стежимо — індекс лишається як є, але пошук працює. ' +
-          'Це те, що рятує від повної перебудови при зміні моделі.',
-  disabled: 'Не стежимо й не шукаємо. Банк лишається в реєстрі.',
-};
-
-/**
- * Second line under the status badge.
- *
- * Precedence is indexing > empty > ready (lead amendment), and BankInfo always
- * carries both `queued` and `chunks` — so these four readings stay distinct
- * instead of collapsing into one ambiguous "empty".
- */
-function statusNote(bank) {
-  if (bank.status === 'indexing') {
-    return bank.chunks > 0
-      ? 'база є, свіжі зміни доїжджають'
-      : 'перший білд у процесі — ще порожньо';
-  }
-  if (bank.status === 'empty') {
-    return bank.queued > 0 ? 'порожньо, задачі в черзі' : 'справді порожньо, нічого не заплановано';
-  }
-  return 'індекс готовий';
-}
-
 // ---------------------------------------------------------------------------
-// banks
+// banks — shared data fetchers (page-memory.js owns the rendering)
 // ---------------------------------------------------------------------------
 
 async function loadBanks() {
@@ -415,670 +384,10 @@ function bankById(id) {
   return state.banks.find((b) => b.id === id) || null;
 }
 
-function renderService() {
-  const box = $('service-info');
-  clear(box);
-  const svc = state.service;
-  if (!svc) {
-    box.appendChild(el('span', { className: 'muted', text: 'сервіс невідомий' }));
-    return;
-  }
-  const q = state.queue || { depth: 0, high: 0, normal: 0, low: 0 };
-  const bit = (label, value) => el('span', {}, [
-    document.createTextNode(label + ' '),
-    el('b', { text: value }),
-  ]);
-  box.appendChild(bit('v', svc.version || '—'));
-  box.appendChild(bit('pid', svc.pid != null ? svc.pid : '—'));
-  box.appendChild(bit('порт', svc.port != null ? svc.port : '—'));
-  box.appendChild(bit('провайдер', svc.provider || '—'));
-  box.appendChild(bit('черга', q.depth + ' (H' + q.high + '/N' + q.normal + '/L' + q.low + ')'));
-  if (svc.embed) {
-    // `kind` says what was probed. Under `api` nothing is called — health()
-    // only checks configuration — so «недоступний» would describe a resident
-    // that is not supposed to be running at all.
-    const local = (svc.embed.kind || 'local') === 'local';
-    box.appendChild(bit('embed', svc.embed.reachable
-      ? (local ? 'ok' : 'налаштовано')
-      : (local ? 'недоступний' : 'не налаштовано')));
-  }
-}
-
 // ---------------------------------------------------------------------------
-// stale-provider rebuild notice
+// task progress — fed by REST snapshots and by WebSocket deltas (shell.js),
+// rendered into bank cards (page-memory.js)
 // ---------------------------------------------------------------------------
-//
-// Separate from `#banner`, which is an error channel. A provider change is not
-// a failed request: it is durable machine state with a remedy, and hiding it
-// because some later request succeeded would be the same silence that made the
-// settings switch look as if it did nothing.
-
-const rebuildNotice = { root: null, text: null, action: null };
-const rebuildDialog = {
-  root: null, body: null, submit: null,
-  banks: [], busy: false, errorText: null,
-};
-
-function pendingRebuilds() {
-  const pending = state.banks.filter((bank) => !!bank.rebuild_pending);
-  return {
-    actionable: pending.filter((bank) =>
-      bankState(bank) !== 'disabled' && bank.status !== 'indexing' && !bank.indexing),
-    running: pending.filter((bank) =>
-      bankState(bank) !== 'disabled' && (bank.status === 'indexing' || bank.indexing)),
-    disabled: pending.filter((bank) => bankState(bank) === 'disabled'),
-  };
-}
-
-function buildRebuildNotice() {
-  rebuildNotice.text = el('div', { className: 'rebuild-banner-text' });
-  rebuildNotice.action = el('button', {
-    className: 'btn',
-    text: 'Перегенерувати',
-    on: { click: () => openRebuildDialog() },
-  });
-  rebuildNotice.root = el('div', {
-    className: 'rebuild-banner',
-    attrs: { hidden: '', role: 'status' },
-  }, [rebuildNotice.text, rebuildNotice.action]);
-
-  const errorBanner = $('banner');
-  errorBanner.parentNode.insertBefore(rebuildNotice.root, errorBanner.nextSibling);
-}
-
-function renderRebuildNotice() {
-  if (!rebuildNotice.root) return;
-  const groups = pendingRebuilds();
-  const total = groups.actionable.length + groups.running.length + groups.disabled.length;
-  rebuildNotice.root.hidden = total === 0;
-  if (!total) return;
-
-  const parts = [];
-  if (groups.actionable.length) {
-    parts.push(groups.actionable.length + ' банк(и) мають індекс від попередньої моделі');
-  }
-  if (groups.running.length) {
-    parts.push(groups.running.length + ' вже перегенеровуються');
-  }
-  if (groups.disabled.length) {
-    parts.push(groups.disabled.length + ' вимкнено — спершу їх треба увімкнути');
-  }
-  rebuildNotice.text.textContent = parts.join(' · ') +
-    '. Пошук по застарілих векторах відмовляє, а не змішує два простори.';
-  rebuildNotice.action.hidden = groups.actionable.length === 0;
-  rebuildNotice.action.disabled = rebuildDialog.busy;
-}
-
-function buildRebuildDialog() {
-  rebuildDialog.body = el('div', { className: 'modal-body' });
-  rebuildDialog.submit = el('button', {
-    className: 'btn btn-primary',
-    text: 'Перегенерувати',
-    on: { click: () => submitPendingRebuilds() },
-  });
-  const box = el('div', {
-    className: 'modal-box',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Перегенерувати індекси' },
-    on: { click: (ev) => ev.stopPropagation() },
-  }, [
-    el('div', { className: 'modal-head' }, [
-      el('h2', { text: 'Перегенерувати індекси' }),
-      el('button', {
-        className: 'btn btn-ghost', text: '✕', title: 'Закрити (Esc)',
-        on: { click: () => closeRebuildDialog() },
-      }),
-    ]),
-    rebuildDialog.body,
-    el('div', { className: 'modal-foot' }, [
-      el('button', {
-        className: 'btn', text: 'Скасувати',
-        on: { click: () => closeRebuildDialog() },
-      }),
-      rebuildDialog.submit,
-    ]),
-  ]);
-  rebuildDialog.root = el('div', {
-    className: 'modal', attrs: { hidden: '' },
-    on: { click: () => closeRebuildDialog() },
-  }, [box]);
-  document.body.appendChild(rebuildDialog.root);
-
-  document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && !rebuildDialog.root.hidden) closeRebuildDialog();
-  });
-}
-
-function openRebuildDialog() {
-  rebuildDialog.banks = pendingRebuilds().actionable;
-  if (!rebuildDialog.banks.length) return;
-  rebuildDialog.errorText = null;
-  rebuildDialog.busy = false;
-  rebuildDialog.root.hidden = false;
-  renderRebuildDialog();
-}
-
-function closeRebuildDialog() {
-  if (rebuildDialog.busy) return;
-  rebuildDialog.root.hidden = true;
-  rebuildDialog.banks = [];
-  rebuildDialog.errorText = null;
-}
-
-function renderRebuildDialog() {
-  clear(rebuildDialog.body);
-  rebuildDialog.body.appendChild(el('p', {
-    className: 'rm-lead',
-    text: 'Повний реіндекс буде поставлено для ' + rebuildDialog.banks.length +
-          ' банк(ів). Старі derived-індекси буде стерто й зібрано з .md заново.',
-  }));
-
-  const list = el('div', { className: 'set-stats' });
-  for (const bank of rebuildDialog.banks) {
-    list.appendChild(setStat(bank.name, bank.chunks + ' чанків', true));
-  }
-  rebuildDialog.body.appendChild(list);
-  rebuildDialog.body.appendChild(el('p', {
-    className: 'set-note',
-    text: 'Файли .md не змінюються. Час пропорційний обсягу: у виміряному ' +
-          'переході local CPU → Ollama GPU весь конвеєр став приблизно у 3× ' +
-          'швидшим — не у 8.8×, бо 8.8× стосувалось лише ембедингу.',
-  }));
-  if (rebuildDialog.errorText) {
-    rebuildDialog.body.appendChild(el('p', {
-      className: 'modal-error', text: rebuildDialog.errorText,
-    }));
-  }
-  rebuildDialog.submit.disabled = rebuildDialog.busy || !rebuildDialog.banks.length;
-  rebuildDialog.submit.textContent = rebuildDialog.busy ? 'Ставимо в чергу…' : 'Перегенерувати';
-}
-
-async function submitPendingRebuilds() {
-  const banks = rebuildDialog.banks.slice();
-  if (!banks.length || rebuildDialog.busy) return;
-  rebuildDialog.busy = true;
-  rebuildDialog.errorText = null;
-  renderRebuildDialog();
-
-  const outcomes = await Promise.allSettled(
-    banks.map((bank) => requestReindex(bank, { full: true }))
-  );
-  const failed = [];
-  outcomes.forEach((outcome, index) => {
-    const bank = banks[index];
-    if (outcome.status === 'fulfilled') {
-      const res = outcome.value;
-      setNote(bank.id, 'поставлено: повний реіндекс · у черзі ' + res.queued +
-                       ' · task ' + (res.task_ids || []).join(', '));
-    } else {
-      failed.push({ bank: bank, error: outcome.reason });
-    }
-  });
-
-  const authFailure = failed.find((item) => isAuthError(item.error));
-  if (authFailure) {
-    rebuildDialog.busy = false;
-    closeRebuildDialog();
-    reportError(authFailure.error);
-    return;
-  }
-
-  await Promise.all([loadBanks().catch(() => {}), loadStatus().catch(() => {})]);
-  rebuildDialog.busy = false;
-  renderRebuildNotice();
-  if (!failed.length) {
-    closeRebuildDialog();
-    return;
-  }
-  rebuildDialog.banks = failed.map((item) => item.bank);
-  rebuildDialog.errorText = failed.map((item) =>
-    item.bank.name + ': ' + (item.error && item.error.message ? item.error.message : item.error)
-  ).join(' · ');
-  renderRebuildDialog();
-}
-
-function renderBanks() {
-  const list = $('banks-list');
-  clear(list);
-  renderRebuildNotice();
-
-  if (!state.banks.length) {
-    list.appendChild(el('p', {
-      className: 'empty-hint',
-      text: 'Жодного банку не зареєстровано — «＋ додати» у шапці вибирає теку з .md.',
-    }));
-    syncTicker();
-    return;
-  }
-
-  for (const bank of state.banks) {
-    list.appendChild(bankCard(bank));
-  }
-  syncTicker();
-}
-
-function bankCard(bank) {
-  const selected = bank.id === state.selectedBankId;
-  const classes = ['bank'];
-  if (selected) classes.push('is-selected');
-  if (bankState(bank) === 'disabled') classes.push('is-disabled');
-
-  const badges = [
-    el('span', {
-      className: 'badge badge-' + bank.status,
-      text: STATUS_LABEL[bank.status] || bank.status,
-      title: statusNote(bank),
-    }),
-    bank.git
-      ? el('span', { className: 'badge badge-git', text: 'git' })
-      : el('span', { className: 'badge badge-nogit', text: 'no git' }),
-  ];
-  if (bankState(bank) === 'frozen') {
-    // The warning IS the badge. A frozen bank keeps answering searches out of
-    // an index that no longer follows the files, and nothing else on the card
-    // says so — `status: ready` and a chunk count both look entirely healthy.
-    badges.push(el('span', {
-      className: 'badge badge-frozen',
-      text: 'заморожено',
-      title: 'Індекс не оновлюється — файли могли змінитись після ' +
-             fmtDateTime(bank.last_indexed) +
-             '. Пошук працює й відповідає за тим станом.',
-    }));
-  }
-  if (bankState(bank) === 'disabled') {
-    badges.push(el('span', { className: 'badge badge-off', text: 'вимкнено' }));
-  }
-  if (bank.exists === false) {
-    badges.push(el('span', { className: 'badge badge-off', text: 'нема кореня' }));
-  }
-
-  // Human-facing address is the name, never the hash (lead amendment); the id
-  // stays available as a tooltip for debugging.
-  //
-  // Every action lives in the menu at the end of this row. Buttons used to sit
-  // in a row of their own at the bottom of the card, which cost four lines of
-  // height per bank and pinned the column's width from both sides — under
-  // 287px the row wrapped, over 311px the document ended up narrower than the
-  // file list. With nothing but a glyph to fit, the column is free again.
-  // Name and badges wrap together inside their own box; the menu button sits
-  // outside it and cannot be pushed onto a line of its own. A third badge —
-  // which `frozen` and `no git` together produce — used to do exactly that,
-  // costing a line and leaving the glyph stranded under the name.
-  const head = el('div', { className: 'bank-row' }, [
-    el('div', { className: 'bank-head' }, [
-      el('span', {
-        className: 'bank-name', text: bank.name, title: 'id: ' + bank.id,
-      }),
-      ...badges,
-    ]),
-    el('button', {
-      className: 'btn btn-menu',
-      text: '···',
-      title: 'Дії над банком',
-      attrs: { 'aria-haspopup': 'menu', 'aria-label': 'Дії над банком' },
-      // Not `stop(...)`: that wrapper calls the handler with no arguments and
-      // no `this`, and this one needs the button it fired on to place the menu.
-      on: {
-        click: (ev) => {
-          ev.stopPropagation();
-          openBankMenu(ev.currentTarget, bank);
-        },
-      },
-    }),
-  ]);
-
-  const stats = el('div', { className: 'bank-stats' }, [
-    el('span', { text: 'файлів ' + bank.files }),
-    el('span', { text: 'чанків ' + bank.chunks }),
-    el('span', { text: 'у черзі ' + bank.queued }),
-    el('span', { text: fmtBytes(bank.db_bytes), title: 'розмір індексу' }),
-  ]);
-
-  const card = el('div', {
-    className: classes.join(' '),
-    attrs: { 'data-bank': bank.id },      // so the ticker can find this card
-    on: { click: () => selectBank(bank.id) },
-  }, [
-    head,
-    el('span', { className: 'bank-root', text: bank.root }),
-    stats,
-    el('div', { className: 'bank-stats' }, [
-      el('span', { className: 'muted', text: statusNote(bank) }),
-    ]),
-    el('div', { className: 'bank-stats' }, [
-      el('span', { className: 'muted', text: 'востаннє: ' + fmtDateTime(bank.last_indexed) }),
-    ]),
-  ]);
-
-  const live = state.progress.get(bank.id);
-  if (live) card.appendChild(progressBlock(live));
-
-  const note = state.notes.get(bank.id);
-  if (note) {
-    card.appendChild(el('div', { className: 'progress-text', text: note }));
-  }
-
-  if (bank.last_error) {
-    card.appendChild(el('div', { className: 'bank-error', text: bank.last_error }));
-  }
-
-  return card;
-}
-
-// ---------------------------------------------------------------------------
-// per-bank menu
-//
-// Built once and moved, rather than rebuilt per card: the bank list re-renders
-// on a timer, and a menu owned by a card would vanish mid-click.
-
-const bankMenu = { root: null, bank: null };
-
-function buildBankMenu() {
-  // `bankMenu.bank` is read at click time, not captured when the menu is
-  // built: one menu serves every card, and which bank it belongs to is
-  // whatever `openBankMenu` last pointed it at.
-  const item = (opts) => el('button', {
-    className: 'menu-item' + (opts.danger ? ' is-danger' : ''),
-    text: opts.text,
-    title: opts.title,
-    // The state entries are a choice among three, not three commands, so they
-    // announce as radios and carry `aria-checked` (set in `openBankMenu`).
-    attrs: { role: opts.role || 'menuitem' },
-    on: {
-      click: () => {
-        const bank = bankMenu.bank;
-        closeBankMenu();
-        if (bank) opts.run(bank);
-      },
-    },
-  });
-
-  bankMenu.root = el('div', {
-    className: 'menu',
-    attrs: { hidden: '', role: 'menu' },
-    on: { click: (ev) => ev.stopPropagation() },
-  }, [
-    item({
-      text: 'Синхронізація індексу',
-      title: 'Переіндексує лише файли, що змінилися, і знімає з індексу видалені',
-      run: (bank) => reindex(bank, { full: false }),
-    }),
-    item({
-      text: 'Повний реіндекс',
-      title: 'Стирає індекс і збирає його заново — довго, пропорційно розміру банку',
-      run: (bank) => reindex(bank, { full: true }),
-    }),
-    el('div', { className: 'menu-sep' }),
-    item({
-      text: 'Доступ MCP',
-      title: 'Токен цього банку і готовий фрагмент конфігурації для проєкту',
-      run: (bank) => openTokenPanel(bank),
-    }),
-    el('div', { className: 'menu-sep' }),
-    el('div', { className: 'menu-label', text: 'Стан' }),
-    // Not a submenu and not a dialog: three states are few enough to show, and
-    // the current one has to be visible at the moment of choosing — otherwise
-    // "freeze" on an already-frozen bank looks like it did nothing. The marks
-    // are refreshed in `openBankMenu`, because one menu serves every card.
-    ...['enabled', 'frozen', 'disabled'].map((value) => {
-      const button = item({
-        text: BANK_STATE_LABEL[value],
-        title: BANK_STATE_NOTE[value],
-        role: 'menuitemradio',
-        run: (bank) => setBankState(bank, value),
-      });
-      button.dataset.state = value;
-      return button;
-    }),
-    el('div', { className: 'menu-sep' }),
-    item({
-      text: 'Прибрати банк',
-      title: 'Зняти банк з реєстру; .md не чіпаються',
-      danger: true,
-      run: (bank) => openRemoval(bank),
-    }),
-  ]);
-  document.body.appendChild(bankMenu.root);
-
-  document.addEventListener('click', () => closeBankMenu());
-  document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape') closeBankMenu();
-  });
-  // A menu pinned to page coordinates does not follow its button. Rather
-  // than track the anchor, close: a menu that has drifted off its trigger is
-  // a menu whose next click lands on whatever moved underneath it.
-  window.addEventListener('scroll', () => closeBankMenu(), true);
-  window.addEventListener('resize', () => closeBankMenu());
-}
-
-function openBankMenu(anchor, bank) {
-  bankMenu.bank = bank;
-  // The state marks belong to the bank being opened, not to the one the menu
-  // last served — one menu, many cards.
-  const current = bankState(bank);
-  for (const button of bankMenu.root.querySelectorAll('[data-state]')) {
-    const active = button.dataset.state === current;
-    button.classList.toggle('is-current', active);
-    button.setAttribute('aria-checked', active ? 'true' : 'false');
-  }
-  // Laid out before it is shown: a `position: fixed` box with no coordinates
-  // paints wherever it happens to flow, so measuring it visible costs one
-  // frame of the menu sitting in the corner of the page.
-  bankMenu.root.style.visibility = 'hidden';
-  bankMenu.root.hidden = false;
-  const box = anchor.getBoundingClientRect();
-  const menu = bankMenu.root.getBoundingClientRect();
-  // Flip up, and pull left, when the default placement would leave the
-  // viewport. The bank column is at the left edge and the cards run to the
-  // bottom of a long list, so both edges are reachable in normal use.
-  const top = (box.bottom + menu.height > window.innerHeight)
-    ? box.top - menu.height - 4
-    : box.bottom + 4;
-  // Right edges aligned, because the button sits at the right end of the
-  // title row: hanging the menu off its left edge would throw it across the
-  // pane boundary into the file tree for no reason.
-  const left = Math.max(4, Math.min(box.right - menu.width,
-                                    window.innerWidth - menu.width - 4));
-  bankMenu.root.style.top = Math.max(4, top) + 'px';
-  bankMenu.root.style.left = left + 'px';
-  bankMenu.root.style.visibility = 'visible';
-}
-
-function closeBankMenu() {
-  if (!bankMenu.root || bankMenu.root.hidden) return;
-  bankMenu.root.hidden = true;
-  bankMenu.bank = null;
-}
-
-// ---------------------------------------------------------------------------
-// removing a bank (contract 9.5: DELETE /api/banks/{id})
-//
-// The only irreversible action in the cabinet, and what makes it irreversible
-// is not the index — that rebuilds — but the token. Bank ids are derived from
-// the root and come back identical on re-registration; tokens are minted, so a
-// removed bank cannot be restored to the projects that address it. That is why
-// this asks for the name to be typed, and why the dialog leads with the token
-// rather than with megabytes.
-
-const removal = {
-  root: null, box: null, body: null, submit: null,
-  bank: null, dropIndex: true, typed: '', busy: false, errorText: null,
-};
-
-function buildRemoval() {
-  removal.body = el('div', { className: 'modal-body' });
-  removal.submit = el('button', {
-    className: 'btn btn-danger',
-    text: 'Прибрати',
-    on: { click: () => submitRemoval() },
-  });
-
-  removal.box = el('div', {
-    className: 'modal-box',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Прибрати банк' },
-    on: { click: (ev) => ev.stopPropagation() },
-  }, [
-    el('div', { className: 'modal-head' }, [
-      el('h2', { text: 'Прибрати банк' }),
-      el('button', {
-        className: 'btn btn-ghost',
-        text: '✕',
-        title: 'Закрити (Esc)',
-        on: { click: () => closeRemoval() },
-      }),
-    ]),
-    removal.body,
-    el('div', { className: 'modal-foot' }, [
-      el('button', { className: 'btn', text: 'Скасувати', on: { click: () => closeRemoval() } }),
-      removal.submit,
-    ]),
-  ]);
-
-  removal.root = el('div', {
-    className: 'modal',
-    attrs: { hidden: '' },
-    on: { click: () => closeRemoval() },
-  }, [removal.box]);
-  document.body.appendChild(removal.root);
-
-  document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && !removal.root.hidden) closeRemoval();
-  });
-}
-
-function openRemoval(bank) {
-  removal.bank = bank;
-  removal.dropIndex = true;
-  removal.typed = '';
-  removal.busy = false;
-  removal.errorText = null;
-  removal.root.hidden = false;
-  renderRemoval();
-}
-
-function closeRemoval() {
-  if (removal.busy) return;      // a request is in flight; let it land
-  removal.root.hidden = true;
-  removal.bank = null;
-  removal.typed = '';
-}
-
-function renderRemoval() {
-  const bank = removal.bank;
-  if (!bank) return;
-  clear(removal.body);
-
-  removal.body.appendChild(el('p', { className: 'rm-lead' }, [
-    document.createTextNode('Банк '),
-    el('strong', { text: bank.name }),
-    document.createTextNode(' перестане існувати для цієї машини.'),
-  ]));
-
-  removal.body.appendChild(el('dl', { className: 'rm-effects' }, [
-    el('dt', { className: 'is-loss', text: 'Зникає назавжди' }),
-    el('dd', {
-      text: 'Реєстрація банку та його токен. Токен видається випадково і не ' +
-            'відтворюється: кожен .mcp.json, який ним підключається, ' +
-            'перестане працювати, і повернути той самий токен неможливо.',
-    }),
-    el('dt', { className: 'is-safe', text: 'Лишається недоторканим' }),
-    el('dd', null, [
-      document.createTextNode('Усі .md за шляхом '),
-      el('code', { text: bank.root }),
-      document.createTextNode('. Кабінет не видаляє вміст банку — тільки те, ' +
-                              'що з нього виведено.'),
-    ]),
-  ]));
-
-  const box = el('input', {
-    attrs: { type: 'checkbox', id: 'rm-drop-index' },
-    on: { change: (ev) => { removal.dropIndex = ev.target.checked; } },
-  });
-  box.checked = removal.dropIndex;
-  box.disabled = removal.busy;
-  removal.body.appendChild(el('label', { className: 'rm-check', attrs: { for: 'rm-drop-index' } }, [
-    box,
-    el('span', {
-      text: 'видалити також індекс (' + fmtBytes(bank.db_bytes) + ') — ' +
-            'відновлюваний повним реіндексом',
-    }),
-  ]));
-
-  const confirm = el('input', {
-    className: 'fs-input',
-    attrs: {
-      type: 'text', spellcheck: 'false', autocomplete: 'off',
-      id: 'rm-confirm', placeholder: bank.name,
-    },
-    on: {
-      input: (ev) => {
-        removal.typed = ev.target.value;
-        // Only the button's own state changes, so it is updated in place: a
-        // re-render would rebuild the field and drop the caret.
-        removal.submit.disabled = !removalReady();
-      },
-      keydown: (ev) => {
-        if (ev.key === 'Enter' && removalReady()) { ev.preventDefault(); submitRemoval(); }
-      },
-    },
-  });
-  confirm.value = removal.typed;
-  confirm.disabled = removal.busy;
-  removal.body.appendChild(el('label', {
-    className: 'fs-label', attrs: { for: 'rm-confirm' },
-    text: 'Введіть назву банку, щоб підтвердити',
-  }));
-  removal.body.appendChild(confirm);
-
-  if (removal.errorText) {
-    removal.body.appendChild(el('p', { className: 'modal-error', text: removal.errorText }));
-  }
-
-  removal.submit.disabled = !removalReady();
-  removal.submit.textContent = removal.busy ? 'Прибираю…' : 'Прибрати';
-  if (!removal.busy) confirm.focus();
-}
-
-function removalReady() {
-  return !removal.busy && !!removal.bank && removal.typed.trim() === removal.bank.name;
-}
-
-async function submitRemoval() {
-  if (!removalReady()) return;
-  const bank = removal.bank;
-  removal.busy = true;
-  removal.errorText = null;
-  renderRemoval();
-  try {
-    await api('/api/banks/' + encodeURIComponent(bank.id) +
-              '?drop_index=' + (removal.dropIndex ? 'true' : 'false'),
-              { method: 'DELETE' });
-  } catch (err) {
-    removal.busy = false;
-    if (isAuthError(err)) { closeRemoval(); reportError(err); return; }
-    // `index_locked` is fixable where it is raised — the bank is still
-    // registered and nothing was lost — so it belongs inside the dialog
-    // rather than on a page-wide banner the user has to leave to read.
-    removal.errorText = err.message;
-    renderRemoval();
-    return;
-  }
-  removal.busy = false;
-  removal.root.hidden = true;
-  removal.bank = null;
-  removal.typed = '';
-  hideBanner();
-  // Drop it from the local model immediately rather than waiting for the
-  // `bank_removed` event to come back: the socket may be down, and a card
-  // that outlives the bank it describes is the one thing this dialog must
-  // not leave behind. The reload that follows is the correction, not the
-  // mechanism.
-  state.banks = state.banks.filter((b) => b.id !== bank.id);
-  if (state.selectedBankId === bank.id) state.selectedBankId = null;
-  state.progress.delete(bank.id);
-  state.notes.delete(bank.id);
-  renderBanks();
-  loadBanks().catch(() => {});
-}
 
 // A task is not always a file: `bulk`/`rebuild` work on the whole bank and
 // carry no path at all, so they get named rather than left as a blank slot.
@@ -1270,7 +579,7 @@ function setNote(bankId, text) {
 }
 
 // ---------------------------------------------------------------------------
-// reindex (contract 9.5 POST /api/reindex)
+// reindex (contract 9.5 POST /api/reindex) + bank state (PATCH /api/banks/{id})
 // ---------------------------------------------------------------------------
 
 function requestReindex(bank, opts) {
@@ -2241,1873 +1550,326 @@ function renderTokenPanel() {
 }
 
 // ---------------------------------------------------------------------------
-// settings screen (contract 9.5: GET/PUT /api/settings)
+// per-bank menu
+//
+// Built once and moved, rather than rebuilt per card: the bank list re-renders
+// on a timer, and a menu owned by a card would vanish mid-click.
 // ---------------------------------------------------------------------------
 
-/**
- * Machine settings: which backend produces vectors, and what it needs.
- *
- * A full screen rather than a modal, because unlike every other dialog here
- * this one is not about a bank — it is about the machine, and it takes the
- * page over while you are in it.
- *
- * The design principle is that **the backend is picked, not typed**. Prefixes
- * are the reason: e5 is trained with mandatory `passage: ` / `query: ` markers
- * and sending it bare text quietly produces worse vectors with nothing in a
- * log to say so. A free-text form would make that a thing you can forget, so
- * the catalogue (`/api/settings` -> `presets`) supplies the URL, the model,
- * its width and its markers together, and choosing a model is enough to get
- * all four right.
- *
- * `dim` is still shown and still editable: the catalogue's value is what the
- * model publishes, but the endpoint is the authority and a wrong width does
- * not degrade an index, it corrupts one.
- */
-const settings = {
-  root: null,
-  data: null,          // the last GET /api/settings response
-  section: 'embed',    // which section of the left nav is open
-  backendId: null,     // which tab is open
-  form: null,          // {model, url, dim, timeout, key} — the edited values
-  busy: false,
-  errorText: null,
-  note: null,
-  keyTouched: false,   // the key field was typed into; otherwise leave stored
-  autostart: null,     // GET /api/autostart — its own request, its own failure
-  autostartWant: null, // the selected state, null when it matches the machine
-  autostartError: null,
-  embed: null,         // GET /api/embed/state — what the backend holds now
-  embedError: null,
-  embedBusy: false,    // an unload/load is in flight
-  maintenance: null,  // GET /api/doctor — loaded only when this section opens
-  maintenanceBusy: false,
-  maintenanceError: null,
-  cleanupBusy: false,
-  cleanupConfirming: false,
-  cleanupNote: null,
-};
+const bankMenu = { root: null, bank: null };
 
-/**
- * The sections down the left, in order.
- *
- * A table rather than a chain of ifs so that adding one is a line here plus a
- * render function — the nav, the routing and the footer all read from this,
- * and there is no fourth place to forget.
- *
- * `submit` is both the footer's Save handler and the answer to whether there
- * is a Save button at all. A section that changes machine state gets one and
- * applies nothing until it is pressed — including the autostart control,
- * which could just as easily have acted on click. One screen with two habits
- * would make every future control something you have to remember the rules
- * for; a section that only reports (`submit: null`) shows no button.
- */
-const SETTINGS_SECTIONS = [
-  { id: 'embed', label: 'Модель ембедингу', render: renderEmbedSection, submit: submitSettings },
-  { id: 'service', label: 'Служба', render: renderServiceSection, submit: submitService },
-  { id: 'maint', label: 'Обслуговування', render: renderMaintSection, submit: null },
-];
-
-function settingsSection(id) {
-  return SETTINGS_SECTIONS.find((s) => s.id === id) || SETTINGS_SECTIONS[0];
-}
-
-/** The catalogue entry for a backend id, or null. */
-function backendPreset(id) {
-  const list = (settings.data && settings.data.presets) || [];
-  return list.find((b) => b.id === id) || null;
-}
-
-/** The catalogue entry for a model name inside a backend, or null. */
-function modelPreset(backend, name) {
-  if (!backend) return null;
-  return (backend.models || []).find((m) => m.name === name) || null;
-}
-
-function settingValue(key) {
-  const box = settings.data && settings.data.settings;
-  return box && box[key] ? box[key] : null;
-}
-
-/**
- * Which backend the stored settings correspond to.
- *
- * `provider` alone does not answer it: `ollama` and `openai` are both the
- * `api` provider, and what tells them apart is the URL. Matching on the URL
- * keeps a configured machine opening on the tab it actually uses, and falls
- * back to the first `api` backend when the URL is one we do not know — the
- * fields are all still editable there, so an unlisted endpoint is usable,
- * just not pre-filled.
- */
-function backendForSettings() {
-  const provider = (settingValue('provider') || {}).value || 'local';
-  const list = (settings.data && settings.data.presets) || [];
-  if (provider === 'local') return 'local';
-  const url = ((settingValue('api.url') || {}).value || '').trim();
-  const match = list.find((b) => b.provider === 'api' && b.url && b.url === url);
-  if (match) return match.id;
-  const anyApi = list.find((b) => b.provider === 'api');
-  return anyApi ? anyApi.id : 'local';
-}
-
-function buildSettings() {
-  settings.body = el('div', { className: 'set-body' });
-  settings.nav = el('div', { className: 'set-nav' });
-  settings.save = el('button', {
-    className: 'btn btn-primary',
-    text: 'Зберегти',
-    // Routed through the section table rather than bound to one handler: the
-    // button belongs to the screen, but what it saves belongs to whatever is
-    // open in it.
-    on: { click: () => {
-      const section = settingsSection(settings.section);
-      if (section.submit) section.submit();
-    } },
+function buildBankMenu() {
+  // `bankMenu.bank` is read at click time, not captured when the menu is
+  // built: one menu serves every card, and which bank it belongs to is
+  // whatever `openBankMenu` last pointed it at.
+  const item = (opts) => el('button', {
+    className: 'menu-item' + (opts.danger ? ' is-danger' : ''),
+    text: opts.text,
+    title: opts.title,
+    // The state entries are a choice among three, not three commands, so they
+    // announce as radios and carry `aria-checked` (set in `openBankMenu`).
+    attrs: { role: opts.role || 'menuitem' },
+    on: {
+      click: () => {
+        const bank = bankMenu.bank;
+        closeBankMenu();
+        if (bank) opts.run(bank);
+      },
+    },
   });
 
-  settings.root = el('div', { className: 'screen', attrs: { hidden: '' } }, [
-    el('div', { className: 'screen-head' }, [
-      el('h1', { text: 'Налаштування машини' }),
+  bankMenu.root = el('div', {
+    className: 'menu',
+    attrs: { hidden: '', role: 'menu' },
+    on: { click: (ev) => ev.stopPropagation() },
+  }, [
+    item({
+      text: 'Синхронізація індексу',
+      title: 'Переіндексує лише файли, що змінилися, і знімає з індексу видалені',
+      run: (bank) => reindex(bank, { full: false }),
+    }),
+    item({
+      text: 'Повний реіндекс',
+      title: 'Стирає індекс і збирає його заново — довго, пропорційно розміру банку',
+      run: (bank) => reindex(bank, { full: true }),
+    }),
+    el('div', { className: 'menu-sep' }),
+    item({
+      text: 'Доступ MCP',
+      title: 'Токен цього банку і готовий фрагмент конфігурації для проєкту',
+      run: (bank) => openTokenPanel(bank),
+    }),
+    el('div', { className: 'menu-sep' }),
+    el('div', { className: 'menu-label', text: 'Стан' }),
+    // Not a submenu and not a dialog: three states are few enough to show, and
+    // the current one has to be visible at the moment of choosing — otherwise
+    // "freeze" on an already-frozen bank looks like it did nothing. The marks
+    // are refreshed in `openBankMenu`, because one menu serves every card.
+    ...['enabled', 'frozen', 'disabled'].map((value) => {
+      const button = item({
+        text: BANK_STATE_LABEL[value],
+        title: BANK_STATE_NOTE[value],
+        role: 'menuitemradio',
+        run: (bank) => setBankState(bank, value),
+      });
+      button.dataset.state = value;
+      return button;
+    }),
+    el('div', { className: 'menu-sep' }),
+    item({
+      text: 'Прибрати банк',
+      title: 'Зняти банк з реєстру; .md не чіпаються',
+      danger: true,
+      run: (bank) => openRemoval(bank),
+    }),
+  ]);
+  document.body.appendChild(bankMenu.root);
+
+  document.addEventListener('click', () => closeBankMenu());
+  document.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Escape') closeBankMenu();
+  });
+  // A menu pinned to page coordinates does not follow its button. Rather
+  // than track the anchor, close: a menu that has drifted off its trigger is
+  // a menu whose next click lands on whatever moved underneath it.
+  window.addEventListener('scroll', () => closeBankMenu(), true);
+  window.addEventListener('resize', () => closeBankMenu());
+}
+
+function openBankMenu(anchor, bank) {
+  bankMenu.bank = bank;
+  // The state marks belong to the bank being opened, not to the one the menu
+  // last served — one menu, many cards.
+  const current = bankState(bank);
+  for (const button of bankMenu.root.querySelectorAll('[data-state]')) {
+    const active = button.dataset.state === current;
+    button.classList.toggle('is-current', active);
+    button.setAttribute('aria-checked', active ? 'true' : 'false');
+  }
+  // Laid out before it is shown: a `position: fixed` box with no coordinates
+  // paints wherever it happens to flow, so measuring it visible costs one
+  // frame of the menu sitting in the corner of the page.
+  bankMenu.root.style.visibility = 'hidden';
+  bankMenu.root.hidden = false;
+  const box = anchor.getBoundingClientRect();
+  const menu = bankMenu.root.getBoundingClientRect();
+  // Flip up, and pull left, when the default placement would leave the
+  // viewport. The bank column is at the left edge and the cards run to the
+  // bottom of a long list, so both edges are reachable in normal use.
+  const top = (box.bottom + menu.height > window.innerHeight)
+    ? box.top - menu.height - 4
+    : box.bottom + 4;
+  // Right edges aligned, because the button sits at the right end of the
+  // title row: hanging the menu off its left edge would throw it across the
+  // pane boundary into the file tree for no reason.
+  const left = Math.max(4, Math.min(box.right - menu.width,
+                                    window.innerWidth - menu.width - 4));
+  bankMenu.root.style.top = Math.max(4, top) + 'px';
+  bankMenu.root.style.left = left + 'px';
+  bankMenu.root.style.visibility = 'visible';
+}
+
+function closeBankMenu() {
+  if (!bankMenu.root || bankMenu.root.hidden) return;
+  bankMenu.root.hidden = true;
+  bankMenu.bank = null;
+}
+
+// ---------------------------------------------------------------------------
+// removing a bank (contract 9.5: DELETE /api/banks/{id})
+//
+// The only irreversible action in the cabinet, and what makes it irreversible
+// is not the index — that rebuilds — but the token. Bank ids are derived from
+// the root and come back identical on re-registration; tokens are minted, so a
+// removed bank cannot be restored to the projects that address it. That is why
+// this asks for the name to be typed, and why the dialog leads with the token
+// rather than with megabytes.
+// ---------------------------------------------------------------------------
+
+const removal = {
+  root: null, box: null, body: null, submit: null,
+  bank: null, dropIndex: true, typed: '', busy: false, errorText: null,
+};
+
+function buildRemoval() {
+  removal.body = el('div', { className: 'modal-body' });
+  removal.submit = el('button', {
+    className: 'btn btn-danger',
+    text: 'Прибрати',
+    on: { click: () => submitRemoval() },
+  });
+
+  removal.box = el('div', {
+    className: 'modal-box',
+    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Прибрати банк' },
+    on: { click: (ev) => ev.stopPropagation() },
+  }, [
+    el('div', { className: 'modal-head' }, [
+      el('h2', { text: 'Прибрати банк' }),
       el('button', {
         className: 'btn btn-ghost',
         text: '✕',
         title: 'Закрити (Esc)',
-        on: { click: () => closeSettings() },
+        on: { click: () => closeRemoval() },
       }),
     ]),
-    el('div', { className: 'screen-main' }, [
-      settings.nav,
-      el('div', { className: 'set-pane' }, [settings.body]),
-    ]),
-    el('div', { className: 'screen-foot' }, [
-      el('button', { className: 'btn', text: 'Закрити', on: { click: () => closeSettings() } }),
-      settings.save,
+    removal.body,
+    el('div', { className: 'modal-foot' }, [
+      el('button', { className: 'btn', text: 'Скасувати', on: { click: () => closeRemoval() } }),
+      removal.submit,
     ]),
   ]);
-  document.body.appendChild(settings.root);
+
+  removal.root = el('div', {
+    className: 'modal',
+    attrs: { hidden: '' },
+    on: { click: () => closeRemoval() },
+  }, [removal.box]);
+  document.body.appendChild(removal.root);
 
   document.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Escape' && !settings.root.hidden) closeSettings();
+    if (ev.key === 'Escape' && !removal.root.hidden) closeRemoval();
   });
 }
 
-/**
- * Move to another section.
- *
- * The save verdict is dropped on the way out: «Збережено» belongs to the form
- * that produced it, and carrying it to a section with no form would make it
- * read as a report about whatever is on screen now.
- */
-function chooseSettingsSection(id) {
-  if (settings.section === id) return;
-  settings.section = id;
-  settings.errorText = null;
-  settings.note = null;
-  // Same rule for the autostart failure: it describes an attempt made in the
-  // section being left, and leaving it to reappear on the way back would
-  // report a stale problem as a current one.
-  settings.autostartError = null;
-  // The unsaved selection goes too. Leaving is not saving, and a draft that
-  // survived the trip would show the control on «Вимкнено» for a machine
-  // whose autostart is on — the same lie as an unsaved edit that looks stored.
-  settings.autostartWant = null;
-  settings.maintenanceError = null;
-  settings.cleanupConfirming = false;
-  settings.cleanupNote = null;
-  renderSettings();
-  if (id === 'maint' && !settings.maintenance && !settings.maintenanceBusy) {
-    refreshMaintenance();
-  }
+function openRemoval(bank) {
+  removal.bank = bank;
+  removal.dropIndex = true;
+  removal.typed = '';
+  removal.busy = false;
+  removal.errorText = null;
+  removal.root.hidden = false;
+  renderRemoval();
 }
 
-function renderSettingsNav() {
-  clear(settings.nav);
-  for (const section of SETTINGS_SECTIONS) {
-    settings.nav.appendChild(el('button', {
-      className: 'set-nav-item' + (section.id === settings.section ? ' is-active' : ''),
-      text: section.label,
-      on: { click: () => chooseSettingsSection(section.id) },
-    }));
-  }
+function closeRemoval() {
+  if (removal.busy) return;      // a request is in flight; let it land
+  removal.root.hidden = true;
+  removal.bank = null;
+  removal.typed = '';
 }
 
-async function openSettings() {
-  settings.root.hidden = false;
-  settings.errorText = null;
-  settings.note = null;
-  settings.busy = true;
-  renderSettings();
-  try {
-    settings.data = await api('/api/settings');
-    settings.backendId = backendForSettings();
-    seedSettingsForm();
-    // The service section reports uptime and pid out of `state.service`, which
-    // is only refreshed on events — opening this screen during a quiet spell
-    // would otherwise show numbers from whenever the last one happened.
-    await loadStatus().catch(() => {});
-    // Its own request, and its own failure: costing a subprocess it is not
-    // part of `/api/status`, and a machine where the query fails must still
-    // get a working backend form. Caught rather than awaited into the outer
-    // try for exactly that reason.
-    settings.autostartError = null;
-    try {
-      settings.autostart = await api('/api/autostart');
-    } catch (err) {
-      if (isAuthError(err)) throw err;
-      settings.autostart = null;
-      settings.autostartError = err.message;
-    }
-    // Same shape and the same reason as autostart: asking can cost a round
-    // trip to Ollama, so it is fetched when this screen opens rather than on
-    // every indexing event — and its failure must not cost the whole form.
-    await refreshEmbedState();
-  } catch (err) {
-    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
-    settings.errorText = err.message;
-  } finally {
-    settings.busy = false;
-    renderSettings();
-    if (settings.section === 'maint' && !settings.maintenanceBusy) {
-      refreshMaintenance();
-    }
-  }
-}
+function renderRemoval() {
+  const bank = removal.bank;
+  if (!bank) return;
+  clear(removal.body);
 
-function closeSettings() {
-  if (settings.busy) return;      // a save is in flight; let it land
-  settings.root.hidden = true;
-  // The key is a credential: do not leave it in memory behind a closed screen.
-  if (settings.form) settings.form.key = '';
-  settings.keyTouched = false;
-  // Unsaved selections do not survive the screen either — reopening must show
-  // the machine, not what somebody nearly did to it last time.
-  settings.autostartWant = null;
-  settings.cleanupConfirming = false;
-  settings.cleanupNote = null;
-}
-
-/** Fill the form from what is stored, for the currently selected backend. */
-function seedSettingsForm() {
-  const backend = backendPreset(settings.backendId);
-  const stored = {
-    url: ((settingValue('api.url') || {}).value || ''),
-    model: ((settingValue('api.model') || {}).value || ''),
-    dim: ((settingValue('api.dim') || {}).value || 0),
-    timeout: ((settingValue('api.timeout') || {}).value || 60),
-  };
-  // Only carry the stored values across when this tab IS the stored backend.
-  // Switching to OpenAI must not inherit Ollama's URL — that would produce a
-  // config that looks deliberate and cannot work.
-  const isStored = settings.backendId === backendForSettings();
-  const known = backend && (backend.models || [])[0];
-  const model = (isStored && stored.model) || (known ? known.name : '');
-  const preset = modelPreset(backend, model);
-  settings.form = {
-    model: model,
-    url: (isStored && stored.url) || (backend ? backend.url : ''),
-    dim: (isStored && stored.dim) || (preset ? preset.dim : 0),
-    timeout: (isStored && stored.timeout) || 60,
-    key: '',
-  };
-  settings.keyTouched = false;
-}
-
-/**
- * Drop the last save's verdict as soon as the form is edited.
- *
- * «Вкажіть адресу» describes the state at the moment Save was pressed. Leaving
- * it under a field the user has since fixed makes the page report a problem
- * that is no longer there — and the same goes for «Збережено», which would
- * otherwise sit above unsaved edits and claim they are stored.
- *
- * The nodes are removed rather than re-rendered: this runs on every keystroke,
- * and rebuilding the form would take the focus out of the input mid-word.
- */
-function clearSettingsMessages() {
-  if (!settings.errorText && !settings.note) return;
-  settings.errorText = null;
-  settings.note = null;
-  for (const node of settings.body.querySelectorAll('.modal-error, .tok-ok')) {
-    node.remove();
-  }
-}
-
-/** A model was chosen: adopt its width, since that is what it publishes. */
-function chooseModel(name) {
-  const backend = backendPreset(settings.backendId);
-  const preset = modelPreset(backend, name);
-  settings.form.model = name;
-  if (preset) settings.form.dim = preset.dim;
-  settings.errorText = null;
-  settings.note = null;
-  renderSettings();
-}
-
-function chooseBackend(id) {
-  if (settings.backendId === id) return;
-  settings.backendId = id;
-  settings.errorText = null;
-  settings.note = null;
-  seedSettingsForm();
-  renderSettings();
-}
-
-/** A labelled row: caption, control, and the note under it. */
-function setField(label, control, note) {
-  return el('div', { className: 'set-field' }, [
-    el('label', { className: 'set-label', text: label }),
-    control,
-    note ? el('p', { className: 'set-note', text: note }) : null,
-  ]);
-}
-
-/**
- * The "this is overridden by an environment variable" line.
- *
- * Not decoration: precedence is env > file, so a value saved here can be
- * completely inert. A form that stayed silent about it would accept a click,
- * report success and change nothing observable.
- */
-function overrideNote(key) {
-  const item = settingValue(key);
-  if (!item || !item.overridden) return null;
-  return el('p', {
-    className: 'set-override',
-    text: 'перекрито змінною ' + item.env_var + ' — збережене тут не подіє, ' +
-          'доки вона виставлена',
-  });
-}
-
-function renderSettings() {
-  const body = settings.body;
-  clear(body);
-  renderSettingsNav();
-
-  const section = settingsSection(settings.section);
-  // Only a section that can change something gets a Save button. Hidden
-  // rather than disabled: a permanently greyed-out control reads as something
-  // that ought to work and does not.
-  settings.save.hidden = !section.submit;
-
-  if (settings.busy && !settings.data) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Завантаження…' }));
-    return;
-  }
-  if (!settings.data) {
-    body.appendChild(el('p', { className: 'modal-error', text: settings.errorText || '—' }));
-    return;
-  }
-
-  section.render(body);
-}
-
-/** Backend, model, endpoint — the settings that decide what produces vectors. */
-function renderEmbedSection(body) {
-  const presetList = settings.data.presets || [];
-  const backend = backendPreset(settings.backendId);
-
-  // -- backend tabs ---------------------------------------------------
-  const tabs = el('div', { className: 'segmented set-tabs' });
-  for (const item of presetList) {
-    tabs.appendChild(el('button', {
-      className: 'seg' + (item.id === settings.backendId ? ' is-active' : ''),
-      text: item.label,
-      on: { click: () => chooseBackend(item.id) },
-    }));
-  }
-  body.appendChild(setField('Бекенд', tabs, backend ? backend.note : null));
-
-  const providerOverride = overrideNote('provider');
-  if (providerOverride) body.appendChild(providerOverride);
-
-  if (!backend) { renderSettingsMessages(); return; }
-
-  // -- local needs nothing --------------------------------------------
-  if (backend.provider === 'local') {
-    const model = (backend.models || [])[0];
-    body.appendChild(el('p', { className: 'set-lead' }, [
-      document.createTextNode('Вектори рахує резидент на цій машині — '),
-      el('code', { text: model ? model.label : '—' }),
-      document.createTextNode(model ? ' (' + model.dim + ' вимірів). ' : '. '),
-      document.createTextNode('Нічого налаштовувати не треба; жоден байт памʼяті ' +
-                              'не залишає машину.'),
-    ]));
-    // The resident is what holds the most (~1.5 GB), so the one backend with
-    // nothing to configure is the one where this block matters most.
-    if (settings.backendId === backendForSettings()) renderEmbedMemory(body);
-    // Switching TO local is a save like any other, and this branch returns
-    // early — without this the one backend that needs no configuration was
-    // also the one whose «Збережено» never appeared, so the click read as
-    // ignored while the file on disk had already changed.
-    renderSettingsMessages();
-    return;
-  }
-
-  // -- model ------------------------------------------------------------
-  const select = el('select', { className: 'set-select' });
-  for (const model of backend.models || []) {
-    const option = el('option', { text: model.label, attrs: { value: model.name } });
-    if (model.name === settings.form.model) option.selected = true;
-    select.appendChild(option);
-  }
-  // An endpoint may serve a model the catalogue does not list; keep it
-  // selectable rather than silently rewriting what the user configured.
-  if (settings.form.model && !modelPreset(backend, settings.form.model)) {
-    const option = el('option', {
-      text: settings.form.model + ' (не з довідника)',
-      attrs: { value: settings.form.model },
-    });
-    option.selected = true;
-    select.appendChild(option);
-  }
-  select.addEventListener('change', (ev) => chooseModel(ev.target.value));
-
-  const chosen = modelPreset(backend, settings.form.model);
-  body.appendChild(setField('Модель', select, chosen ? chosen.note : null));
-  if (chosen && chosen.prefixed) {
-    // Said out loud because it is the one property of a model that is
-    // invisible in every other way: markers change every vector, and getting
-    // them wrong shows up only as quietly worse search.
-    body.appendChild(el('p', {
-      className: 'set-note',
-      text: 'ця модель тренована з маркерами — mnemo підставить їх сама',
-    }));
-  }
-  const modelOverride = overrideNote('api.model');
-  if (modelOverride) body.appendChild(modelOverride);
-
-  // -- endpoint ---------------------------------------------------------
-  const url = el('input', {
-    className: 'fs-input set-wide',
-    attrs: { type: 'text', spellcheck: 'false', placeholder: 'http://…' },
-  });
-  url.value = settings.form.url;
-  url.addEventListener('input', (ev) => {
-    settings.form.url = ev.target.value;
-    clearSettingsMessages();
-  });
-  body.appendChild(setField('Адреса', url, null));
-  const urlOverride = overrideNote('api.url');
-  if (urlOverride) body.appendChild(urlOverride);
-
-  // -- dim + timeout ----------------------------------------------------
-  const dim = el('input', {
-    className: 'fs-input set-narrow',
-    attrs: { type: 'number', min: '1', step: '1' },
-  });
-  dim.value = settings.form.dim || '';
-  dim.addEventListener('input', (ev) => {
-    settings.form.dim = ev.target.value;
-    clearSettingsMessages();
-  });
-
-  const timeout = el('input', {
-    className: 'fs-input set-narrow',
-    attrs: { type: 'number', min: '1', step: '1' },
-  });
-  timeout.value = settings.form.timeout || '';
-  timeout.addEventListener('input', (ev) => {
-    settings.form.timeout = ev.target.value;
-    clearSettingsMessages();
-  });
-
-  body.appendChild(el('div', { className: 'set-row' }, [
-    setField('Вимірів', dim, null),
-    setField('Таймаут, с', timeout, null),
-  ]));
-  body.appendChild(el('p', {
-    className: 'set-note',
-    text: 'Ширина підставлена з довідника, але останнє слово за самим ' +
-          'ендпоінтом: mnemo звіряє її з першим отриманим вектором і ' +
-          'відмовиться писати індекс, якщо вони розійшлися.',
-  }));
-  // Every editable field needs its own override line, not just the obvious
-  // ones: an environment variable on `dim` or `timeout` makes that input inert
-  // exactly as much as one on the URL does.
-  const dimOverride = overrideNote('api.dim');
-  if (dimOverride) body.appendChild(dimOverride);
-  const timeoutOverride = overrideNote('api.timeout');
-  if (timeoutOverride) body.appendChild(timeoutOverride);
-
-  // -- key --------------------------------------------------------------
-  if (backend.needs_key) {
-    const stored = (settingValue('api.key_set') || {}).value;
-    const key = el('input', {
-      className: 'fs-input set-wide',
-      attrs: {
-        type: 'password', spellcheck: 'false', autocomplete: 'off',
-        placeholder: stored ? 'збережений — введіть новий, щоб замінити' : 'sk-…',
-      },
-    });
-    key.value = settings.form.key;
-    key.addEventListener('input', (ev) => {
-      settings.form.key = ev.target.value;
-      settings.keyTouched = true;
-    });
-    body.appendChild(setField('Ключ API', key,
-      'Зберігається у settings.json на цій машині. Назад не показується — ' +
-      'сторінка, яка друкує секрет, друкує його і в скриншот.'));
-    const keyOverride = overrideNote('api.key_set');
-    if (keyOverride) body.appendChild(keyOverride);
-  }
-
-  // -- memory ------------------------------------------------------------
-  // Only for the backend that is actually in use. `settings.embed` describes
-  // the machine as configured, so showing it under a tab the user is merely
-  // *considering* would report another backend's memory as this one's.
-  if (settings.backendId === backendForSettings()) renderEmbedMemory(body);
-
-  // -- consequences -----------------------------------------------------
-  body.appendChild(el('p', { className: 'set-warn' }, [
-    document.createTextNode('Зміна моделі або ширини — це новий ключ перебудови. ' +
-      'Конфігурація діє одразу для нової роботи; старі індекси отримають ' +
-      'REBUILD PENDING і пошук по них відмовить, доки їх не перегенерувати. ' +
-      'Спершу перевірте ендпоінт кнопкою вище.'),
+  removal.body.appendChild(el('p', { className: 'rm-lead' }, [
+    document.createTextNode('Банк '),
+    el('strong', { text: bank.name }),
+    document.createTextNode(' перестане існувати для цієї машини.'),
   ]));
 
-  renderSettingsMessages();
-}
-
-// -------------------------------------------------------- backend memory
-//
-// «Вивантажити» is NOT an off switch, and the copy has to keep saying so:
-// the model comes back on the next search or indexed file, paying ~7-8 s
-// once. A backend that is off is not a mode, it is a fault — what this
-// offers is the memory back on purpose, which is the trade the engine
-// deliberately left to a command instead of an idle timer.
-
-const HOLD_LABEL = {
-  loaded: 'у памʼяті',
-  unloaded: 'не завантажена',
-  'n/a': 'нічого не тримає',
-  unknown: 'невідомо',
-};
-
-async function refreshEmbedState() {
-  settings.embedError = null;
-  try {
-    settings.embed = await api('/api/embed/state');
-  } catch (err) {
-    if (isAuthError(err)) throw err;
-    settings.embed = null;
-    settings.embedError = err.message;
-  }
-}
-
-/**
- * The memory block, appended under the backend form.
- *
- * Deliberately NOT gated behind «Зберегти»: this section's rule is that
- * nothing applies on click — but that rule is about *settings*, values that
- * describe the machine and are saved. Unloading is not a setting, it is an
- * action with an immediate effect and no stored form, the same category as
- * a bank's reindex. Putting it behind Save would mean saving to make it
- * happen and then having nothing left to un-save.
- */
-function renderEmbedMemory(body) {
-  const info = settings.embed;
-  const box = el('div', { className: 'set-mem' });
-
-  if (settings.embedError) {
-    box.appendChild(el('p', { className: 'set-note', text: settings.embedError }));
-    body.appendChild(setField('Памʼять', box, null));
-    return;
-  }
-  if (!info) {
-    box.appendChild(el('p', { className: 'empty-hint', text: 'Стан ще не отримано.' }));
-    body.appendChild(setField('Памʼять', box, null));
-    return;
-  }
-
-  const held = info.holding;
-  const line = el('div', { className: 'set-mem-line' }, [
-    el('span', {
-      // `badge-empty`, never the red `badge-off`: an unloaded model is a
-      // normal state that costs one wake-up, not a fault — the same reason
-      // `frozen` got its own cold colour instead of the error one.
-      className: 'badge ' + (held === 'loaded' ? 'badge-ready' : 'badge-empty'),
-      text: HOLD_LABEL[held] || String(held),
+  removal.body.appendChild(el('dl', { className: 'rm-effects' }, [
+    el('dt', { className: 'is-loss', text: 'Зникає назавжди' }),
+    el('dd', {
+      text: 'Реєстрація банку та його токен. Токен видається випадково і не ' +
+            'відтворюється: кожен .mcp.json, який ним підключається, ' +
+            'перестане працювати, і повернути той самий токен неможливо.',
     }),
-    el('span', { className: 'set-mem-what', text: info.model || '—' }),
-  ]);
-  box.appendChild(line);
-
-  const buttons = el('div', { className: 'set-mem-actions' });
-  if (held === 'loaded') {
-    buttons.appendChild(el('button', {
-      className: 'btn',
-      text: 'Вивантажити',
-      attrs: settings.embedBusy ? { disabled: '' } : {},
-      on: { click: () => embedAction('unload') },
-    }));
-  }
-  if (['unloaded', 'loaded', 'n/a', 'unknown'].includes(held)) {
-    buttons.appendChild(el('button', {
-      className: 'btn',
-      // The same probe has three useful names. A cold local/Ollama backend is
-      // loaded; one already holding the model is checked; a remote endpoint
-      // never holds our memory at all, so only its answer can be verified.
-      text: held === 'unloaded'
-        ? 'Завантажити'
-        : (held === 'n/a' || held === 'unknown')
-          ? 'Перевірити ендпоінт'
-          : 'Перевірити',
-      attrs: settings.embedBusy ? { disabled: '' } : {},
-      on: { click: () => embedAction('load') },
-    }));
-  }
-  if (buttons.childNodes.length) box.appendChild(buttons);
-
-  const notes = [];
-  if (held === 'n/a') {
-    // The cabinet's own wording, not the backend's `detail`. A steady state
-    // that every client renders the same way belongs to the interface — the
-    // API stays English by convention, and echoing it here would put one
-    // English line in the middle of a Ukrainian screen.
-    notes.push('Цей ендпоінт не тримає нічого на цій машині — модель живе ' +
-               'на боці постачальника, тож звільняти нічого.');
-    notes.push('«Перевірити ендпоінт» зробить один embedding request. Для ' +
-               'тарифікованого API це може бути платний виклик.');
-  }
-  if (held === 'loaded' && info.wake_s) {
-    notes.push('Вивантаження звільняє памʼять зараз; наступний пошук або ' +
-               'збережений файл підніме модель назад за ~' +
-               Math.round(info.wake_s) + ' с. Це не вимикач.');
-  }
-  if (info.expires_at) notes.push('Бекенд тримає її до ' + info.expires_at + '.');
-  if (info.others_held) {
-    // A count, never the names: the other models are somebody else's, and
-    // this cabinet unloads ours alone.
-    notes.push('Там же ще ' + info.others_held + ' модел(і/ей) — не наші, ' +
-               'їх не чіпаємо.');
-  }
-  if (info.probe_dim) notes.push('Пробний вектор: ' + info.probe_dim + ' вимірів.');
-  if (info.detail) notes.push(info.detail);
-  for (const text of notes) {
-    box.appendChild(el('p', { className: 'set-note', text: text }));
-  }
-
-  body.appendChild(setField('Памʼять', box, null));
-}
-
-async function embedAction(what) {
-  settings.embedBusy = true;
-  settings.embedError = null;
-  settings.note = null;
-  renderSettings();
-  try {
-    settings.embed = await api('/api/embed/' + what, { method: 'POST' });
-    if (what === 'unload') {
-      settings.note = 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.';
-    } else if (settings.embed.holding === 'n/a') {
-      settings.note = 'Ендпоінт відповів' + (settings.embed.probe_dim
-        ? ' — пробний вектор має ' + settings.embed.probe_dim + ' вимірів.'
-        : '.');
-    } else {
-      settings.note = 'Бекенд відповів — модель у памʼяті.';
-    }
-  } catch (err) {
-    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
-    settings.embedError = err.message;
-  } finally {
-    settings.embedBusy = false;
-    renderSettings();
-  }
-}
-
-/** A read-only `caption — value` line, for the sections that report rather
- *  than edit. */
-function setStat(label, value, mono) {
-  return el('div', { className: 'set-stat' }, [
-    el('span', { className: 'set-stat-label', text: label }),
-    el('span', {
-      className: 'set-stat-value' + (mono ? ' is-mono' : ''),
-      text: value == null || value === '' ? '—' : String(value),
-    }),
-  ]);
-}
-
-/** Seconds as `2 год 14 хв` / `3 хв 05 с` / `47 с`. */
-function humanUptime(seconds) {
-  const total = Math.max(0, Math.floor(Number(seconds) || 0));
-  const h = Math.floor(total / 3600);
-  const m = Math.floor((total % 3600) / 60);
-  const s = total % 60;
-  if (h) return h + ' год ' + m + ' хв';
-  if (m) return m + ' хв ' + String(s).padStart(2, '0') + ' с';
-  return s + ' с';
-}
-
-/**
- * What is running, and where.
- *
- * Reports only. Stopping and restarting the backend are deliberately absent:
- * this page is served BY that process, so a stop button would kill the page
- * that offers it and leave no way back except a terminal — the exact
- * "press here, then finish it in the shell" split the cabinet is supposed to
- * remove, only worse for being a trap. Restart is the same problem wearing a
- * friendlier label: something has to outlive the process to start its
- * successor, and handing the port over is a race. So the honest thing is to
- * show the state and name the command.
- */
-function renderServiceSection(body) {
-  const svc = state.service;
-  if (!svc) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Стан служби ще не отримано.' }));
-    return;
-  }
-
-  body.appendChild(el('p', {
-    className: 'set-lead',
-    text: 'Бекенд, який тримає реєстр, індекс, вотчер і цю сторінку.',
-  }));
-
-  // What you can change comes first; what merely reports sits under it. The
-  // section used to open with five read-only rows, which put the one control
-  // on the page below a wall of facts nobody came here to read.
-  renderAutostart(body);
-
-  const box = el('div', { className: 'set-stats' }, [
-    setStat('Версія', svc.version, true),
-    setStat('PID', svc.pid, true),
-    setStat('Адреса', (svc.host || '—') + ':' + (svc.port != null ? svc.port : '—'), true),
-    setStat('Працює', humanUptime(svc.uptime_s)),
-    setStat('Черга пріоритетів', svc.priority_enabled ? 'увімкнена' : 'вимкнена'),
-  ]);
-  body.appendChild(setField('Стан', box, null));
-
-  body.appendChild(el('p', {
-    className: 'set-warn',
-    text: 'Зупинку й перезапуск робить лише команда — mnemo service ' +
-          'stop | restart. Кнопка тут обірвала б сторінку, яка нею ж і ' +
-          'подається, а підняти службу назад мусить хтось поза нею.',
-  }));
-
-  renderSettingsMessages();
-}
-
-/**
- * Start at logon — a `.segmented` pair, the control this cabinet already uses
- * for a two-state choice.
- *
- * Unlike stopping the service this is safe to offer: registering a scheduled
- * task changes what happens at the NEXT logon and touches nothing running, so
- * the page it is served from survives the change either way.
- *
- * Clicking selects, it does not apply — «Зберегти» does, exactly as in the
- * backend form. One screen with two habits (this control acts at once, that
- * one waits for the button) would make every future control a thing you have
- * to remember the rules for. The installer switches autostart on by default
- * (`-NoAutostart` opts out), so a normally-installed machine opens this
- * already on: the control reports a state that exists rather than proposing
- * one.
- */
-function renderAutostart(body) {
-  const auto = settings.autostart;
-  if (!auto) {
-    body.appendChild(setField('Автозапуск', el('p', {
-      className: 'set-note',
-      text: settings.autostartError || 'стан не отримано',
-    }), null));
-    return;
-  }
-  if (!auto.supported) {
-    body.appendChild(setField('Автозапуск', el('p', {
-      className: 'set-note',
-      text: 'на цій системі не підтримується',
-    }), null));
-    return;
-  }
-
-  // `.segmented`, the cabinet's own two-state control — the same one the
-  // topbar uses for Темна│Світла and the journal for Запити│Індексація. A
-  // native checkbox paints itself in the browser's accent colour and ignores
-  // the theme entirely, which is exactly the mismatch this component exists
-  // to avoid.
-  const chosen = autostartWanted();
-  const seg = el('div', { className: 'segmented set-toggle' });
-  for (const option of [{ on: true, label: 'Увімкнено' }, { on: false, label: 'Вимкнено' }]) {
-    seg.appendChild(el('button', {
-      className: 'seg' + (chosen === option.on ? ' is-active' : ''),
-      text: option.label,
-      attrs: settings.busy ? { disabled: '' } : {},
-      on: { click: () => chooseAutostart(option.on) },
-    }));
-  }
-
-  body.appendChild(setField('Запускати службу при вході в систему', seg,
-    'Реєструється як ' + (auto.mechanism || '—') +
-    (auto.name ? ' — «' + auto.name + '»' : '') +
-    '. Діє з наступного входу; те, що працює зараз, не зачіпає.'));
-
-  // Said plainly, because the control now shows an intention rather than the
-  // machine: without this line a page left open on «Вимкнено» reads as a
-  // machine with autostart off.
-  if (chosen !== !!auto.enabled) {
-    body.appendChild(el('p', {
-      className: 'set-override',
-      text: 'не збережено — зараз ' + (auto.enabled ? 'увімкнено' : 'вимкнено') +
-            '; натисніть «Зберегти», щоб застосувати',
-    }));
-  }
-}
-
-/** The autostart state the form is showing: the edit if there is one, else
- *  what the machine reports. */
-function autostartWanted() {
-  if (settings.autostartWant != null) return settings.autostartWant;
-  return !!(settings.autostart && settings.autostart.enabled);
-}
-
-/** Select an autostart state. Nothing is registered until Save. */
-function chooseAutostart(want) {
-  if (settings.busy) return;
-  // Back to the stored value -> no pending edit at all, rather than an edit
-  // that happens to match. Otherwise Save would fire a request that changes
-  // nothing, and the "не збережено" line would need to guess.
-  settings.autostartWant =
-    (!!want === !!(settings.autostart && settings.autostart.enabled)) ? null : !!want;
-  settings.errorText = null;
-  settings.note = null;
-  renderSettings();
-}
-
-/**
- * Apply the selected autostart state, then adopt whatever the service reports.
- *
- * The click is never trusted as the new state: the POST returns the
- * registration as re-read, so a task the scheduler refused leaves the control
- * showing the machine instead of showing an intention as a fact.
- */
-async function submitService() {
-  if (settings.autostartWant == null) {
-    settings.note = 'Нічого не змінено.';
-    renderSettings();
-    return;
-  }
-  const want = settings.autostartWant;
-  settings.busy = true;
-  settings.save.disabled = true;
-  settings.errorText = null;
-  settings.note = null;
-  renderSettings();
-  try {
-    settings.autostart = await api('/api/autostart', {
-      method: 'POST', body: { enabled: want },
-    });
-    settings.autostartWant = null;
-    settings.note = settings.autostart.enabled
-      ? 'Збережено. Служба підніматиметься при вході в систему.'
-      : 'Збережено. Автозапуску більше немає — службу доведеться піднімати самому.';
-  } catch (err) {
-    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
-    settings.errorText = err.message;
-  } finally {
-    settings.busy = false;
-    settings.save.disabled = false;
-    renderSettings();
-  }
-}
-
-/** Fetch the structured report only when Maintenance is actually opened. */
-async function refreshMaintenance(options) {
-  if (settings.maintenanceBusy) return;
-  const keepNote = options && options.keepNote;
-  settings.maintenanceBusy = true;
-  settings.maintenanceError = null;
-  if (!keepNote) settings.cleanupNote = null;
-  if (settings.section === 'maint') renderSettings();
-  try {
-    settings.maintenance = await api('/api/doctor');
-  } catch (err) {
-    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
-    settings.maintenanceError = err.message;
-  } finally {
-    settings.maintenanceBusy = false;
-    if (settings.section === 'maint') renderSettings();
-  }
-}
-
-function maintItem(title, value, note, tone) {
-  return el('div', { className: 'maint-item' + (tone ? ' is-' + tone : '') }, [
-    el('div', { className: 'maint-item-line' }, [
-      el('strong', { text: title }),
-      value ? el('code', { text: value }) : null,
+    el('dt', { className: 'is-safe', text: 'Лишається недоторканим' }),
+    el('dd', null, [
+      document.createTextNode('Усі .md за шляхом '),
+      el('code', { text: bank.root }),
+      document.createTextNode('. Кабінет не видаляє вміст банку — тільки те, ' +
+                              'що з нього виведено.'),
     ]),
-    note ? el('p', { className: 'set-note', text: note }) : null,
-  ]);
-}
-
-/** Diagnostics and cleanup — the rare commands, kept off the main screen. */
-function renderMaintSection(body) {
-  const report = settings.maintenance;
-  body.appendChild(el('div', { className: 'maint-head' }, [
-    el('p', {
-      className: 'set-lead',
-      text: 'Ті самі перевірки, що друкує mnemo doctor; тут вони показані ' +
-            'структуровано, без парсингу CLI-тексту.',
-    }),
-    el('button', {
-      className: 'btn',
-      text: settings.maintenanceBusy ? 'Оновлюємо…' : 'Оновити діагностику',
-      attrs: settings.maintenanceBusy ? { disabled: '' } : {},
-      on: { click: () => refreshMaintenance() },
-    }),
   ]));
 
-  if (settings.maintenanceError) {
-    body.appendChild(el('p', { className: 'modal-error', text: settings.maintenanceError }));
-  }
-  if (!report) {
-    body.appendChild(el('p', {
-      className: 'empty-hint',
-      text: settings.maintenanceBusy ? 'Збираємо діагностику…' : 'Звіт ще не отримано.',
-    }));
-    return;
-  }
-
-  const engine = report.engine || {};
-  body.appendChild(setField('Рушій', el('div', { className: 'set-stats' }, [
-    setStat('Engine home', engine.home, true),
-    setStat('State dir', engine.state_dir, true),
-    setStat('Python', engine.python, true),
-  ]), null));
-
-  const provider = report.provider || {};
-  const model = report.model || {};
-  const vec = report.sqlite_vec || {};
-  const resident = report.resident || {};
-  const endpoint = report.endpoint || {};
-  const providerValue = provider.machine + ((provider.overrides || []).length
-    ? ' · overrides: ' + provider.overrides.join(', ')
-    : '');
-  const providerStats = [
-    setStat('Провайдер', providerValue, true),
-    setStat('Локальна модель', model.needed
-      ? (model.cached ? 'кеш повний' : 'НЕ ЗАВАНТАЖЕНА')
-      : (model.cached ? 'є, але не потрібна' : 'не потрібна')),
-    setStat('sqlite-vec', vec.ok ? 'ok' : 'НЕДОСТУПНИЙ'),
-    setStat('Резидент', resident.applicable
-      ? ((resident.up ? 'працює' : 'не завантажений') +
-         ' · ' + resident.host + ':' + resident.port + ' · машинний порт')
-      : 'n/a для цього провайдера'),
-  ];
-  if (endpoint.applicable) {
-    providerStats.push(setStat('API endpoint', endpoint.configured
-      ? endpoint.url + ' · ' + endpoint.model + ' · ' + endpoint.dim + ' вимірів' +
-        (endpoint.key_set ? ' · key set' : ' · no key')
-      : 'НЕ НАЛАШТОВАНО — ' + (endpoint.error || 'невідомо'), true));
-  }
-  body.appendChild(setField('Ембединг', el('div', { className: 'set-stats' }, providerStats), null));
-  if (vec.error) body.appendChild(el('p', { className: 'modal-error', text: vec.error }));
-
-  const backend = report.backend || {};
-  const tokenFact = report.token || {};
-  body.appendChild(setField('Служба', el('div', { className: 'set-stats' }, [
-    setStat('Backend', backend.up
-      ? 'працює · pid ' + backend.serving_pid + ' · машинний порт'
-      : 'НЕ ДОСТУПНИЙ — ' + (backend.error || 'невідомо')),
-    setStat('URL', backend.url, true),
-    setStat('Черга', backend.queue_depth),
-    setStat('API token', (tokenFact.present ? 'present' : 'MISSING') +
-      ' · ' + (tokenFact.where || tokenFact.source || 'unknown') +
-      ' · ' + (tokenFact.scope || 'unknown scope'), true),
-  ]), null));
-
-  const registry = report.registry || {};
-  if (!registry.ok) {
-    body.appendChild(setField('Реєстр', el('p', {
-      className: 'modal-error',
-      text: 'НЕЧИТАНИЙ — ' + (registry.error || 'невідомо'),
-    }), null));
-  } else {
-    const registryBox = el('div', { className: 'maint-list' });
-    registryBox.appendChild(maintItem(
-      registry.count + ' банк(ів)', null, 'Реєстр читається.', 'ok'));
-    for (const bank of registry.banks || []) {
-      const flags = [];
-      if (bank.state !== 'enabled') flags.push(bank.state);
-      if (!bank.exists) flags.push('нема кореня');
-      registryBox.appendChild(maintItem(
-        bank.name,
-        flags.length ? flags.join(' · ') : 'ok',
-        bank.root,
-        flags.length ? 'warn' : null));
-    }
-    body.appendChild(setField('Реєстр', registryBox, null));
-  }
-
-  const wiring = report.wiring || {};
-  const wiringBox = el('div', { className: 'maint-list' });
-  if (!wiring.ok) {
-    wiringBox.appendChild(maintItem('Невідомо', null, wiring.error || 'помилка', 'error'));
-  } else if (!(wiring.stale || []).length) {
-    wiringBox.appendChild(maintItem(
-      (wiring.total || 0) + ' проєкт(ів)', 'усі актуальні', null, 'ok'));
-  } else {
-    for (const project of wiring.stale) {
-      wiringBox.appendChild(maintItem(
-        project.root,
-        project.command,
-        project.reason,
-        'warn'));
-    }
-  }
-  body.appendChild(setField('Project wiring', wiringBox, null));
-
-  renderOrphanMaintenance(body, report.orphans || {});
-}
-
-function renderOrphanMaintenance(body, orphans) {
-  const box = el('div', { className: 'maint-list' });
-  if (!orphans.ok) {
-    box.appendChild(maintItem(
-      'Список недоступний', null,
-      'Видалення заборонене: ' + (orphans.error || 'реєстр не можна перевірити'),
-      'error'));
-  } else if (!orphans.count) {
-    box.appendChild(maintItem('Сиріт немає', '0 B', 'Кожен index належить банку.', 'ok'));
-  } else {
-    for (const orphan of orphans.items || []) {
-      let note = orphan.error
-        ? 'не читається — ' + orphan.error
-        : orphan.root || (orphan.schema == null
-          ? 'pre-v3 index — root не записаний'
-          : 'root не записаний');
-      if (orphan.root_exists) note += ' · root досі є на диску';
-      box.appendChild(maintItem(
-        orphan.id,
-        fmtBytes(orphan.size),
-        (orphan.files == null ? '? файлів' : orphan.files + ' файлів') + ' · ' + note,
-        'warn'));
-    }
-  }
-  body.appendChild(setField(
-    'Індекси-сироти' + (orphans.ok && orphans.count
-      ? ' · ' + orphans.count + ' · ' + fmtBytes(orphans.bytes)
-      : ''),
+  const box = el('input', {
+    attrs: { type: 'checkbox', id: 'rm-drop-index' },
+    on: { change: (ev) => { removal.dropIndex = ev.target.checked; } },
+  });
+  box.checked = removal.dropIndex;
+  box.disabled = removal.busy;
+  removal.body.appendChild(el('label', { className: 'rm-check', attrs: { for: 'rm-drop-index' } }, [
     box,
-    'Doctor лише показує. Прибирає тільки окрема підтверджена дія — ніколи ' +
-    'автоматично й ніколи разом із діагностикою.'));
-
-  if (settings.cleanupNote) {
-    body.appendChild(el('p', { className: 'tok-ok', text: settings.cleanupNote }));
-  }
-  if (!orphans.ok || !orphans.count) return;
-
-  if (!settings.cleanupConfirming) {
-    body.appendChild(el('div', { className: 'maint-actions' }, [
-      el('button', {
-        className: 'btn',
-        text: 'Прибрати сироти',
-        attrs: settings.cleanupBusy ? { disabled: '' } : {},
-        on: { click: () => {
-          settings.cleanupConfirming = true;
-          renderSettings();
-        } },
-      }),
-    ]));
-    return;
-  }
-
-  const ids = (orphans.items || []).map((item) => item.id);
-  body.appendChild(el('div', { className: 'tok-confirm' }, [
-    el('p', {
-      className: 'tok-confirm-text',
-      text: 'Буде видалено тільки ці показані derived index id: ' + ids.join(', ') +
-            '. Перед кожним видаленням реєстр перевіряється знову; .md не чіпаються.',
-    }),
-    el('div', { className: 'tok-confirm-row' }, [
-      el('button', {
-        className: 'btn', text: 'Скасувати',
-        attrs: settings.cleanupBusy ? { disabled: '' } : {},
-        on: { click: () => {
-          settings.cleanupConfirming = false;
-          renderSettings();
-        } },
-      }),
-      el('button', {
-        className: 'btn btn-danger',
-        text: settings.cleanupBusy ? 'Прибираємо…' : 'Видалити ' + ids.length,
-        attrs: settings.cleanupBusy ? { disabled: '' } : {},
-        on: { click: () => submitOrphanCleanup(ids) },
-      }),
-    ]),
-  ]));
-}
-
-async function submitOrphanCleanup(ids) {
-  if (settings.cleanupBusy || !ids.length) return;
-  settings.cleanupBusy = true;
-  settings.maintenanceError = null;
-  settings.cleanupNote = null;
-  renderSettings();
-  try {
-    const result = await api('/api/clean-orphans', {
-      method: 'POST', body: { ids: ids },
-    });
-    const parts = [
-      'видалено ' + result.removed.length + ' з ' + result.requested.length,
-      'звільнено ' + fmtBytes(result.freed_bytes),
-    ];
-    if (result.skipped.length) parts.push('пропущено ' + result.skipped.length);
-    if (result.locked.length) parts.push('locked ' + result.locked.length);
-    settings.cleanupNote = parts.join(' · ');
-    settings.cleanupConfirming = false;
-    settings.maintenance = await api('/api/doctor');
-    if (result.locked.length) {
-      settings.maintenanceError = 'Не всі файли видалено: ' + result.locked.map((item) =>
-        item.id + ' (' + item.paths.join(', ') + ')').join(' · ');
-    }
-  } catch (err) {
-    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
-    settings.maintenanceError = err.message;
-  } finally {
-    settings.cleanupBusy = false;
-    if (settings.section === 'maint') renderSettings();
-  }
-}
-
-/** The last save's verdict. Called from every branch of `renderSettings`,
- *  because a backend that renders fewer fields still gets saved. */
-function renderSettingsMessages() {
-  if (settings.note) {
-    settings.body.appendChild(el('p', { className: 'tok-ok', text: settings.note }));
-  }
-  if (settings.errorText) {
-    settings.body.appendChild(
-      el('p', { className: 'modal-error', text: settings.errorText }));
-  }
-}
-
-async function submitSettings() {
-  const backend = backendPreset(settings.backendId);
-  if (!backend) return;
-  settings.errorText = null;
-  settings.note = null;
-
-  const payload = { provider: backend.provider };
-  if (backend.provider === 'api') {
-    const dim = parseInt(settings.form.dim, 10);
-    if (!settings.form.url.trim()) {
-      settings.errorText = 'Вкажіть адресу ендпоінта.';
-      renderSettings();
-      return;
-    }
-    if (!(dim > 0)) {
-      // Refused here rather than sent: `dim` declares the vector column's
-      // width, so a zero would not be a slow degradation but an index that
-      // cannot hold what the endpoint returns.
-      settings.errorText = 'Вимірів має бути додатним числом.';
-      renderSettings();
-      return;
-    }
-    payload.api = {
-      url: settings.form.url.trim(),
-      model: settings.form.model,
-      dim: dim,
-      timeout: parseFloat(settings.form.timeout) || 60,
-    };
-    // Sent only when typed. An untouched field means "leave what is stored";
-    // sending its empty value would erase a working credential.
-    if (settings.keyTouched) payload.api.key = settings.form.key;
-  }
-
-  settings.busy = true;
-  settings.save.disabled = true;
-  try {
-    const data = await api('/api/settings', { method: 'PUT', body: payload });
-    settings.data = data;
-    settings.keyTouched = false;
-    settings.form.key = '';
-    // The provider cache is already dropped by the PUT. Re-read every view of
-    // that fact now: the memory block must point at the saved endpoint, and the
-    // main screen must expose the resulting stale indexes immediately.
-    await refreshEmbedState();
-    const refreshed = await Promise.allSettled([loadBanks(), loadStatus()]);
-    const refreshFailed = refreshed.some((item) => item.status === 'rejected');
-    const pending = pendingRebuilds();
-    const pendingCount = pending.actionable.length + pending.running.length + pending.disabled.length;
-    settings.note = data.restart_required
-      ? 'Збережено. Набере чинності після перезапуску служби.'
-      : 'Збережено й застосовано. Перевірте бекенд кнопкою вище' +
-        (pendingCount
-          ? ', потім перегенеруйте банки з REBUILD PENDING на головному екрані.'
-          : '.');
-    if (refreshFailed) {
-      settings.errorText = 'Налаштування збережено, але не всі стани вдалося ' +
-        'перечитати. Оновіть сторінку — повторно зберігати не потрібно.';
-    }
-  } catch (err) {
-    if (isAuthError(err)) { closeSettings(); openGate('rejected'); return; }
-    settings.errorText = err.message;
-  } finally {
-    settings.busy = false;
-    settings.save.disabled = false;
-    renderSettings();
-  }
-}
-
-// ---------------------------------------------------------------------------
-// tree
-// ---------------------------------------------------------------------------
-
-function selectBank(bankId) {
-  if (state.selectedBankId === bankId) return;
-  state.selectedBankId = bankId;
-  state.tree = null;
-  state.file = null;
-  state.filePath = null;
-  state.expanded = new Set();
-  renderBanks();
-  renderFile();
-  renderTree();
-  if (bankId) loadTree({ expandAll: true }).catch(reportError);
-  if (state.logScope === 'bank') loadLogs().catch(reportError);
-}
-
-/**
- * Refetch the tree.
- *
- * `expandAll` belongs to the first load of a bank only. A live refresh must
- * not re-open directories the user has since collapsed, and must not fight
- * them for the scroll position while a rebuild streams in.
- */
-async function loadTree(opts) {
-  const bank = bankById(state.selectedBankId);
-  if (!bank) return;
-  const data = await api('/api/tree?bank=' + encodeURIComponent(bank.name) + '&links=false&depth=0');
-  // The selection can move while the request is in flight; a late response
-  // for the previous bank must not overwrite the current one's tree.
-  if (bank.id !== state.selectedBankId) return;
-  state.tree = data;
-  if (opts && opts.expandAll) {
-    // Open every directory by default — v1 banks are small and hiding files
-    // defeats the "видно, багато файлів чи ні" goal of design §7.
-    walkDirs(data.tree, (dir) => state.expanded.add(dir.path));
-  }
-  renderTree();
-}
-
-function walkDirs(node, fn) {
-  if (!node || node.type !== 'dir') return;
-  fn(node);
-  for (const child of node.children || []) walkDirs(child, fn);
-}
-
-function renderTree() {
-  const body = $('tree-body');
-  const sub = $('tree-sub');
-  // This now re-runs on every live index_done, so the pane must not jump back
-  // to the top under someone who is reading halfway down it.
-  const keepTop = body.scrollTop;
-  const keepLeft = body.scrollLeft;
-  clear(body);
-  clear(sub);
-
-  const bank = bankById(state.selectedBankId);
-  if (!bank) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть банк ліворуч.' }));
-    return;
-  }
-  if (!state.tree) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Завантаження…' }));
-    return;
-  }
-
-  sub.textContent = state.tree.files + ' файлів · ' + state.tree.dirs + ' тек';
-
-  const root = state.tree.tree;
-  const children = (root && root.children) || [];
-  if (!children.length) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'У цьому банку немає .md файлів.' }));
-    return;
-  }
-
-  const box = el('div', { className: 'tree' });
-  for (const child of children) renderNode(child, 0, box);
-  body.appendChild(box);
-  body.scrollTop = keepTop;
-  body.scrollLeft = keepLeft;
-}
-
-function renderNode(node, depth, out) {
-  const pad = 12 + depth * 14;
-
-  if (node.type === 'dir') {
-    const open = state.expanded.has(node.path);
-    const row = el('div', {
-      className: 'tree-node tree-dir',
-      on: {
-        click: () => {
-          if (open) state.expanded.delete(node.path);
-          else state.expanded.add(node.path);
-          renderTree();
-        },
-      },
-    }, [
-      el('span', { className: 'tree-twisty', text: open ? '▾' : '▸' }),
-      el('span', { className: 'tree-label', text: node.name + '/' }),
-    ]);
-    row.style.paddingLeft = pad + 'px';
-    out.appendChild(row);
-    if (open) {
-      for (const child of node.children || []) renderNode(child, depth + 1, out);
-    }
-    return;
-  }
-
-  const classes = ['tree-node', 'is-file'];
-  if (node.path === state.filePath) classes.push('is-selected');
-  if (!node.indexed) classes.push('not-indexed');
-
-  const row = el('div', {
-    className: classes.join(' '),
-    title: (node.headings || []).join(' · ') || node.path,
-    on: { click: () => openFile(node.path) },
-  }, [
-    el('span', { className: 'tree-twisty' }),
-    el('span', { className: 'tree-label', text: node.name }),
     el('span', {
-      className: 'tree-chunks',
-      text: node.indexed ? node.chunks + '×' : 'не в індексі',
+      text: 'видалити також індекс (' + fmtBytes(bank.db_bytes) + ') — ' +
+            'відновлюваний повним реіндексом',
     }),
-  ]);
-  row.style.paddingLeft = pad + 'px';
-  out.appendChild(row);
-}
+  ]));
 
-// ---------------------------------------------------------------------------
-// file view + chunk visualisation
-// ---------------------------------------------------------------------------
-
-async function openFile(path) {
-  const bank = bankById(state.selectedBankId);
-  if (!bank) return;
-  state.filePath = path;
-  renderTree();
-  try {
-    state.file = await api('/api/file?bank=' + encodeURIComponent(bank.name) +
-                           '&path=' + encodeURIComponent(path));
-    hideBanner();
-  } catch (err) {
-    state.file = null;
-    reportError(err);
-  }
-  renderFile();
-}
-
-/**
- * Map character (code point) offsets to JS string indices.
- *
- * `start_char`/`end_char` come from Python, which counts code points; a JS
- * string counts UTF-16 units, so anything above the BMP (an emoji in a log
- * file is enough) shifts every later offset. Returns null when the two agree,
- * which is the common case and costs one regex.
- */
-function buildCodePointIndex(text) {
-  if (!/[\uD800-\uDBFF]/.test(text)) return null;
-  const index = [];
-  for (let i = 0; i < text.length;) {
-    index.push(i);
-    i += text.codePointAt(i) > 0xFFFF ? 2 : 1;
-  }
-  index.push(text.length);
-  return index;
-}
-
-function makeSlicer(text) {
-  const index = buildCodePointIndex(text);
-  const total = index ? index.length - 1 : text.length;
-  return {
-    total: total,
-    slice(from, to) {
-      const a = Math.max(0, Math.min(total, from));
-      const b = Math.max(a, Math.min(total, to));
-      return index ? text.slice(index[a], index[b]) : text.slice(a, b);
+  const confirm = el('input', {
+    className: 'fs-input',
+    attrs: {
+      type: 'text', spellcheck: 'false', autocomplete: 'off',
+      id: 'rm-confirm', placeholder: bank.name,
     },
-  };
-}
-
-function renderFile() {
-  const body = $('file-body');
-  const title = $('file-title');
-  const button = $('file-reindex');
-  clear(body);
-
-  const file = state.file;
-  if (!file) {
-    title.textContent = 'Вміст';
-    button.disabled = true;
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть файл у дереві.' }));
-    return;
-  }
-
-  title.textContent = file.path;
-  button.disabled = false;
-
-  const chunks = (file.chunks || []).slice().sort((a, b) => a.start_char - b.start_char);
-
-  body.appendChild(el('div', { className: 'file-meta' }, [
-    el('span', { text: fmtBytes(file.size) }),
-    el('span', { text: file.indexed ? 'в індексі' : 'не в індексі' }),
-    el('span', { text: chunks.length + ' чанків' }),
-    el('span', { text: 'sha256 ' + String(file.sha256 || '').slice(0, 12), title: file.sha256 }),
-  ]));
-
-  const doc = el('div', { className: 'doc' });
-  const text = file.text || '';
-
-  if (!state.chunkViz || !chunks.length) {
-    doc.appendChild(el('pre', { text: text }));
-    body.appendChild(doc);
-    return;
-  }
-
-  const cut = makeSlicer(text);
-  let cursor = 0;
-
-  for (const chunk of chunks) {
-    appendGap(doc, cut.slice(cursor, chunk.start_char));
-    doc.appendChild(chunkDivider(chunk));
-    doc.appendChild(el('pre', {
-      className: 'chunk-body',
-      text: cut.slice(chunk.start_char, chunk.end_char),
-    }));
-    cursor = Math.max(cursor, chunk.end_char);
-  }
-
-  appendGap(doc, cut.slice(cursor, cut.total));
-
-  doc.appendChild(el('div', { className: 'chunk-divider is-end' }, [
-    el('span', { className: 'cd-label', text: 'кінець · ' + cut.total + ' символів' }),
-  ]));
-
-  body.appendChild(doc);
-}
-
-/**
- * Render text that no chunk claims.
- *
- * The splitter leaves the blank line between sections outside both chunks, so
- * a whitespace-only gap is ordinary and gets no marker. A gap with real
- * content in it means the index does not cover part of the file — that is
- * worth seeing, so it keeps the marker.
- */
-function appendGap(doc, text) {
-  if (!text) return;
-  const blank = text.trim() === '';
-  if (!blank) {
-    doc.appendChild(el('div', { className: 'gap-note', text: '· поза чанками ·' }));
-  }
-  // A blank gap is still the file's own text and stays in the DOM, selectable
-  // and copyable — it is only rendered tighter. See `.gap-body.is-blank`.
-  doc.appendChild(el('pre', {
-    className: blank ? 'gap-body is-blank' : 'gap-body',
-    text: text,
+    on: {
+      input: (ev) => {
+        removal.typed = ev.target.value;
+        // Only the button's own state changes, so it is updated in place: a
+        // re-render would rebuild the field and drop the caret.
+        removal.submit.disabled = !removalReady();
+      },
+      keydown: (ev) => {
+        if (ev.key === 'Enter' && removalReady()) { ev.preventDefault(); submitRemoval(); }
+      },
+    },
+  });
+  confirm.value = removal.typed;
+  confirm.disabled = removal.busy;
+  removal.body.appendChild(el('label', {
+    className: 'fs-label', attrs: { for: 'rm-confirm' },
+    text: 'Введіть назву банку, щоб підтвердити',
   }));
-}
+  removal.body.appendChild(confirm);
 
-function chunkDivider(chunk) {
-  // Displayed 1-based; `chunk_index` is and stays 0-based everywhere else.
-  // This is a reading surface, and "#0" is an implementation detail leaking
-  // into it. Do NOT shift the stored value to match: `chunk_uid` is
-  // sha1(path\0chunk_index), so changing it would rewrite every chunk id and
-  // force a full re-embed of every bank. The one other place a human sees the
-  // raw number is the hit list in `queryRow`, which stays 0-based on purpose —
-  // it is a locator, not prose. So the two differ by one by design.
-  const label = '#' + (chunk.chunk_index + 1) + (chunk.heading ? ' · ' + chunk.heading : '');
-  return el('div', { className: 'chunk-divider', title: 'chunk_uid ' + chunk.chunk_uid }, [
-    el('span', { className: 'cd-label', text: label }),
-    el('span', {
-      className: 'cd-range',
-      text: chunk.start_char + '–' + chunk.end_char,
-    }),
-  ]);
-}
-
-// ---------------------------------------------------------------------------
-// log (contract 9.5 GET /api/logs, 7.1 row shapes)
-// ---------------------------------------------------------------------------
-
-async function loadLogs() {
-  const params = new URLSearchParams({ kind: state.logKind, limit: '200', offset: '0' });
-  if (state.logScope === 'bank') {
-    const bank = bankById(state.selectedBankId);
-    if (!bank) {
-      state.logRows = [];
-      state.logTotal = 0;
-      renderLogs();
-      return;
-    }
-    params.set('bank', bank.name);
+  if (removal.errorText) {
+    removal.body.appendChild(el('p', { className: 'modal-error', text: removal.errorText }));
   }
-  const data = await api('/api/logs?' + params.toString());
-  state.logRows = data.events || [];
-  state.logTotal = data.total || 0;
-  renderLogs();
+
+  removal.submit.disabled = !removalReady();
+  removal.submit.textContent = removal.busy ? 'Прибираю…' : 'Прибрати';
+  if (!removal.busy) confirm.focus();
 }
 
-const QUERY_COLUMNS = ['час', 'банк', 'обличчя', 'запит', 'префікс', 'статус', 'хітів', 'час, мс'];
-const INDEX_COLUMNS = ['час', 'банк', 'вид', 'тригер', 'шлях', 'результат',
-                       'файлів', 'чанків', 'знято', 'час, мс'];
-
-function bankLabel(bankId) {
-  const bank = bankById(bankId);
-  return bank ? bank.name : (bankId || '—');
+function removalReady() {
+  return !removal.busy && !!removal.bank && removal.typed.trim() === removal.bank.name;
 }
 
-function renderLogs() {
-  const body = $('log-body');
-  clear(body);
-
-  if (!state.logRows.length) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Порожньо.' }));
+async function submitRemoval() {
+  if (!removalReady()) return;
+  const bank = removal.bank;
+  removal.busy = true;
+  removal.errorText = null;
+  renderRemoval();
+  try {
+    await api('/api/banks/' + encodeURIComponent(bank.id) +
+              '?drop_index=' + (removal.dropIndex ? 'true' : 'false'),
+              { method: 'DELETE' });
+  } catch (err) {
+    removal.busy = false;
+    if (isAuthError(err)) { closeRemoval(); reportError(err); return; }
+    // `index_locked` is fixable where it is raised — the bank is still
+    // registered and nothing was lost — so it belongs inside the dialog
+    // rather than on a page-wide banner the user has to leave to read.
+    removal.errorText = err.message;
+    renderRemoval();
     return;
   }
-
-  const columns = state.logKind === 'query' ? QUERY_COLUMNS : INDEX_COLUMNS;
-  const head = el('tr', {}, columns.map((c) => el('th', { text: c })));
-  const tbody = el('tbody');
-
-  for (const row of state.logRows) {
-    tbody.appendChild(state.logKind === 'query' ? queryRow(row) : indexRow(row));
-  }
-
-  body.appendChild(el('table', { className: 'log-table' }, [
-    el('thead', {}, [head]),
-    tbody,
-  ]));
-}
-
-function queryRow(ev) {
-  // Stays 0-based, unlike the label in `chunkDivider`. `path#index` is a
-  // locator you match against the store or against what a search face
-  // reported, not something to read as prose — so it has to agree with the
-  // data rather than with the viewer.
-  const hits = (ev.hits || []).map((h) => h.path + '#' + h.chunk_index).join(', ');
-  const tr = el('tr', { className: ev._live ? 'is-live' : '', title: hits }, [
-    el('td', { text: fmtTime(ev.ts) }),
-    el('td', { text: bankLabel(ev.bank_id) }),
-    el('td', { text: ev.face }),
-    el('td', { className: 'col-q', text: ev.query }),
-    el('td', { text: ev.path_prefix || '—' }),
-    el('td', { text: STATUS_LABEL[ev.status] || ev.status }),
-    el('td', { className: 'num', text: ev.n_hits }),
-    el('td', { className: 'num', text: fmtMs(ev.took_ms) }),
-  ]);
-  return tr;
-}
-
-function indexRow(ev) {
-  return el('tr', { className: ev._live ? 'is-live' : '', title: ev.error || '' }, [
-    el('td', { text: fmtTime(ev.ts) }),
-    el('td', { text: bankLabel(ev.bank_id) }),
-    el('td', { text: ev.kind }),
-    el('td', { text: ev.trigger }),
-    el('td', { className: 'col-q', text: ev.path || (ev.error ? ev.error : '—') }),
-    el('td', { className: 'res-' + ev.result, text: ev.result }),
-    el('td', { className: 'num', text: ev.files_indexed }),
-    el('td', { className: 'num', text: ev.chunks_indexed }),
-    el('td', { className: 'num', text: ev.files_pruned }),
-    el('td', { className: 'num', text: fmtMs(ev.took_ms) }),
-  ]);
-}
-
-/** A live WS event is prepended only when the current filter would include it. */
-function pushLiveLog(kind, row) {
-  if (state.logKind !== kind) return;
-  if (state.logScope === 'bank' && row.bank_id !== state.selectedBankId) return;
-  row._live = true;
-  state.logRows.unshift(row);
-  if (state.logRows.length > 200) state.logRows.pop();
-  state.logTotal += 1;
-  renderLogs();
-}
-
-// ---------------------------------------------------------------------------
-// WebSocket (contract 9.7)
-// ---------------------------------------------------------------------------
-
-let socket = null;
-let retryDelay = 500;
-let banksReloadTimer = null;
-let treeRefreshTimer = null;
-// The first `hello` follows the load boot() just did, so there is nothing to
-// resync. Every later one means the socket dropped and deltas were missed.
-let helloSeen = false;
-
-function setConnState(kind, label) {
-  const box = $('conn-state');
-  box.className = 'conn is-' + kind;
-  box.lastElementChild.textContent = label;
-}
-
-function scheduleBanksReload() {
-  if (banksReloadTimer || state.gated) return;
-  banksReloadTimer = setTimeout(() => {
-    banksReloadTimer = null;
-    if (state.gated) return;
-    loadBanks().catch(reportError);
-    loadStatus().catch(() => {});
-  }, 350);
-}
-
-/**
- * Pull the tree again after indexing changed something in it.
- *
- * Throttled rather than debounced: a bulk rebuild emits a steady stream of
- * `index_done`, and a debounce that keeps getting reset would never fire
- * until the very end. This fires at most once per window and the last event
- * in a burst still gets its own trailing refresh, so the tree converges.
- */
-function scheduleTreeRefresh() {
-  if (treeRefreshTimer || state.gated || !state.selectedBankId) return;
-  treeRefreshTimer = setTimeout(() => {
-    treeRefreshTimer = null;
-    if (state.gated || !state.selectedBankId) return;
-    loadTree().catch(() => {});
-  }, 700);
-}
-
-/**
- * Re-read everything over REST.
- *
- * Contract 9.7: the socket carries deltas only and `hello` means "refetch" —
- * REST is authoritative for initial state. Anything missed while the socket
- * was down heals here, which is the only reason a gap cannot persist.
- */
-function resyncAll() {
-  state.progress.clear();
-  loadBanks().catch(reportError);
-  loadStatus().catch(() => {});
-  loadLogs().catch(() => {});
-  if (state.selectedBankId) loadTree().catch(() => {});
-}
-
-/** Drop the socket without arming the reconnect timer. */
-function closeSocket() {
-  if (!socket) return;
-  const dead = socket;
-  socket = null;
-  dead.onclose = null;
-  dead.onerror = null;
-  dead.close();
-}
-
-function connectSocket() {
-  // Without a token the handshake can only be refused, and a refused socket
-  // would reconnect forever behind the gate.
-  if (state.gated || !token) return;
-
-  const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-  const url = scheme + '//' + window.location.host + '/ws' +
-              '?token=' + encodeURIComponent(token);
-  setConnState('wait', 'підключення…');
-
-  socket = new WebSocket(url);
-
-  socket.onopen = () => {
-    retryDelay = 500;
-    setConnState('open', 'наживо');
-  };
-
-  socket.onclose = () => {
-    socket = null;
-    if (state.gated) return;
-    setConnState('error', 'розірвано');
-    setTimeout(connectSocket, retryDelay);
-    retryDelay = Math.min(retryDelay * 2, 10000);
-  };
-
-  socket.onerror = () => {
-    if (!state.gated) setConnState('error', 'помилка');
-  };
-
-  socket.onmessage = (event) => {
-    let envelope;
-    try {
-      envelope = JSON.parse(event.data);
-    } catch (err) {
-      return;
-    }
-    handleEvent(envelope);
-  };
-}
-
-function handleEvent(envelope) {
-  const type = envelope.type;
-  const data = envelope.data || {};
-  const bankId = envelope.bank_id;
-
-  switch (type) {
-    case 'hello':
-      if (data.queue) {
-        state.queue = data.queue;
-        renderService();
-        if (reconcileProgress(data.queue)) renderBanks();
-      }
-      if (helloSeen) resyncAll();
-      helloSeen = true;
-      break;
-
-    case 'ping':
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        socket.send(JSON.stringify({ type: 'pong' }));
-      }
-      break;
-
-    case 'queue':
-      state.queue = data;
-      renderService();
-      if (reconcileProgress(data)) renderBanks();
-      break;
-
-    case 'index_start':
-      // We watched this one begin, so its age is exact — no `≥`.
-      state.progress.set(bankId, {
-        task_id: data.task_id, kind: data.kind, path: data.path,
-        batch: 0, batches: data.batches || 0, chunks_done: 0, chunks_total: 0,
-        since: Date.now(), approx: false,
-      });
-      renderBanks();
-      break;
-
-    case 'index_progress': {
-      const prev = state.progress.get(bankId) || {};
-      const same = prev.task_id === data.task_id;
-      state.progress.set(bankId, {
-        task_id: data.task_id, kind: prev.kind || 'file', path: data.path,
-        batch: data.batch, batches: data.batches,
-        chunks_done: data.chunks_done, chunks_total: data.chunks_total,
-        // Keep the clock running across progress events; if this is the first
-        // we have seen of the task, we joined it late and must say so.
-        since: same && prev.since ? prev.since : Date.now(),
-        approx: same ? !!prev.approx : true,
-      });
-      renderBanks();
-      break;
-    }
-
-    case 'index_yield': {
-      const prev = state.progress.get(bankId);
-      if (prev && prev.task_id === data.task_id) { prev.yielded = true; renderBanks(); }
-      break;
-    }
-
-    case 'index_done':
-      clearProgress(bankId, data.task_id);
-      setNote(bankId, 'готово: ' + (data.path || data.kind) + ' · ' +
-                      (data.chunks_indexed || 0) + ' чанків · ' + fmtMs(data.took_ms));
-      scheduleBanksReload();
-      // A file just changed its indexed/chunk state — that is what the tree
-      // shows, so it has to be pulled again or it stays stale until a reload.
-      if (bankId === state.selectedBankId) scheduleTreeRefresh();
-      // The open file may have been re-chunked — pull fresh boundaries.
-      if (bankId === state.selectedBankId && state.filePath &&
-          (!data.path || data.path === state.filePath)) {
-        openFile(state.filePath);
-      }
-      break;
-
-    case 'index_error':
-      clearProgress(bankId, data.task_id);
-      setNote(bankId, 'помилка: ' + (data.path || data.kind) + ' — ' + data.error);
-      scheduleBanksReload();
-      break;
-
-    case 'prune':
-      setNote(bankId, 'знято з індексу: ' + (data.count || 0));
-      scheduleBanksReload();
-      if (bankId === state.selectedBankId) scheduleTreeRefresh();
-      break;
-
-    case 'bank_added':
-    case 'bank_removed':
-      scheduleBanksReload();
-      break;
-
-    case 'bank_status':
-      if (data.bank) applyBank(data.bank);
-      break;
-
-    case 'query':
-      pushLiveLog('query', {
-        id: null, ts: envelope.ts, bank_id: bankId, face: data.face,
-        query: data.query, path_prefix: data.path_prefix || null,
-        status: data.status, n_hits: data.n_hits, took_ms: data.took_ms, hits: [],
-      });
-      break;
-
-    default:
-      // Contract 9.7: unknown types are ignored on purpose, so the backend can
-      // add events without breaking this page.
-      break;
-  }
+  removal.busy = false;
+  removal.root.hidden = true;
+  removal.bank = null;
+  removal.typed = '';
+  hideBanner();
+  // Drop it from the local model immediately rather than waiting for the
+  // `bank_removed` event to come back: the socket may be down, and a card
+  // that outlives the bank it describes is the one thing this dialog must
+  // not leave behind. The reload that follows is the correction, not the
+  // mechanism.
+  state.banks = state.banks.filter((b) => b.id !== bank.id);
+  if (state.selectedBankId === bank.id) state.selectedBankId = null;
+  state.progress.delete(bank.id);
+  state.notes.delete(bank.id);
+  renderBanks();
+  loadBanks().catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
 // wiring
 // ---------------------------------------------------------------------------
-
-function bindControls() {
-  const refresh = $('banks-refresh');
-  refresh.addEventListener('click', () => {
-    loadBanks().catch(reportError);
-    loadStatus().catch(() => {});
-  });
-
-  // Inserted rather than written into index.html: the document may come from
-  // cache while this script does not, and a button this code addresses by id
-  // would then be missing (same reasoning as the gate).
-  refresh.parentNode.insertBefore(el('button', {
-    className: 'btn btn-ghost',
-    text: '＋ додати',
-    title: 'Зареєструвати нову теку з .md як банк',
-    on: { click: () => openPicker() },
-  }), refresh);
-
-  for (const button of $('theme-toggle').querySelectorAll('.seg')) {
-    button.addEventListener('click', () => {
-      const theme = button.dataset.theme;
-      applyTheme(theme);
-      localStorage.setItem('mnemo_theme', theme);
-    });
-  }
-
-  $('settings-open').addEventListener('click', () => openSettings());
-
-  $('log-refresh').addEventListener('click', () => loadLogs().catch(reportError));
-
-  $('chunkviz-toggle').addEventListener('change', (ev) => {
-    state.chunkViz = ev.target.checked;
-    renderFile();
-  });
-
-  $('file-reindex').addEventListener('click', () => {
-    const bank = bankById(state.selectedBankId);
-    if (bank && state.filePath) reindex(bank, { path: state.filePath });
-  });
-
-  for (const button of $('log-kind').querySelectorAll('.seg')) {
-    button.addEventListener('click', () => {
-      state.logKind = button.dataset.kind;
-      for (const b of $('log-kind').querySelectorAll('.seg')) {
-        b.classList.toggle('is-active', b === button);
-      }
-      loadLogs().catch(reportError);
-    });
-  }
-
-  for (const button of $('log-scope').querySelectorAll('.seg')) {
-    button.addEventListener('click', () => {
-      state.logScope = button.dataset.scope;
-      for (const b of $('log-scope').querySelectorAll('.seg')) {
-        b.classList.toggle('is-active', b === button);
-      }
-      loadLogs().catch(reportError);
-    });
-  }
-}
 
 /** First load of everything, then the live channel. Re-runnable after the gate. */
 async function start() {
@@ -4130,22 +1892,19 @@ async function start() {
     renderBanks();
     renderTree();
     renderFile();
-    renderLogs();
+    renderJournal();
   }
   connectSocket();
 }
 
 async function boot() {
   applyTheme(resolveTheme());
-  bindControls();
   buildGate();
   buildPicker();
   buildTokenPanel();
   buildBankMenu();
   buildRemoval();
-  buildRebuildNotice();
-  buildRebuildDialog();
-  buildSettings();
+  initShell();
   renderService();
   if (!token) {
     // First run: nothing has been rejected, so ask before knocking.
@@ -4155,4 +1914,6 @@ async function boot() {
   await start();
 }
 
-boot();
+// Not called here: `boot()` reaches into every page module (`initShell`,
+// `renderBanks`, `loadLogs`, …), so it can only run once all five scripts
+// have been parsed. The last one loaded (page-settings.js) calls it.

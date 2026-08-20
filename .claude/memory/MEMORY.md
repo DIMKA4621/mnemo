@@ -30,9 +30,12 @@ detail lives in `topics/`, day notes in `logs/`.
   налаштування як **екран, а не модалка** (затемнений фон показував би
   застарілий стан), окремий warning lane для `REBUILD PENDING` і structured
   «Обслуговування»: CLI/UI читають один doctor-report, cleanup приймає лише
-  щойно показані orphan id. **Затверджений макет наступної оболонки —
-  `docs/cabinet-design.html`** (заморожений еталон, не код продукту):
-  сайдбар = три маршрути, хедер = сторінка, підвал сайдбару = машина.
+  щойно показані orphan id. **Нова оболонка реалізована** у
+  `src/webui/static/` (сайдбар = три маршрути, хедер = сторінка, підвал
+  сайдбару = машина) з `docs/cabinet-design.html` як еталоном; `app.js`
+  розбитий на `shell.js`/`page-{memory,journal,settings}.js`, CSS — на
+  `styles/*.css`. Не зроблено: snapshot-текст хіта в Журналі (бекенд не
+  зберігає `content`), фільтр статусу й повнотекстовий пошук журналу.
 - [Native Windows support](topics/windows-native-support.md) — PowerShell 5.1
   installer, canonical launcher contract, portable wiring, and verification.
 - [Пропускна здатність ембедингу](topics/embedding-throughput.md) — наш

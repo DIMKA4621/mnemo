@@ -1,0 +1,220 @@
+/* Налаштування: horizontal tabs under the header instead of the old fixed
+ * `.screen` overlay with a vertical `.set-nav`. The tab bar and body frame
+ * are new (ported from docs/cabinet-design.html); the form field rules below
+ * them are the current live cabinet's `.set-*`/`.maint-*` rules, unchanged
+ * except where the mockup renamed a class. */
+
+.set-tabs { flex: none; display: flex; gap: 2px; padding: 6px 12px; background: var(--bg-pane); border-bottom: 1px solid var(--line); overflow-x: auto; }
+.set-tab { border: 0; border-radius: var(--radius); padding: 5px 11px; background: transparent; color: var(--fg-dim); font-size: 12.5px; white-space: nowrap; }
+.set-tab:hover { background: var(--bg-hover); color: var(--fg); }
+.set-tab.is-active { background: var(--sel-bg); color: var(--sel-fg); font-weight: 500; }
+
+.set-body { flex: 1; min-height: 0; overflow: auto; background: var(--bg-pane); }
+.set-form { max-width: 640px; padding: 20px 16px 90px; display: flex; flex-direction: column; gap: 14px; }
+.set-form h2 { margin: 0; font-size: 15px; font-weight: 650; }
+.lede { max-width: 60ch; margin: 8px 0 0; color: var(--fg-dim); font-size: 12.5px; line-height: 1.65; }
+
+.set-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  min-height: 48px;
+  padding: 8px 14px;
+  background: var(--bg-pane);
+  border-top: 1px solid var(--line);
+}
+
+.set-field { display: flex; flex-direction: column; gap: 5px; }
+
+.set-label {
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.set-note {
+  margin: 0;
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.set-lead {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+.set-lead code {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg);
+}
+
+/* An override means the field below it cannot take effect. It reads as a
+   warning because that is what it is — the save will succeed and change
+   nothing observable. */
+.set-override {
+  margin: 0;
+  color: var(--busy);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.set-warn {
+  margin: 0;
+  padding: 9px 11px;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.55;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+/* Reported facts, not editable fields: a caption column and a value column,
+   so the values line up and can be scanned down rather than read across. */
+.set-stats {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.set-stat {
+  display: flex;
+  gap: 12px;
+  padding: 7px 11px;
+  font-size: 12px;
+}
+
+.set-stat + .set-stat { border-top: 1px solid var(--line); }
+
+.set-stat-label {
+  flex: none;
+  width: 150px;
+  color: var(--fg-dim);
+}
+
+.set-stat-value { color: var(--fg); word-break: break-word; }
+.set-stat-value.is-mono { font-family: var(--mono); }
+
+/* `.set-backend-tabs` used to be named `.set-tabs`, the same class the page
+   nav above now owns for the horizontal section bar — the two are different
+   components (a `.segmented` picker nested in a form field vs. the page's
+   own tab strip) that happened to share a name in the pre-shell cabinet,
+   where there was only one kind of tabs on screen. Both are `.segmented`
+   internally; this alone keeps the embed backend picker from stretching to
+   the tab bar's full-width, bordered, horizontally-scrolling look. */
+.set-backend-tabs,
+.set-toggle { align-self: flex-start; }
+
+.set-row { display: flex; gap: 12px; }
+.set-row .set-field { flex: 0 0 auto; }
+
+/* Backend memory: a state line, then the actions it allows. Boxed like
+   `.set-stats` because it reports as much as it acts, and the border is what
+   keeps «Вивантажити» from reading as a second Save for the form above it. */
+.set-mem {
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 9px 11px;
+}
+.set-mem-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  /* Same two-box lesson as `.bank-row`: the badge and the model name wrap
+     between themselves rather than pushing the row wider than the column. */
+  flex-wrap: wrap;
+  min-width: 0;
+}
+.set-mem-what {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--fg-dim);
+  overflow-wrap: anywhere;
+  min-width: 0;
+}
+.set-mem-actions { display: flex; gap: 7px; margin-top: 9px; flex-wrap: wrap; }
+.set-mem .set-note { margin-top: 7px; }
+
+/* Maintenance: the same facts as CLI doctor, grouped for scanning rather than
+   poured into a preformatted transcript. Reuses the settings tokens and the
+   inline confirmation already used by token rotation; no new interaction
+   pattern is introduced for cleanup. */
+.maint-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.maint-head .set-lead { flex: 1 1 260px; min-width: 0; }
+.maint-head .btn { flex: none; }
+
+.maint-list {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.maint-item { padding: 8px 10px; }
+.maint-item + .maint-item { border-top: 1px solid var(--line); }
+.maint-item.is-warn { background: var(--badge-indexing-bg); }
+.maint-item.is-error { background: var(--danger-bg); }
+.maint-item.is-ok { background: var(--success-bg); }
+
+.maint-item-line {
+  display: flex;
+  align-items: baseline;
+  gap: 9px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.maint-item-line strong { font-size: 12px; }
+.maint-item-line code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--fg-dim);
+}
+.maint-item .set-note { margin-top: 3px; overflow-wrap: anywhere; }
+.maint-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+.set-wide { width: 100%; }
+.set-narrow { width: 110px; }
+
+.set-select {
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.set-select:focus { outline: none; border-color: var(--accent); }
+
+/* Theme lives here (Служба section) as a `.segmented`, the one control on
+   this screen that applies on click rather than waiting for «Зберегти»: it
+   is a browser preference, nothing is sent to the backend, so there is
+   nothing for Save to do with it. Uses the shared `.segmented`/`.seg`
+   component (base.css) — no dedicated rule needed. */
+
+@media (max-width: 620px) {
+  .set-body { padding: 0; }
+  .set-form { max-width: none; padding: 16px; }
+  .set-row { flex-wrap: wrap; }
+  .set-stat { flex-direction: column; gap: 2px; }
+  .set-stat-label { width: auto; }
+}

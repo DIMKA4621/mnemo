@@ -1,0 +1,516 @@
+/* Fixed-position, page-agnostic overlays: the token gate, the generic error
+ * banner, modals (folder picker, token panel, removal, rebuild), the
+ * per-bank menu. None of these belong to one page — they float over
+ * whichever page is on screen, or (gate, banner) replace/precede it. */
+
+/* ---- generic error banner ------------------------------------------------ */
+
+.banner {
+  flex: none;
+  padding: 8px 14px;
+  background: var(--danger-bg);
+  border-bottom: 1px solid var(--danger-border);
+  color: var(--danger-fg);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+/* ---- token gate ----------------------------------------------------------- */
+
+.gate {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+  background: var(--bg);
+}
+
+.gate-card {
+  width: 100%;
+  max-width: 520px;
+  padding: 20px 24px 22px;
+  background: var(--bg-pane);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-card);
+}
+
+.gate-card.is-error { border-color: var(--danger-border); }
+
+.gate-brand {
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: .02em;
+  color: var(--fg-dim);
+}
+
+.gate-title {
+  margin: 10px 0 8px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.gate-card.is-error .gate-title { color: var(--danger-fg-strong); }
+
+.gate-text {
+  margin: 0 0 16px;
+  color: var(--fg-dim);
+  line-height: 1.62;
+}
+
+.gate-lead {
+  margin: 0 0 6px;
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+/* No lead line: the prose itself introduces the command, so it closes up. */
+.gate-card.is-terse .gate-text { margin-bottom: 6px; }
+
+.gate-cmd {
+  display: block;
+  padding: 8px 10px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  color: var(--accent);
+  user-select: all;
+}
+
+.gate-form {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--line);
+}
+
+.gate-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.gate-row { display: flex; gap: 8px; }
+
+.gate-input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.gate-input::placeholder { color: var(--fg-mute); }
+.gate-input:focus { outline: none; border-color: var(--accent); }
+
+.gate-note {
+  margin: 8px 0 0;
+  color: var(--danger-fg-soft);
+  font-size: 12px;
+}
+
+/* ---- modal (folder picker, token panel, removal, rebuild) ---------------- */
+
+/* Above the gate would be wrong — the gate means "no requests are possible",
+   and a dialog on top of that could not load. It sits one below, so raising
+   the gate covers it. */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 15;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--overlay);
+}
+
+.modal-box {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-width: 560px;
+  /* The dialog may not outgrow the window: the listing scrolls, the frame
+     does not, so the footer buttons stay reachable on a short screen. */
+  max-height: min(620px, 100%);
+  background: var(--bg-pane);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow-modal);
+}
+
+/* The config snippets are one long URL each; the extra width buys a line or
+   two of wrapping, nothing more. */
+.modal-box.is-wide { max-width: 640px; }
+
+.modal-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px 10px 16px;
+  border-bottom: 1px solid var(--line);
+}
+
+.modal-head h2 { flex: 1 1 auto; }
+
+.modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  padding: 14px 16px;
+  overflow: auto;
+}
+
+.modal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.modal-error {
+  margin: 0;
+  padding: 7px 9px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
+  color: var(--danger-fg);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+/* ---- per-bank menu ---------------------------------------------------------
+   Fixed rather than absolute: the bank list scrolls in its own pane, and an
+   absolutely-positioned menu would be clipped by that pane's overflow. */
+
+.menu {
+  position: fixed;
+  z-index: 18;
+  padding: 4px;
+  white-space: nowrap;
+  background: var(--bg-pane);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-menu);
+}
+
+.menu-item {
+  display: block;
+  width: 100%;
+  padding: 6px 9px;
+  background: transparent;
+  border: 0;
+  border-radius: 4px;
+  color: var(--fg);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu-item:hover { background: var(--bg-hover); }
+.menu-item.is-danger { color: var(--menu-danger-fg); }
+.menu-item.is-danger:hover { background: var(--danger-bg); }
+
+/* The state group: a heading, and a check on the one in force. The mark is a
+   pseudo-element so the label text stays aligned whether or not it is set —
+   a tick prepended to the text would shift every other row. */
+.menu-label {
+  padding: 5px 9px 3px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.menu-item[role="menuitemradio"] { padding-left: 24px; position: relative; }
+
+.menu-item[role="menuitemradio"].is-current::before {
+  content: '✓';
+  position: absolute;
+  left: 9px;
+  color: var(--accent);
+}
+
+.menu-sep {
+  height: 1px;
+  margin: 4px 5px;
+  background: var(--line);
+}
+
+/* ---- removal dialog --------------------------------------------------------
+   Two columns so the loss and the survival read as a pair. What is lost is
+   the token, not the index, and the layout should not bury that. */
+
+.rm-lead { margin: 0; }
+
+.rm-effects {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 2px 0 4px;
+}
+
+.rm-effects dt {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.rm-effects dt.is-loss { color: var(--err); }
+.rm-effects dt.is-safe { color: var(--ok); }
+
+.rm-effects dd {
+  margin: 0;
+  color: var(--fg-dim);
+}
+
+.rm-effects code {
+  font-family: var(--mono);
+  color: var(--fg);
+  word-break: break-all;
+}
+
+.rm-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px 9px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+
+.rm-check input { margin: 2px 0 0; flex: 0 0 auto; }
+
+/* ---- folder browser inside the modal --------------------------------------- */
+
+.fs-label {
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.fs-roots { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.chip {
+  font: inherit;
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 2px 8px;
+  color: var(--fg-dim);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+
+.chip:hover { color: var(--fg); border-color: var(--btn-border-hover); background: var(--bg-hover); }
+
+.fs-input,
+.tok-value {
+  min-width: 0;
+  padding: 5px 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.fs-input::placeholder { color: var(--fg-mute); }
+.fs-input:focus,
+.tok-value:focus { outline: none; border-color: var(--accent); }
+
+.fs-list {
+  flex: 1 1 auto;
+  min-height: 140px;
+  overflow: auto;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.fs-list p { margin: 0; padding: 10px 11px; font-size: 12px; }
+
+/* Rows are buttons, not divs: one click enters a folder, so they have to be
+   reachable from the keyboard like everything else here. */
+.fs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 11px;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line-sunken);
+  cursor: pointer;
+}
+
+.fs-row:hover { background: var(--bg-hover); }
+.fs-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.fs-row.is-up { color: var(--fg-dim); font-family: var(--mono); }
+
+.fs-row .fs-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fs-hint {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+}
+
+.fs-warn { color: var(--busy); }
+
+/* ---- bank token panel inside the modal ------------------------------------- */
+
+/* Nothing in this panel absorbs slack — the body scrolls instead. Without
+   this the column's default `flex-shrink: 1` squeezes every row once the
+   content outgrows the frame, and the tabs (a bordered box with no min
+   height of their own) collapse to a 2px line. The folder browser is the
+   opposite case, which is why this is scoped to the wide box: there
+   `.fs-list` is meant to take the leftover height. */
+.modal-box.is-wide .modal-body > * { flex: none; }
+
+.tok-row { display: flex; gap: 8px; }
+
+.tok-value { flex: 1 1 auto; }
+
+.tok-note {
+  margin: 0;
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+/* The recommended path, not a footnote: same size as the notes around it, but
+   in the body colour so the eye lands on it before the snippets below. */
+.tok-lead {
+  margin: 0;
+  color: var(--fg-dim);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.tok-note code,
+.tok-lead code {
+  padding: 0 4px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--accent);
+  /* A sed line is long and full of punctuation; it may break rather than push
+     the dialog sideways. */
+  overflow-wrap: anywhere;
+}
+
+.tok-ok {
+  margin: 0;
+  padding: 7px 9px;
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius);
+  color: var(--success-fg);
+  font-size: 12px;
+}
+
+.tok-tabs { margin-top: 4px; align-self: flex-start; }
+
+/* The label carries a path, so it must not be clipped by the segment box. */
+.tok-tabs .seg { white-space: nowrap; }
+
+.tok-caption {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 4px;
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.tok-caption span {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.tok-code {
+  margin: 0;
+  padding: 8px 10px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg);
+  /* The snippet is meant to be copied, not read across: it wraps rather than
+     scrolling sideways, so the dialog never grows a horizontal scrollbar. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+/* Regeneration is the one destructive thing in this dialog, so the question
+   is asked inline, right above the button that raised it, instead of in a
+   second dialog stacked on the first. */
+.tok-confirm {
+  margin-top: 4px;
+  padding: 10px 11px;
+  background: var(--danger-bg-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
+}
+
+.tok-confirm-text {
+  margin: 0 0 9px;
+  color: var(--danger-fg);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.tok-confirm-row { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* `.modal-foot` pushes everything right; this one belongs on the other side. */
+.tok-regen { margin-right: auto; }
+
+/* Off-screen sink for the pre-clipboard-API copy path. Not `display: none`:
+   a hidden textarea cannot be selected, and the selection is the whole point. */
+.tok-copysink {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  pointer-events: none;
+}

@@ -15,91 +15,147 @@
   <!-- Inline so the browser stops probing /favicon.ico at the origin root,
        which the API does not serve and which logs a 404 on every load. -->
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' rx='3' fill='%236aa8ff'/%3E%3Crect x='3' y='4' width='10' height='1.6' fill='%2314161a'/%3E%3Crect x='3' y='7.2' width='10' height='1.6' fill='%2314161a'/%3E%3Crect x='3' y='10.4' width='6' height='1.6' fill='%2314161a'/%3E%3C/svg%3E">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles/base.css">
+  <link rel="stylesheet" href="styles/shell.css">
+  <link rel="stylesheet" href="styles/page-memory.css">
+  <link rel="stylesheet" href="styles/page-journal.css">
+  <link rel="stylesheet" href="styles/page-settings.css">
+  <link rel="stylesheet" href="styles/overlays.css">
 </head>
 <body>
 
-<header class="topbar">
-  <div class="brand">
-    <span class="brand-name">mnemo</span>
-    <span class="brand-sub">локальний кабінет памʼяті</span>
-  </div>
-  <div class="service" id="service-info">
-    <span class="muted">зʼєднання…</span>
-  </div>
-  <div class="segmented" id="theme-toggle">
-    <button class="seg is-active" data-theme="dark">Темна</button>
-    <button class="seg" data-theme="light">Світла</button>
-  </div>
-  <button class="btn btn-ghost btn-gear" id="settings-open"
-          title="Налаштування машини">⚙</button>
-  <div class="conn" id="conn-state" title="стан WebSocket">
-    <span class="dot"></span><span class="conn-label">…</span>
-  </div>
-</header>
-
-<div id="banner" class="banner" hidden></div>
-
-<main class="layout">
-
-  <!-- ---------------------------------------------------------------- -->
-  <section class="pane pane-banks">
-    <div class="pane-head">
-      <h2>Банки</h2>
-      <button class="btn btn-ghost" id="banks-refresh" title="Оновити список">↻</button>
+<div class="app" id="app">
+  <!-- ═══ sidebar: three routes, nothing else — banks live in Памʼять's own
+       first column, never duplicated here ═══ -->
+  <aside class="sidebar">
+    <div class="sb-top">
+      <span class="sb-brand">mnemo</span>
+      <button class="sb-toggle" id="sb-toggle" aria-label="Згорнути навігацію" title="Згорнути навігацію">
+        <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+      </button>
     </div>
-    <div class="pane-body" id="banks-list"></div>
-  </section>
 
-  <!-- ---------------------------------------------------------------- -->
-  <section class="pane pane-tree">
-    <div class="pane-head">
-      <h2>Файли</h2>
-      <span class="pane-sub" id="tree-sub"></span>
-    </div>
-    <div class="pane-body" id="tree-body">
-      <p class="empty-hint">Оберіть банк ліворуч.</p>
-    </div>
-  </section>
+    <nav class="sb-nav" aria-label="Розділи кабінету">
+      <button class="sb-item is-active" data-page="memory" title="Памʼять">
+        <svg viewBox="0 0 24 24"><path d="M5 4.5h11.5A2.5 2.5 0 0 1 19 7v12H7.5A2.5 2.5 0 0 1 5 16.5z"/><path d="M5 16.5A2.5 2.5 0 0 1 7.5 14H19"/></svg>
+        <span class="lbl">Памʼять</span>
+        <span class="cnt" id="sb-count-memory"></span>
+      </button>
+      <button class="sb-item" data-page="journal" title="Журнал">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <span class="lbl">Журнал</span>
+        <span class="cnt" id="sb-count-journal"></span>
+      </button>
+      <button class="sb-item" data-page="settings" title="Налаштування">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M19 12c0-.37-.03-.73-.08-1.09l2-1.55-2-3.46-2.44.98a8 8 0 0 0-1.9-1.1L14.2 3H9.8l-.38 2.78a8 8 0 0 0-1.9 1.1l-2.44-.98-2 3.46 2 1.55a7.8 7.8 0 0 0 0 2.18l-2 1.55 2 3.46 2.44-.98a8 8 0 0 0 1.9 1.1L9.8 21h4.4l.38-2.78a8 8 0 0 0 1.9-1.1l2.44.98 2-3.46-2-1.55c.05-.36.08-.72.08-1.09z"/></svg>
+        <span class="lbl">Налаштування</span>
+      </button>
+    </nav>
 
-  <!-- ---------------------------------------------------------------- -->
-  <section class="pane pane-file">
-    <div class="pane-head">
-      <h2 id="file-title">Вміст</h2>
-      <div class="pane-actions">
-        <label class="toggle" title="Показати межі чанків так, як вони лежать в індексі">
-          <input type="checkbox" id="chunkviz-toggle" checked>
-          <span>Межі чанків</span>
-        </label>
-        <button class="btn" id="file-reindex" disabled>Переіндексувати файл</button>
-      </div>
+    <!-- The machine's own three facts — online/offline, provider, version —
+         not a page's. `renderService()`/`setConnState()` in shell.js target
+         these. -->
+    <div class="sb-foot" id="sb-foot">
+      <i class="dot idle" id="sb-dot"></i>
+      <span class="txt" id="sb-status-text">…</span>
+      <span class="sep">·</span>
+      <span class="txt" id="sb-provider-text">—</span>
+      <span class="ver" id="sb-version-text">—</span>
     </div>
-    <div class="pane-body" id="file-body">
-      <p class="empty-hint">Оберіть файл у дереві.</p>
-    </div>
-  </section>
+  </aside>
 
-</main>
+  <main class="stage">
+    <!-- Persistent header: the left half is built per page (shell.js's
+         PAGES table); nothing machine-level rides here — that lives in the
+         sidebar footer above. -->
+    <header class="topbar">
+      <div class="top-left" id="top-left"></div>
+    </header>
 
-<!-- ------------------------------------------------------------------ -->
-<section class="pane pane-log">
-  <div class="pane-head">
-    <h2>Журнал</h2>
-    <div class="pane-actions">
-      <div class="segmented" id="log-kind">
-        <button class="seg is-active" data-kind="query">Запити</button>
-        <button class="seg" data-kind="index">Індексація</button>
-      </div>
-      <div class="segmented" id="log-scope">
-        <button class="seg is-active" data-scope="all">Усі банки</button>
-        <button class="seg" data-scope="bank">Обраний банк</button>
-      </div>
-      <button class="btn btn-ghost" id="log-refresh" title="Оновити журнал">↻</button>
+    <!-- Page-agnostic: an API error can happen from any page's action. -->
+    <div id="banner" class="banner" hidden></div>
+
+    <div class="pages">
+      <!-- ═══ ПАМʼЯТЬ ═══ -->
+      <section class="page" data-panel="memory">
+        <div class="layout">
+          <section class="pane is-mob" data-mob-panel="banks">
+            <div class="pane-head">
+              <h2>Банки</h2>
+              <div class="pane-actions">
+                <button class="btn btn-ghost" id="banks-refresh" title="Оновити список">↻</button>
+              </div>
+            </div>
+            <div class="pane-body" id="banks-list"></div>
+          </section>
+
+          <section class="pane" data-mob-panel="tree">
+            <div class="pane-head">
+              <h2>Файли</h2>
+              <span class="pane-sub" id="tree-sub"></span>
+            </div>
+            <div class="pane-body" id="tree-body">
+              <p class="empty-hint">Оберіть банк ліворуч.</p>
+            </div>
+          </section>
+
+          <section class="pane" data-mob-panel="file">
+            <div class="pane-head">
+              <h2 class="file-title" id="file-title">Вміст</h2>
+              <div class="pane-actions">
+                <label class="toggle" title="Показати межі чанків так, як вони лежать в індексі">
+                  <input type="checkbox" id="chunkviz-toggle" checked>
+                  <span>Межі чанків</span>
+                </label>
+                <button class="btn" id="file-reindex" disabled>Переіндексувати файл</button>
+              </div>
+            </div>
+            <div class="pane-body" id="file-body">
+              <p class="empty-hint">Оберіть файл у дереві.</p>
+            </div>
+          </section>
+        </div>
+      </section>
+
+      <!-- ═══ ЖУРНАЛ ═══ -->
+      <section class="page" data-panel="journal" hidden>
+        <div class="filters">
+          <select class="control" id="jbank" aria-label="Банк">
+            <option value="">Усі банки</option>
+          </select>
+          <select class="control" id="jperiod" aria-label="Період">
+            <option value="24h">24 години</option>
+            <option value="1h">Остання година</option>
+            <option value="7d">7 днів</option>
+            <option value="30d">30 днів</option>
+          </select>
+        </div>
+
+        <div class="jl">
+          <section class="events">
+            <div class="events-head"><span id="jcount"></span><span>нові спочатку</span></div>
+            <div class="events-body" id="jlist"></div>
+          </section>
+          <section class="detail"><div class="detail-in" id="jdetail"></div></section>
+        </div>
+      </section>
+
+      <!-- ═══ НАЛАШТУВАННЯ ═══ -->
+      <section class="page" data-panel="settings" hidden>
+        <div class="set-tabs" id="set-tabs"></div>
+        <div class="set-body" id="set-body"></div>
+        <footer class="set-foot" id="set-foot">
+          <button class="btn btn-primary" id="settings-save">Зберегти</button>
+        </footer>
+      </section>
     </div>
-  </div>
-  <div class="pane-body" id="log-body"></div>
-</section>
+  </main>
+</div>
 
 <script src="app.js"></script>
+<script src="shell.js"></script>
+<script src="page-memory.js"></script>
+<script src="page-journal.js"></script>
+<script src="page-settings.js"></script>
 </body>
 </html>
