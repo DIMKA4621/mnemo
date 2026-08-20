@@ -1,0 +1,1131 @@
+<!doctype html>
+<html lang="uk">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!--
+  ============================================================================
+  ЗАТВЕРДЖЕНИЙ МАКЕТ КАБІНЕТУ v3 — ЗАМОРОЖЕНО 2026-08-19
+  ============================================================================
+
+  Це НЕ код продукту. Продукт живе в `src/webui/static/`.
+  Це еталон, з якого реалізується оболонка: архітектура вкладок, розкладка
+  сторінок і візуальна мова, погоджені з користувачем.
+
+  Дані всередині — фікстури, вписані руками. Поведінка справжня: перемикання
+  сторінок, вибір банку й файла, меню `···`, master-detail журналу, перехід
+  «Відкрити в Памʼяті» (перемикає і банк теж), розділи налаштувань, тема.
+
+  НЕ РЕДАГУВАТИ мимохідь. Якщо макет має змінитись — це рішення, і воно
+  записується в `.claude/memory/topics/cabinet-ui.md` разом зі зміною файла.
+  Рішення, які цей файл втілює, пояснені там же; денний запис —
+  `.claude/memory/logs/2026-08-19-cabinet-tabs.md`.
+
+  Відкривати подвійним кліком: файл самодостатній, без залежностей і мережі.
+  ============================================================================
+-->
+</head>
+<body>
+<title>Mnemo Cabinet</title>
+<!--
+АРХІТЕКТУРА ВКЛАДОК (прототип структури, не фінальних стилів)
+
+  ┌──────────┬────────────────────────────────────────┐
+  │ сайдбар  │  одна сторінка на всю решту вікна      │
+  │ 3 пункти │  ── Памʼять:  Банки │ Файли │ Вміст    │
+  │          │  ── Журнал:   картки │ деталі          │
+  │ ─────────│  ── Налашт.:  вкладки вгорі + форма    │
+  │ статус   │                                        │
+  └──────────┴────────────────────────────────────────┘
+
+- Сайдбар широкий за замовчуванням, кнопка згортає його в іконки.
+- Крім трьох пунктів у ньому НЕМАЄ нічого: банки живуть тільки в першій
+  колонці Памʼяті й ніде не дублюються.
+- Горизонтального топбару немає: службові факти й тема — підвал сайдбару,
+  спільний для всіх трьох сторінок.
+- Кожна сторінка займає контент цілком; вони заміщають одна одну.
+-->
+<style>
+  :root {
+    --bg: #14161a;
+    --bg-pane: #1b1e24;
+    --bg-sunken: #101216;
+    --bg-hover: #23272f;
+    --line: #2c313a;
+    --line-sunken: #191c22;
+    --line-table: #23262c;
+    --fg: #dfe3ea;
+    --fg-dim: #949cab;
+    --fg-mute: #8d97a8;
+    --accent: #6aa8ff;
+    --ok: #4bbf7a;
+    --busy: #e0a94a;
+    --idle: #7b8494;
+    --err: #e2685f;
+    --radius: 6px;
+    --mono: ui-monospace, "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
+    --sans: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+
+    --btn-bg: #2a2f38;
+    --btn-bg-hover: #333a45;
+    --btn-border-hover: #3d444f;
+
+    --sel-bg: #232c3a;
+    --sel-fg: #cfe1ff;
+    --seg-active-bg: #2f3742;
+
+    --badge-git-fg: #9ecb8a; --badge-git-border: #35482f; --badge-git-bg: #212b1e;
+    --badge-off-fg: #d0a0a0; --badge-off-border: #4a3030; --badge-off-bg: #2c2020;
+    --badge-frozen-fg: #8fc6dd; --badge-frozen-border: #2f4756; --badge-frozen-bg: #1b2a33;
+    --badge-ready-fg: #8ee0ac; --badge-ready-border: #2e4d3a; --badge-ready-bg: #1c2b23;
+    --badge-indexing-fg: #f0c37a; --badge-indexing-border: #574427; --badge-indexing-bg: #2e2618;
+    --badge-empty-fg: #9fb2cc; --badge-empty-border: #33415a; --badge-empty-bg: #1d2531;
+
+    --danger-bg: #3a2020; --danger-border: #5a2f2c; --danger-fg: #f3c3bf;
+    --warn-bg: #2e2618; --warn-border: #574427; --warn-fg: #f0c37a;
+
+    --sidebar-w: 208px;
+    --sidebar-rail: 52px;
+  }
+
+  :root[data-theme="light"] {
+    --bg: #f2f3f6;
+    --bg-pane: #ffffff;
+    --bg-sunken: #e9ebef;
+    --bg-hover: #e4e7ec;
+    --line: #d7dbe2;
+    --line-sunken: #e6e9ee;
+    --line-table: #e8ebef;
+    --fg: #1b1f27;
+    --fg-dim: #545c69;
+    --fg-mute: #6a7280;
+    --accent: #2c66c9;
+    --ok: #2f9257;
+    --busy: #9d6c0c;
+    --idle: #7b8494;
+    --err: #c4423a;
+
+    --btn-bg: #f4f5f8;
+    --btn-bg-hover: #e9ecf1;
+    --btn-border-hover: #c5cbd5;
+
+    --sel-bg: #e2ebfb;
+    --sel-fg: #17417e;
+    --seg-active-bg: #e2e5eb;
+
+    --badge-git-fg: #3d6b2c; --badge-git-border: #c3dcb6; --badge-git-bg: #eef7ea;
+    --badge-off-fg: #8f3a35; --badge-off-border: #e2bcb9; --badge-off-bg: #fbeeed;
+    --badge-frozen-fg: #1d6b8a; --badge-frozen-border: #b6d7e4; --badge-frozen-bg: #eaf5fa;
+    --badge-ready-fg: #22703f; --badge-ready-border: #b9debe; --badge-ready-bg: #ecf8ef;
+    --badge-indexing-fg: #8a6209; --badge-indexing-border: #e5d3a4; --badge-indexing-bg: #fdf6e5;
+    --badge-empty-fg: #3d5580; --badge-empty-border: #c3cfe4; --badge-empty-bg: #eef2f9;
+
+    --danger-bg: #fbeceb; --danger-border: #e6bfbc; --danger-fg: #97302a;
+    --warn-bg: #fdf4e3; --warn-border: #e6d3a8; --warn-fg: #8a6209;
+  }
+
+  * { box-sizing: border-box; }
+  html, body { width: 100%; height: 100%; margin: 0; }
+  body {
+    overflow: hidden;
+    background: var(--bg);
+    color: var(--fg);
+    font: 13px/1.45 var(--sans);
+  }
+  button, input, select { font: inherit; color: inherit; }
+  button { cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+  [hidden] { display: none !important; }
+  svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+  ::-webkit-scrollbar { width: 10px; height: 10px; }
+  ::-webkit-scrollbar-thumb { background: var(--line); border: 3px solid transparent; background-clip: content-box; border-radius: 8px; }
+
+  /* ═══════════ shell: sidebar + one full page ═══════════ */
+  .app {
+    display: grid;
+    grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+    height: 100%;
+    transition: grid-template-columns 140ms ease;
+  }
+  .app.is-collapsed { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
+
+  .sidebar {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    background: var(--bg-sunken);
+    border-right: 1px solid var(--line);
+    overflow: hidden;
+  }
+
+  .sb-top {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    height: 44px;
+    padding: 0 10px;
+    border-bottom: 1px solid var(--line);
+  }
+  .sb-brand { flex: 1; min-width: 0; font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+  .is-collapsed .sb-brand { display: none; }
+  .sb-toggle {
+    flex: none;
+    display: inline-flex;
+    padding: 4px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg-mute);
+  }
+  .sb-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+  .is-collapsed .sb-toggle { margin: 0 auto; }
+  .is-collapsed .sb-toggle svg { transform: scaleX(-1); }
+
+  .sb-nav { flex: 1; min-height: 0; overflow: auto; padding: 8px 6px; }
+  .sb-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+    height: 32px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: var(--radius);
+    background: transparent;
+    color: var(--fg-dim);
+    text-align: left;
+    white-space: nowrap;
+  }
+  .sb-item + .sb-item { margin-top: 2px; }
+  .sb-item:hover { background: var(--bg-hover); color: var(--fg); }
+  .sb-item.is-active { background: var(--sel-bg); color: var(--sel-fg); font-weight: 500; }
+  .sb-item svg { flex: none; }
+  .sb-item .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+  .sb-item .cnt { flex: none; color: var(--fg-mute); font: 11px/1 var(--mono); }
+  .sb-item.is-active .cnt { color: var(--sel-fg); }
+  .is-collapsed .sb-item { justify-content: center; padding: 0; }
+  .is-collapsed .sb-item .lbl, .is-collapsed .sb-item .cnt { display: none; }
+
+  /* The machine's three facts sit at the bottom of the sidebar, where an app
+     usually puts the account chip. They belong to the machine, not to a page,
+     so they must not ride in the header — that space is for a page's actions. */
+  .sb-foot {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 34px;
+    padding: 8px 10px;
+    border-top: 1px solid var(--line);
+    color: var(--fg-mute);
+    font: 10.5px/1.4 var(--mono);
+    white-space: nowrap;
+    overflow: hidden;
+  }
+  .sb-foot .sep { color: var(--line); }
+  .sb-foot .ver { margin-left: auto; }
+  .is-collapsed .sb-foot { justify-content: center; padding: 8px 4px; }
+  .is-collapsed .sb-foot .txt, .is-collapsed .sb-foot .sep, .is-collapsed .sb-foot .ver { display: none; }
+
+  .dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+  .dot.busy { background: var(--busy); }
+  .dot.err { background: var(--err); }
+  .dot.idle { background: var(--idle); }
+
+  .stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .pages { position: relative; flex: 1; min-width: 0; min-height: 0; }
+  .page { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+  /* Persistent header. The left half swaps with the tab; the right half never
+     does — it is the machine, and the machine does not depend on the page. */
+  .topbar {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    min-height: 44px;
+    padding: 7px 12px;
+    background: var(--bg-pane);
+    border-bottom: 1px solid var(--line);
+    min-width: 0;
+  }
+  .top-left { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+
+  /* ═══════════ shared bits ═══════════ */
+  .page-title { font-size: 13.5px; font-weight: 650; white-space: nowrap; }
+  .page-sub { color: var(--fg-mute); font-size: 11.5px; white-space: nowrap; }
+  .grow { flex: 1; min-width: 4px; }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    min-height: 27px;
+    padding: 4px 9px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--btn-bg);
+    color: var(--fg);
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .btn:hover { background: var(--btn-bg-hover); border-color: var(--btn-border-hover); }
+  .btn-ghost { border-color: transparent; background: transparent; color: var(--fg-dim); }
+  .btn-ghost:hover { background: var(--bg-hover); color: var(--fg); }
+  .btn-icon { min-width: 27px; padding: 4px; }
+  .btn-sm { min-height: 23px; padding: 2px 7px; font-size: 11.5px; }
+  .btn svg { width: 14px; height: 14px; }
+
+  .segmented { display: inline-flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+  .seg { border: 0; padding: 4px 9px; background: transparent; color: var(--fg-dim); font-size: 11.5px; }
+  .seg + .seg { border-left: 1px solid var(--line); }
+  .seg:hover { color: var(--fg); }
+  .seg.is-active { background: var(--seg-active-bg); color: var(--fg); }
+
+  .badge {
+    display: inline-flex;
+    align-items: center;
+    padding: 1px 6px;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    font: 10.5px/1.5 var(--mono);
+    white-space: nowrap;
+  }
+  .badge-ready { color: var(--badge-ready-fg); border-color: var(--badge-ready-border); background: var(--badge-ready-bg); }
+  .badge-indexing { color: var(--badge-indexing-fg); border-color: var(--badge-indexing-border); background: var(--badge-indexing-bg); }
+  .badge-empty { color: var(--badge-empty-fg); border-color: var(--badge-empty-border); background: var(--badge-empty-bg); }
+  .badge-git { color: var(--badge-git-fg); border-color: var(--badge-git-border); background: var(--badge-git-bg); }
+  .badge-nogit { color: var(--fg-mute); border-color: var(--line); background: var(--bg-sunken); }
+  .badge-frozen { color: var(--badge-frozen-fg); border-color: var(--badge-frozen-border); background: var(--badge-frozen-bg); }
+  .badge-off { color: var(--badge-off-fg); border-color: var(--badge-off-border); background: var(--badge-off-bg); }
+
+  .banner {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 8px 12px;
+    border-bottom: 1px solid var(--warn-border);
+    background: var(--warn-bg);
+    color: var(--warn-fg);
+    font-size: 12px;
+  }
+  .banner strong { color: var(--fg); }
+  .banner .btn { margin-left: auto; }
+  .empty-hint { margin: 0; padding: 18px 14px; color: var(--fg-mute); font-size: 12px; }
+
+  /* ═══════════ page: Памʼять (three panes, as today) ═══════════ */
+  .layout { flex: 1; min-height: 0; display: grid; grid-template-columns: 300px 300px minmax(0, 1fr); }
+  .pane { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-pane); border-right: 1px solid var(--line); }
+  .pane:last-child { border-right: 0; }
+  .pane-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-height: 36px;
+    padding: 6px 11px;
+    background: var(--bg-sunken);
+    border-bottom: 1px solid var(--line);
+  }
+  .pane-head h2 { margin: 0; font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--fg-dim); }
+  .pane-head h2.file-title { letter-spacing: 0; text-transform: none; font: 500 12px/1.4 var(--mono); color: var(--fg); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pane-sub { color: var(--fg-mute); font: 10.5px/1 var(--mono); }
+  .pane-actions { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+  .pane-body { min-height: 0; overflow: auto; }
+  .toggle { display: inline-flex; align-items: center; gap: 5px; color: var(--fg-dim); font-size: 11px; white-space: nowrap; }
+
+  .bank { position: relative; padding: 10px 11px; border-bottom: 1px solid var(--line-sunken); cursor: pointer; }
+  .bank:hover { background: var(--bg-hover); }
+  .bank.is-selected { background: var(--sel-bg); box-shadow: inset 2px 0 var(--accent); }
+  .bank.is-disabled { opacity: .62; }
+  .bank-row { display: flex; align-items: flex-start; gap: 6px; }
+  .bank-head { flex: 1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 5px; }
+  .bank-name { font-size: 12.5px; font-weight: 650; }
+  .btn-menu { flex: none; border: 0; border-radius: 4px; padding: 0 4px; background: transparent; color: var(--fg-mute); font: 600 15px/1.2 var(--mono); }
+  .btn-menu:hover { background: var(--bg-hover); color: var(--fg); }
+  .bank-root { display: block; margin-top: 6px; color: var(--fg-mute); font: 10.5px/1.5 var(--mono); overflow-wrap: anywhere; }
+  .bank-stats { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 2px 12px; color: var(--fg-dim); font: 10.5px/1.5 var(--mono); }
+  .bank-stats .muted { color: var(--fg-mute); }
+
+  .menu {
+    position: fixed;
+    z-index: 50;
+    min-width: 214px;
+    padding: 4px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-pane);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .38);
+  }
+  .menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    width: 100%;
+    padding: 6px 9px;
+    border: 0;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--fg);
+    text-align: left;
+    font-size: 12.5px;
+  }
+  .menu-item:hover { background: var(--bg-hover); }
+  .menu-item.is-danger { color: var(--err); }
+  .menu-item .mark { flex: none; width: 12px; color: var(--accent); }
+  .menu-sep { height: 1px; margin: 4px 2px; background: var(--line); }
+  .menu-label { padding: 5px 9px 2px; color: var(--fg-mute); font-size: 10.5px; }
+
+  .tree { padding: 5px 0 20px; font-family: var(--mono); font-size: 11.5px; }
+  .tree-row { display: flex; align-items: center; gap: 6px; min-height: 25px; padding: 3px 11px; color: var(--fg-dim); cursor: pointer; }
+  .tree-row:hover { background: var(--bg-hover); color: var(--fg); }
+  .tree-row.is-selected { background: var(--sel-bg); color: var(--sel-fg); }
+  .tree-row.indent { padding-left: 26px; }
+  .tree-row .caret { width: 9px; font-size: 9px; color: var(--fg-mute); }
+  .tree-row .ic { flex: none; width: 14px; display: inline-flex; color: var(--fg-mute); }
+  .tree-row .ic svg { width: 13px; height: 13px; }
+  .tree-row .nm { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .tree-row .n { flex: none; color: var(--fg-mute); font-size: 10px; }
+
+  .file-meta { flex: none; display: flex; flex-wrap: wrap; gap: 3px 16px; padding: 7px 14px; border-bottom: 1px solid var(--line-sunken); color: var(--fg-mute); font: 10.5px/1.5 var(--mono); }
+  .doc { max-width: 76ch; padding: 18px 16px 80px; font-family: var(--mono); font-size: 12px; line-height: 1.7; transition: background 480ms ease; }
+  .doc h1 { margin: 0 0 12px; font: 650 14px/1.45 var(--mono); }
+  .doc h2 { margin: 18px 0 10px; font: 650 13px/1.45 var(--mono); }
+  .doc p { margin: 0 0 12px; color: var(--fg-dim); }
+  .doc ul { margin: 0 0 13px; padding-left: 19px; color: var(--fg-dim); }
+  .doc li { margin: 4px 0; }
+  .doc strong { color: var(--fg); }
+  .chunk-divider { position: relative; height: 22px; margin: 14px 0 6px; border-top: 1px dashed color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .chunk-divider span { position: absolute; top: -7px; left: 0; padding-right: 8px; background: var(--bg-pane); color: var(--accent); font: 10px/1 var(--mono); }
+  .doc.no-viz .chunk-divider { display: none; }
+  .mob-panes { display: none; }
+
+  /* ═══════════ page: Журнал ═══════════ */
+  .filters {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    padding: 8px 12px;
+    background: var(--bg-pane);
+    border-bottom: 1px solid var(--line);
+  }
+  .control {
+    min-height: 27px;
+    padding: 4px 24px 4px 8px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-sunken);
+    color: var(--fg-dim);
+    font-size: 12px;
+  }
+  .search { position: relative; display: inline-flex; }
+  .search svg { position: absolute; left: 8px; top: 7px; width: 13px; height: 13px; color: var(--fg-mute); pointer-events: none; }
+  .search input {
+    width: min(240px, 26vw);
+    min-height: 27px;
+    padding: 4px 8px 4px 26px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-sunken);
+    color: var(--fg);
+    font-size: 12px;
+  }
+
+  .jl { flex: 1; min-height: 0; display: grid; grid-template-columns: 400px minmax(0, 1fr); }
+  .events { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-pane); border-right: 1px solid var(--line); }
+  .events-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    min-height: 30px;
+    padding: 5px 11px;
+    background: var(--bg-sunken);
+    border-bottom: 1px solid var(--line);
+    color: var(--fg-mute);
+    font: 10.5px/1 var(--mono);
+  }
+  .events-body { min-height: 0; overflow: auto; padding: 7px; }
+
+  /* «прямокутнички» — кожен виклик окремою карткою */
+  .ev {
+    display: block;
+    width: 100%;
+    padding: 9px 10px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    background: var(--bg-sunken);
+    color: var(--fg);
+    text-align: left;
+  }
+  .ev + .ev { margin-top: 6px; }
+  .ev:hover { background: var(--bg-hover); border-color: var(--btn-border-hover); }
+  .ev.is-selected { background: var(--sel-bg); border-color: var(--accent); }
+  .ev-top { display: flex; align-items: baseline; gap: 8px; }
+  .ev-q { flex: 1; min-width: 0; font-size: 12px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .ev-n { flex: none; text-align: right; color: var(--fg-dim); font: 12px/1.4 var(--mono); }
+  .ev-n small { display: block; margin-top: 2px; color: var(--fg-mute); font: 10px/1 var(--mono); }
+  .ev-bot { margin-top: 7px; display: flex; align-items: center; gap: 8px; color: var(--fg-mute); font: 10.5px/1 var(--mono); }
+  .ev-bot .st { display: inline-flex; align-items: center; gap: 5px; }
+  .ev-bot .t { margin-left: auto; }
+
+  .detail { min-width: 0; min-height: 0; overflow: auto; background: var(--bg-pane); }
+  .detail-in { padding: 16px 16px 70px; }
+  .d-kick { display: flex; align-items: center; gap: 8px; color: var(--fg-mute); font: 11px/1 var(--mono); }
+  .d-h { margin: 9px 0 0; font-size: 15px; font-weight: 650; line-height: 1.45; }
+  .d-facts { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 12px 28px; padding: 12px 0; border-top: 1px solid var(--line-table); border-bottom: 1px solid var(--line-table); }
+  .d-k { color: var(--fg-mute); font-size: 10.5px; }
+  .d-v { margin-top: 3px; font: 12px/1.3 var(--mono); }
+  .d-quote { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-sunken); color: var(--fg-dim); font: 12px/1.6 var(--mono); }
+  .d-sec { margin: 20px 0 8px; display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; font-weight: 650; }
+  .d-sec .muted { color: var(--fg-mute); font-size: 11px; font-weight: 400; }
+
+  .hit { padding: 11px 0; border-bottom: 1px solid var(--line-table); }
+  .hit-top { display: flex; align-items: baseline; gap: 9px; }
+  .hit-r { flex: none; width: 14px; color: var(--fg-mute); font: 11px/1.45 var(--mono); }
+  .hit-l { flex: 1; min-width: 0; }
+  .hit-p { font: 12px/1.45 var(--mono); overflow-wrap: anywhere; }
+  .hit-h { margin-top: 2px; color: var(--fg-mute); font-size: 11px; }
+  .hit-s { flex: none; text-align: right; color: var(--fg-mute); font: 10.5px/1.5 var(--mono); }
+  .hit-snap { margin: 8px 0 0 23px; padding: 9px 11px; border-radius: var(--radius); background: var(--bg-sunken); color: var(--fg-dim); font: 11.5px/1.7 var(--mono); }
+  .hit-foot { margin: 8px 0 0 23px; display: flex; align-items: center; gap: 9px; color: var(--fg-mute); font-size: 11px; }
+  .hit-foot .btn { margin-left: auto; }
+  .note { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--warn-border); border-radius: var(--radius); background: var(--warn-bg); color: var(--warn-fg); font-size: 12px; line-height: 1.6; }
+  .note.is-err { border-color: var(--danger-border); background: var(--danger-bg); color: var(--danger-fg); font: 11.5px/1.65 var(--mono); }
+  .note strong { color: var(--fg); }
+  .nums { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 18px 40px; }
+  .num { font: 500 19px/1.2 var(--mono); }
+  .num-k { margin-top: 3px; color: var(--fg-mute); font-size: 11px; }
+
+  /* ═══════════ page: Налаштування (horizontal tabs) ═══════════ */
+  .set-tabs { flex: none; display: flex; gap: 2px; padding: 6px 12px; background: var(--bg-pane); border-bottom: 1px solid var(--line); overflow-x: auto; }
+  .set-tab { border: 0; border-radius: var(--radius); padding: 5px 11px; background: transparent; color: var(--fg-dim); font-size: 12.5px; white-space: nowrap; }
+  .set-tab:hover { background: var(--bg-hover); color: var(--fg); }
+  .set-tab.is-active { background: var(--sel-bg); color: var(--sel-fg); font-weight: 500; }
+  .set-body { flex: 1; min-height: 0; overflow: auto; background: var(--bg-pane); }
+  .set-form { max-width: 640px; padding: 20px 16px 90px; }
+  .set-form h2 { margin: 0; font-size: 15px; font-weight: 650; }
+  .lede { max-width: 60ch; margin: 8px 0 0; color: var(--fg-dim); font-size: 12.5px; line-height: 1.65; }
+  .fs { margin-top: 22px; padding-top: 18px; border-top: 1px solid var(--line-table); }
+  .fs:first-of-type { margin-top: 18px; }
+  .fl { display: block; margin-bottom: 8px; font-size: 12.5px; font-weight: 650; }
+  .fn { margin: 8px 0 0; color: var(--fg-mute); font-size: 11.5px; line-height: 1.65; }
+  .kv { display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; padding: 8px 0; border-bottom: 1px solid var(--line-table); font-size: 12.5px; }
+  .kv:first-of-type { border-top: 1px solid var(--line-table); }
+  .kv b { color: var(--fg-mute); font-weight: 400; }
+  .kv span { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-family: var(--mono); }
+  .box { margin-top: 10px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-sunken); }
+  .box-top { display: flex; align-items: center; gap: 9px; flex-wrap: wrap; font-size: 12.5px; }
+  .box-top .p { color: var(--fg-mute); font: 11.5px/1.4 var(--mono); }
+  .box-acts { display: flex; gap: 7px; margin-top: 11px; }
+  .chk { display: flex; align-items: baseline; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line-table); }
+  .chk:last-child { border-bottom: 0; }
+  .chk .dot { margin-top: 5px; }
+  .chk-t { font-size: 12.5px; font-weight: 650; }
+  .chk-c { margin-top: 4px; color: var(--fg-mute); font-size: 11.5px; line-height: 1.65; }
+  .set-foot {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    min-height: 48px;
+    padding: 8px 14px;
+    background: var(--bg-pane);
+    border-top: 1px solid var(--line);
+  }
+
+  /* ═══════════ responsive ═══════════ */
+  @media (max-width: 1180px) {
+    .layout { grid-template-columns: 270px 262px minmax(0, 1fr); }
+    .jl { grid-template-columns: 352px minmax(0, 1fr); }
+  }
+  @media (max-width: 940px) {
+    .app, .app.is-collapsed { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
+    .sb-brand { display: none; }
+    .sb-foot { justify-content: center; padding: 8px 4px; }
+    .sb-foot .txt, .sb-foot .sep, .sb-foot .ver { display: none; }
+    .sb-item { justify-content: center; padding: 0; }
+    .sb-item .lbl, .sb-item .cnt { display: none; }
+    .sb-toggle { display: none; }
+    .layout { display: block; position: relative; }
+    .layout .pane { position: absolute; inset: 0; display: none; border-right: 0; }
+    .layout .pane.is-mob { display: flex; }
+    .mob-panes { display: inline-flex; }
+    .jl { grid-template-columns: 1fr; grid-template-rows: minmax(200px, 34%) minmax(0, 1fr); }
+    .events { border-right: 0; border-bottom: 1px solid var(--line); }
+  }
+  @media (max-width: 620px) {
+    .topbar { flex-wrap: wrap; }
+    .page-sub { display: none; }
+    .search { flex: 1 1 100%; }
+    .search input { width: 100%; }
+    .filters .grow { display: none; }
+    .filters .control { flex: 1; min-width: 104px; }
+    .kv { grid-template-columns: 1fr; gap: 3px; }
+    .hit-snap, .hit-foot { margin-left: 0; }
+    .pane-head { flex-wrap: wrap; }
+    .pane-actions { margin-left: 0; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+</style>
+
+<div class="app" id="app">
+  <!-- ═══ sidebar: three tabs, nothing else ═══ -->
+  <aside class="sidebar">
+    <div class="sb-top">
+      <span class="sb-brand">mnemo</span>
+      <button class="sb-toggle" id="sb-toggle" aria-label="Згорнути навігацію" title="Згорнути навігацію">
+        <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+      </button>
+    </div>
+
+    <nav class="sb-nav" aria-label="Розділи кабінету">
+      <button class="sb-item is-active" data-page="memory" title="Памʼять">
+        <svg viewBox="0 0 24 24"><path d="M5 4.5h11.5A2.5 2.5 0 0 1 19 7v12H7.5A2.5 2.5 0 0 1 5 16.5z"/><path d="M5 16.5A2.5 2.5 0 0 1 7.5 14H19"/></svg>
+        <span class="lbl">Памʼять</span>
+        <span class="cnt">3</span>
+      </button>
+      <button class="sb-item" data-page="journal" title="Журнал">
+        <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
+        <span class="lbl">Журнал</span>
+        <span class="cnt">1&nbsp;284</span>
+      </button>
+      <button class="sb-item" data-page="settings" title="Налаштування">
+        <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M19 12c0-.37-.03-.73-.08-1.09l2-1.55-2-3.46-2.44.98a8 8 0 0 0-1.9-1.1L14.2 3H9.8l-.38 2.78a8 8 0 0 0-1.9 1.1l-2.44-.98-2 3.46 2 1.55a7.8 7.8 0 0 0 0 2.18l-2 1.55 2 3.46 2.44-.98a8 8 0 0 0 1.9 1.1L9.8 21h4.4l.38-2.78a8 8 0 0 0 1.9-1.1l2.44.98 2-3.46-2-1.55c.05-.36.08-.72.08-1.09z"/></svg>
+        <span class="lbl">Налаштування</span>
+      </button>
+    </nav>
+
+    <div class="sb-foot" title="онлайн · провайдер local · версія 3.0.0">
+      <i class="dot"></i>
+      <span class="txt">онлайн</span>
+      <span class="sep">·</span>
+      <span class="txt">local</span>
+      <span class="ver">v 3.0.0</span>
+    </div>
+  </aside>
+
+  <main class="stage">
+    <!-- Постійний хедер: ліва половина міняється від вкладки, права — ніколи -->
+    <header class="topbar">
+      <div class="top-left" id="top-left"></div>
+    </header>
+
+    <div class="pages">
+    <!-- ═══ ПАМʼЯТЬ ═══ -->
+    <section class="page" data-panel="memory">
+      <div class="banner">
+        <i class="dot busy"></i>
+        <span><strong>1 банк має індекс від попередньої моделі.</strong> Пошук у ньому відмовляє, доки індекс не перебудовано.</span>
+        <button class="btn btn-sm">Перегенерувати</button>
+      </div>
+
+      <div class="layout">
+        <section class="pane is-mob" data-mob-panel="banks">
+          <div class="pane-head">
+            <h2>Банки</h2>
+            <div class="pane-actions"><button class="btn btn-ghost btn-icon btn-sm" title="Оновити список" aria-label="Оновити список">↻</button></div>
+          </div>
+          <div class="pane-body" id="banks"></div>
+        </section>
+
+        <section class="pane" data-mob-panel="tree">
+          <div class="pane-head">
+            <h2>Файли</h2>
+            <span class="pane-sub" id="tree-sub">37 файлів · 2 теки</span>
+          </div>
+          <div class="pane-body tree" id="tree"></div>
+        </section>
+
+        <section class="pane" data-mob-panel="file">
+          <div class="pane-head">
+            <h2 class="file-title" id="file-title">Вміст</h2>
+            <div class="pane-actions">
+              <label class="toggle" title="Показати межі чанків так, як вони лежать в індексі">
+                <input type="checkbox" id="chunkviz" checked>
+                <span>Межі чанків</span>
+              </label>
+              <button class="btn btn-sm">Переіндексувати файл</button>
+            </div>
+          </div>
+          <div class="file-meta" id="file-meta" hidden></div>
+          <div class="pane-body" id="file-body"><p class="empty-hint">Оберіть файл у дереві.</p></div>
+        </section>
+      </div>
+    </section>
+
+    <!-- ═══ ЖУРНАЛ ═══ -->
+    <section class="page" data-panel="journal" hidden>
+      <div class="filters">
+        <select class="control" name="bank" aria-label="Банк"><option>Усі банки</option><option>mnemo</option><option>voice-agent</option><option>neoversity</option></select>
+        <select class="control" name="period" aria-label="Період"><option>24 години</option><option>Остання година</option><option>7 днів</option><option>30 днів</option></select>
+        <select class="control" name="status" aria-label="Статус"><option>Усі стани</option><option>готово</option><option>індексується</option><option>помилка</option></select>
+        <div class="grow"></div>
+        <label class="search">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-4-4"/></svg>
+          <input name="jq" placeholder="Запит або шлях…" aria-label="Пошук у журналі">
+        </label>
+      </div>
+
+      <div class="jl">
+        <section class="events">
+          <div class="events-head"><span id="jcount">Показано 5 із 1 284</span><span>нові спочатку</span></div>
+          <div class="events-body" id="jlist"></div>
+        </section>
+        <section class="detail"><div class="detail-in" id="jdetail"></div></section>
+      </div>
+    </section>
+
+    <!-- ═══ НАЛАШТУВАННЯ ═══ -->
+    <section class="page" data-panel="settings" hidden>
+      <div class="set-tabs" id="set-tabs">
+        <button class="set-tab is-active" data-sec="embed">Модель ембедингу</button>
+        <button class="set-tab" data-sec="service">Служба</button>
+        <button class="set-tab" data-sec="maint">Обслуговування</button>
+      </div>
+      <div class="set-body" id="set-body"></div>
+      <footer class="set-foot" id="set-foot">
+        <button class="btn">Скасувати</button>
+        <button class="btn">Зберегти</button>
+      </footer>
+    </section>
+    </div>
+  </main>
+</div>
+
+<script>
+  const esc = v => String(v).replace(/[&<>'"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[c]));
+  const OPEN = '<svg viewBox="0 0 24 24"><path d="M14 5h5v5M19 5l-8 8"/><path d="M19 14v5H5V5h5"/></svg>';
+  const STATUS_LABEL = { ready: 'готово', indexing: 'індексується', empty: 'порожньо' };
+  const STATE_LABEL = { enabled: 'Активний', frozen: 'Заморожений', disabled: 'Вимкнений' };
+
+  /* ---------- data ---------- */
+  const BANKS = [
+    { id: 'voice-agent', name: 'voice-agent', root: 'E:/work_projects/python/voice-agent/.claude/memory',
+      status: 'ready', state: 'enabled', git: true, files: 61, chunks: 882, queued: 0, size: '6.2 MiB',
+      note: 'індекс актуальний', last: '2026-08-15 15:29' },
+    { id: 'mnemo', name: 'mnemo', root: 'E:/work_projects/other/mnemo/.claude/memory',
+      status: 'ready', state: 'enabled', git: true, files: 37, chunks: 404, queued: 0, size: '7.1 MiB',
+      note: 'індекс актуальний', last: '2026-08-17 17:48' },
+    { id: 'neoversity', name: 'neoversity', root: 'E:/work_projects/other/neoversity/.claude/memory',
+      status: 'ready', state: 'frozen', git: true, files: 34, chunks: 1027, queued: 0, size: '12.6 MiB',
+      note: 'за файлами не стежимо', last: '2026-08-17 11:52' }
+  ];
+
+  const TREE = [
+    { t: 'dir', name: 'logs/', n: 22 },
+    { t: 'file', name: '2026-08-16-bank-states.md', path: 'logs/2026-08-16-bank-states.md', n: 9 },
+    { t: 'file', name: '2026-08-16-settings-sections.md', path: 'logs/2026-08-16-settings-sections.md', n: 9 },
+    { t: 'file', name: '2026-08-17-cabinet-navigation.md', path: 'logs/2026-08-17-cabinet-navigation.md', n: 4 },
+    { t: 'dir', name: 'topics/', n: 12 },
+    { t: 'file', name: 'cabinet-ui.md', path: 'topics/cabinet-ui.md', n: 18 },
+    { t: 'file', name: 'provider-settings.md', path: 'topics/provider-settings.md', n: 17 },
+    { t: 'root', name: 'MEMORY.md', path: 'MEMORY.md', n: 8 }
+  ];
+
+  const FILES = {
+    'logs/2026-08-17-cabinet-navigation.md': { size: '2.8 KiB', chunks: 4, sha: '9c41…e82', html:
+      `<div class="chunk-divider"><span>#1 · 0–1018</span></div><h1># Глобальна навігація кабінету й окремий журнал</h1><p>Після аудиту живої сторінки узгоджено інформаційну архітектуру наступного кроку.</p><h2>## Узгоджені рішення</h2><ul><li>Сайдбар тримає <strong>лише три пункти</strong>; банки в ньому не дублюються.</li><li>Кожна сторінка займає вікно <strong>цілком</strong>.</li><li>Нижній dock журналу прибирається з Памʼяті повністю.</li></ul><div class="chunk-divider"><span>#2 · 1019–1930</span></div><h2>## Журнал як окрема сторінка</h2><p>Виклики ліворуч прямокутниками, повні деталі вибраного — праворуч.</p><div class="chunk-divider"><span>#3 · 1931–2862</span></div><p>У service journal зберігається точний snapshot content кожного повернутого hit.</p>` },
+    'topics/cabinet-ui.md': { size: '9.4 KiB', chunks: 18, sha: 'a17b…3d1', html:
+      `<div class="chunk-divider"><span>#14 · 9210–10442</span></div><h1># Кабінет: рішення інтерфейсу</h1><h2>## Усі дії банку — в одному меню ···</h2><p>У правому кінці рядка з назвою: синхронізація, повний реіндекс, доступ MCP, прибрати. Власних кнопок картка не має.</p><p>Саме той ряд кнопок зажимав ширину колонки <strong>з двох боків</strong>.</p>` },
+    'logs/2026-08-16-settings-sections.md': { size: '3.1 KiB', chunks: 9, sha: 'b204…9fa', html:
+      `<div class="chunk-divider"><span>#1 · 0–1160</span></div><h1># Розділи налаштувань і автозапуск як контрол</h1><h2>## Сторінка налаштувань уже існувала</h2><p>Робота — не «зробити сторінку», а додати їй навігацію розділів із <strong>SETTINGS_SECTIONS</strong>.</p>` },
+    'logs/2026-08-16-bank-states.md': { size: '4.2 KiB', chunks: 9, sha: 'c38e…447', html:
+      `<div class="chunk-divider"><span>#2 · 880–2010</span></div><h1># Три стани банку</h1><p>Стан — <strong>одне поле</strong>, не пара булеанів: enabled / frozen / disabled.</p>` },
+    'topics/provider-settings.md': { size: '8.8 KiB', chunks: 17, sha: 'd51a…08c', html:
+      `<div class="chunk-divider"><span>#9 · 5120–6240</span></div><h1># Провайдер ембедингу</h1><p>Префікс належить <strong>моделі</strong>, а не полю вводу.</p>` },
+    'MEMORY.md': { size: '5.6 KiB', chunks: 8, sha: 'e77c…b12', html:
+      `<div class="chunk-divider"><span>#1 · 0–1240</span></div><h1># MEMORY.md</h1><p>Індекс банку: посилання на <strong>topics/</strong> і швидкі факти.</p>` },
+    'logs/2026-08-13-settings-ui.md': { size: '3.9 KiB', chunks: 7, sha: 'f012…5ae', html:
+      `<div class="chunk-divider"><span>#2 · 980–2140</span></div><h1># Сторінка налаштувань</h1><p>Цей екран про <strong>машину</strong>, тому роботу заміщає.</p>` },
+    'logs/2026-08-16-embed-memory.md': { size: '4.4 KiB', chunks: 8, sha: '1a3d…77e', html:
+      `<div class="chunk-divider"><span>#3 · 2210–3180</span></div><h1># Віддати памʼять бекенда кнопкою</h1><p>OpenAI-сумісний <strong>/v1/embeddings</strong> приймає keep_alive і мовчки ігнорує.</p>` },
+    'topics/git-workflow.md': { size: '2.4 KiB', chunks: 5, sha: '2b4e…901', html:
+      `<div class="chunk-divider"><span>#3 · 1420–2260</span></div><h1># Git workflow</h1><p>Push виконується лише після підтвердження.</p>` },
+    'topics/deploy.md': { size: '1.9 KiB', chunks: 4, sha: '3c5f…a20', html:
+      `<h1># deploy.md</h1><p>Поточна версія файла, відкрита з журналу.</p>` }
+  };
+
+  const QUERIES = [
+    { id: 1284, at: '17:48:55', date: '2026-08-17', bank: 'mnemo', face: 'mcp', status: 'ready', hits: 3, took: '150.3 мс', prefix: '—', snap: true,
+      q: 'глобальна навігація сторінки Памʼять Банки Агенти Налаштування кабінет',
+      res: [
+        { p: 'logs/2026-08-17-cabinet-navigation.md', h: 'Узгоджені рішення', c: 1, sc: '0.1148', sim: '0.842', tx: 'Сайдбар тримає лише три пункти; банки в ньому не дублюються. Кожна сторінка займає вікно цілком.' },
+        { p: 'topics/cabinet-ui.md', h: 'Усі дії банку — в одному меню ···', c: 14, sc: '0.1129', sim: '0.827', tx: 'У правому кінці рядка з назвою: синхронізація, повний реіндекс, доступ MCP, прибрати. Власних кнопок картка не має.' },
+        { p: 'logs/2026-08-13-settings-ui.md', h: 'Форма: окремий екран', c: 2, sc: '0.1054', sim: '0.801', tx: 'Цей екран про машину і роботу заміщає.' }
+      ] },
+    { id: 1283, at: '17:47:00', date: '2026-08-17', bank: 'mnemo', face: 'mcp', status: 'ready', hits: 8, took: '130.9 мс', prefix: '—', snap: true,
+      q: 'налаштування окремий екран навігація журнал подій веб кабінет банки агенти UX',
+      res: [
+        { p: 'logs/2026-08-16-settings-sections.md', h: 'Сторінка налаштувань уже існувала', c: 1, sc: '0.1109', sim: '0.789', tx: 'Розділи будуються з єдиної таблиці SETTINGS_SECTIONS.' }
+      ] },
+    { id: 1282, at: '17:46:21', date: '2026-08-17', bank: 'mnemo', face: 'mcp', status: 'ready', hits: 6, took: '148.8 мс', prefix: '—', snap: false,
+      q: 'event log panel collapsible hide bottom drawer webui responsive bank list settings screen',
+      res: [
+        { p: 'logs/2026-08-16-settings-sections.md', h: 'Сторінка налаштувань уже існувала', c: 1, sc: '0.1109', sim: '0.775' },
+        { p: 'topics/cabinet-ui.md', h: 'Налаштування — екран, а не модалка', c: 4, sc: '0.1063', sim: '0.763' }
+      ] },
+    { id: 1281, at: '03:28:56', date: '2026-08-17', bank: 'neoversity', face: 'mcp', status: 'indexing', hits: 5, took: '284.8 мс', prefix: 'topics/', snap: true,
+      q: 'гілка dima master merge злиття гілок git workflow',
+      res: [
+        { p: 'topics/git-workflow.md', h: 'Робочі гілки', c: 3, sc: '0.0984', sim: '0.736', tx: 'Push виконується лише після підтвердження.' }
+      ] },
+    { id: 1280, at: '22:22:05', date: '2026-08-16', bank: 'mnemo', face: 'cli', status: 'ready', hits: 5, took: '203.1 мс', prefix: '—', snap: true,
+      q: 'keep_alive нативний api/embed Ollama',
+      res: [
+        { p: 'logs/2026-08-16-embed-memory.md', h: 'Ollama приймає поле й ігнорує його', c: 3, sc: '0.1182', sim: '0.816', tx: 'Вивантаження мусить іти через нативний /api/embed.' }
+      ] }
+  ];
+
+  const INDEXES = [
+    { id: 512, at: '17:52:04', date: '2026-08-17', bank: 'mnemo', face: 'watcher', status: 'ready', kind: 'file', trigger: 'watcher', path: 'logs/2026-08-17-cabinet-navigation.md', took: '1.42 с', files: 1, chunks: 4, pruned: 0 },
+    { id: 511, at: '17:49:11', date: '2026-08-17', bank: 'mnemo', face: 'ui', status: 'ready', kind: 'bulk', trigger: 'manual', path: null, took: '5.84 с', files: 2, chunks: 7, pruned: 1 },
+    { id: 510, at: '12:19:34', date: '2026-08-17', bank: 'voice-agent', face: 'watcher', status: 'error', kind: 'file', trigger: 'watcher', path: 'topics/deploy.md', took: '0.64 с', files: 0, chunks: 0, pruned: 0, error: 'The file changed while it was being read. It remains queued for the next watcher reconciliation.' },
+    { id: 509, at: '11:52:01', date: '2026-08-17', bank: 'neoversity', face: 'service', status: 'ready', kind: 'rebuild', trigger: 'startup', path: null, took: '2 хв 12 с', files: 34, chunks: 1027, pruned: 0 }
+  ];
+
+  const SETTINGS = {
+    embed: `<div class="set-form">
+      <h2>Модель ембедингу</h2>
+      <p class="lede">Бекенд обирається пресетом: URL, модель, ширина вектора й префікси змінюються разом — поле, яке можна забути, відтворило б ту саму тиху ваду.</p>
+      <section class="fs">
+        <span class="fl">Бекенд</span>
+        <div class="segmented">
+          <button class="seg is-active">Локальний резидент</button>
+          <button class="seg">Ollama</button>
+          <button class="seg">OpenAI</button>
+        </div>
+        <p class="fn">Поточний пресет: intfloat/multilingual-e5-large · 1024 виміри · працює без мережі.</p>
+      </section>
+      <section class="fs">
+        <span class="fl">Памʼять моделі</span>
+        <div class="box">
+          <div class="box-top"><span class="badge badge-ready">у памʼяті</span><span class="p">intfloat/multilingual-e5-large · ≈1.5 GiB</span></div>
+          <div class="box-acts"><button class="btn">Вивантажити</button><button class="btn">Перевірити ендпоінт</button></div>
+          <p class="fn">Вивантаження звільняє RAM зараз. Наступний пошук підніме модель назад приблизно за 8 секунд — це не вимикач.</p>
+        </div>
+      </section>
+    </div>`,
+    service: `<div class="set-form">
+      <h2>Служба</h2>
+      <p class="lede">Стан процесу, machine-port факти й автозапуск. Кабінет не пропонує кнопку, яка вбиває процес, що віддає саму сторінку.</p>
+      <section class="fs">
+        <div class="kv"><b>Стан</b><span><i class="dot"></i>працює</span></div>
+        <div class="kv"><b>Версія</b><span>3.0.0</span></div>
+        <div class="kv"><b>PID</b><span>20196 <i class="badge badge-empty">machine-port</i></span></div>
+        <div class="kv"><b>Порт</b><span>127.0.0.1:8918 <i class="badge badge-empty">machine-port</i></span></div>
+        <div class="kv"><b>Черга</b><span>0 · H0 / N0 / L0</span></div>
+      </section>
+      <section class="fs">
+        <span class="fl">Автозапуск</span>
+        <div class="segmented"><button class="seg">Вимкнено</button><button class="seg is-active">Увімкнено</button></div>
+        <p class="fn">Task Scheduler. Зміна застосовується після «Зберегти».</p>
+      </section>
+      <section class="fs">
+        <span class="fl">Тема кабінету</span>
+        <div class="segmented" id="theme">
+          <button class="seg" data-theme="dark">Темна</button>
+          <button class="seg" data-theme="light">Світла</button>
+        </div>
+        <p class="fn">Вибір цього браузера, не машинне значення — тому застосовується одразу й не чекає «Зберегти».</p>
+      </section>
+    </div>`,
+    maint: `<div class="set-form">
+      <h2>Обслуговування</h2>
+      <p class="lede">Той самий структурований doctor report, який CLI показує текстом. Перевірки запускаються лише при відкритті цього розділу.</p>
+      <section class="fs">
+        <div class="chk"><i class="dot"></i><div><div class="chk-t">Рушій і залежності</div><div class="chk-c">Python 3.12 · sqlite-vec доступний · service token на місці.</div></div></div>
+        <div class="chk"><i class="dot"></i><div><div class="chk-t">Банки</div><div class="chk-c">3 зареєстровано · 2 активні · 1 заморожений · токени узгоджені.</div></div></div>
+        <div class="chk"><i class="dot busy"></i><div><div class="chk-t">Осиротілі індекси</div><div class="chk-c">Знайдено 2 derived-файли, які не належать жодному банку.</div><div class="box-acts"><button class="btn btn-sm">Показати ID</button><button class="btn btn-sm">Прибрати сироти</button></div></div></div>
+      </section>
+    </div>`
+  };
+
+  /* ---------- state ---------- */
+  let page = 'memory';
+  let bankId = 'mnemo';
+  let filePath = null;
+  let kind = 'query';
+  let mobPane = 'banks';
+  let selQ = QUERIES[0].id, selI = INDEXES[0].id;
+  const bankById = id => BANKS.find(b => b.id === id);
+
+  /* ---------- shell ---------- */
+  /* Only the LEFT half of the header belongs to a page. The right half is the
+     machine — liveness, provider, version — and never changes with the tab. */
+  const HEAD = {
+    memory: `<span class="page-title">Памʼять</span>
+      <span class="page-sub">3 банки · 132 файли · 2 313 чанків</span>
+      <div class="grow"></div>
+      <div class="segmented mob-panes" aria-label="Панель">
+        <button class="seg is-active" data-mob="banks">Банки</button>
+        <button class="seg" data-mob="tree">Файли</button>
+        <button class="seg" data-mob="file">Вміст</button>
+      </div>
+      <button class="btn btn-sm"><svg viewBox="0 0 24 24"><path d="M12 5v14m-7-7h14"/></svg>Додати банк</button>`,
+    journal: `<span class="page-title">Журнал</span>
+      <div class="segmented" id="jkind">
+        <button class="seg" data-kind="query">Запити</button>
+        <button class="seg" data-kind="index">Індексація</button>
+      </div>
+      <div class="grow"></div>
+      <button class="btn btn-ghost btn-icon btn-sm" title="Оновити журнал" aria-label="Оновити журнал">↻</button>`,
+    settings: `<span class="page-title">Налаштування</span>
+      <span class="page-sub">стосується цієї машини, не окремого банку</span>`
+  };
+
+  function renderHead() {
+    document.getElementById('top-left').innerHTML = HEAD[page];
+    if (page === 'memory') {
+          showPane(mobPane);
+    }
+    if (page === 'journal') {
+      document.querySelectorAll('#jkind .seg').forEach(sg => {
+        sg.classList.toggle('is-active', sg.dataset.kind === kind);
+        sg.addEventListener('click', () => { kind = sg.dataset.kind; renderHead(); renderJournal(); });
+      });
+    }
+  }
+
+  function setPage(name) {
+    page = name;
+    document.querySelectorAll('[data-panel]').forEach(el => el.hidden = el.dataset.panel !== name);
+    document.querySelectorAll('[data-page]').forEach(el => el.classList.toggle('is-active', el.dataset.page === name));
+    renderHead();
+    if (name === 'journal') renderJournal();
+  }
+
+  document.getElementById('sb-toggle').addEventListener('click', () => {
+    const collapsed = document.getElementById('app').classList.toggle('is-collapsed');
+    const btn = document.getElementById('sb-toggle');
+    const label = collapsed ? 'Розгорнути навігацію' : 'Згорнути навігацію';
+    btn.title = label;
+    btn.setAttribute('aria-label', label);
+  });
+
+  /* ---------- Памʼять ---------- */
+  function renderBanks() {
+    document.getElementById('banks').innerHTML = BANKS.map(b => {
+      const badges = [`<span class="badge badge-${b.status}">${STATUS_LABEL[b.status]}</span>`,
+        b.git ? '<span class="badge badge-git">git</span>' : '<span class="badge badge-nogit">no git</span>'];
+      if (b.state === 'frozen') badges.push(`<span class="badge badge-frozen" title="Індекс не оновлюється — файли могли змінитись після ${b.last}. Пошук працює й відповідає за тим станом.">заморожено</span>`);
+      if (b.state === 'disabled') badges.push('<span class="badge badge-off">вимкнено</span>');
+      return `<div class="bank ${b.id === bankId ? 'is-selected' : ''} ${b.state === 'disabled' ? 'is-disabled' : ''}" data-bank="${b.id}">
+        <div class="bank-row">
+          <div class="bank-head"><span class="bank-name">${esc(b.name)}</span>${badges.join('')}</div>
+          <button class="btn-menu" data-menu="${b.id}" aria-haspopup="menu" aria-label="Дії над банком"><span aria-hidden="true">···</span></button>
+        </div>
+        <span class="bank-root">${esc(b.root)}</span>
+        <div class="bank-stats"><span>файлів ${b.files}</span><span>чанків ${b.chunks}</span><span>у черзі ${b.queued}</span><span>${b.size}</span></div>
+        <div class="bank-stats"><span class="muted">${esc(b.note)}</span></div>
+        <div class="bank-stats"><span class="muted">востаннє: ${b.last}</span></div>
+      </div>`;
+    }).join('');
+
+    document.querySelectorAll('[data-bank]').forEach(card => card.addEventListener('click', ev => {
+      if (ev.target.closest('[data-menu]')) return;
+      selectBank(card.dataset.bank);
+    }));
+    document.querySelectorAll('[data-menu]').forEach(btn => btn.addEventListener('click', ev => {
+      ev.stopPropagation();
+      openMenu(btn, bankById(btn.dataset.menu));
+    }));
+  }
+
+  function selectBank(id) {
+    bankId = id;
+    const b = bankById(id);
+    document.querySelectorAll('[data-bank]').forEach(c => c.classList.toggle('is-selected', c.dataset.bank === id));
+    document.getElementById('tree-sub').textContent = `${b.files} файлів · 2 теки`;
+  }
+
+  /* one menu serves every card — the marks are set when it opens */
+  let menuEl = null;
+  function openMenu(anchor, bank) {
+    closeMenu();
+    const states = ['enabled', 'frozen', 'disabled'].map(v =>
+      `<button class="menu-item" role="menuitemradio" aria-checked="${bank.state === v}"><span class="mark">${bank.state === v ? '✓' : ''}</span>${STATE_LABEL[v]}</button>`).join('');
+    menuEl = document.createElement('div');
+    menuEl.className = 'menu';
+    menuEl.setAttribute('role', 'menu');
+    menuEl.innerHTML =
+      `<button class="menu-item" title="Переіндексує лише файли, що змінилися, і знімає з індексу видалені"><span class="mark"></span>Синхронізація індексу</button>
+       <button class="menu-item" title="Стирає індекс і збирає його заново"><span class="mark"></span>Повний реіндекс</button>
+       <div class="menu-sep"></div>
+       <button class="menu-item" title="Токен цього банку і готовий фрагмент конфігурації"><span class="mark"></span>Доступ MCP</button>
+       <div class="menu-sep"></div>
+       <div class="menu-label">Стан</div>${states}
+       <div class="menu-sep"></div>
+       <button class="menu-item is-danger" title="Зняти банк з реєстру; .md не чіпаються"><span class="mark"></span>Прибрати банк</button>`;
+    menuEl.addEventListener('click', ev => ev.stopPropagation());
+    document.body.appendChild(menuEl);
+    const r = anchor.getBoundingClientRect();
+    menuEl.style.top = Math.max(8, Math.min(r.bottom + 4, innerHeight - menuEl.offsetHeight - 8)) + 'px';
+    menuEl.style.left = Math.max(8, Math.min(r.left, innerWidth - menuEl.offsetWidth - 8)) + 'px';
+  }
+  function closeMenu() { if (menuEl) { menuEl.remove(); menuEl = null; } }
+  document.addEventListener('click', closeMenu);
+  document.addEventListener('keydown', ev => { if (ev.key === 'Escape') closeMenu(); });
+
+  function renderTree() {
+    document.getElementById('tree').innerHTML = TREE.map(n => {
+      if (n.t === 'dir') return `<div class="tree-row"><span class="caret">▾</span><span class="ic"><svg viewBox="0 0 24 24"><path d="M3 7h7l2 2h9v10H3z"/></svg></span><span class="nm">${n.name}</span><span class="n">${n.n}</span></div>`;
+      return `<div class="tree-row ${n.t === 'file' ? 'indent' : ''} ${n.path === filePath ? 'is-selected' : ''}" data-file="${esc(n.path)}"><span class="caret"></span><span class="ic"><svg viewBox="0 0 24 24"><path d="M6 3h9l4 4v14H6zM15 3v5h5"/></svg></span><span class="nm">${n.name}</span><span class="n">${n.n}</span></div>`;
+    }).join('');
+    document.querySelectorAll('[data-file]').forEach(r => r.addEventListener('click', () => openFile(r.dataset.file)));
+  }
+
+  function openFile(path, flash) {
+    filePath = path;
+    const f = FILES[path] || { size: '—', chunks: 0, sha: '—', html: `<h1># ${esc(path.split('/').pop())}</h1><p>Поточна версія файла.</p>` };
+    document.getElementById('file-title').textContent = path;
+    const meta = document.getElementById('file-meta');
+    meta.hidden = false;
+    meta.innerHTML = `<span>${f.size}</span><span>в індексі</span><span>${f.chunks} чанки</span><span>sha256 ${f.sha}</span>`;
+    const viz = document.getElementById('chunkviz').checked;
+    document.getElementById('file-body').innerHTML = `<article class="doc ${viz ? '' : 'no-viz'}" id="doc">${f.html}</article>`;
+    document.querySelectorAll('[data-file]').forEach(r => r.classList.toggle('is-selected', r.dataset.file === path));
+    if (flash) {
+      const d = document.getElementById('doc');
+      d.style.background = 'var(--sel-bg)';
+      setTimeout(() => { d.style.background = ''; }, 560);
+    }
+    showPane('file');
+  }
+
+  document.getElementById('chunkviz').addEventListener('change', ev => {
+    const d = document.getElementById('doc');
+    if (d) d.classList.toggle('no-viz', !ev.target.checked);
+  });
+
+  function showPane(which) {
+    mobPane = which;
+    document.querySelectorAll('[data-mob]').forEach(b => b.classList.toggle('is-active', b.dataset.mob === which));
+    document.querySelectorAll('[data-mob-panel]').forEach(p => p.classList.toggle('is-mob', p.dataset.mobPanel === which));
+  }
+
+  /* ---------- Журнал ---------- */
+  function renderList() {
+    const src = kind === 'query' ? QUERIES : INDEXES;
+    const sel = kind === 'query' ? selQ : selI;
+    document.getElementById('jcount').textContent = kind === 'query' ? 'Показано 5 із 1 284' : 'Показано 4 із 512';
+    document.getElementById('jlist').innerHTML = src.map(e => {
+      const title = kind === 'query' ? e.q : (e.path || (e.kind === 'rebuild' ? 'Повна перебудова банку' : 'Синхронізація індексу'));
+      const n = kind === 'query' ? e.hits : e.chunks;
+      const st = e.status === 'error' ? 'помилка' : STATUS_LABEL[e.status] || e.status;
+      const cls = e.status === 'ready' ? '' : e.status === 'error' ? ' err' : ' busy';
+      return `<button class="ev ${e.id === sel ? 'is-selected' : ''}" data-ev="${e.id}">
+        <div class="ev-top"><span class="ev-q">${esc(title)}</span><span class="ev-n">${n}<small>${e.took}</small></span></div>
+        <div class="ev-bot"><span class="st"><i class="dot${cls}"></i>${st}</span><span>${e.bank}</span><span>${e.face}</span><span class="t">${e.date} ${e.at}</span></div>
+      </button>`;
+    }).join('');
+    document.querySelectorAll('[data-ev]').forEach(b => b.addEventListener('click', () => {
+      const id = Number(b.dataset.ev);
+      if (kind === 'query') selQ = id; else selI = id;
+      renderJournal();
+    }));
+  }
+
+  const facts = list => `<div class="d-facts">${list.map(([k, v]) => `<div><div class="d-k">${k}</div><div class="d-v">${esc(v)}</div></div>`).join('')}</div>`;
+
+  function renderQ(e) {
+    const hits = e.res.map((r, i) => `<article class="hit">
+      <div class="hit-top"><span class="hit-r">${i + 1}</span>
+        <div class="hit-l"><div class="hit-p">${esc(r.p)}</div><div class="hit-h">${esc(r.h)} · чанк ${r.c}</div></div>
+        <div class="hit-s">score ${r.sc}<br>sim ${r.sim}</div>
+      </div>
+      ${e.snap ? `<div class="hit-snap">${esc(r.tx || '')}</div>` : ''}
+      <div class="hit-foot"><span>${e.snap ? 'точний snapshot відповіді' : 'snapshot не записувався'}</span>
+        <button class="btn btn-ghost btn-sm go" data-p="${esc(r.p)}" data-b="${e.bank}">${OPEN}Відкрити в Памʼяті</button></div>
+    </article>`).join('');
+    document.getElementById('jdetail').innerHTML =
+      `<div class="d-kick"><span>запит · #${e.id}</span><i class="dot${e.status === 'ready' ? '' : ' busy'}"></i><span>${STATUS_LABEL[e.status]}</span></div>
+       <h2 class="d-h">${esc(e.q)}</h2>
+       ${facts([['банк', e.bank], ['обличчя', e.face], ['префікс', e.prefix], ['хітів', e.hits], ['час, мс', e.took], ['коли', `${e.date} ${e.at}`]])}
+       <div class="d-quote">${esc(e.q)}</div>
+       ${e.snap ? '' : '<div class="note"><strong>Історичний текст недоступний.</strong> Подію записано до появи snapshot content. Кнопка нижче відкриває поточну версію файла й не видає її за стару відповідь.</div>'}
+       <div class="d-sec">Результати <span class="muted">у точному ранговому порядку</span></div>${hits}`;
+    bindGo();
+  }
+
+  function renderI(e) {
+    const title = e.path || (e.kind === 'rebuild' ? 'Повна перебудова банку' : 'Синхронізація індексу');
+    document.getElementById('jdetail').innerHTML =
+      `<div class="d-kick"><span>індексація · #${e.id}</span><i class="dot${e.status === 'error' ? ' err' : ''}"></i><span>${e.status === 'error' ? 'помилка' : 'готово'}</span></div>
+       <h2 class="d-h">${esc(title)}</h2>
+       ${facts([['банк', e.bank], ['вид', e.kind], ['тригер', e.trigger], ['джерело', e.face], ['коли', `${e.date} ${e.at}`]])}
+       <div class="nums">
+         <div><div class="num">${e.files}</div><div class="num-k">файлів</div></div>
+         <div><div class="num">${e.chunks}</div><div class="num-k">чанків</div></div>
+         <div><div class="num">${e.pruned}</div><div class="num-k">знято</div></div>
+         <div><div class="num">${e.took}</div><div class="num-k">тривалість</div></div>
+       </div>
+       ${e.error ? `<div class="note is-err"><strong>Помилка</strong><br>${esc(e.error)}</div>` : ''}
+       ${e.path ? `<div class="d-sec">Файл</div><article class="hit"><div class="hit-top"><span class="hit-r">·</span><div class="hit-l"><div class="hit-p">${esc(e.path)}</div><div class="hit-h">поточний файл банку ${e.bank}</div></div></div><div class="hit-foot"><span>перехід до поточного вмісту</span><button class="btn btn-ghost btn-sm go" data-p="${esc(e.path)}" data-b="${e.bank}">${OPEN}Відкрити в Памʼяті</button></div></article>` : ''}`;
+    bindGo();
+  }
+
+  function bindGo() {
+    document.querySelectorAll('.go').forEach(b => b.addEventListener('click', () => {
+      selectBank(b.dataset.b);
+      setPage('memory');
+      renderBanks();
+      openFile(b.dataset.p, true);
+    }));
+  }
+
+  function renderJournal() {
+    renderList();
+    if (kind === 'query') renderQ(QUERIES.find(e => e.id === selQ) || QUERIES[0]);
+    else renderI(INDEXES.find(e => e.id === selI) || INDEXES[0]);
+  }
+
+  /* ---------- Налаштування ---------- */
+  function renderSettings(sec) {
+    document.getElementById('set-body').innerHTML = SETTINGS[sec];
+    document.querySelectorAll('[data-sec]').forEach(b => b.classList.toggle('is-active', b.dataset.sec === sec));
+    // submit: null → кнопки немає (не «сіра»)
+    document.getElementById('set-foot').hidden = sec === 'maint';
+    document.querySelectorAll('.set-form .segmented:not(#theme)').forEach(group =>
+      group.querySelectorAll('.seg').forEach(s => s.addEventListener('click', () =>
+        group.querySelectorAll('.seg').forEach(x => x.classList.toggle('is-active', x === s)))));
+    // Theme is the one control here that applies on click: it is a browser
+    // preference, not a machine value, so «Зберегти» has nothing to send for it.
+    const themeBox = document.getElementById('theme');
+    if (themeBox) {
+      const now = document.documentElement.dataset.theme;
+      themeBox.querySelectorAll('.seg').forEach(b => {
+        b.classList.toggle('is-active', b.dataset.theme === now);
+        b.addEventListener('click', () => setTheme(b.dataset.theme));
+      });
+    }
+  }
+
+  /* ---------- wiring ---------- */
+  document.querySelectorAll('[data-page]').forEach(b => b.addEventListener('click', () => setPage(b.dataset.page)));
+  document.querySelectorAll('[data-sec]').forEach(b => b.addEventListener('click', () => renderSettings(b.dataset.sec)));
+  document.querySelectorAll('[data-mob]').forEach(b => b.addEventListener('click', () => showPane(b.dataset.mob)));
+
+  function setTheme(t) {
+    document.documentElement.dataset.theme = t;
+    document.querySelectorAll('#theme .seg').forEach(b => b.classList.toggle('is-active', b.dataset.theme === t));
+  }
+
+  setTheme('dark');
+  renderBanks();
+  renderTree();
+  selectBank(bankId);
+  openFile('logs/2026-08-17-cabinet-navigation.md');
+  renderHead();
+  renderJournal();
+  renderSettings('embed');
+</script>
+
+</body>
+</html>
