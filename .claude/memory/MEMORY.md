@@ -122,6 +122,16 @@ detail lives in `topics/`, day notes in `logs/`.
 
 ## Logs
 
+- [2026-08-20 (дванадцяте)](logs/2026-08-20-engine-self-update-step11.md) —
+  самооновлення рушія, крок 11 UI (**кроки 0–11 усі готові**): банер +
+  модалка + прогрес (`update.js`), reconnect-логіка WS перевикористана як
+  є. Ключове рішення: модалка ніколи не трактує обрив WS на "switching" як
+  помилку — справжнє джерело істини `GET /api/update/status`-поллінг, не
+  сокет. Знайдено й не полагоджено (ескальовано service-dev): `engine_
+  update.py`'s `update_available` ніколи не перераховується після успішного
+  switch — банер міг би вічно казати "є оновлення". Обхід на клієнті
+  (`current.tag !== latest_known.tag`) не ховає справжніх апдейтів, але сам
+  бекенд-стан лишається протухлим.
 - [2026-08-20 (одинадцяте)](logs/2026-08-20-engine-self-update-steps9-10.md)
   — самооновлення рушія, кроки 9–10 (unstaged, **кроки 0–10 усі готові**):
   `/api/update/status|check|apply` + `stale_target`/`update_in_progress`
