@@ -327,6 +327,21 @@ if ! "$PY_BIN" -c "$VEC_PROBE" 2>/dev/null; then
 fi
 
 # --- 5. launcher: self-locating, no hardcoded home ---------------------
+#
+# Versioned layout (self-update, see .claude/memory/topics/
+# engine-self-update-design.md): src/ and .venv live under
+# versions/<tag>/, and `current` is a stable alias a switch repoints. Unlike
+# the Windows bin\mnemo.exe launcher, this script is plain text -- it
+# resolves HOME_DIR (and now CURRENT_DIR) fresh from BASH_SOURCE on every
+# invocation, so there is no "frozen at build time" problem here and no
+# subprocess-dispatch trick is needed: `exec` replaces this shell with
+# python directly, still one process.
+#
+# Two different things are both called "engine home" and must NOT be
+# conflated: MNEMO_HOME stays the UNVERSIONED root (state/ and
+# model-cache/ are shared across every version, never duplicated), while
+# the interpreter and PYTHONPATH/sys.path must point INSIDE `current` --
+# that is where src/ and .venv actually live now.
 cat > "$LAUNCHER" <<'LAUNCHER_EOF'
 #!/usr/bin/env bash
 # mnemo launcher (written by install.sh). Resolves its own engine home
@@ -335,9 +350,10 @@ cat > "$LAUNCHER" <<'LAUNCHER_EOF'
 # and the mnemo-adopt skill.
 set -euo pipefail
 HOME_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-exec env PYTHONPATH="$HOME_DIR" MNEMO_HOME="$HOME_DIR" \
-	"$HOME_DIR/.venv/bin/python" \
-	-c 'import os,sys; sys.path.insert(0, os.environ["MNEMO_HOME"]); from src.cli import main; raise SystemExit(main())' \
+CURRENT_DIR="$HOME_DIR/current"
+exec env PYTHONPATH="$CURRENT_DIR" MNEMO_HOME="$HOME_DIR" \
+	"$CURRENT_DIR/.venv/bin/python" \
+	-c 'import os,sys; sys.path.insert(0, os.environ["PYTHONPATH"]); from src.cli import main; raise SystemExit(main())' \
 	"$@"
 LAUNCHER_EOF
 chmod +x "$LAUNCHER"

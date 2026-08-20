@@ -135,32 +135,40 @@ function Resolve-PythonCommand {
 function Test-ModelCached {
     param(
         [string]$EngineHome,
+        [string]$SrcRoot,
         [string]$VenvPython
     )
 
     # Asks the engine itself rather than looking for files: `is_model_cached`
     # knows what a *complete* snapshot is, and a half-downloaded one must read
     # as absent or the installer would skip the warmup that repairs it.
+    #
+    # Two different roots, on purpose: MNEMO_HOME must be the UNVERSIONED
+    # engine home (state/model-cache are shared across versions), while
+    # sys.path must point at $SrcRoot -- the versioned tree `src` actually
+    # lives under (normally `current`, so the check runs against whichever
+    # version is active).
     if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
         return $false
     }
-    $probe = "import os,sys; home=sys.argv[1]; os.environ['MNEMO_HOME']=home; " +
-        "sys.path.insert(0,home); from src.embedder import is_model_cached; " +
+    $probe = "import os,sys; home=sys.argv[1]; src=sys.argv[2]; os.environ['MNEMO_HOME']=home; " +
+        "sys.path.insert(0,src); from src.embedder import is_model_cached; " +
         "raise SystemExit(0 if is_model_cached() else 1)"
-    & $VenvPython -c $probe $EngineHome 2>$null
+    & $VenvPython -c $probe $EngineHome $SrcRoot 2>$null
     return $LASTEXITCODE -eq 0
 }
 
 function Show-CheckReport {
     param(
         [string]$EngineHome,
+        [string]$SrcRoot,
         [string]$VenvPython,
         [string]$Launcher
     )
 
     Write-Status "engine home: $EngineHome"
     Write-Report "home dir" $(if (Test-Path -LiteralPath $EngineHome -PathType Container) { "present" } else { "MISSING" })
-    Write-Report "engine code" $(if (Test-Path -LiteralPath (Join-Path $EngineHome "src\cli.py") -PathType Leaf) { "present" } else { "MISSING" })
+    Write-Report "engine code" $(if (Test-Path -LiteralPath (Join-Path $SrcRoot "src\cli.py") -PathType Leaf) { "present" } else { "MISSING" })
     Write-Report "venv python" $(if (Test-Path -LiteralPath $VenvPython -PathType Leaf) { "present" } else { "MISSING" })
     Write-Report "launcher" $(if (Test-Path -LiteralPath $Launcher -PathType Leaf) { "present" } else { "MISSING" })
 
@@ -191,7 +199,7 @@ function Show-CheckReport {
 
     $modelCached = $false
     if ($deps -eq "present") {
-        $modelCached = Test-ModelCached $EngineHome $VenvPython
+        $modelCached = Test-ModelCached $EngineHome $SrcRoot $VenvPython
     }
     Write-Report "model cache" $(if ($modelCached) { "present (warmed)" } else { "empty / incomplete (run: mnemo warmup)" })
 
@@ -316,34 +324,6 @@ function Get-LegacyEngineState {
     }
 }
 
-function Sync-EngineCode {
-    param(
-        [string]$RepoRoot,
-        [string]$EngineHome
-    )
-
-    $source = Join-Path $RepoRoot "src"
-    $destination = Join-Path $EngineHome "src"
-    if (-not (Test-Path -LiteralPath (Join-Path $source "cli.py") -PathType Leaf)) {
-        throw "Run install.ps1 from the mnemo repository (src\cli.py not found)."
-    }
-
-    if (Test-Path -LiteralPath $destination) {
-        Remove-Item -LiteralPath $destination -Recurse -Force
-    }
-    New-Item -ItemType Directory -Path $destination -Force | Out-Null
-    Copy-Item -Path (Join-Path $source "*") -Destination $destination -Recurse -Force
-
-    Get-ChildItem -LiteralPath $destination -Directory -Recurse -Force |
-        Where-Object { $_.Name -eq "__pycache__" } |
-        Remove-Item -Recurse -Force
-
-    foreach ($file in @("requirements.txt", "pyproject.toml", "mnemo_bootstrap.py")) {
-        Copy-Item -LiteralPath (Join-Path $RepoRoot $file) `
-            -Destination (Join-Path $EngineHome $file) -Force
-    }
-}
-
 function Get-Sha256 {
     param([string]$Path)
 
@@ -364,39 +344,186 @@ function Get-Sha256 {
     finally { $sha.Dispose() }
 }
 
-function Install-Launcher {
+function Build-EngineVersion {
+    <#
+        Builds ONE versioned {src, .venv} tree from the repo's source, at
+        $VersionDir -- the "build one venv from a source tree" primitive,
+        extracted so it is reusable rather than inlined in Invoke-Install.
+        It is deliberately just a function in this dot-sourceable script
+        (the same reuse mechanism test_platform.py already relies on to
+        exercise other functions here in isolation), not a new script file
+        and not a new CLI flag: a flag reads as end-user-facing behaviour,
+        and this is a library operation for other CODE to call.
+
+        Two callers, both real: the first full install builds
+        versions/local/ here; later, the self-update apply handler (step 7,
+        service-dev, not this file) stages a new release tag the same way
+        -- versions/<tag>/ -- while `current` still points at the version
+        actively serving. Same function, same guarantees, in both cases.
+
+        Idempotent: safe to re-run against the same $VersionDir (refreshes
+        code, deps and launcher metadata in place; reuses a compatible venv
+        exactly like the old flat-layout install did). Never touches
+        state/ or model-cache/ -- neither is a parameter here, because
+        neither belongs to a version at all.
+
+        Returns a pscustomobject: VenvPython, MnemoExe, MnemowExe -- the
+        paths Publish-Launchers and the rest of Invoke-Install need next.
+    #>
     param(
-        [string]$VenvPython,
-        [string]$EngineHome,
-        [string]$Launcher
+        [string]$RepoRoot,
+        [string]$VersionDir,
+        [pscustomobject]$PythonCommand
     )
 
-    Invoke-Checked $VenvPython @(
-        "-m", "pip", "install", "--quiet", "--no-deps",
-        "--force-reinstall", $EngineHome
-    ) "Failed to install the mnemo launcher"
+    $source = Join-Path $RepoRoot "src"
+    if (-not (Test-Path -LiteralPath (Join-Path $source "cli.py") -PathType Leaf)) {
+        throw "Run install.ps1 from the mnemo repository (src\cli.py not found)."
+    }
+    New-Item -ItemType Directory -Path $VersionDir -Force | Out-Null
 
-    $generated = Join-Path $EngineHome ".venv\Scripts\mnemo.exe"
-    if (-not (Test-Path -LiteralPath $generated -PathType Leaf)) {
-        throw "pip did not create the expected launcher: $generated"
+    # --- code mirror (was Sync-EngineCode) -----------------------------
+    $destination = Join-Path $VersionDir "src"
+    if (Test-Path -LiteralPath $destination) {
+        Remove-Item -LiteralPath $destination -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $destination -Force | Out-Null
+    Copy-Item -Path (Join-Path $source "*") -Destination $destination -Recurse -Force
+
+    Get-ChildItem -LiteralPath $destination -Directory -Recurse -Force |
+        Where-Object { $_.Name -eq "__pycache__" } |
+        Remove-Item -Recurse -Force
+
+    foreach ($file in @("requirements.txt", "pyproject.toml", "mnemo_bootstrap.py")) {
+        Copy-Item -LiteralPath (Join-Path $RepoRoot $file) `
+            -Destination (Join-Path $VersionDir $file) -Force
     }
 
-    # Both launchers: the console one for humans and hooks, the GUI-subsystem
-    # one for anything spawned in the background (Task Scheduler, autostart).
-    foreach ($pair in @(
-        @{ Generated = "mnemo.exe";  Target = $Launcher },
-        @{ Generated = "mnemow.exe"; Target = (Join-Path (Split-Path -Parent $Launcher) "mnemow.exe") }
-    )) {
-        $generated = Join-Path $EngineHome (".venv\Scripts\" + $pair.Generated)
+    # --- venv (was inline in Invoke-Install) ---------------------------
+    $venvDir = Join-Path $VersionDir ".venv"
+    $venvPython = Join-Path $venvDir "Scripts\python.exe"
+    $recreateVenv = $false
+    $venvCommand = $null
+    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
+        try {
+            $venvCommand = Resolve-PythonCommand $venvPython
+        }
+        catch {
+            $recreateVenv = $true
+            Write-Status "existing virtualenv is invalid; rebuilding"
+        }
+        if (-not $recreateVenv -and -not [string]::IsNullOrWhiteSpace($script:Python)) {
+            $requestedBase = [System.IO.Path]::GetFullPath($PythonCommand.Interpreter)
+            $existingBase = [System.IO.Path]::GetFullPath($venvCommand.BaseInterpreter)
+            if ($requestedBase -ne $existingBase) {
+                $recreateVenv = $true
+                Write-Status "existing virtualenv uses a different Python; rebuilding"
+            }
+        }
+    }
+    if ($recreateVenv -and (Test-Path -LiteralPath $venvDir)) {
+        Remove-Item -LiteralPath $venvDir -Recurse -Force
+    }
+    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
+        $exe = [string]$PythonCommand.Exe
+        $prefix = @($PythonCommand.Prefix)
+        Invoke-Checked $exe ($prefix + @("-m", "venv", $venvDir)) "Failed to create the virtual environment"
+        Write-Status "virtualenv created ($VersionDir)"
+    }
+    else {
+        Write-Status "virtualenv reused (Python $($venvCommand.Version), $($venvCommand.Bits)-bit)"
+    }
+
+    Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
+    Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $VersionDir "requirements.txt")) "Failed to install Python dependencies"
+    Write-Status "python deps installed"
+
+    # Fail here rather than at the user's first search: everything below
+    # this builds an engine that could not open a bank.
+    & $venvPython -c $VecProbe 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        throw ("This Python cannot load SQLite extensions, so sqlite-vec " +
+               "cannot load and no bank can be opened: $venvPython. " +
+               "Re-run with -Python pointing at a build that has them.")
+    }
+
+    # --- launcher metadata (was Install-Launcher's pip step) -----------
+    # Generates .venv\Scripts\mnemo[w].exe from THIS version's own venv.
+    # Which venv built them no longer matters at run time (mnemo_bootstrap
+    # dispatches through `current` via sys.argv[0], never sys.prefix -- see
+    # the design topic) -- this step only has to succeed once, here.
+    Invoke-Checked $venvPython @(
+        "-m", "pip", "install", "--quiet", "--no-deps",
+        "--force-reinstall", $VersionDir
+    ) "Failed to install the mnemo launcher"
+
+    foreach ($name in @("mnemo.exe", "mnemow.exe")) {
+        $generated = Join-Path $venvDir ("Scripts\" + $name)
         if (-not (Test-Path -LiteralPath $generated -PathType Leaf)) {
             throw "pip did not create the expected launcher: $generated"
         }
+    }
+
+    return [pscustomobject]@{
+        VenvPython = $venvPython
+        MnemoExe   = Join-Path $venvDir "Scripts\mnemo.exe"
+        MnemowExe  = Join-Path $venvDir "Scripts\mnemow.exe"
+    }
+}
+
+function Set-CurrentVersion {
+    <#
+        Atomically repoints $CurrentLink (a junction) at $VersionDir. This
+        installer's own copy of the same "stage beside, remove old, rename
+        into place" technique as Python's service_ctl.switch_current() --
+        Windows has no atomic directory rename over an existing target, so
+        neither side pretends otherwise. Kept here, independent of the
+        Python module, because install.ps1 must be able to create the VERY
+        FIRST `current` before any venv -- and therefore any Python -- exists
+        to run switch_current with.
+
+        Always repoints, even if `current` already resolves to $VersionDir:
+        detecting "already correct" needs a reparse-point-target read whose
+        behaviour is not worth trusting across PowerShell versions, and
+        redoing three fast filesystem calls on an unmodified target is not a
+        cost worth avoiding that risk for.
+    #>
+    param([string]$CurrentLink, [string]$VersionDir)
+
+    $staging = "$CurrentLink.new"
+    if (Test-Path -LiteralPath $staging) {
+        cmd /c rmdir "$staging" 2>&1 | Out-Null
+    }
+    $mklinkOutput = cmd /c mklink /J "$staging" "$VersionDir" 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create the 'current' junction: $mklinkOutput"
+    }
+    if (Test-Path -LiteralPath $CurrentLink) {
+        cmd /c rmdir "$CurrentLink" 2>&1 | Out-Null
+    }
+    Rename-Item -LiteralPath $staging -NewName (Split-Path -Leaf $CurrentLink)
+}
+
+function Publish-Launchers {
+    <#
+        Copies the two exes Build-EngineVersion generated to the STABLE,
+        unversioned bin\ -- the one location aliases and hooks ever target
+        (was the second half of the old Install-Launcher).
+    #>
+    param(
+        [pscustomobject]$Built,
+        [string]$Launcher
+    )
+
+    foreach ($pair in @(
+        @{ Generated = $Built.MnemoExe;  Target = $Launcher },
+        @{ Generated = $Built.MnemowExe; Target = (Join-Path (Split-Path -Parent $Launcher) "mnemow.exe") }
+    )) {
+        $generated = [string]$pair.Generated
         $target = [string]$pair.Target
         $copyRequired = $true
         if (Test-Path -LiteralPath $target -PathType Leaf) {
-            $generatedHash = Get-Sha256 -Path $generated
-            $launcherHash = Get-Sha256 -Path $target
-            $copyRequired = $generatedHash -ne $launcherHash
+            $copyRequired = (Get-Sha256 -Path $generated) -ne (Get-Sha256 -Path $target)
         }
         if ($copyRequired) {
             try {
@@ -491,20 +618,24 @@ function Stop-EngineService {
 }
 
 function Set-ApiTokenEnvironment {
-    param([string]$VenvPython, [string]$EngineHome)
+    param([string]$VenvPython, [string]$EngineHome, [string]$SrcRoot)
 
     # The git-tracked .mcp.json refers to ${MNEMO_API_TOKEN}; without the
     # user-scope variable that placeholder never expands and MCP cannot
     # connect. Set exactly like HOME: only when absent, never overwritten.
+    #
+    # MNEMO_HOME stays the unversioned engine home (api_token() reads/writes
+    # state/api.token there); sys.path must point at $SrcRoot, the versioned
+    # tree `src` actually lives under. Same split as Test-ModelCached.
     $existing = [Environment]::GetEnvironmentVariable("MNEMO_API_TOKEN", "User")
     if (-not [string]::IsNullOrWhiteSpace($existing)) {
         Write-Status "MNEMO_API_TOKEN already set (left untouched)"
         return
     }
-    $code = "import os,sys; home=sys.argv[1]; os.environ['MNEMO_HOME']=home; " +
-        "sys.path.insert(0, home); from src.api import api_token; print(api_token())"
+    $code = "import os,sys; home=sys.argv[1]; src=sys.argv[2]; os.environ['MNEMO_HOME']=home; " +
+        "sys.path.insert(0, src); from src.api import api_token; print(api_token())"
     $token = ""
-    try { $token = & $VenvPython -c $code $EngineHome 2>&1 } catch { $token = "" }
+    try { $token = & $VenvPython -c $code $EngineHome $SrcRoot 2>&1 } catch { $token = "" }
     if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
         Write-Status "could not read the API token; set MNEMO_API_TOKEN by hand"
         return
@@ -588,17 +719,34 @@ function Invoke-Install {
         $engineHome = [System.IO.Path]::GetFullPath($InstallHome)
     }
 
-    $venvPython = Join-Path $engineHome ".venv\Scripts\python.exe"
+    # Versioned layout (self-update, see .claude/memory/topics/
+    # engine-self-update-design.md): src/ and .venv live under
+    # versions/<tag>/, and `current` is the stable alias a switch repoints.
+    # state/ and model-cache/ stay siblings of `versions`/`current`, exactly
+    # where they always were -- shared across every version, never touched
+    # by anything below. A plain from-source install (this script; no
+    # GitHub release involved) always targets the fixed tag "local" -- real
+    # release tags ("v3.1.0", ...) are what the self-update apply handler
+    # (step 7, service-dev) stages under versions/ instead. Repeated runs of
+    # this script therefore refresh the SAME versions\local\ in place,
+    # exactly as idempotent as the old flat layout was.
+    $versionsDir = Join-Path $engineHome "versions"
+    $versionTag = "local"
+    $versionDir = Join-Path $versionsDir $versionTag
+    $currentLink = Join-Path $engineHome "current"
+
+    $venvPython = Join-Path $currentLink ".venv\Scripts\python.exe"
     $launcher = Join-Path $engineHome "bin\mnemo.exe"
 
     if ($Check) {
-        Show-CheckReport $engineHome $venvPython $launcher
+        Show-CheckReport $engineHome $currentLink $venvPython $launcher
         return
     }
 
-    # Dependency-only refresh: update the venv packages and nothing else. The
-    # engine code mirror and the launcher are left exactly as they are, so this
-    # is safe to run while src/ is mid-refactor in the repository.
+    # Dependency-only refresh: update the CURRENT version's venv packages
+    # and nothing else. The engine code mirror and the launcher are left
+    # exactly as they are, so this is safe to run while src/ is mid-refactor
+    # in the repository.
     if ($DepsOnly) {
         if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
             throw "-DepsOnly needs an installed engine at $engineHome; run install.ps1 without it first."
@@ -611,17 +759,20 @@ function Invoke-Install {
         Write-Status "engine home: $engineHome"
         foreach ($file in @("requirements.txt", "pyproject.toml", "mnemo_bootstrap.py")) {
             Copy-Item -LiteralPath (Join-Path $repoRoot $file) `
-                -Destination (Join-Path $engineHome $file) -Force
+                -Destination (Join-Path $currentLink $file) -Force
         }
         Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
-        Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $engineHome "requirements.txt")) "Failed to install Python dependencies"
+        Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $currentLink "requirements.txt")) "Failed to install Python dependencies"
         # Refresh the launcher package's declared dependencies (they are read
         # from requirements.txt at build time) so `pip check` stays honest.
-        # bin\mnemo.exe is deliberately not rewritten: it holds an absolute path
-        # into the venv and is unaffected by a metadata-only reinstall.
+        # bin\mnemo.exe is deliberately not rewritten: mnemo_bootstrap now
+        # dispatches through `current` by resolving its OWN sys.argv[0], not
+        # by an absolute path baked into the venv it happened to be built
+        # from -- so which venv rebuilt this package's metadata does not
+        # matter to it at all.
         Invoke-Checked $venvPython @(
             "-m", "pip", "install", "--quiet", "--no-deps",
-            "--force-reinstall", $engineHome
+            "--force-reinstall", $currentLink
         ) "Failed to refresh the launcher package metadata"
         Write-Status "python deps installed (deps-only: engine code and launcher untouched)"
         return
@@ -648,13 +799,14 @@ function Invoke-Install {
         $engineHome,
         (Join-Path $engineHome "state"),
         (Join-Path $engineHome "model-cache"),
-        (Join-Path $engineHome "bin")
+        (Join-Path $engineHome "bin"),
+        $versionsDir
     )) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
     Write-Status "engine home: $engineHome"
 
-    # Taken before the mirror, because the mirror is what makes this a v3
+    # Taken before the build, because the build is what makes this a v3
     # engine. Acted on further down, once the launcher exists to act with.
     $legacyEngine = Get-LegacyEngineState $engineHome
     if ($null -ne $legacyEngine) {
@@ -662,7 +814,7 @@ function Invoke-Install {
     }
 
     # stop -> refresh -> start. The running backend is the likeliest holder
-    # of a lock on the venv, so it must be down before the mirror, and it is
+    # of a lock on the venv, so it must be down before the build, and it is
     # only brought back if it was up in the first place.
     $servicePid = Get-LiveServicePid $engineHome
     $serviceWasRunning = $servicePid -gt 0
@@ -670,58 +822,13 @@ function Invoke-Install {
         Stop-EngineService $launcher $servicePid
     }
 
-    Sync-EngineCode $repoRoot $engineHome
-    Write-Status "engine code refreshed"
+    $built = Build-EngineVersion $repoRoot $versionDir $pythonCommand
+    Write-Status "engine code + venv ready: $versionDir"
 
-    $venvDir = Join-Path $engineHome ".venv"
-    $recreateVenv = $false
-    $venvCommand = $null
-    if (Test-Path -LiteralPath $venvPython -PathType Leaf) {
-        try {
-            $venvCommand = Resolve-PythonCommand $venvPython
-        }
-        catch {
-            $recreateVenv = $true
-            Write-Status "existing virtualenv is invalid; rebuilding"
-        }
-        if (-not $recreateVenv -and -not [string]::IsNullOrWhiteSpace($Python)) {
-            $requestedBase = [System.IO.Path]::GetFullPath($pythonCommand.Interpreter)
-            $existingBase = [System.IO.Path]::GetFullPath($venvCommand.BaseInterpreter)
-            if ($requestedBase -ne $existingBase) {
-                $recreateVenv = $true
-                Write-Status "existing virtualenv uses a different Python; rebuilding"
-            }
-        }
-    }
+    Set-CurrentVersion $currentLink $versionDir
+    Write-Status "current -> $versionTag"
 
-    if ($recreateVenv -and (Test-Path -LiteralPath $venvDir)) {
-        Remove-Item -LiteralPath $venvDir -Recurse -Force
-    }
-
-    if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
-        $exe = [string]$pythonCommand.Exe
-        $prefix = @($pythonCommand.Prefix)
-        Invoke-Checked $exe ($prefix + @("-m", "venv", $venvDir)) "Failed to create the virtual environment"
-        Write-Status "virtualenv created"
-    }
-    else {
-        Write-Status "virtualenv reused (Python $($venvCommand.Version), $($venvCommand.Bits)-bit)"
-    }
-
-    Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
-    Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $engineHome "requirements.txt")) "Failed to install Python dependencies"
-    Write-Status "python deps installed"
-
-    # Fail here rather than at the user's first search: everything below this
-    # builds an engine that could not open a bank.
-    & $venvPython -c $VecProbe 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        throw ("This Python cannot load SQLite extensions, so sqlite-vec " +
-               "cannot load and no bank can be opened: $venvPython. " +
-               "Re-run with -Python pointing at a build that has them.")
-    }
-
-    Install-Launcher $venvPython $engineHome $launcher
+    Publish-Launchers $built $launcher
     Write-Status "launcher written: $launcher"
 
     # The v2 indexes go now. Not a user-scope action - this only ever touches
@@ -745,7 +852,7 @@ function Invoke-Install {
     # -- and the test suite uses one -- so it must never reach out and touch
     # the user's profile or Task Scheduler.
     if ($usingDefaultHome) {
-        Set-ApiTokenEnvironment $venvPython $engineHome
+        Set-ApiTokenEnvironment $venvPython $engineHome $currentLink
         Register-PowerShellProfile $launcher
 
         if (-not $NoAutostart) {
@@ -778,7 +885,7 @@ function Invoke-Install {
     # Model before service: the resident loads it on first use, so warming
     # now is the difference between a service that answers and one that
     # answers in two minutes.
-    if (Test-ModelCached $engineHome $venvPython) {
+    if (Test-ModelCached $engineHome $currentLink $venvPython) {
         Write-Status "model already cached"
     }
     elseif (Confirm-ModelDownload) {

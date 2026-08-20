@@ -376,12 +376,18 @@ function Invoke-Uninstall {
     # ---- survey: measure before touching anything ----------------------
     $stateDir = Join-Path $engineHome "state"
     $modelDir = Join-Path $engineHome "model-cache"
-    $venvDir = Join-Path $engineHome ".venv"
+    # Versioned layout (self-update): src/ and .venv live under
+    # versions/<tag>/, not directly under $engineHome any more. `versions\`
+    # covers every retained tag's size in one measurement; `current` is
+    # only ever a junction/alias (its own tree size is ~0, the bytes are
+    # counted once under versions\).
+    $versionsDir = Join-Path $engineHome "versions"
+    $currentLink = Join-Path $engineHome "current"
 
     $totalSize = Get-TreeSize $engineHome
     $stateSize = Get-TreeSize $stateDir
     $modelSize = Get-TreeSize $modelDir
-    $venvSize = Get-TreeSize $venvDir
+    $versionsSize = Get-TreeSize $versionsDir
     $banks = Get-RegisteredBanks $engineHome
     $running = Get-RecordedProcesses $engineHome
     $hasTask = Test-AutostartTask
@@ -397,8 +403,8 @@ function Invoke-Uninstall {
     if ($KeepState) { $goingSize -= $stateSize }
 
     Write-Status "this would remove --"
-    Write-Report "engine code" $(if (Test-Path -LiteralPath (Join-Path $engineHome "src\cli.py") -PathType Leaf) { "src\, launchers, requirements" } else { "MISSING" })
-    Write-Report "virtualenv" $(if ($venvSize -gt 0) { Format-Bytes $venvSize } else { "absent" })
+    Write-Report "engine code" $(if (Test-Path -LiteralPath (Join-Path $currentLink "src\cli.py") -PathType Leaf) { "src\, launchers, requirements (versions\, current)" } else { "MISSING" })
+    Write-Report "versions (code + venv)" $(if ($versionsSize -gt 0) { Format-Bytes $versionsSize } else { "absent" })
     if ($KeepModel) {
         Write-Report "model cache" ("KEPT (" + (Format-Bytes $modelSize) + ")")
     }

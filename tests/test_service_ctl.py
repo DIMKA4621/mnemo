@@ -395,6 +395,115 @@ def test_state_dir_is_resolved_live() -> None:
         service_ctl.service_pid_file().unlink(missing_ok=True)
 
 
+def test_switch_current_and_rollback(work: Path) -> None:
+    """switch_current repoints `current`; switching back IS the rollback.
+
+    Entirely isolated from the real engine: VERSIONS_DIR/CURRENT_LINK are
+    patched to a throwaway tree for the duration, same technique as
+    test_state_dir_is_resolved_live() above.
+    """
+    from unittest.mock import patch
+
+    import src.config as config
+
+    versions = work / "switch-versions"
+    versions.mkdir()
+    current = work / "switch-current"
+
+    v1, v2 = versions / "v1", versions / "v2"
+    for version in (v1, v2):
+        version.mkdir()
+        (version / "marker.txt").write_text(version.name, encoding="utf-8")
+
+    def marker() -> str | None:
+        path = current / "marker.txt"
+        return path.read_text(encoding="utf-8") if path.is_file() else None
+
+    with patch.object(config, "VERSIONS_DIR", versions), \
+         patch.object(config, "CURRENT_LINK", current):
+        service_ctl.switch_current("v1")
+        check("switch_current points `current` at v1", marker() == "v1", detail=str(marker()))
+        check("_resolve_current_target reports v1",
+              service_ctl._resolve_current_target() == v1.resolve(),
+              detail=str(service_ctl._resolve_current_target()))
+
+        service_ctl.switch_current("v2")
+        check("switch_current repoints `current` to v2", marker() == "v2", detail=str(marker()))
+        check("v1's own files survive being switched away from",
+              (v1 / "marker.txt").read_text(encoding="utf-8") == "v1")
+
+        # Rollback IS a switch: switching back to v1 must work exactly the
+        # same way a forward switch does, because that is the whole point --
+        # a health-gated rollback has no special-cased code path to trust.
+        service_ctl.switch_current("v1")
+        check("switching back to v1 (rollback) restores it", marker() == "v1", detail=str(marker()))
+        check("v2's files survive being switched away from",
+              (v2 / "marker.txt").read_text(encoding="utf-8") == "v2")
+
+        try:
+            service_ctl.switch_current("no-such-tag")
+            check("switching to a missing tag raises", False)
+        except FileNotFoundError:
+            check("switching to a missing tag raises FileNotFoundError", True)
+
+        with service_ctl.update_lock():
+            try:
+                with service_ctl.update_lock():
+                    pass
+                check("update_lock refuses re-entry while held", False)
+            except RuntimeError as exc:
+                check("update_lock refuses a concurrent switch", "in progress" in str(exc))
+        check("update_lock releases cleanly after the block",
+              not service_ctl._update_lock_path().is_file())
+
+
+def test_prune_versions_spares_active_and_just_installed(work: Path) -> None:
+    """Retention deletes old trees, but never the active or staged-next one."""
+    from unittest.mock import patch
+
+    import src.config as config
+
+    versions = work / "prune-versions"
+    versions.mkdir()
+    current = work / "prune-current"
+
+    tags = ["v1", "v2", "v3", "v4", "v5"]
+    now = time.time()
+    for index, tag in enumerate(tags):
+        entry = versions / tag
+        entry.mkdir()
+        (entry / "marker.txt").write_text(tag, encoding="utf-8")
+        # Oldest first: v1 is the oldest, v5 the newest, by mtime.
+        stamp = now - (len(tags) - index) * 10
+        os.utime(entry, (stamp, stamp))
+
+    with patch.object(config, "VERSIONS_DIR", versions), \
+         patch.object(config, "CURRENT_LINK", current), \
+         patch.object(config, "UPDATE_RETENTION_COUNT", 3):
+        # `current` is deliberately pointed at an OLD version (v2), as it
+        # would be mid-update: the new build (v5) is staged but not yet the
+        # active one when a caller might reasonably want to prune.
+        service_ctl.switch_current("v2")
+
+        removed = service_ctl.prune_versions(active="v5")
+        remaining = {p.name for p in versions.iterdir()}
+
+        check("prune removed exactly the one out-of-retention, unprotected version",
+              removed == ["v1"], detail=str(removed))
+        check("the active (`current`) version survives even though it is old",
+              "v2" in remaining, detail=str(remaining))
+        check("the just-installed `active` tag survives even though not current",
+              "v5" in remaining, detail=str(remaining))
+        check("the newest retention-window versions survive",
+              {"v3", "v4"} <= remaining, detail=str(remaining))
+
+        # A second prune with nothing new installed is a no-op: everything
+        # left is already within keep_names.
+        again = service_ctl.prune_versions(active="v5")
+        check("pruning again once retention is satisfied removes nothing",
+              again == [], detail=str(again))
+
+
 def test_ps_fingerprint_contract() -> None:
     """The macOS/BSD path, exercised without a Mac.
 
@@ -795,6 +904,8 @@ def main() -> int:
         test_lifecycle(work, script)
         test_never_kills_bystanders(work)
         test_state_dir_is_resolved_live()
+        test_switch_current_and_rollback(work)
+        test_prune_versions_spares_active_and_just_installed(work)
         test_ps_fingerprint_contract()
         test_listening_pid_parser()
         test_exit_code_259(work)

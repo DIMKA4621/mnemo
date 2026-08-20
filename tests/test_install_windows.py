@@ -131,7 +131,10 @@ def main() -> int:
 
         first = run(install)
         launcher = engine / "bin" / "mnemo.exe"
-        venv_python = engine / ".venv" / "Scripts" / "python.exe"
+        # src/ and .venv live under the versioned tree (versions/<tag>/);
+        # `current` is the stable junction mnemo_bootstrap.py resolves at run
+        # time (see its module docstring / config.CURRENT_LINK).
+        venv_python = engine / "current" / ".venv" / "Scripts" / "python.exe"
         assert launcher.is_file(), launcher
         assert venv_python.is_file(), venv_python
         # A default install now warms the model, starts the service and runs
@@ -205,7 +208,9 @@ def main() -> int:
             " from src.embedder import _model_cache_spec;"
             " repo, files = _model_cache_spec();"
             " print(json.dumps([repo, sorted(files)]))",
-            str(engine),
+            # src/ lives under the versioned tree, resolved through `current`
+            # -- not directly under the engine home any more.
+            str(engine / "current"),
         ])
         repository, required = json.loads(spec.stdout.strip())
         snapshot = (
@@ -236,7 +241,8 @@ def main() -> int:
 
         # -DepsOnly must refresh the venv without re-mirroring src/, so it is
         # safe to run while the repository's engine code is mid-refactor.
-        in_flight = engine / "src" / "in flight.py"
+        # src/ lives under `current` (-> versions/local), not the engine root.
+        in_flight = engine / "current" / "src" / "in flight.py"
         in_flight.write_text("# uncommitted engine work\n", encoding="utf-8")
         deps_only = run(install + ["-DepsOnly"])
         assert "deps-only" in deps_only.stdout
@@ -353,7 +359,12 @@ def main() -> int:
         ok("uninstall refuses to delete without a terminal or -Yes")
 
         kept = run(uninstall + ["-KeepModel", "-KeepState", "-Yes"])
-        assert not (engine / ".venv").exists(), kept.stdout
+        # Engine code + venv live under versions/<tag>/, referenced through
+        # the `current` junction -- both must go; state/ and model-cache/
+        # (checked below) must not.
+        assert not (engine / "versions").exists(), kept.stdout
+        assert not (engine / "current").exists(), kept.stdout
+        assert not venv_python.exists(), kept.stdout
         assert not launcher.exists(), kept.stdout
         assert state_sentinel.read_text(encoding="utf-8") == "state"
         assert cache_sentinel.read_text(encoding="utf-8") == "cache"

@@ -549,3 +549,73 @@ SERVICE_START_GRACE: float = float(
 SERVICE_READY_TIMEOUT: float = float(
     os.environ.get("MNEMO_SERVICE_READY_TIMEOUT", "45.0")
 )
+
+# --- versioned engine layout (self-update spike, step 0; see
+# .claude/memory/topics/engine-self-update-design.md) --------------------
+#
+# ``USER_HOME/versions/<tag>/`` holds one full {src, .venv} pair per
+# installed release; ``USER_HOME/current`` is a stable alias (a junction on
+# Windows, a symlink-like rename target on POSIX) that names the active one.
+# Both are plain ``USER_HOME / ...`` constants, same as MODEL_CACHE above --
+# NOT the frozen-path trap that BANKS_FILE_OVERRIDE and STATE_DIR's live
+# accessors work around: those exist because STATE_DIR itself is relocatable
+# independently of USER_HOME (MNEMO_STATE_DIR), so caching a path *derived*
+# from it goes stale under that specific override. USER_HOME has no such
+# independent override, so a plain constant here is exactly as safe as
+# MODEL_CACHE already is. Callers that must survive a test repointing
+# ``config.USER_HOME`` after import (mirroring ``service_ctl.state_dir()``)
+# still read them through a live accessor in service_ctl -- see
+# ``versions_dir()`` / ``current_link()`` there.
+VERSIONS_DIR: Path = USER_HOME / "versions"
+CURRENT_LINK: Path = USER_HOME / "current"
+
+# How many versions/<tag>/ trees `service_ctl`'s prune helper keeps once a
+# switch to a newer one is confirmed healthy. Older ones are deleted --
+# code + venv only, never state/ or model-cache/. See the design topic's
+# "Retention" note for why this waits for a *confirmed* switch rather than
+# pruning eagerly (the newest-but-one is the rollback target).
+UPDATE_RETENTION_COUNT: int = int(
+    os.environ.get("MNEMO_UPDATE_RETENTION_COUNT", "3")
+)
+
+# --- self-update check (M) ----------------------  service-dev
+#
+# Whether a newer tagged release exists on GitHub, checked on a timer inside
+# the backend (src/engine_update.py). Staging/applying that release (step 7)
+# and the `/api/update/*` surface (step 9) are separate concerns owned
+# elsewhere; this section only says "who do we ask, how often, how long do
+# we wait".
+
+# Public, unauthenticated GitHub REST endpoint -- confirmed against the real
+# repo (git remote), no token needed, and the 60/hour unauthenticated rate
+# limit is nowhere close to being threatened by a check every few hours.
+GITHUB_REPO: str = os.environ.get("MNEMO_GITHUB_REPO", "DIMKA4621/mnemo")
+
+# How often the backend polls GET /repos/<GITHUB_REPO>/releases/latest.
+# "кілька годин" (design topic's UX flow) -- frequent enough that a release
+# shows up same-day, infrequent enough nobody notices the traffic. 0 disables
+# the background timer entirely; the manual "check now" trigger (step 9)
+# still works on demand.
+UPDATE_CHECK_INTERVAL_S: float = float(
+    os.environ.get("MNEMO_UPDATE_CHECK_INTERVAL_S", str(4 * 3600))
+)
+
+# Liveness budget for the GitHub call itself. Short and deliberately so: a
+# hung request must not pin the checker thread anywhere near its next tick.
+# On timeout or any network error, engine_update.record_check() records the
+# error and leaves the previous latest_tag/update_available exactly as they
+# were -- soft failure, per the design topic's "Мережа недоступна" note.
+UPDATE_CHECK_TIMEOUT_S: float = float(
+    os.environ.get("MNEMO_UPDATE_CHECK_TIMEOUT_S", "5.0")
+)
+
+# Mirror override for the release tarball URL, added for step 7/9's own real
+# end-to-end testing (there is no real GitHub release of this in-progress
+# feature yet — see `engine_update._tarball_url`'s docstring) and left in as
+# a genuine, generalisable knob: an air-gapped machine or one sitting behind
+# a proxy that blocks GitHub can point self-update at an internal mirror
+# instead. ``{tag}`` is substituted with the release tag; unset (the
+# default) means "ask codeload.github.com/<GITHUB_REPO> like normal".
+UPDATE_TARBALL_URL_TEMPLATE: str | None = os.environ.get(
+    "MNEMO_UPDATE_TARBALL_URL_TEMPLATE"
+)

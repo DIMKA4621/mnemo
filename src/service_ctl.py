@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -78,6 +79,22 @@ def service_pid_file() -> Path:
 def service_info_file() -> Path:
     """The backend's service.json. Derived live, see state_dir()."""
     return state_dir() / "service.json"
+
+
+def versions_dir() -> Path:
+    """``versions/`` -- one ``{src, .venv}`` tree per installed release.
+
+    Derived live from ``config.VERSIONS_DIR``, not imported by value, for the
+    same reason as ``state_dir()``: a test that repoints the config
+    attribute after import must not leave this module reading the old path.
+    """
+    return Path(config.VERSIONS_DIR)
+
+
+def current_link() -> Path:
+    """``current`` -- the stable alias a switch repoints. Derived live."""
+    return Path(config.CURRENT_LINK)
+
 
 # Exit codes. 3 means "service is down" across the whole CLI (contracts
 # §11.1), so a script can tell it apart from "ran fine, found nothing".
@@ -493,6 +510,20 @@ def windowless_python() -> str:
     console to show, which makes "no window" a property of the executable
     rather than of the caller's flags — the only form of the guarantee that
     also holds when Task Scheduler or a shortcut does the launching.
+
+    Derived from ``sys.executable`` -- THIS process's own, already-running
+    interpreter. That is correct for the overwhelming majority of callers
+    (``mnemo service start`` from a shell, Task Scheduler, the installer):
+    the process asking was itself just dispatched through ``current`` by
+    ``mnemo_bootstrap.py``, so its ``sys.executable`` already IS whatever
+    ``current`` names. It is WRONG for exactly one caller: a self-update
+    apply that calls ``switch_current()`` and then wants to start the
+    version it just switched TO, from the SAME long-lived process that was
+    still running the OLD version a moment ago -- ``sys.executable`` is
+    fixed for a process's entire lifetime, so this function would silently
+    keep resolving the pre-switch venv. Confirmed by a real run (platform-
+    dev, self-update step 8), not by reasoning alone. That caller must use
+    ``target_for_version()`` below instead of the default target.
     """
     executable = Path(sys.executable)
     if os.name != "nt":
@@ -518,6 +549,59 @@ def spawn_detached(argv: Sequence[str], *, cwd: str | Path | None = None) -> int
 def _default_target() -> list[str]:
     """The backend command: `mnemo serve` under the windowless interpreter."""
     return [windowless_python(), "-m", "src.cli", "serve"]
+
+
+@dataclass(frozen=True)
+class SpawnTarget:
+    """What ``start()`` needs to spawn a SPECIFIC version, not the default.
+
+    Two fields because one is not enough -- see ``target_for_version``'s
+    docstring for why ``cwd`` was the part that was missing (self-update
+    cwd bug, 2026-08-20, third occurrence of the same "frozen self-
+    reference" class as ``sys.prefix`` in the launcher and ``sys.executable``
+    in ``windowless_python()``).
+    """
+
+    argv: list[str]
+    cwd: Path
+
+
+def target_for_version(version_dir: str | Path) -> SpawnTarget:
+    """`mnemo serve` argv AND cwd for a SPECIFIC ``versions/<tag>/`` tree.
+
+    The self-update apply command's reason to exist: right after
+    ``switch_current()`` repoints `current`, ``_default_target()`` (via
+    ``windowless_python()``) would still resolve the CALLING process's own
+    frozen ``sys.executable`` -- the version it is running FROM, not the one
+    `current` now names. This bypasses that entirely by taking the version
+    directory explicitly, the same way ``mnemo_bootstrap.py`` resolves a
+    fresh dispatch: no dependency on which interpreter happens to be asking.
+
+    **The interpreter alone is not enough — confirmed by a real run
+    (service-dev, step 9 live-proof), not reasoning.** ``-m src.cli``
+    resolves the ``src`` package against the CHILD PROCESS's ``cwd``, and
+    ``cwd`` beats ``PYTHONPATH`` unconditionally when Python resolves a
+    ``-m`` module — a minimal two-fake-tree experiment proved this
+    directly. ``start()`` used to spawn every target with
+    ``cwd=Path(__file__).resolve().parent.parent`` regardless of what
+    ``target`` was, i.e. wherever the CALLING process's own
+    ``service_ctl.py`` happens to live -- the old version, for the entire
+    life of an ``update-apply`` process that just switched `current` to a
+    new one. The interpreter would be the new venv's; the code actually
+    imported would still be the old tree's. Dependencies update, apply
+    logic silently does not. So this returns ``cwd`` alongside ``argv``,
+    and callers spawning a specific version MUST pass both to ``start()``
+    -- see its ``cwd`` parameter.
+
+    Windowless the same way ``windowless_python()`` is (``pythonw.exe`` on
+    Windows; POSIX has no console-subsystem distinction to make).
+    """
+    root = Path(version_dir)
+    if os.name == "nt":
+        python = root / ".venv" / "Scripts" / "pythonw.exe"
+    else:
+        python = root / ".venv" / "bin" / "python"
+    return SpawnTarget(argv=[str(python), "-m", "src.cli", "serve"], cwd=root)
 
 
 # ------------------------------------------------------------- resident
@@ -646,34 +730,34 @@ def _start_lock() -> Path:
 
 
 @contextmanager
-def _exclusive_start():
-    """Serialise the whole of start(): probe -> spawn -> record.
+def _exclusive_file_lock(lock: Path, *, busy_message: str):
+    """An O_CREAT|O_EXCL file holding our own pid -- the shared technique.
 
-    Without it the window between spawning and writing service.pid (a full
-    SERVICE_START_GRACE) reads as "stopped", so a second start spawns a
-    second backend and only one of them is ever tracked.
+    A lock whose recorded owner is no longer alive is stale and is broken
+    (removed and retried once); one whose owner is still alive refuses with
+    ``busy_message`` (formatted with ``pid=``). Used by both
+    ``_exclusive_start()`` (probe -> spawn -> record) and ``update_lock()``
+    (prepare -> repoint `current` -> verify) -- same failure mode either way:
+    a step that is not atomic on disk must not run twice concurrently.
     """
-    state_dir().mkdir(parents=True, exist_ok=True)
-    lock = _start_lock()
+    lock.parent.mkdir(parents=True, exist_ok=True)
     handle = None
     for _ in range(2):
         try:
             handle = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
             break
         except FileExistsError:
-            # Break a lock whose owner died mid-start; never one still held.
+            # Break a lock whose owner died mid-operation; never one still held.
             holder = _read_json(lock) or {}
             holder_pid = holder.get("pid")
             if isinstance(holder_pid, int) and _pid_state(holder_pid) == ALIVE:
-                raise RuntimeError(
-                    f"another `mnemo service start` is running (pid {holder_pid})"
-                )
+                raise RuntimeError(busy_message.format(pid=holder_pid))
             try:
                 lock.unlink()
             except OSError:
                 pass
     if handle is None:
-        raise RuntimeError("could not acquire the service start lock")
+        raise RuntimeError(f"could not acquire lock: {lock}")
     try:
         os.write(handle, json.dumps({"pid": os.getpid()}).encode("utf-8"))
         os.close(handle)
@@ -683,6 +767,21 @@ def _exclusive_start():
             lock.unlink()
         except OSError:
             pass
+
+
+@contextmanager
+def _exclusive_start():
+    """Serialise the whole of start(): probe -> spawn -> record.
+
+    Without it the window between spawning and writing service.pid (a full
+    SERVICE_START_GRACE) reads as "stopped", so a second start spawns a
+    second backend and only one of them is ever tracked.
+    """
+    with _exclusive_file_lock(
+        _start_lock(),
+        busy_message="another `mnemo service start` is running (pid {pid})",
+    ):
+        yield
 
 
 def _handed_off(spawned_pid: int, info: dict) -> bool:
@@ -740,6 +839,7 @@ def start(
     *,
     foreground: bool = False,
     target: Sequence[str] | None = None,
+    cwd: str | Path | None = None,
     wait_ready: bool | None = None,
 ) -> int:
     """Start the service unless it is already running.
@@ -751,6 +851,20 @@ def start(
     ``target`` is an additive convenience over the contract signature: it lets
     the lifecycle be exercised against any long-running command.
 
+    ``cwd`` matters as much as ``target`` does for a self-update apply, and
+    is easy to miss: ``-m src.cli`` resolves the ``src`` package against the
+    CHILD process's working directory, and ``cwd`` beats ``PYTHONPATH``
+    unconditionally for that resolution (confirmed by a real run, not
+    assumed). Left unset, this still defaults to
+    ``Path(__file__).resolve().parent.parent`` -- the directory THIS
+    ``service_ctl.py`` lives in -- which is correct for every caller that is
+    not spawning a specific ``versions/<tag>/`` tree explicitly. A caller
+    that passes a version-specific ``target`` (``target_for_version()``)
+    MUST pass its matching ``cwd`` too, or the child gets the new
+    interpreter but the OLD code: this was a real, shipped bug (self-update
+    step 8/9, "cwd bug") until this parameter existed -- ``target`` alone
+    was not the whole fix.
+
     ``wait_ready`` decides whether "started" has to mean "answering". It
     defaults to *whether we know what ready means*: the real backend publishes
     an endpoint and serves ``/health``, an arbitrary ``target`` does neither,
@@ -759,8 +873,9 @@ def start(
     argv = list(target) if target is not None else _default_target()
     if wait_ready is None:
         wait_ready = target is None
+    engine_root = Path(cwd) if cwd is not None else Path(__file__).resolve().parent.parent
     if foreground:
-        return subprocess.call(argv)
+        return subprocess.call(argv, cwd=str(engine_root))
 
     try:
         with _exclusive_start():
@@ -774,8 +889,22 @@ def start(
                 _clear_identity()
                 print("mnemo service: removed stale process-state files")
 
-            engine_root = Path(__file__).resolve().parent.parent
-            pid = spawn_detached(argv, cwd=engine_root)
+            try:
+                pid = spawn_detached(argv, cwd=engine_root)
+            except OSError as exc:
+                # The interpreter named by `argv[0]` does not exist at all --
+                # not "started then crashed" (below) but "could not even be
+                # launched". A corrupt/incomplete versions/<tag>/.venv (a bad
+                # self-update build, a half-deleted venv) hits this, not the
+                # grace-period check, because there is no PID to poll in the
+                # first place. Confirmed by a real run: an uncaught OSError
+                # here previously aborted a self-update apply mid-switch,
+                # leaving `current` repointed at the broken version with the
+                # service down and no rollback attempted -- the caller must
+                # get a return code to act on, the same as every other start
+                # failure, never an exception escaping this function.
+                print(f"mnemo service: could not start the process: {exc}")
+                return EXIT_DOWN
 
             # A child that dies instantly (bad interpreter, import error) must
             # not be recorded as a running service.
@@ -951,7 +1080,173 @@ def _report_resident() -> None:
     print(f"mnemo service: embedding resident running (pid {pid}, port {EMBED_PORT})")
 
 
-def restart(*, target: Sequence[str] | None = None) -> int:
+def restart(*, target: Sequence[str] | None = None, cwd: str | Path | None = None) -> int:
     """Stop (if up) then start. A stopped service restarts cleanly."""
     stop()
-    return start(target=target)
+    return start(target=target, cwd=cwd)
+
+
+# --------------------------------------------------- versioned installs
+#
+# ``versions/<tag>/{src,.venv}`` -- one full tree per installed release --
+# plus ``current``, a stable alias a switch repoints. Only the low-level
+# primitives live here: repointing the alias and pruning old trees. Nothing
+# here stops or starts the service, downloads a release, or decides when to
+# switch -- that orchestration (stop -> repoint -> start -> health-gate ->
+# rollback) is the self-update apply handler, not this module. See
+# .claude/memory/topics/engine-self-update-design.md for the full design.
+
+
+def _update_lock_path() -> Path:
+    return state_dir() / "service.update.lock"
+
+
+@contextmanager
+def update_lock():
+    """Exclusive lock around a `current` repoint (and its surrounding steps).
+
+    Same technique as ``_exclusive_start()`` -- see ``_exclusive_file_lock``.
+    Held across the whole prepare -> repoint -> verify sequence a caller runs
+    (this module only performs the repoint itself in ``switch_current``), so
+    two concurrent switches -- or a switch racing a manual ``service
+    start``/``stop`` that reads `current` mid-repoint -- cannot interleave.
+    """
+    with _exclusive_file_lock(
+        _update_lock_path(),
+        busy_message="another update/switch is already in progress (pid {pid})",
+    ):
+        yield
+
+
+def _remove_link(path: Path) -> None:
+    """Remove a `current`-style alias WITHOUT touching what it points at.
+
+    A junction (Windows) or a symlink-to-directory (POSIX) must never be
+    removed with a recursive tree-delete: that walks through the link into
+    the versioned install it names and destroys it. ``os.rmdir()`` on a
+    Windows reparse point -- and ``Path.unlink()`` on a POSIX symlink --
+    removes only the link itself, exactly the same distinction
+    ``_terminate_tree`` draws between a PID and what it fronts.
+    """
+    if os.name == "nt":
+        os.rmdir(path)
+    else:
+        path.unlink()
+
+
+def switch_current(tag: str) -> None:
+    """Atomically repoint `current` at ``versions/<tag>/``.
+
+    Windows has no atomic directory rename over an existing target, so this
+    builds the new link at a staging name first, removes the old link, then
+    renames staging into place -- the same "prepare beside, then swap"
+    shape as ``_write_identity``'s tmp-file-then-replace, just for a
+    directory alias instead of a file. POSIX gets the real thing:
+    ``os.replace`` on a symlink is a single atomic rename syscall.
+
+    The window between "old link removed" and "new link renamed into place"
+    is not zero on Windows (mklink/rmdir/rename are three separate calls,
+    not one transaction) -- hence "atomic-ish" everywhere this is described.
+    A crash inside that window leaves `current` absent, which every reader
+    here already treats as "no engine found", not as pointing at garbage.
+    """
+    target = versions_dir() / tag
+    if not target.is_dir():
+        raise FileNotFoundError(f"no such version: {target}")
+
+    link = current_link()
+    link.parent.mkdir(parents=True, exist_ok=True)
+    staging = link.with_name(link.name + ".new")
+
+    if os.name == "nt":
+        if staging.exists() or staging.is_symlink():
+            _remove_link(staging)
+        # mklink is a cmd builtin, not a standalone exe -- no admin rights
+        # needed for /J (a junction), unlike a symlink.
+        subprocess.run(
+            ["cmd", "/c", "mklink", "/J", str(staging), str(target)],
+            capture_output=True,
+            creationflags=_CREATE_NO_WINDOW,
+            timeout=30,
+            check=True,
+        )
+        if link.exists() or link.is_symlink():
+            _remove_link(link)
+        os.rename(staging, link)
+    else:
+        if staging.exists() or staging.is_symlink():
+            staging.unlink()
+        staging.symlink_to(target, target_is_directory=True)
+        os.replace(staging, link)  # atomic rename, POSIX guarantee
+
+
+def _resolve_current_target() -> Path | None:
+    """What `current` points at right now, or None if absent/broken.
+
+    ``Path.resolve()`` follows a Windows junction the same way it follows a
+    POSIX symlink (both are reparse points the OS resolves transparently),
+    so this returns the real ``versions/<tag>`` directory either way.
+    """
+    link = current_link()
+    try:
+        return link.resolve(strict=True)
+    except OSError:
+        return None
+
+
+def current_tag() -> str | None:
+    """The active version's tag name (`current`'s target's directory name),
+    or None if `current` is absent/broken. Public wrapper around
+    ``_resolve_current_target()`` for callers outside this module -- the
+    self-update apply command (cli.py) needs to know what to roll back to
+    without reaching into a private helper.
+    """
+    target = _resolve_current_target()
+    return target.name if target is not None else None
+
+
+def prune_versions(*, keep: int | None = None, active: str | None = None) -> list[str]:
+    """Delete ``versions/<tag>/`` trees (code + venv) beyond retention.
+
+    Never touches ``state/`` or ``model-cache/`` -- neither lives under
+    ``versions/`` at all, so there is nothing here that could reach them.
+
+    Two tags are protected regardless of ``keep``: whatever `current`
+    resolves to right now, and ``active`` (an explicit just-installed tag a
+    caller mid-update passes before the switch is confirmed, so a stray
+    prune during staging cannot delete the very tree the update is about to
+    switch to). This is what keeps a rollback target available: pruning only
+    ever runs *after* a switch is confirmed healthy (see the design topic's
+    "Retention" note), never eagerly.
+
+    Ordered oldest-first by mtime, since a version directory is never
+    modified after creation -- its mtime is effectively its install time.
+    Returns the tags actually removed.
+    """
+    if keep is None:
+        keep = config.UPDATE_RETENTION_COUNT
+    root = versions_dir()
+    if not root.is_dir():
+        return []
+
+    protected: set[str] = set()
+    current_target = _resolve_current_target()
+    if current_target is not None:
+        protected.add(current_target.name)
+    if active is not None:
+        protected.add(active)
+
+    entries = sorted(
+        (p for p in root.iterdir() if p.is_dir()),
+        key=lambda p: p.stat().st_mtime,
+    )
+    keep_names = {p.name for p in entries[-keep:]} if keep > 0 else set()
+    keep_names |= protected
+
+    removed: list[str] = []
+    for entry in entries:
+        if entry.name in keep_names:
+            continue
+        shutil.rmtree(entry)
+        removed.append(entry.name)
+    return removed

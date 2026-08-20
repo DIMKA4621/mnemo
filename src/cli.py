@@ -196,6 +196,133 @@ def _cmd_clean_orphans(args: argparse.Namespace) -> int:
     return EXIT_ERROR if result["locked"] else EXIT_OK
 
 
+def _cmd_update_apply() -> int:
+    """`update-apply` — self-update step 8: stop -> switch -> start -> health
+    -> rollback. Hidden (see the bare ``add_parser`` above); spawned
+    detached by the future ``/api/update/apply`` handler (step 9), runnable
+    by hand for diagnostics.
+
+    **Never trusts this process's own interpreter OR working directory to
+    find what should serve after a switch.** This command's own process is
+    dispatched under whichever venv `current` pointed at BEFORE the switch,
+    and both its interpreter identity (``sys.executable``) and its ``cwd``
+    are fixed for the process's whole lifetime — so every
+    ``service_ctl.start()`` call below passes an EXPLICIT
+    ``service_ctl.target_for_version()`` (argv AND cwd), computed from the
+    tag just switched to/from, never the default target. Confirmed by two
+    real runs, not by reasoning: (1) starting with the default target after
+    a switch kept the OLD venv serving even though `current` already
+    pointed at the new one; (2) passing only a new *interpreter* still
+    silently ran the OLD *code* — ``-m src.cli`` resolves ``src`` against
+    the child's ``cwd``, which beat an explicit ``PYTHONPATH`` unconditionally
+    in a real experiment, so the interpreter fix alone was incomplete until
+    ``target_for_version()`` also returned ``cwd`` and ``start()`` grew a
+    ``cwd`` parameter to carry it. See ``service_ctl.windowless_python()``'s
+    and ``service_ctl.target_for_version()``'s docstrings, and the design
+    topic, for the full story.
+
+    Tag selection: reads ``engine_version.json``'s ``last_check`` — a tag is
+    "ready to apply" only when ``update_available`` is true (``latest_tag``
+    differs from what is currently installed) AND a ``VERSION`` marker
+    matching that tag exists under ``versions/<tag>/`` (proof
+    ``stage_release()`` actually finished building it, not just that GitHub
+    has a newer release). Neither engine_update.py nor the design topic
+    names an explicit "staged and ready" field beyond this, so this is an
+    inference from the two facts that ARE recorded — flagged as such in the
+    step-8 report rather than decided silently.
+
+    Exit codes (this command's own, not service_ctl's or cli.py's): 0 =
+    applied, new tag healthy · 1 = apply failed, rollback succeeded (old tag
+    healthy again) · 2 = nothing staged/ready to apply · 3 = apply AND
+    rollback both failed health — the service is down, and `mnemo service
+    status` already makes that visible, so nothing extra is hidden here.
+    """
+    from . import engine_update, service_ctl
+
+    state = engine_update.read_state()
+    last_check = state.get("last_check") or {}
+    tag = last_check.get("latest_tag")
+    if not tag or not last_check.get("update_available"):
+        print("mnemo update-apply: no update available to apply "
+              "(nothing in engine_version.json's last_check says one is ready)")
+        return 2
+
+    version_dir = service_ctl.versions_dir() / tag
+    marker = version_dir / "VERSION"
+    try:
+        # utf-8-sig: transparently strips a BOM if one is present (some
+        # writers add it, stage_release()'s plain write_text() does not) and
+        # is otherwise identical to plain utf-8. A marker mismatch should
+        # mean "wrong tag", never "right tag, wrong byte order mark".
+        marker_tag = marker.read_text(encoding="utf-8-sig").strip()
+    except OSError:
+        print(f"mnemo update-apply: {tag} is not staged — no VERSION marker "
+              f"at {marker} (run stage_release first)")
+        return 2
+    if marker_tag != tag:
+        # Sanity, not security: the archive's integrity rests on TLS, not
+        # this check. This only catches a mismatched/corrupted staging dir.
+        print(f"mnemo update-apply: VERSION marker at {marker} says "
+              f"{marker_tag!r}, expected {tag!r} — refusing to apply")
+        return 2
+
+    prev_tag = service_ctl.current_tag()
+
+    engine_update.start_apply(tag)
+    print(f"mnemo update-apply: applying {tag} (currently {prev_tag or '(none)'})")
+
+    service_ctl.stop()
+
+    with service_ctl.update_lock():
+        service_ctl.switch_current(tag)
+    print(f"mnemo update-apply: current -> {tag}")
+
+    spawn = service_ctl.target_for_version(version_dir)
+    rc = service_ctl.start(target=spawn.argv, cwd=spawn.cwd, wait_ready=True)
+    if rc == service_ctl.EXIT_OK:
+        engine_update.record_installed(
+            tag=tag, commit=None, status=engine_update.STATUS_ACTIVE
+        )
+        removed = service_ctl.prune_versions()
+        engine_update.finish_apply(tag=tag, result="applied")
+        pruned_note = f"; pruned {', '.join(removed)}" if removed else ""
+        print(f"mnemo update-apply: {tag} is active and healthy{pruned_note}")
+        return EXIT_OK
+
+    print(f"mnemo update-apply: {tag} did not become healthy (rc={rc}); "
+          f"rolling back")
+
+    if prev_tag is None:
+        print("mnemo update-apply: no previous version recorded — cannot "
+              "roll back")
+        engine_update.finish_apply(
+            tag=tag, result="failed",
+            error="health check failed and there is no rollback target",
+        )
+        return service_ctl.EXIT_DOWN
+
+    with service_ctl.update_lock():
+        service_ctl.switch_current(prev_tag)
+    print(f"mnemo update-apply: current -> {prev_tag} (rollback)")
+
+    rollback_spawn = service_ctl.target_for_version(service_ctl.versions_dir() / prev_tag)
+    rollback_rc = service_ctl.start(
+        target=rollback_spawn.argv, cwd=rollback_spawn.cwd, wait_ready=True
+    )
+    if rollback_rc == service_ctl.EXIT_OK:
+        engine_update.finish_apply(tag=tag, result="rolled_back")
+        print(f"mnemo update-apply: rolled back to {prev_tag}, service is healthy")
+        return EXIT_ERROR
+
+    engine_update.finish_apply(
+        tag=tag, result="failed",
+        error=f"rollback to {prev_tag} also failed health (rc={rollback_rc})",
+    )
+    print("mnemo update-apply: ROLLBACK ALSO FAILED — service is down; "
+          "check `mnemo service status` / `mnemo doctor`")
+    return service_ctl.EXIT_DOWN
+
+
 # -------------------------------------------------------------- API commands
 
 
@@ -589,9 +716,14 @@ def _build_parser() -> argparse.ArgumentParser:
     # `embed-server` is what the backend spawns. `hook-postedit` is a shim
     # whose entire job is to keep an already-wired hook from failing, so
     # deleting it would cause exactly what it exists to prevent — it is the
-    # last hook entry point left, and it does nothing but exit 0.
+    # last hook entry point left, and it does nothing but exit 0. `update-
+    # apply` is what the future `/api/update/apply` handler (step 9) spawns
+    # detached to run the stop -> switch -> start -> health -> rollback
+    # sequence outside the request/response cycle -- see the design topic
+    # and _cmd_update_apply's own docstring.
     sub.add_parser("embed-server")
     sub.add_parser("hook-postedit")
+    sub.add_parser("update-apply")
 
     pn = sub.add_parser(
         "init",
@@ -797,6 +929,8 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
     if cmd == "hook-postedit":
         return _cmd_hook_postedit()
+    if cmd == "update-apply":
+        return _cmd_update_apply()
     if cmd == "init":
         from .scaffold import init_project
         return init_project(args.root, migrate=args.migrate,
