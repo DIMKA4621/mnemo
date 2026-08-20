@@ -169,6 +169,21 @@ def record_installed(*, tag: str, commit: str | None, status: str) -> dict[str, 
             if entry.get("status") == STATUS_ACTIVE:
                 entry["status"] = STATUS_PREVIOUS
         state["current"] = tag
+        # `last_check.update_available` is computed once, at check time,
+        # against whatever `current` was THEN — a switch changes `current`
+        # without ever re-running a check, so it goes stale the instant an
+        # apply succeeds unless it is re-derived right here. Confirmed live
+        # (ui-dev, step 11): after a real apply, `current.tag ==
+        # latest_known.tag` but `update_available` stayed `true` forever,
+        # since nothing re-ran the background check. Same formula
+        # `record_check()` uses — this just fires on the OTHER event that
+        # can flip it: a new tag becoming current, not a new tag being
+        # reported.
+        last_check = dict(state.get("last_check") or {})
+        last_check["update_available"] = (
+            bool(last_check.get("latest_tag")) and last_check.get("latest_tag") != tag
+        )
+        state["last_check"] = last_check
     installed.append(
         {"tag": tag, "installed_at": _now_iso(), "commit": commit, "status": status}
     )

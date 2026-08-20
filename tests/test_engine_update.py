@@ -187,6 +187,50 @@ def test_record_check_soft_failure(work: Path) -> None:
               after_same["last_check"]["update_available"] is False)
 
 
+def test_update_available_clears_on_switch(work: Path) -> None:
+    """The bug ui-dev found in step 11's live run: `update_available` used
+    to be computed only inside `record_check()`, so a successful switch
+    (which changes `current` without ever re-running a check) left it
+    permanently `true` even though `current` now matches `latest_tag`.
+    `record_installed(status="active")` must re-derive it on the spot.
+    """
+    with patch.object(config, "STATE_DIR", work / "update-available"):
+        engine_update.record_installed(tag="v1.0.0", commit=None, status="active")
+        after_check = engine_update.record_check(latest_tag="v1.1.0", error=None)
+        check("update_available is true before the switch",
+              after_check["last_check"]["update_available"] is True)
+
+        after_switch = engine_update.record_installed(
+            tag="v1.1.0", commit=None, status="active"
+        )
+        check("update_available flips to false the moment the matching tag "
+              "becomes current — no new check needed",
+              after_switch["last_check"]["update_available"] is False,
+              detail=str(after_switch["last_check"]))
+        check("latest_tag itself is untouched by the switch",
+              after_switch["last_check"]["latest_tag"] == "v1.1.0",
+              detail=str(after_switch["last_check"]))
+
+        # Switching to a tag that does NOT match the last known latest_tag
+        # (e.g. a rollback) must leave update_available true -- there
+        # genuinely is still a newer release than what ended up running.
+        after_rollback = engine_update.record_installed(
+            tag="v1.0.0", commit=None, status="active"
+        )
+        check("switching to a tag OTHER than latest_tag keeps "
+              "update_available true (a real rollback case)",
+              after_rollback["last_check"]["update_available"] is True,
+              detail=str(after_rollback["last_check"]))
+
+        # A status other than "active" (e.g. recording a staged-but-not-
+        # applied or a failed attempt) must never touch update_available.
+        before = engine_update.read_state()["last_check"]
+        engine_update.record_installed(tag="v1.2.0", commit=None, status="failed")
+        after_failed = engine_update.read_state()["last_check"]
+        check("a non-active record_installed leaves last_check untouched",
+              after_failed == before, detail=str(after_failed))
+
+
 def test_tarball_url_shape() -> None:
     with patch.object(config, "GITHUB_REPO", "DIMKA4621/mnemo"):
         url = engine_update._tarball_url("v3.4.0")
@@ -505,6 +549,7 @@ def main() -> int:
         test_state_recovers_from_corrupt_file(work)
         test_record_installed_and_apply_helpers(work)
         test_record_check_soft_failure(work)
+        test_update_available_clears_on_switch(work)
         test_tarball_url_shape()
 
         test_check_latest_release_real_no_releases_yet()
