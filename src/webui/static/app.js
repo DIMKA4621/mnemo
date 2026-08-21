@@ -18,6 +18,14 @@
 // ---------------------------------------------------------------------------
 // token (contract 9.1)
 // ---------------------------------------------------------------------------
+//
+// `/api` is open by default (no configured token, loopback-only — see
+// api.py's auth_middleware), so an empty `token` here is the normal case,
+// not an error state: `boot()` proceeds straight to `start()` regardless.
+// This machinery — capturing `?token=`, attaching it as `Authorization`,
+// the gate on a genuine 401 — stays wired for the day a token IS configured
+// ($MNEMO_API_TOKEN, or a future opt-in "generate" step), which is the only
+// case it still does anything.
 
 /** Pull `?token=` out of the URL once, keep it in sessionStorage, scrub the bar. */
 function resolveToken() {
@@ -2044,11 +2052,10 @@ async function boot() {
   buildUpdateModal();
   initShell();
   renderService();
-  if (!token) {
-    // First run: nothing has been rejected, so ask before knocking.
-    openGate('missing');
-    return;
-  }
+  // `/api` is open by default (no login token, loopback-only — 2026-08-21):
+  // no gate to raise just because `token` is empty. `start()`'s own
+  // catch-block still routes a genuine 401 to `openGate('rejected')`, which
+  // only fires if a token has been deliberately configured server-side.
   await start();
 }
 

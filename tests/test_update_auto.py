@@ -83,25 +83,6 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def token() -> str:
-    """The token minted by ``lifespan()``'s ``api_token()`` call.
-
-    That call is the very first line of startup, before ``/health`` can
-    answer at all (ASGI lifespan blocks connection-accepting until startup
-    completes) -- but poll with a short deadline anyway rather than a bare
-    read, the same "never trust immediate readiness" discipline every other
-    wait helper in this file already follows.
-    """
-    path = _STATE / "api.token"
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        try:
-            return path.read_text(encoding="utf-8").strip()
-        except OSError:
-            time.sleep(0.25)
-    return path.read_text(encoding="utf-8").strip()
-
-
 def wait_healthy(port: int, timeout: float = 60.0) -> bool:
     import httpx
 
@@ -116,31 +97,28 @@ def wait_healthy(port: int, timeout: float = 60.0) -> bool:
     return False
 
 
+
+# No Authorization header on any of these: /api is open by default (no
+# configured token, loopback-only — 2026-08-21 decision), and
+# `MNEMO_API_TOKEN` is popped below so this throwaway service never sees one.
+
+
 def _get(port: int, path: str) -> "httpx.Response":  # noqa: F821
     import httpx
 
-    return httpx.get(
-        f"http://127.0.0.1:{port}{path}",
-        headers={"Authorization": f"Bearer {token()}"}, timeout=30.0,
-    )
+    return httpx.get(f"http://127.0.0.1:{port}{path}", timeout=30.0)
 
 
 def _post(port: int, path: str, json_body: dict | None = None) -> "httpx.Response":  # noqa: F821
     import httpx
 
-    return httpx.post(
-        f"http://127.0.0.1:{port}{path}", json=json_body,
-        headers={"Authorization": f"Bearer {token()}"}, timeout=30.0,
-    )
+    return httpx.post(f"http://127.0.0.1:{port}{path}", json=json_body, timeout=30.0)
 
 
 def _put(port: int, path: str, json_body: dict) -> "httpx.Response":  # noqa: F821
     import httpx
 
-    return httpx.put(
-        f"http://127.0.0.1:{port}{path}", json=json_body,
-        headers={"Authorization": f"Bearer {token()}"}, timeout=30.0,
-    )
+    return httpx.put(f"http://127.0.0.1:{port}{path}", json=json_body, timeout=30.0)
 
 
 def wait_for(port: int, predicate, timeout: float, label: str) -> dict | None:
@@ -171,12 +149,12 @@ def main() -> int:
     # This machine may have a REAL mnemo install whose MNEMO_API_TOKEN is
     # exported machine-wide (the installer sets it once and keeps no
     # record). Left alone, a throwaway backend spawned from this shell would
-    # inherit that env var and use the real production token instead of
-    # minting its own file-based one under our throwaway state dir --
-    # `token()` below would then never find `api.token` there (it was never
-    # written), and worse, this test would be handling a real secret it has
-    # no business touching. Pop it so the throwaway service is genuinely
-    # isolated, exactly like a machine with no real install at all.
+    # inherit it -- and since /api requires a token only when one is
+    # configured (2026-08-21 decision), that inherited env var would make
+    # this test's unauthenticated `_get`/`_post`/`_put` calls fail with 401
+    # against a real secret this test has no business touching. Pop it so
+    # the throwaway service is genuinely isolated and /api stays open, same
+    # as a machine with no real install at all.
     os.environ.pop("MNEMO_API_TOKEN", None)
 
     port = free_port()

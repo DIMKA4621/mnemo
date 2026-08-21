@@ -388,10 +388,14 @@ async def main() -> int:
     else:
         print("SKIP  cross-bank token check: only one bank is registered")
 
-    # A bank token opens the READ face and nothing wider: the mirror and the
-    # private API take the service token, which already reaches every bank.
+    # A bank token opens the READ face and nothing wider: the mirror takes
+    # the service token, which already reaches every bank.
     check("a bank token is refused on /mcp-tools",
           _status("/mcp-tools/tree", mine) == 401)
+    # /api itself only requires the service token when one is actually
+    # configured (2026-08-21 decision: open by default, loopback-only) — this
+    # machine has one persisted (this test would have SKIPped at line ~174
+    # otherwise), so a bank token still isn't it.
     check("a bank token is refused on /api",
           _status("/api/banks", mine) == 401)
 

@@ -1344,9 +1344,10 @@ function renderMaintSection(body) {
       : 'НЕ ДОСТУПНИЙ — ' + (backend.error || 'невідомо')),
     setStat('URL', backend.url, true),
     setStat('Черга', backend.queue_depth),
-    setStat('API token', (tokenFact.present ? 'present' : 'MISSING') +
-      ' · ' + (tokenFact.where || tokenFact.source || 'unknown') +
-      ' · ' + (tokenFact.scope || 'unknown scope'), true),
+    setStat('API token', tokenFact.present
+      ? 'set · ' + (tokenFact.where || tokenFact.source || 'unknown') +
+        ' · ' + (tokenFact.scope || 'unknown scope')
+      : 'не встановлено · /api відкритий на loopback за замовчуванням', true),
   ]), null));
 
   const registry = report.registry || {};

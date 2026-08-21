@@ -208,10 +208,16 @@ if [ "$CHECK_ONLY" -eq 1 ]; then
 		line "health" "not checked (service down)"
 	fi
 
-	if [ -f "$MNEMO_HOME/state/api.token" ]; then
-		line "api token" present
+	# /api is open by default with none of this (design decision #34) --
+	# /mcp-admin and /mcp-tools are the only things that ever mint
+	# state/api.token, and only lazily, on their own first use. Absent
+	# here is the normal steady state, not something to fix.
+	if [ -n "${MNEMO_API_TOKEN:-}" ]; then
+		line "api token" "set (MNEMO_API_TOKEN) -- /api requires it"
+	elif [ -f "$MNEMO_HOME/state/api.token" ]; then
+		line "api token" "set (state file, minted for /mcp-admin or /mcp-tools) -- /api requires it"
 	else
-		line "api token" "missing (created on first service start)"
+		line "api token" "not set -- /api is open on loopback by default"
 	fi
 
 	if [ -f "$MNEMO_HOME/state/banks.json" ]; then
@@ -467,27 +473,19 @@ PROFILE_FILE="$HOME/.profile"
 BEGIN_MARK="# >>> mnemo >>>"
 END_MARK="# <<< mnemo <<<"
 
-# MNEMO_HOME stays the unversioned root (api_token() reads/writes
-# state/api.token there); sys.path must point at CURRENT_LINK, the
-# versioned tree `src` actually lives under. Same split as model_cached()
-# below.
-API_TOKEN="$("$PY_BIN" -c 'import os,sys
-home = sys.argv[1]
-src = sys.argv[2]
-os.environ["MNEMO_HOME"] = home
-sys.path.insert(0, src)
-from src.api import api_token
-print(api_token())' "$MNEMO_HOME" "$CURRENT_LINK" 2>/dev/null || true)"
-
+# No MNEMO_API_TOKEN export here any more (2026-08-21, design decision #34,
+# Memory-design-v3.md §13): /api no longer requires a token by default, so
+# minting and exporting one on every install was exactly the auto-
+# provisioning that decision removes. Its own old rationale ("the
+# git-tracked .mcp.json refers to ${MNEMO_API_TOKEN}") was already stale —
+# the real template (.mcp.json.template) addresses a BANK token via
+# {{MNEMO_TOKEN}}, not this one. Setting $MNEMO_API_TOKEN by hand still
+# gates /api exactly as before; this only stops the installer from doing it
+# unasked.
 {
 	printf '%s\n' "$BEGIN_MARK"
 	printf '# Added by install.sh — no PATH mutation, full paths only.\n'
 	printf 'mnemo() { "%s" "$@"; }\n' "$LAUNCHER"
-	if [ -n "$API_TOKEN" ]; then
-		# The git-tracked .mcp.json refers to ${MNEMO_API_TOKEN}; without it
-		# the placeholder never expands and MCP cannot connect.
-		printf 'export MNEMO_API_TOKEN="%s"\n' "$API_TOKEN"
-	fi
 	printf '%s\n' "$END_MARK"
 } > "$MNEMO_HOME/state/.profile-block"
 

@@ -86,10 +86,6 @@ def free_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def token() -> str:
-    return (_STATE / "api.token").read_text(encoding="utf-8").strip()
-
-
 def wait_healthy(port: int, timeout: float = 90.0) -> bool:
     import httpx
 
@@ -170,10 +166,11 @@ def test_reconcile_on_start(work: Path) -> None:
     check("service starts for the first time", start_service(port) == service_ctl.EXIT_OK)
     check("backend is healthy", wait_healthy(port))
 
+    # No Authorization header: /api is open by default (no configured token,
+    # loopback-only — 2026-08-21 decision), and this test never sets one.
     reply = httpx.post(
         f"http://127.0.0.1:{port}/api/banks",
         json={"root": str(bank), "name": "recovery"},
-        headers={"Authorization": f"Bearer {token()}"},
         timeout=30.0,
     )
     check("bank registered over the API", reply.status_code in (200, 201),
@@ -207,7 +204,6 @@ def test_reconcile_on_start(work: Path) -> None:
     found = httpx.post(
         f"http://127.0.0.1:{port}/api/search",
         json={"bank": "recovery", "query": "EDITED while down", "k": 5},
-        headers={"Authorization": f"Bearer {token()}"},
         timeout=60.0,
     )
     hits = found.json().get("hits", []) if found.status_code == 200 else []

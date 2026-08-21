@@ -236,16 +236,20 @@ function Show-CheckReport {
     }
     Write-Report "health" $health
 
+    # /api is open by default with none of this (design decision #34) --
+    # /mcp-admin and /mcp-tools are the only things that ever mint
+    # state/api.token, and only lazily, on their own first use. Absent here
+    # is the normal steady state, not something to fix.
     $tokenPath = Join-Path $EngineHome "state\api.token"
-    $tokenState = "missing (created on first service start)"
-    if (Test-Path -LiteralPath $tokenPath -PathType Leaf) {
-        $envToken = [Environment]::GetEnvironmentVariable("MNEMO_API_TOKEN", "User")
-        $tokenState = if ([string]::IsNullOrWhiteSpace($envToken)) {
-            "present (but MNEMO_API_TOKEN is not exported)"
-        }
-        else {
-            "present + exported"
-        }
+    $envToken = [Environment]::GetEnvironmentVariable("MNEMO_API_TOKEN", "User")
+    $tokenState = if (-not [string]::IsNullOrWhiteSpace($envToken)) {
+        "set (MNEMO_API_TOKEN) -- /api requires it"
+    }
+    elseif (Test-Path -LiteralPath $tokenPath -PathType Leaf) {
+        "set (state file, minted for /mcp-admin or /mcp-tools) -- /api requires it"
+    }
+    else {
+        "not set -- /api is open on loopback by default"
     }
     Write-Report "api token" $tokenState
 
@@ -639,33 +643,16 @@ function New-MnemoEnvStub {
     Write-Status "mnemo.env stub created (state/mnemo.env)"
 }
 
-function Set-ApiTokenEnvironment {
-    param([string]$VenvPython, [string]$EngineHome, [string]$SrcRoot)
-
-    # The git-tracked .mcp.json refers to ${MNEMO_API_TOKEN}; without the
-    # user-scope variable that placeholder never expands and MCP cannot
-    # connect. Set exactly like HOME: only when absent, never overwritten.
-    #
-    # MNEMO_HOME stays the unversioned engine home (api_token() reads/writes
-    # state/api.token there); sys.path must point at $SrcRoot, the versioned
-    # tree `src` actually lives under. Same split as Test-ModelCached.
-    $existing = [Environment]::GetEnvironmentVariable("MNEMO_API_TOKEN", "User")
-    if (-not [string]::IsNullOrWhiteSpace($existing)) {
-        Write-Status "MNEMO_API_TOKEN already set (left untouched)"
-        return
-    }
-    $code = "import os,sys; home=sys.argv[1]; src=sys.argv[2]; os.environ['MNEMO_HOME']=home; " +
-        "sys.path.insert(0, src); from src.api import api_token; print(api_token())"
-    $token = ""
-    try { $token = & $VenvPython -c $code $EngineHome $SrcRoot 2>&1 } catch { $token = "" }
-    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
-        Write-Status "could not read the API token; set MNEMO_API_TOKEN by hand"
-        return
-    }
-    [Environment]::SetEnvironmentVariable("MNEMO_API_TOKEN", ([string]$token).Trim(), "User")
-    Write-Status "MNEMO_API_TOKEN exported (user scope)"
-    Write-Status "reopen the terminal or IDE for it to take effect"
-}
+## Set-ApiTokenEnvironment removed (2026-08-21): /api no longer requires a
+## token by default (design decision #34, Memory-design-v3.md §13). This
+## function used to mint one and export it as a persistent User env var on
+## every install where none existed yet -- exactly the auto-provisioning
+## the decision removes. Its own rationale ("the git-tracked .mcp.json
+## refers to ${MNEMO_API_TOKEN}") was already stale: the real template
+## (.mcp.json.template) addresses a BANK token via {{MNEMO_TOKEN}}, not
+## this one. A real service token, once someone sets $MNEMO_API_TOKEN by
+## hand, still gates /api exactly as before -- this only stops the
+## installer from creating that state on its own.
 
 function Register-PowerShellProfile {
     param([string]$Launcher)
@@ -870,12 +857,11 @@ function Invoke-Install {
         Write-Status "the check below lists the ones this machine can still find."
     }
 
-    # User-scope registrations (env var, shell profile, logon task) belong to
-    # the real engine only. A custom -InstallHome is an isolated/manual copy
-    # -- and the test suite uses one -- so it must never reach out and touch
-    # the user's profile or Task Scheduler.
+    # User-scope registrations (shell profile, logon task) belong to the real
+    # engine only. A custom -InstallHome is an isolated/manual copy -- and the
+    # test suite uses one -- so it must never reach out and touch the user's
+    # profile or Task Scheduler.
     if ($usingDefaultHome) {
-        Set-ApiTokenEnvironment $venvPython $engineHome $currentLink
         Register-PowerShellProfile $launcher
 
         if (-not $NoAutostart) {
@@ -886,7 +872,7 @@ function Invoke-Install {
         }
     }
     else {
-        Write-Status "isolated home: skipped token export, profile and autostart"
+        Write-Status "isolated home: skipped profile and autostart"
     }
 
     # An isolated -InstallHome is a manual or test copy (the suite uses one),

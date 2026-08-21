@@ -107,12 +107,17 @@ Service (the persistent backend):
   `/autostart`, `/doctor`, `/clean-orphans` — hidden from
   OpenAPI); **external** `/mcp-tools/<tool_name>`, the tools as plain
   HTTP for a human with curl or Swagger; and the two mounted MCP faces,
-  `/mcp` and `/mcp-admin`. Bearer token everywhere; `/mcp`, `/mcp-admin`
-  and `/mcp-tools` also take `?token=`, because an MCP client configures
-  a URL, not headers. `/api/*`, `/mcp-tools/*` and `/mcp-admin` take the
-  **service** token; `/mcp` takes a **bank** token and nothing else. A
-  leftover `/mcp/<bank>` path is a 400 pointing at `init --migrate`, not
-  a segment quietly ignored.
+  `/mcp` and `/mcp-admin`. `/mcp`, `/mcp-admin` and `/mcp-tools` also take
+  `?token=`, because an MCP client configures a URL, not headers.
+  `/mcp-tools/*` and `/mcp-admin` take the **service** token; `/mcp` takes
+  a **bank** token and nothing else. `/api/*` — the cabinet's and CLI's own
+  channel — takes the service token **only if one has been deliberately
+  configured** (`$MNEMO_API_TOKEN`, or a future opt-in "generate" step);
+  with none configured, the default, `/api` is open (2026-08-21 decision:
+  it's loopback-only, and a login token bought no real security there while
+  costing every `mnemo ui` open a "paste the token" screen). A leftover
+  `/mcp/<bank>` path is a 400 pointing at `init --migrate`, not a segment
+  quietly ignored.
 - `src/workqueue.py`, `src/watcher.py` — priority queue + worker and the
   watchdog→debounce→enqueue path (**phase 3, in flight**).
 - `src/service_ctl.py` — `mnemo service …`, windowless spawn, PID/port
@@ -485,8 +490,11 @@ machine starts one that never was.
 - Vector search primary; FTS5/BM25 secondary; blended with RRF.
 - The index is disposable and rebuilds deterministically from `.md`.
 - The model is never downloaded implicitly — explicit `warmup` only.
-- Everything on loopback, behind a token; nothing exposed outward
-  without an explicit decision.
+- Everything on loopback; nothing exposed outward without an explicit
+  decision. `/mcp`, `/mcp-admin` and `/mcp-tools` stay behind a bearer
+  token always. `/api` (cabinet + CLI) is the one exception (2026-08-21):
+  open by default on loopback, gated only once a token is explicitly
+  configured — see `src/api.py`'s `auth_middleware`.
 
 ## Working rules
 

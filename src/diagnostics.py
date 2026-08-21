@@ -451,11 +451,16 @@ def render_text(report: dict[str, Any]) -> str:
     backend = report["backend"]
     lines.append(f"backend url      {backend.get('url') or '—'} [machine port]")
     token = report["token"]
-    token_state = "present" if token.get("present") else "MISSING"
-    lines.append(
-        f"api token        {token_state} ({token.get('where') or token.get('source') or 'unknown'}; "
-        f"{token.get('scope') or 'unknown scope'})"
-    )
+    if token.get("present"):
+        lines.append(
+            f"api token        set ({token.get('where') or token.get('source') or 'unknown'}; "
+            f"{token.get('scope') or 'unknown scope'}) — /api requires it"
+        )
+    else:
+        lines.append(
+            "api token        not set — /api is open on loopback by default "
+            "(/mcp, /mcp-admin, /mcp-tools still require their own token)"
+        )
     if backend.get("up"):
         pids = f"serving pid {backend.get('serving_pid')}"
         launcher = backend.get("launcher_pid")

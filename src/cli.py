@@ -649,17 +649,25 @@ def _cmd_logs(args: argparse.Namespace) -> int:
 
 
 def _cmd_ui() -> int:
-    """Print the cabinet's URL, token filled in (§9.1). Opens nothing.
+    """Print the cabinet's URL. Opens nothing.
+
+    `/api` is open by default — no login token — since it is a loopback-only
+    local channel (2026-08-21 decision, api.py's `auth_middleware`). So the
+    plain URL is enough; nothing to fill in. If a token has been explicitly
+    configured (`$MNEMO_API_TOKEN`, or a future opt-in "generate" step), it
+    is still appended so the cabinet stays reachable in that mode too.
 
     It used to call `webbrowser.open` as well. Which browser that reaches is
     not a decision this command gets to make: it is whatever the OS has
-    registered, in whatever profile happens to be signed in, and the URL
-    carries the service token — the widest credential on the machine. A
-    printed line goes exactly where the user is already looking, and they
-    click it, or paste it into the browser they meant.
+    registered, in whatever profile happens to be signed in. A printed line
+    goes exactly where the user is already looking, and they click it, or
+    paste it into the browser they meant.
     """
     client = _client()
-    print(f"{client.base_url}/ui/?token={client.token}")
+    url = f"{client.base_url}/ui/"
+    if client.token:
+        url += f"?token={client.token}"
+    print(url)
     return EXIT_OK
 
 
