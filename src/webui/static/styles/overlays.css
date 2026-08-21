@@ -531,6 +531,10 @@
 .upd-row { margin: 0; }
 .upd-row code { font-family: var(--mono); }
 
+/* The auto-apply countdown's own number: bold and a step larger than the
+   surrounding sentence so it stays readable while it changes every second. */
+.upd-countdown { font-size: 15px; }
+
 .upd-note {
   margin: 0;
   color: var(--fg-mute);

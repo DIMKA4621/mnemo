@@ -78,17 +78,24 @@
   width: calc(100% - 16px);
   margin: 0 8px 6px;
   padding: 6px 8px;
-  border: 1px solid var(--accent);
+  /* Warm, not the accent blue -- "something new" should read differently
+     from an ordinary interactive element, and this reuses the theme's
+     existing warning tokens (already dark/light-aware) rather than adding
+     a fourth color language just for this banner. */
+  border: 1px solid var(--warn-border);
   border-radius: var(--radius);
-  background: var(--bg-pane);
-  color: var(--accent);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
   font-size: 11px;
   text-align: left;
   line-height: 1.4;
   cursor: pointer;
 }
-.sb-update-banner:hover { background: var(--bg-hover); }
-.sb-update-banner.is-busy { border-color: var(--busy); color: var(--busy); }
+.sb-update-banner:hover { filter: brightness(1.08); }
+.sb-update-banner.is-busy {
+  border-color: var(--busy); color: var(--busy);
+  background: var(--bg-pane);
+}
 .is-collapsed .sb-update-banner { display: none; }
 
 /* The machine's three facts sit at the bottom of the sidebar, where an app

@@ -619,10 +619,12 @@ UPDATE_AUTO_APPLY_RETRY_DELAY_S: float = float(
 )
 
 # How long the "about to auto-apply <tag>" countdown runs before firing on
-# its own -- long enough for a person watching the cabinet to click Cancel,
-# short enough that unattended really means unattended.
+# its own -- long enough for a person watching the cabinet to actually read
+# the message and click Cancel (raised from 10s to 20s -- 10 didn't leave
+# enough time to read it), short enough that unattended really means
+# unattended.
 UPDATE_AUTO_APPLY_COUNTDOWN_S: float = float(
-    os.environ.get("MNEMO_UPDATE_AUTO_COUNTDOWN_S", "10")
+    os.environ.get("MNEMO_UPDATE_AUTO_COUNTDOWN_S", "20")
 )
 
 # Liveness budget for the GitHub call itself. Short and deliberately so: a

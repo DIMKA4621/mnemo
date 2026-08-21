@@ -261,7 +261,9 @@ function renderUpdateAutoPending() {
   updateModal.body.appendChild(el('p', { className: 'upd-row' }, [
     document.createTextNode('Автоматичне оновлення до '),
     el('strong', { text: tag }),
-    document.createTextNode(' почнеться через ' + secondsLeft + ' с.'),
+    document.createTextNode(' почнеться через '),
+    el('strong', { className: 'upd-countdown', text: String(secondsLeft) }),
+    document.createTextNode(' с.'),
   ]));
 
   updateModal.body.appendChild(el('div', { className: 'tok-confirm' }, [
