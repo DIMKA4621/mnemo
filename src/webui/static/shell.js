@@ -375,6 +375,14 @@ function handleEvent(envelope) {
       onUpdateProgress(data);
       break;
 
+    // Unattended auto-apply's own countdown (backend: commit 4f977b6, api.
+    // maybe_begin_auto_apply / _settle_auto_pending). Also bank_id: null —
+    // same machine-level event as update_progress above, routed the same
+    // way, just to update.js's own auto-pending handler.
+    case 'update_auto_pending':
+      onUpdateAutoPending(data);
+      break;
+
     case 'query':
       pushLiveLog('query', {
         id: null, ts: envelope.ts, bank_id: bankId, face: data.face,

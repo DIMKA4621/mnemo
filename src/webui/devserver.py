@@ -27,7 +27,7 @@ import socket
 import struct
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -167,6 +167,7 @@ FS_MD: dict[str, int] = {
 
 _SETTINGS: dict[str, Any] = {
     "provider": "local",
+    "auto_update": True,
     "api": {"url": "", "model": "", "dim": 0, "timeout": 60.0, "key": ""},
 }
 
@@ -281,7 +282,110 @@ def update_status_payload() -> dict:
             "apply": dict(s["apply"]),
             "history": [dict(e) for e in s["history"]],
             "retention": {"keep": 3},
+            "auto": _auto_status_view(),
         }
+
+
+# --------------------------------------------------------------------------
+# unattended auto-apply fixture state (contract: src/api.py POST /api/update/
+# auto/confirm|cancel, the "auto" block of GET /api/update/status, WS
+# `update_auto_pending`; backend landed in 4f977b6, this is the frontend's
+# step, ui-dev)
+# --------------------------------------------------------------------------
+#
+# `_AUTO_COUNTDOWN_S` mirrors the real default (`config.UPDATE_AUTO_APPLY_
+# COUNTDOWN_S`). A background thread (`_auto_pending_scheduler`, started from
+# `main()`) arms one countdown shortly after boot — the fixture's stand-in for
+# the real checker's background tick discovering an eligible tag — so the WS
+# event, the countdown modal, and both new endpoints are all reachable
+# without any extra setup, the same reasoning `_UPDATE_STATE` already starts
+# with `update_available: True` for.
+
+_AUTO_COUNTDOWN_S = 10
+_AUTO_STATE: dict[str, Any] = {"pending": None, "timer": None}
+
+
+def _auto_status_view() -> dict:
+    """Mirror of `api._auto_status_view` — `seconds_left` computed here, at
+    response time, not trusted from a client-side timer (same "status-poll is
+    the truth" discipline `_apply_view`/`update_status_payload` already
+    follow)."""
+    with _UPDATE_LOCK:
+        pending = dict(_AUTO_STATE["pending"]) if _AUTO_STATE["pending"] else None
+    if pending is not None:
+        deadline_dt = datetime.fromisoformat(pending["deadline"])
+        seconds_left = max(0, int((deadline_dt - datetime.now(timezone.utc).astimezone()).total_seconds()))
+        pending = {**pending, "seconds_left": seconds_left}
+    return {
+        "enabled": bool(_SETTINGS.get("auto_update", True)),
+        "pending": pending,
+        "blacklist": [],
+    }
+
+
+def _arm_auto_pending(tag: str) -> None:
+    """Arm a countdown for `tag`, unless one is already pending. Mirrors
+    `api.maybe_begin_auto_apply`: flips in-memory state and starts a
+    `threading.Timer`, the actual (simulated) apply happens later, off this
+    call, when the timer fires or a confirm arrives."""
+    with _UPDATE_LOCK:
+        if _AUTO_STATE["pending"] is not None:
+            return
+        if _UPDATE_STATE["apply"]["state"] not in ("idle", "done", "failed", "rolled_back"):
+            return
+        deadline = (
+            datetime.now(timezone.utc).astimezone() + timedelta(seconds=_AUTO_COUNTDOWN_S)
+        ).isoformat(timespec="milliseconds")
+        _AUTO_STATE["pending"] = {"tag": tag, "started_at": now_iso(), "deadline": deadline}
+        timer = threading.Timer(_AUTO_COUNTDOWN_S, _fire_auto_pending, args=(tag,))
+        timer.daemon = True
+        _AUTO_STATE["timer"] = timer
+        timer.start()
+    broadcast("update_auto_pending", None, {
+        "phase": "started", "tag": tag, "deadline": deadline, "seconds": _AUTO_COUNTDOWN_S,
+    })
+
+
+def _settle_auto_pending(tag: str) -> None:
+    """Cancel the countdown (idempotent) and start the same simulated apply
+    `POST /api/update/apply` uses. Shared by the timer firing on its own and
+    `POST /api/update/auto/confirm` arriving first — mirrors `api._settle_
+    auto_pending`'s race guard (whichever gets the lock first proceeds, the
+    other sees `pending` already `None`)."""
+    with _UPDATE_LOCK:
+        if _AUTO_STATE["pending"] is None:
+            return
+        timer = _AUTO_STATE["timer"]
+        _AUTO_STATE["pending"] = None
+        _AUTO_STATE["timer"] = None
+        _UPDATE_STATE["apply"] = {
+            "state": "staging", "tag": tag, "step": "download", "error": None,
+            "started_at": now_iso(), "finished_at": None,
+        }
+    if timer is not None:
+        timer.cancel()
+    threading.Thread(target=simulate_update_apply, args=(tag,), daemon=True).start()
+
+
+def _fire_auto_pending(tag: str) -> None:
+    _settle_auto_pending(tag)
+
+
+def _rearm_if_enabled(tag: str) -> None:
+    """Dev-only: re-arm shortly after a cancel, mirroring the real backend's
+    "no cooldown -- the same tag reappears on the next checker tick" (design
+    decision, `api.api_update_auto_cancel`'s own docstring), just faster —
+    so cancel/confirm is exercisable more than once without restarting the
+    fixture."""
+    if _SETTINGS.get("auto_update", True):
+        _arm_auto_pending(tag)
+
+
+def _auto_pending_scheduler() -> None:
+    time.sleep(6.0)
+    with _UPDATE_LOCK:
+        tag = _UPDATE_STATE["latest_tag"]
+    _rearm_if_enabled(tag)
 
 
 def _force_disconnect_all() -> None:
@@ -448,6 +552,7 @@ def settings_payload() -> dict:
         "exists": True,
         "settings": {
             "provider": item("provider", _SETTINGS["provider"]),
+            "auto_update": item("auto_update", _SETTINGS["auto_update"]),
             "api.url": item("api.url", api["url"]),
             "api.model": item("api.model", api["model"]),
             "api.dim": item("api.dim", api["dim"]),
@@ -1098,6 +1203,8 @@ class Handler(BaseHTTPRequestHandler):
                           f"unknown provider {chosen!r} (known: local, api)")
                 return
             _SETTINGS["provider"] = chosen
+        if "auto_update" in body:
+            _SETTINGS["auto_update"] = bool(body["auto_update"])
         api_in = body.get("api")
         if isinstance(api_in, dict):
             for key in ("url", "model"):
@@ -1253,6 +1360,33 @@ class Handler(BaseHTTPRequestHandler):
                 }
             threading.Thread(target=simulate_update_apply, args=(tag,), daemon=True).start()
             self.json_out(202, {"accepted": True, "tag": tag})
+            return
+
+        if parsed.path == "/api/update/auto/confirm":
+            with _UPDATE_LOCK:
+                pending = dict(_AUTO_STATE["pending"]) if _AUTO_STATE["pending"] else None
+            if pending is None:
+                self.fail(404, "auto_not_pending", "no auto-apply countdown is pending right now")
+                return
+            _settle_auto_pending(pending["tag"])
+            self.json_out(202, {"accepted": True, "tag": pending["tag"]})
+            return
+
+        if parsed.path == "/api/update/auto/cancel":
+            with _UPDATE_LOCK:
+                pending = _AUTO_STATE["pending"]
+                timer = _AUTO_STATE["timer"]
+                if pending is not None:
+                    _AUTO_STATE["pending"] = None
+                    _AUTO_STATE["timer"] = None
+            if pending is None:
+                self.fail(404, "auto_not_pending", "no auto-apply countdown is pending right now")
+                return
+            if timer is not None:
+                timer.cancel()
+            broadcast("update_auto_pending", None, {"phase": "cancelled", "tag": pending["tag"]})
+            self.json_out(200, {"accepted": True, "tag": pending["tag"]})
+            threading.Timer(15.0, _rearm_if_enabled, args=(pending["tag"],)).start()
             return
 
         if parsed.path.startswith("/api/banks/") and parsed.path.endswith("/token"):
@@ -1617,6 +1751,7 @@ def main() -> None:
     Handler.batch_ms = args.batch_ms
 
     threading.Thread(target=heartbeat, daemon=True).start()
+    threading.Thread(target=_auto_pending_scheduler, daemon=True).start()
     if args.noise > 0:
         threading.Thread(target=query_noise, args=(args.noise,), daemon=True).start()
 

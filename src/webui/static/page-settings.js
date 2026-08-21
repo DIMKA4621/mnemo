@@ -44,6 +44,12 @@ const settings = {
   autostart: null,     // GET /api/autostart — its own request, its own failure
   autostartWant: null, // the selected state, null when it matches the machine
   autostartError: null,
+  autoUpdateWant: null,  // pending edit for the "auto_update" setting, same
+                         // idiom as autostartWant — null when it matches
+                         // what GET /api/settings last reported
+  updateCheckBusy: false,  // POST /api/update/check in flight
+  updateCheckError: null,
+  updateCheckResult: null,  // last check's outcome, worded for display
   embed: null,         // GET /api/embed/state — what the backend holds now
   embedError: null,
   embedBusy: false,    // an unload/load is in flight
@@ -169,6 +175,8 @@ function chooseSettingsSection(id) {
   // survived the trip would show the control on «Вимкнено» for a machine
   // whose autostart is on — the same lie as an unsaved edit that looks stored.
   settings.autostartWant = null;
+  settings.autoUpdateWant = null;
+  settings.updateCheckError = null;
   settings.maintenanceError = null;
   settings.cleanupConfirming = false;
   settings.cleanupNote = null;
@@ -831,6 +839,7 @@ function humanUptime(seconds) {
 function renderGeneralSection(body) {
   renderTheme(body);
   renderAutostart(body);
+  renderAutoUpdate(body);
 
   const svc = state.service;
   if (!svc) {
@@ -966,35 +975,168 @@ function chooseAutostart(want) {
 }
 
 /**
- * Apply the selected autostart state, then adopt whatever the service reports.
+ * Unattended auto-apply (contract: `GET/PUT /api/settings`'s `"auto_update"`
+ * key, `POST /api/update/check`) — same Save-gated `.segmented set-toggle`
+ * idiom as autostart above, not a second visual language, and part of the
+ * same `/api/settings` document the embed section already saves through
+ * `submitSettings` — so it can carry an env override like any other field
+ * there (`overrideNote`), unlike autostart which is its own endpoint.
+ */
+function autoUpdateStoredValue() {
+  const item = settingValue('auto_update');
+  return item ? !!item.value : true;
+}
+
+/** The auto-update state the form is showing: the edit if there is one,
+ *  else what the machine reports — same shape as `autostartWanted()`. */
+function autoUpdateWanted() {
+  if (settings.autoUpdateWant != null) return settings.autoUpdateWant;
+  return autoUpdateStoredValue();
+}
+
+/** Select an auto-update state. Nothing is saved until «Зберегти». */
+function chooseAutoUpdate(want) {
+  if (settings.busy) return;
+  settings.autoUpdateWant = (!!want === autoUpdateStoredValue()) ? null : !!want;
+  settings.errorText = null;
+  settings.note = null;
+  renderSettings();
+}
+
+function renderAutoUpdate(body) {
+  const chosen = autoUpdateWanted();
+  const seg = el('div', { className: 'segmented set-toggle' });
+  for (const option of [{ on: true, label: 'Увімкнено' }, { on: false, label: 'Вимкнено' }]) {
+    seg.appendChild(el('button', {
+      className: 'seg' + (chosen === option.on ? ' is-active' : ''),
+      text: option.label,
+      attrs: settings.busy ? { disabled: '' } : {},
+      on: { click: () => chooseAutoUpdate(option.on) },
+    }));
+  }
+
+  body.appendChild(setField('Автоматичне оновлення', seg,
+    'Придатний реліз застосовується сам — з коротким відліком і кнопкою ' +
+    '«Скасувати» просто в кабінеті. Вимкнено — лишається тільки банер і ' +
+    'ручне підтвердження, як і раніше.'));
+
+  const autoUpdateOverride = overrideNote('auto_update');
+  if (autoUpdateOverride) body.appendChild(autoUpdateOverride);
+
+  if (chosen !== autoUpdateStoredValue()) {
+    body.appendChild(el('p', {
+      className: 'set-override',
+      text: 'не збережено — зараз ' + (autoUpdateStoredValue() ? 'увімкнено' : 'вимкнено') +
+            '; натисніть «Зберегти», щоб застосувати',
+    }));
+  }
+
+  body.appendChild(el('div', { className: 'maint-head' }, [
+    el('button', {
+      className: 'btn',
+      text: settings.updateCheckBusy ? 'Перевіряємо…' : 'Перевірити оновлення',
+      attrs: settings.updateCheckBusy ? { disabled: '' } : {},
+      on: { click: () => runUpdateCheck() },
+    }),
+  ]));
+
+  if (settings.updateCheckError) {
+    body.appendChild(el('p', { className: 'modal-error', text: settings.updateCheckError }));
+  } else if (settings.updateCheckResult) {
+    body.appendChild(el('p', { className: 'set-note', text: settings.updateCheckResult }));
+  }
+}
+
+/**
+ * `POST /api/update/check` — the same manual trigger the sidebar banner's
+ * own periodic background check uses, reachable here too. Never itself
+ * shows the auto-pending countdown modal: it only refreshes `latest_tag`/
+ * `update_available` (via `refreshUpdateStatus()`, update.js's existing
+ * single source of truth for that), and that never opens anything on its
+ * own — `update.js`'s own `refreshUpdateStatus` only ever reopens a
+ * countdown that is independently real, armed by the checker's background
+ * tick, never by this click.
+ */
+async function runUpdateCheck() {
+  if (settings.updateCheckBusy) return;
+  settings.updateCheckBusy = true;
+  settings.updateCheckError = null;
+  renderSettings();
+  try {
+    const result = await api('/api/update/check', { method: 'POST' });
+    await refreshUpdateStatus();
+    settings.updateCheckResult = result.error
+      ? null
+      : (result.update_available
+          ? 'Доступна ' + result.latest_tag + '.'
+          : 'Актуальна версія.');
+    if (result.error) settings.updateCheckError = result.error;
+  } catch (err) {
+    if (isAuthError(err)) { openGate('rejected'); return; }
+    settings.updateCheckError = err.message;
+  } finally {
+    settings.updateCheckBusy = false;
+    renderSettings();
+  }
+}
+
+/**
+ * Apply the selected autostart and/or auto-update state, then adopt
+ * whatever each endpoint reports back.
  *
- * The click is never trusted as the new state: the POST returns the
- * registration as re-read, so a task the scheduler refused leaves the control
- * showing the machine instead of showing an intention as a fact.
+ * Two independent drafts, two independent endpoints (`POST /api/autostart`,
+ * `PUT /api/settings`) — neither click is ever trusted as the new state on
+ * its own: each response is re-read, so a task the scheduler refused, or a
+ * setting the server rejected, leaves its control showing the machine
+ * instead of showing an intention as a fact. One request failing does not
+ * stop the other from being tried.
  */
 async function submitGeneral() {
-  if (settings.autostartWant == null) {
+  const autostartWant = settings.autostartWant;
+  const autoUpdateWant = settings.autoUpdateWant;
+  if (autostartWant == null && autoUpdateWant == null) {
     settings.note = 'Нічого не змінено.';
     renderSettings();
     return;
   }
-  const want = settings.autostartWant;
+
   settings.busy = true;
   settings.save.disabled = true;
   settings.errorText = null;
   settings.note = null;
   renderSettings();
+
+  const notes = [];
   try {
-    settings.autostart = await api('/api/autostart', {
-      method: 'POST', body: { enabled: want },
-    });
-    settings.autostartWant = null;
-    settings.note = settings.autostart.enabled
-      ? 'Збережено. Служба підніматиметься при вході в систему.'
-      : 'Збережено. Автозапуску більше немає — службу доведеться піднімати самому.';
-  } catch (err) {
-    if (isAuthError(err)) { openGate('rejected'); return; }
-    settings.errorText = err.message;
+    if (autostartWant != null) {
+      try {
+        settings.autostart = await api('/api/autostart', {
+          method: 'POST', body: { enabled: autostartWant },
+        });
+        settings.autostartWant = null;
+        notes.push(settings.autostart.enabled
+          ? 'Автозапуск: служба підніматиметься при вході в систему.'
+          : 'Автозапуск: вимкнено, службу доведеться піднімати самому.');
+      } catch (err) {
+        if (isAuthError(err)) { openGate('rejected'); return; }
+        settings.errorText = err.message;
+      }
+    }
+
+    if (autoUpdateWant != null) {
+      try {
+        settings.data = await api('/api/settings', {
+          method: 'PUT', body: { auto_update: autoUpdateWant },
+        });
+        settings.autoUpdateWant = null;
+        notes.push(autoUpdateWant ? 'Автооновлення: увімкнено.' : 'Автооновлення: вимкнено.');
+      } catch (err) {
+        if (isAuthError(err)) { openGate('rejected'); return; }
+        settings.errorText = settings.errorText ? settings.errorText + ' ' + err.message : err.message;
+      }
+    }
+
+    if (notes.length) settings.note = notes.join(' ');
   } finally {
     settings.busy = false;
     settings.save.disabled = false;

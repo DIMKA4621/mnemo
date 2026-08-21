@@ -34,6 +34,20 @@
  * narrower than the literal "banner on update_available" instruction, never
  * hiding a real update, only suppressing the false-positive re-appearance
  * right after this cabinet's own successful apply.
+ *
+ * Unattended auto-apply (backend: commit 4f977b6) extends this with a
+ * second, independent entry point: the checker's own background tick can
+ * arm a short countdown (`GET /api/update/status`'s `"auto"` block, WS
+ * `update_auto_pending`) that applies itself unless cancelled. It is a
+ * genuinely separate flow, not a variant of the confirm dialog above — the
+ * user never asked for it — so it gets its own modal phase (`'auto-pending'`)
+ * and settles into the SAME progress phase/render path once it fires,
+ * through `enterUpdateProgress()`. The countdown has no "confirmed" event of
+ * its own: receiving `update_progress` at all, while a countdown was being
+ * shown, IS the signal that it settled (see `onUpdateProgress`). Same
+ * poll-is-truth discipline as above — `seconds_left` is always taken from
+ * the server's response, a local per-second tick only re-derives it from the
+ * polled `deadline` between polls, never counts down blindly on its own.
  */
 'use strict';
 
@@ -50,7 +64,7 @@ const UPDATE_STEPS = [
 
 const updateModal = {
   root: null, box: null, title: null, closeBtn: null, body: null, foot: null,
-  // 'idle' (not shown) | 'confirm' | 'progress' | 'timeout' | 'terminal'
+  // 'idle' (not shown) | 'confirm' | 'auto-pending' | 'progress' | 'timeout' | 'terminal'
   phase: 'idle',
   // Observed, THIS session, that staging finished and handoff to the
   // detached `update-apply` began — i.e. the point past which a "failed"
@@ -60,6 +74,13 @@ const updateModal = {
   everSwitching: false,
   pollTimer: null,
   pollStartedAt: 0,
+  // 'auto-pending' phase's own watch: a slower re-sync against the backend
+  // (settlement/cancellation can happen without this tab doing anything —
+  // another tab, or the timer firing server-side) plus a faster local tick
+  // that only re-derives the display from the last polled `deadline`.
+  autoPendingPollTimer: null,
+  autoPendingTickTimer: null,
+  autoPendingError: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -114,6 +135,7 @@ function openUpdateModal() {
 function closeUpdateModal() {
   if (updateModal.phase === 'progress') return; // guarded — see buildUpdateModal
   stopUpdatePolling();
+  stopAutoPendingWatch();
   updateModal.phase = 'idle';
   updateModal.root.hidden = true;
   renderSidebarUpdateBanner();
@@ -121,6 +143,7 @@ function closeUpdateModal() {
 
 function renderUpdateModal() {
   if (updateModal.phase === 'confirm') renderUpdateConfirm();
+  else if (updateModal.phase === 'auto-pending') renderUpdateAutoPending();
   else if (updateModal.phase === 'progress') renderUpdateProgress();
   else if (updateModal.phase === 'timeout') renderUpdateTimeout();
   else if (updateModal.phase === 'terminal') renderUpdateTerminal();
@@ -207,8 +230,220 @@ async function confirmUpdateApply() {
 }
 
 // ---------------------------------------------------------------------------
+// phase: auto-pending — unattended auto-apply's own countdown, independent
+// of the confirm dialog above (design: backend commit 4f977b6, WS
+// `update_auto_pending`, `GET /api/update/status`'s `"auto"` block)
+// ---------------------------------------------------------------------------
+
+/** Open the countdown modal and start watching it — the one entry point for
+ *  all three ways of getting here: the WS event arriving with nothing else
+ *  on screen, resuming one still pending after a reload, and reopening one
+ *  from the sidebar banner after it was dismissed. */
+function openAutoPendingModal() {
+  updateModal.phase = 'auto-pending';
+  updateModal.everSwitching = false;
+  updateModal.autoPendingError = null;
+  updateModal.root.hidden = false;
+  renderUpdateModal();
+  startAutoPendingWatch();
+}
+
+function renderUpdateAutoPending() {
+  clear(updateModal.body);
+  clear(updateModal.foot);
+  updateModal.closeBtn.hidden = false;
+
+  const u = state.update || {};
+  const pending = (u.auto && u.auto.pending) || {};
+  const tag = pending.tag || (u.latest_known && u.latest_known.tag) || '—';
+  const secondsLeft = pending.seconds_left != null ? pending.seconds_left : 0;
+
+  updateModal.body.appendChild(el('p', { className: 'upd-row' }, [
+    document.createTextNode('Автоматичне оновлення до '),
+    el('strong', { text: tag }),
+    document.createTextNode(' почнеться через ' + secondsLeft + ' с.'),
+  ]));
+
+  updateModal.body.appendChild(el('div', { className: 'tok-confirm' }, [
+    el('p', {
+      className: 'tok-confirm-text',
+      text: 'Якщо нічого не натиснути, оновлення застосується автоматично. ' +
+            '«Скасувати» лише відкладає його — ту саму версію може бути ' +
+            'запропоновано знову під час наступної перевірки.',
+    }),
+  ]));
+
+  if (updateModal.autoPendingError) {
+    updateModal.body.appendChild(el('p', { className: 'upd-row modal-error', text: updateModal.autoPendingError }));
+  }
+
+  updateModal.foot.appendChild(el('button', {
+    className: 'btn', text: 'Скасувати', on: { click: () => cancelAutoPending() },
+  }));
+  updateModal.foot.appendChild(el('button', {
+    className: 'btn btn-primary', text: 'OK', on: { click: () => confirmAutoPending() },
+  }));
+}
+
+/** Confirm now, skipping the rest of the countdown — still an "auto" trigger
+ *  for blacklist purposes on the backend (its own docstring, verbatim). */
+async function confirmAutoPending() {
+  try {
+    await api('/api/update/auto/confirm', { method: 'POST' });
+  } catch (err) {
+    if (isAuthError(err)) { openGate('rejected'); return; }
+    if (err.code === 'auto_not_pending') {
+      // Race: it already fired, or was cancelled from elsewhere — resync
+      // from the truth rather than guess which.
+      await pollAutoPendingOnce();
+      return;
+    }
+    updateModal.autoPendingError = err.message;
+    renderUpdateModal();
+    return;
+  }
+  stopAutoPendingWatch();
+  enterUpdateProgress(false);
+}
+
+async function cancelAutoPending() {
+  try {
+    await api('/api/update/auto/cancel', { method: 'POST' });
+  } catch (err) {
+    if (isAuthError(err)) { openGate('rejected'); return; }
+    if (err.code === 'auto_not_pending') {
+      await pollAutoPendingOnce();
+      return;
+    }
+    updateModal.autoPendingError = err.message;
+    renderUpdateModal();
+    return;
+  }
+  stopAutoPendingWatch();
+  // Touches nothing durable server-side either (backend docstring) — closing
+  // here is enough, there is no state left to reflect.
+  closeUpdateModal();
+}
+
+const AUTO_PENDING_POLL_MS = UPDATE_POLL_MS;
+const AUTO_PENDING_TICK_MS = 1000;
+
+function startAutoPendingWatch() {
+  stopAutoPendingWatch();
+  pollAutoPendingOnce();
+  updateModal.autoPendingPollTimer = setInterval(pollAutoPendingOnce, AUTO_PENDING_POLL_MS);
+  updateModal.autoPendingTickTimer = setInterval(tickAutoPendingDisplay, AUTO_PENDING_TICK_MS);
+}
+
+function stopAutoPendingWatch() {
+  if (updateModal.autoPendingPollTimer) {
+    clearInterval(updateModal.autoPendingPollTimer);
+    updateModal.autoPendingPollTimer = null;
+  }
+  if (updateModal.autoPendingTickTimer) {
+    clearInterval(updateModal.autoPendingTickTimer);
+    updateModal.autoPendingTickTimer = null;
+  }
+}
+
+/** The per-second display update between polls — re-derived from the last
+ *  polled `deadline` (a fixed point in time), never a bare decrementing
+ *  counter, so it cannot drift from what the server actually meant. */
+function tickAutoPendingDisplay() {
+  const pending = state.update && state.update.auto && state.update.auto.pending;
+  if (!pending) return;
+  const deadline = Date.parse(pending.deadline);
+  if (!Number.isNaN(deadline)) {
+    pending.seconds_left = Math.max(0, Math.round((deadline - Date.now()) / 1000));
+  }
+  if (updateModal.phase === 'auto-pending') renderUpdateModal();
+  else renderSidebarUpdateBanner();
+}
+
+/** The re-sync half: catches settlement or cancellation that happened
+ *  without this tab doing anything (another tab, the CLI, or the timer
+ *  firing server-side) — same "poll is the truth" discipline as
+ *  `pollUpdateStatusOnce` for the progress phase. */
+async function pollAutoPendingOnce() {
+  if (state.gated) return;
+  let data;
+  try {
+    data = await api('/api/update/status');
+  } catch (err) {
+    return; // transient — same silent treatment as the progress poll
+  }
+  state.update = data;
+
+  const apply = data.apply || {};
+  if (apply.state === 'staging' || apply.state === 'switching') {
+    stopAutoPendingWatch();
+    if (updateModal.phase === 'auto-pending') enterUpdateProgress(apply.state === 'switching');
+    else renderSidebarUpdateBanner();
+    return;
+  }
+
+  if (!(data.auto && data.auto.pending)) {
+    // Cancelled elsewhere, with nothing having started — nothing left to show.
+    stopAutoPendingWatch();
+    if (updateModal.phase === 'auto-pending') closeUpdateModal();
+    else renderSidebarUpdateBanner();
+    return;
+  }
+
+  if (updateModal.phase === 'auto-pending') renderUpdateModal();
+  else renderSidebarUpdateBanner();
+}
+
+/** WS `update_auto_pending` — routed here from shell.js's `handleEvent`. */
+function onUpdateAutoPending(data) {
+  const u = state.update || (state.update = {});
+  u.auto = u.auto || {};
+
+  if (data.phase === 'started') {
+    u.auto.pending = { tag: data.tag, deadline: data.deadline, seconds_left: data.seconds };
+    // Surface it so there is time left to cancel — but never steal the
+    // screen from something already open (an apply already running outranks
+    // a countdown by construction: the backend never arms one while
+    // `_apply_progress` is not idle/terminal).
+    if (updateModal.phase === 'idle') {
+      openAutoPendingModal();
+      return;
+    }
+  } else if (data.phase === 'cancelled') {
+    u.auto.pending = null;
+    if (updateModal.phase === 'auto-pending') {
+      stopAutoPendingWatch();
+      closeUpdateModal();
+      return;
+    }
+  }
+  renderSidebarUpdateBanner();
+}
+
+// ---------------------------------------------------------------------------
 // phase: progress — download -> install packages -> switch & restart
 // ---------------------------------------------------------------------------
+
+/**
+ * Enter the progress phase and start polling.
+ *
+ * The shared tail of three separate entry points: resuming an in-flight
+ * manual apply (reload, or a banner click while one is running — both
+ * pre-existing), and now also the auto-apply countdown settling, whichever
+ * way it settles (this tab's own confirm click, the timer firing, or
+ * `update_progress` arriving because it settled somewhere else entirely).
+ * `confirmUpdateApply` below does NOT use this — it renders the progress
+ * phase optimistically, before the `POST /api/update/apply` call it is
+ * waiting on even resolves, and that ordering is deliberate and unrelated to
+ * resuming/settling into an apply already known to be running.
+ */
+function enterUpdateProgress(everSwitching) {
+  updateModal.phase = 'progress';
+  updateModal.everSwitching = !!everSwitching;
+  updateModal.root.hidden = false;
+  renderUpdateModal();
+  startUpdatePolling();
+}
 
 function updateStepIndex(apply) {
   if (apply.state === 'switching') return 2;
@@ -391,8 +626,18 @@ function checkUpdatePollTimeout() {
 // ---------------------------------------------------------------------------
 
 function onUpdateProgress(data) {
-  if (updateModal.phase !== 'progress') return; // not watching right now
   const u = state.update || (state.update = {});
+
+  // There is no "settled" phase on `update_auto_pending` (see file header):
+  // receiving progress at all, while a countdown was on screen, IS that
+  // signal — auto or not, an apply has now begun. Clear it and, if this tab
+  // was showing the countdown, follow it straight into the progress phase.
+  if (u.auto && u.auto.pending) u.auto.pending = null;
+  if (updateModal.phase === 'auto-pending') {
+    stopAutoPendingWatch();
+    enterUpdateProgress(false);
+  }
+
   u.apply = u.apply || {};
   u.apply.tag = data.tag;
   u.apply.step = data.step;
@@ -403,9 +648,13 @@ function onUpdateProgress(data) {
     // does not need to wait for a poll to confirm it.
     u.apply.state = 'failed';
     u.apply.error = data.error || null;
-    stopUpdatePolling();
-    updateModal.phase = 'terminal';
-    renderUpdateModal();
+    if (updateModal.phase === 'progress') {
+      stopUpdatePolling();
+      updateModal.phase = 'terminal';
+      renderUpdateModal();
+    } else {
+      renderSidebarUpdateBanner();
+    }
     return;
   }
 
@@ -420,7 +669,12 @@ function onUpdateProgress(data) {
   } else {
     u.apply.state = 'staging';
   }
-  renderUpdateModal();
+  // Unlike the manual flow (always watched — the user themselves opened the
+  // progress phase to get here), an auto-triggered apply can run with the
+  // modal closed the whole time. The sidebar's own busy banner must still
+  // track it either way; only the modal render is conditional on watching.
+  if (updateModal.phase === 'progress') renderUpdateModal();
+  else renderSidebarUpdateBanner();
 }
 
 // ---------------------------------------------------------------------------
@@ -435,11 +689,20 @@ function shouldShowUpdateBanner(u) {
   return true;
 }
 
+/**
+ * Three live states now, in precedence order: an apply actually running
+ * outranks everything (shown regardless of what modal is or isn't open —
+ * pre-existing behaviour, unchanged); a live countdown outranks the plain
+ * "available" banner (the two never coexist — the backend only ever arms a
+ * countdown while `_apply_progress` is idle/terminal); the plain banner is
+ * the fallback, and only while nothing else is open.
+ */
 function renderSidebarUpdateBanner() {
   const box = $('sb-update-banner');
   if (!box) return;
   const u = state.update;
   const apply = (u && u.apply) || {};
+  const auto = (u && u.auto) || {};
   const busy = apply.state === 'staging' || apply.state === 'switching';
 
   if (busy) {
@@ -449,6 +712,12 @@ function renderSidebarUpdateBanner() {
     return;
   }
   box.classList.remove('is-busy');
+
+  if (auto.pending) {
+    box.hidden = false;
+    box.textContent = 'Автооновлення до ' + auto.pending.tag + ' очікує підтвердження';
+    return;
+  }
 
   if (updateModal.phase !== 'idle' || !shouldShowUpdateBanner(u)) {
     box.hidden = true;
@@ -461,14 +730,17 @@ function renderSidebarUpdateBanner() {
 function onUpdateBannerClick() {
   const u = state.update;
   const apply = (u && u.apply) || {};
+  const auto = (u && u.auto) || {};
   if (apply.state === 'staging' || apply.state === 'switching') {
     // Reopen the progress view onto an update already in flight (e.g. the
     // page was reloaded mid-update) rather than offering a second confirm.
-    updateModal.phase = 'progress';
-    updateModal.everSwitching = apply.state === 'switching';
-    updateModal.root.hidden = false;
-    renderUpdateModal();
-    startUpdatePolling();
+    enterUpdateProgress(apply.state === 'switching');
+    return;
+  }
+  if (auto.pending) {
+    // Reopen the countdown rather than the plain confirm dialog — it was
+    // dismissed, not cancelled, and is still counting down on the backend.
+    openAutoPendingModal();
     return;
   }
   openUpdateModal();
@@ -495,11 +767,14 @@ async function refreshUpdateStatus() {
     // An update this session did not start is already in flight (a reload,
     // or another tab/CLI triggered it) — resume watching it instead of
     // showing a stale "available" banner next to a service mid-switch.
-    updateModal.everSwitching = apply.state === 'switching';
-    updateModal.phase = 'progress';
-    updateModal.root.hidden = false;
-    renderUpdateModal();
-    startUpdatePolling();
+    enterUpdateProgress(apply.state === 'switching');
+    return;
+  }
+  if (data.auto && data.auto.pending) {
+    // Same resume, for a countdown already ticking when this tab (re)loaded
+    // — server-authoritative `seconds_left`, so the remaining time is
+    // correct from the first render, not guessed from `deadline` alone.
+    openAutoPendingModal();
     return;
   }
   renderSidebarUpdateBanner();
