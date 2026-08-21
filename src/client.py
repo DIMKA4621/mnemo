@@ -58,7 +58,7 @@ def default_base_url() -> str:
         "MNEMO_API_HOST", "127.0.0.1"
     )
     port = getattr(config, "API_PORT", None) or os.environ.get(
-        "MNEMO_API_PORT", "8918"
+        "MNEMO_API_PORT", "4646"
     )
     return f"http://{host}:{port}"
 

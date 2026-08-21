@@ -205,7 +205,7 @@ _DOWNLOAD: dict[str, Any] = {"active": False, "failed": False}
 _ORPHANS: list[dict[str, Any]] = [
     {
         "id": "deadbeefdeadbeef",
-        "path": "/home/dev/.claude/mnemo/state/deadbeefdeadbeef.db",
+        "path": "/home/dev/.mnemo/state/deadbeefdeadbeef.db",
         "size": 7340032,
         "root": "/home/dev/old-project/.claude/memory",
         "root_exists": True,
@@ -216,7 +216,7 @@ _ORPHANS: list[dict[str, Any]] = [
     },
     {
         "id": "facefeedfacefeed",
-        "path": "/home/dev/.claude/mnemo/state/facefeedfacefeed.db",
+        "path": "/home/dev/.mnemo/state/facefeedfacefeed.db",
         "size": 1048576,
         "root": None,
         "root_exists": False,
@@ -478,7 +478,7 @@ def embed_state_payload() -> dict:
             "model": "intfloat/multilingual-e5-large",
             "holding": _EMBED_HELD["holding"],
             "cached": _MODEL_CACHED["value"],
-            "where": "127.0.0.1:8917",
+            "where": "127.0.0.1:4645",
             "wake_s": 7.6,
             # Fixture matches this session's real machine (3h override) so
             # the field renders non-trivially in dev too.
@@ -551,7 +551,7 @@ def settings_payload() -> dict:
 
     api = _SETTINGS["api"]
     return {
-        "path": "/home/dev/.claude/mnemo/state/settings.json",
+        "path": "/home/dev/.mnemo/state/settings.json",
         "exists": True,
         "settings": {
             "provider": item("provider", _SETTINGS["provider"]),
@@ -562,7 +562,7 @@ def settings_payload() -> dict:
             "api.timeout": item("api.timeout", api["timeout"]),
             "api.key_set": item("api.key_set", bool(api["key"])),
         },
-        "readonly": {"api_host": "127.0.0.1", "api_port": 8918},
+        "readonly": {"api_host": "127.0.0.1", "api_port": 4646},
         "presets": _settings_presets(),
     }
 
@@ -591,9 +591,9 @@ def doctor_payload() -> dict[str, Any]:
 
     return {
         "engine": {
-            "home": "/home/dev/.claude/mnemo",
-            "state_dir": "/home/dev/.claude/mnemo/state",
-            "python": "/home/dev/.claude/mnemo/.venv/bin/python",
+            "home": "/home/dev/.mnemo",
+            "state_dir": "/home/dev/.mnemo/state",
+            "python": "/home/dev/.mnemo/.venv/bin/python",
         },
         "provider": {
             "machine": machine,
@@ -606,7 +606,7 @@ def doctor_payload() -> dict[str, Any]:
             "applicable": local_in_use,
             "up": True if local_in_use else None,
             "host": "127.0.0.1",
-            "port": 8917,
+            "port": 4645,
             "scope": "machine_port",
         },
         "endpoint": endpoint,
@@ -1425,7 +1425,7 @@ class Handler(BaseHTTPRequestHandler):
                 "uptime_s": round(time.time() - STARTED_AT, 1), "banks": len(BANKS),
                 "queue_depth": queue_snapshot()["depth"],
                 "embed": {"provider": "local", "reachable": True,
-                          "host": "127.0.0.1", "port": 8917}}
+                          "host": "127.0.0.1", "port": 4645}}
 
     def handle_api_get(self, path: str, query: dict) -> None:
         if path == "/api/embed/state":
@@ -1488,7 +1488,7 @@ class Handler(BaseHTTPRequestHandler):
                             # would render an unconfigured endpoint as a dead
                             # process.
                             "embed": {"reachable": True, "host": "127.0.0.1",
-                                      "port": 8917,
+                                      "port": 4645,
                                       "kind": _SETTINGS["provider"]}},
                 "queue": queue_snapshot(),
                 "banks": [bank_info(b) for b in BANKS],

@@ -469,7 +469,7 @@ def test_scaffold_template_project() -> None:
         env_text = written.get(".mcp.env", "")
         check("real values land in .mcp.env",
               f"MNEMO_TOKEN={_FAKE_TOKEN}" in env_text
-              and "MNEMO_PORT=8918" in env_text,
+              and "MNEMO_PORT=4646" in env_text,
               detail=env_text)
         check("no bank name reaches .mcp.env at all",
               "MNEMO_BANK" not in env_text, detail=env_text)
@@ -572,7 +572,7 @@ def test_scaffold_drops_the_bank_segment() -> None:
         mcp = proj / ".mcp.json"
         _write(mcp, json.dumps({"mcpServers": {"mnemo": {
             "type": "http",
-            "url": f"http://127.0.0.1:8918/mcp/some%20bank?token={_FAKE_TOKEN}",
+            "url": f"http://127.0.0.1:4646/mcp/some%20bank?token={_FAKE_TOKEN}",
             "headers": {"Authorization": f"Bearer {_FAKE_TOKEN}",
                         "X-Mnemo-Bank": "some bank"},
         }}}, indent=2))
@@ -594,10 +594,10 @@ def test_scaffold_drops_the_bank_segment() -> None:
                        "?token={{MNEMO_TOKEN}}",
             }}}, indent=2))
         _write(proj2 / ".mcp.env",
-               "# mnemo\nMNEMO_PORT=8918\nMNEMO_BANK=some%20bank\n"
+               "# mnemo\nMNEMO_PORT=4646\nMNEMO_BANK=some%20bank\n"
                f"MNEMO_TOKEN={_FAKE_TOKEN}\n")
         _write(proj2 / ".mcp.env.example",
-               "# mnemo\nMNEMO_PORT=8918\nMNEMO_BANK=\nMNEMO_TOKEN=\n")
+               "# mnemo\nMNEMO_PORT=4646\nMNEMO_BANK=\nMNEMO_TOKEN=\n")
         _write(proj2 / "mcp-setup.sh", _SETUP_SH.replace(
             '  "$TEMPLATE"',
             '  -e "s|{{MNEMO_PORT}}|${MNEMO_PORT}|g" \\\n'
@@ -808,7 +808,7 @@ def test_scaffold_hand_edited_sed_line() -> None:
                       "url": "http://127.0.0.1:{{MNEMO_PORT}}/mcp"
                              "?token={{MNEMO_TOKEN}}"}}}, indent=2))
         _write(proj / ".mcp.env",
-               f"MNEMO_PORT=8918\nMNEMO_TOKEN={_FAKE_TOKEN}\n")
+               f"MNEMO_PORT=4646\nMNEMO_TOKEN={_FAKE_TOKEN}\n")
         # Same placeholder, different substitution — someone routed it through
         # another variable. Not a line mnemo ever wrote.
         hand = '  -e "s|{{MNEMO_BANK}}|${MY_OWN_BANK_VAR}|g" \\'
@@ -845,7 +845,7 @@ def test_scaffold_renames_the_legacy_key() -> None:
     with tempfile.TemporaryDirectory(prefix="mnemo rename ") as raw:
         current = {
             "type": "http",
-            "url": f"http://127.0.0.1:8918/mcp?token={_FAKE_TOKEN}",
+            "url": f"http://127.0.0.1:4646/mcp?token={_FAKE_TOKEN}",
         }
         stdio = {
             "type": "stdio",
@@ -1079,7 +1079,7 @@ def test_adopted_project_discovery() -> None:
     with tempfile.TemporaryDirectory() as tmp_root:
         current = project("current", mcp={"mcpServers": {_INSTANCE: {
             "type": "http",
-            "url": f"http://127.0.0.1:8918/mcp?token={_FAKE_TOKEN}",
+            "url": f"http://127.0.0.1:4646/mcp?token={_FAKE_TOKEN}",
         }}})
         legacy_stdio = project("legacy", template={"mcpServers": {
             _LEGACY_INSTANCE: {"type": "stdio",
@@ -1087,7 +1087,7 @@ def test_adopted_project_discovery() -> None:
                                "args": ["mcp"]},
         }})
         hooked = project("hooked", mcp={"mcpServers": {_INSTANCE: {
-            "type": "http", "url": "http://127.0.0.1:8918/mcp?token=" + _FAKE_TOKEN,
+            "type": "http", "url": "http://127.0.0.1:4646/mcp?token=" + _FAKE_TOKEN,
         }}}, hooks={"hooks": {"PostToolUse": [
             {"hooks": [{"type": "command",
                         "command": "~/.claude/mnemo/bin/mnemo hook-postedit"}]}
@@ -1263,7 +1263,7 @@ def test_setup_scripts_agree() -> None:
         "# a comment\n"
         "\n"
         "MNEMO_HOST=127.0.0.1\n"
-        "  MNEMO_PORT = 8918  \n"                       # spaces both sides
+        "  MNEMO_PORT = 4646  \n"                       # spaces both sides
         f'MNEMO_TOKEN="{_FAKE_TOKEN}"\n'                # double quoted
         f"MNEMO_NOTES_TOKEN='{_FAKE_TOKEN}'\n"          # single quoted
         "ODD_VALUE=a|b&c$1d/e\n"                        # hostile to sed/regex
@@ -1304,7 +1304,7 @@ def test_setup_scripts_agree() -> None:
     if survivor is not None:
         doc = json.loads(survivor.decode("utf-8"))
         url = doc["mcpServers"]["mnemo-memory"]["url"]
-        check("a value padded around `=` is trimmed", ":8918/" in url,
+        check("a value padded around `=` is trimmed", ":4646/" in url,
               detail=url)
         check("a quoted value loses exactly its quotes",
               url.endswith(_FAKE_TOKEN), detail=url)
@@ -1641,7 +1641,7 @@ def test_scaffold_refuses_a_tracked_file() -> None:
         # token actually lives in.
         _write(proj / ".mcp.json.template", '{"mcpServers": {}}\n')
         git(proj, "rm", "--cached", "-q", ".mcp.json")
-        _write(proj / ".mcp.env", "MNEMO_PORT=8918\n")
+        _write(proj / ".mcp.env", "MNEMO_PORT=4646\n")
         git(proj, "add", "-f", ".mcp.env")
         raised, name = None, ""
         try:
@@ -1985,7 +1985,7 @@ def test_structured_doctor_and_cleanup() -> None:
 
             backend = {
                 "up": True,
-                "url": "http://127.0.0.1:8918",
+                "url": "http://127.0.0.1:4646",
                 "scope": "machine_port",
                 "serving_pid": 123,
                 "launcher_pid": 122,

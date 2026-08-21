@@ -53,7 +53,11 @@ Every bank logs its own events, and its index can be rebuilt independently.
 
 ### The cabinet
 
-A local web interface — `mnemo ui` prints the link to it. It has these pages:
+A local web interface — http://127.0.0.1:4646/ui
+
+`mnemo ui` - print the link.
+
+It has these pages:
 
 - **Memory** — every bank with its index state, each bank's file tree, and any document with its chunk boundaries drawn in.
 - **Journal** — a live feed of every bank's events: search queries and indexing runs.
@@ -77,7 +81,7 @@ git clone https://github.com/DIMKA4621/mnemo.git
 cd mnemo; .\install.ps1
 ```
 
-The launcher lands at `~/.claude/mnemo/bin/mnemo` (`bin\mnemo.exe` on Windows) and isn't added to `PATH` automatically — call it by full path, or alias it once.
+The launcher lands at `~/.mnemo/bin/mnemo` (`bin\mnemo.exe` on Windows) and isn't added to `PATH` automatically — call it by full path, or alias it once.
 
 ## Attach a project
 

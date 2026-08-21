@@ -31,7 +31,7 @@ longer walls them off.
 ## Two layers
 
 **Engine — user scope, once per machine, NOT in git**
-`~/.claude/mnemo/`: `.venv`, `model-cache` (~2.2 GB, only via an
+`~/.mnemo/`: `.venv`, `model-cache` (~2.2 GB, only via an
 explicit `warmup`), `state/<bankhash>.db` (the disposable index — one
 file per **bank root**, keyed by `sha1` of that path), `bin/mnemo`
 (self-locating launcher; a real `bin\mnemo.exe` on Windows).
@@ -248,7 +248,7 @@ left to be portable, so this is about one entry:
   fact that is single.
 
 The one logical path resolves to the platform's real launcher:
-`~/.claude/mnemo/bin/mnemo` (extensionless Bash script) on Linux/macOS,
+`~/.mnemo/bin/mnemo` (extensionless Bash script) on Linux/macOS,
 `bin\mnemo.exe` on Windows (process creation resolves the extensionless
 path to the `.exe`). On Windows `install.ps1` sets the user `HOME`
 environment variable **only when it is absent**, never overwrites it, and

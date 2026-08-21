@@ -19,7 +19,7 @@
 #   ./install.sh --no-start   do not start the service
 #   ./install.sh --home DIR   install into DIR instead of the default
 #
-# Default location: $HOME/.claude/mnemo  (override with $MNEMO_HOME).
+# Default location: $HOME/.mnemo  (override with $MNEMO_HOME).
 set -euo pipefail
 
 usage() {
@@ -53,7 +53,7 @@ human() {
 SRC_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # --- resolve the engine home and parse flags ---------------------------
-DEFAULT_HOME="$HOME/.claude/mnemo"
+DEFAULT_HOME="$HOME/.mnemo"
 MNEMO_HOME="${MNEMO_HOME:-$DEFAULT_HOME}"
 CHECK_ONLY=0
 DEPS_ONLY=0
@@ -271,6 +271,23 @@ mkdir -p \
 	"$MNEMO_HOME/bin" \
 	"$VERSIONS_DIR"
 say "engine home: $MNEMO_HOME"
+
+# A stub only -- created once, never overwritten, so a machine's own
+# overrides already written here survive every later install/update.
+if [ ! -f "$MNEMO_HOME/state/mnemo.env" ]; then
+	cat > "$MNEMO_HOME/state/mnemo.env" <<-'EOF'
+	# mnemo machine-config overrides (read by config.py on every process start)
+	#
+	# KEY=value here overrides that variable's default in config.py, and
+	# survives every future engine update -- this file lives under state/,
+	# which install.sh never touches. See docs/Memory-contracts-v3.md,
+	# section 11.1, for the full list of variables.
+	#
+	# Example:
+	# MNEMO_EMBED_IDLE_TIMEOUT=0
+	EOF
+	say "mnemo.env stub created (state/mnemo.env)"
+fi
 
 # --- 1a. is this a v2 engine? ------------------------------------------
 # Recognised by what v2 never had: a banks registry. v2 indexed one project

@@ -49,8 +49,8 @@ for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
         _stream.reconfigure(encoding="utf-8")
 
-BASE = os.environ.get("MNEMO_TEST_BASE_URL", "http://127.0.0.1:8918")
-_token_file = Path.home() / ".claude" / "mnemo" / "state" / "api.token"
+BASE = os.environ.get("MNEMO_TEST_BASE_URL", "http://127.0.0.1:4646")
+_token_file = Path.home() / ".mnemo" / "state" / "api.token"
 
 _passed = _failed = 0
 

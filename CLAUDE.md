@@ -18,7 +18,7 @@ rebuildable vector index makes it searchable.
   the whole folder is one index. Need isolation (e.g. per agent) → a
   separate bank + its own MCP connection. `path_prefix` narrows a search
   to a subfolder, but it is navigation, not an access boundary.
-- Index: one SQLite file per bank at `~/.claude/mnemo/state/<bankhash>.db`
+- Index: one SQLite file per bank at `~/.mnemo/state/<bankhash>.db`
   — gitignored realm, deletable, fully rebuildable from the `.md`.
 - Access: **one persistent local service** owns the registry, the index
   and the watcher; CLI, MCP, hooks and the web cabinet are thin clients
@@ -226,7 +226,7 @@ Around it:
   service, plus the check that `/mcp-tools/*` is byte-identical to the
   tools it mirrors. The bundled fixture corpus uses the canonical layout
   (`.claude/memory/` with `logs/`, `agents/<role>/` inside).
-- Installed engine: `~/.claude/mnemo/` (`bin/mnemo`, a real `bin\mnemo.exe`
+- Installed engine: `~/.mnemo/` (`bin/mnemo`, a real `bin\mnemo.exe`
   on Windows — a subprocess dispatcher resolving itself from `sys.argv[0]`,
   never `sys.prefix`, and spawning `current/.venv/.../python -m src.cli`;
   `versions/<tag>/{src,.venv}` one full tree per installed release,
@@ -285,7 +285,7 @@ connects instead of spawning. Two faces, keyed by which token is presented —
 `bank_state`, `reindex`, `status`, `logs`). Neither credential opens the
 other's face.
 Poke the read tools by hand at `/mcp-tools/*` (Swagger at
-`http://127.0.0.1:8918/docs`, token from `~/.claude/mnemo/state/api.token`).
+`http://127.0.0.1:4646/docs`, token from `~/.mnemo/state/api.token`).
 
 **`local` is not the only provider, and three commands branch on that.**
 Under `api` the model cache is empty by design and the resident never starts,
@@ -310,9 +310,9 @@ set (`banks`, `reindex`, `tree`, `status`, `logs`, `ui`) arrives with phase
 state directory and must still work with the backend down.
 `docs/Memory-contracts-v3.md` §11.1 is the full target list.
 
-`mnemo` is the launcher at `~/.claude/mnemo/bin/mnemo` (`bin\mnemo.exe` on
+`mnemo` is the launcher at `~/.mnemo/bin/mnemo` (`bin\mnemo.exe` on
 Windows) — it is NOT on PATH by default. Either call it by full path, or
-add `~/.claude/mnemo/bin` to PATH / make a shell alias. The git-tracked
+add `~/.mnemo/bin` to PATH / make a shell alias. The git-tracked
 hooks and MCP always use the portable form (`~`/`${HOME}` resolved per
 user; the extensionless path resolves to `.exe` on Windows), so they work
 regardless.
@@ -329,12 +329,12 @@ cd mnemo
 & .\install.ps1        # venv, deps, launcher, token, profile, autostart,
                        # then: model (asks) -> service start -> doctor
 cd <your project>
-& "$HOME\.claude\mnemo\bin\mnemo.exe" init
+& "$HOME\mnemo\bin\mnemo.exe" init
 ```
 ```bash
 git clone https://github.com/DIMKA4621/mnemo.git   # Linux / macOS
 cd mnemo && ./install.sh
-cd <your project> && ~/.claude/mnemo/bin/mnemo init
+cd <your project> && ~/.mnemo/bin/mnemo init
 ```
 
 The installer ends on **evidence, not a promise**: it runs `doctor` and
@@ -390,7 +390,7 @@ existing machine kept working (design decision #29).
 
 ## Updating the engine (after pulling new code)
 
-The engine (`~/.claude/mnemo/`) is a mirror of this repo's `src/`, shared
+The engine (`~/.mnemo/`) is a mirror of this repo's `src/`, shared
 by every project on the machine. It is decoupled from the repo: editing
 `src/` here changes nothing until you re-run the installer. To roll out
 an update:
@@ -430,9 +430,9 @@ or not.
 
 Extra steps only when:
 - the embedding model changed in `src/config.py` → also run
-  `~/.claude/mnemo/bin/mnemo warmup` and let the index rebuild;
+  `~/.mnemo/bin/mnemo warmup` and let the index rebuild;
 - the wiring schema changed (hooks / `.mcp.json` shape) → re-run
-  `~/.claude/mnemo/bin/mnemo init` in each adopted project (additive,
+  `~/.mnemo/bin/mnemo init` in each adopted project (additive,
   idempotent — it only adds mnemo's own keys), with `--migrate` where the
   project still carries an older mnemo-authored entry. If `.mcp.json` is
   git-tracked there, `init` refuses until `git rm --cached .mcp.json` —

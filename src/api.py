@@ -79,7 +79,7 @@ def _cfg(name: str, env: str, default: Any, cast: Any = str) -> Any:
 
 SERVICE_VERSION: str = getattr(config, "SERVICE_VERSION", "3.0.0")
 API_HOST: str = _cfg("API_HOST", "MNEMO_API_HOST", "127.0.0.1")
-API_PORT: int = int(_cfg("API_PORT", "MNEMO_API_PORT", 8918, int))
+API_PORT: int = int(_cfg("API_PORT", "MNEMO_API_PORT", 4646, int))
 
 
 def token_file() -> Path:
@@ -953,7 +953,7 @@ _URL_TOKEN_OK = ("/mcp", "/mcp-tools", "/mcp-admin")
 # still the one that rejects, this only describes what it wants.
 bearer_scheme = HTTPBearer(
     auto_error=False,
-    description="Contents of ~/.claude/mnemo/state/api.token",
+    description="Contents of ~/.mnemo/state/api.token",
 )
 
 

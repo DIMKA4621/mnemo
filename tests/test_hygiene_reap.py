@@ -26,9 +26,12 @@ import os
 import sys
 from pathlib import Path
 
+REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(REPO))
 
 import _hygiene  # noqa: E402
+from src import config  # noqa: E402
 
 _passed = _failed = 0
 
@@ -148,11 +151,13 @@ def test_claim_embed_port_is_private_and_exported() -> None:
         check("claim_embed_port exports MNEMO_EMBED_PORT",
               os.environ.get("MNEMO_EMBED_PORT") == str(port),
               detail=str(os.environ.get("MNEMO_EMBED_PORT")))
-        # 8917 is the shared default; a suite landing on it would fight the
-        # user's own resident, which is the collision this whole file exists
-        # to prevent.
-        check("the claimed port is not the shared default 8917",
-              port != 8917, detail=str(port))
+        # config.EMBED_PORT is the shared default; a suite landing on it
+        # would fight the user's own resident, which is the collision this
+        # whole file exists to prevent. Read from config, not a hardcoded
+        # literal, so a future renumber can't silently make this pass while
+        # testing nothing.
+        check("the claimed port is not the shared default",
+              port != config.EMBED_PORT, detail=str(port))
         check("a second claim yields a different port",
               _hygiene.claim_embed_port() != port)
     finally:

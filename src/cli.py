@@ -794,7 +794,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     pv = sub.add_parser("serve")
     pv.add_argument("--host", default=None, help="Bind address (default: loopback).")
-    pv.add_argument("--port", type=int, default=None, help="Port (default: 8918).")
+    pv.add_argument("--port", type=int, default=None, help="Port (default: 4646).")
 
     psv = sub.add_parser(
         "service",

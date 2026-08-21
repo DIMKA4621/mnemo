@@ -55,7 +55,7 @@ def _load_env_file() -> Path | None:
     """
     state = os.environ.get("MNEMO_STATE_DIR")
     path = Path(state) if state else Path(
-        os.environ.get("MNEMO_HOME", Path.home() / ".claude" / "mnemo")
+        os.environ.get("MNEMO_HOME", Path.home() / ".mnemo")
     ) / "state"
     path = path / ENV_FILE_NAME
     try:
@@ -81,9 +81,14 @@ ENV_FILE: Path | None = _load_env_file()
 
 # --- paths & state ------------------------------  engine-dev
 
-# User-scope home: installed once, shared by all banks.
+# User-scope home: installed once, shared by all banks. `~/.mnemo`, its own
+# dotfolder directly under HOME — deliberately NOT nested under ~/.claude
+# (design decision, 2026-08-21): the engine is not Claude-Code-specific
+# plumbing, it is a standalone service any MCP client can talk to, and
+# living inside another tool's dotfolder implied otherwise. Same convention
+# as ~/.ollama, ~/.cargo, ~/.docker.
 USER_HOME: Path = Path(
-    os.environ.get("MNEMO_HOME", Path.home() / ".claude" / "mnemo")
+    os.environ.get("MNEMO_HOME", Path.home() / ".mnemo")
 )
 # Per-bank index DBs. $MNEMO_STATE_DIR relocates just the *writable* state
 # (index + logs + token) without moving the engine or model-cache: a container
@@ -168,7 +173,7 @@ EMBEDDING_DIM: int = 1024
 # beyond the machine is a deployment decision, guarded outside this process.
 EMBED_BIND: str = os.environ.get("MNEMO_EMBED_BIND", "127.0.0.1")
 EMBED_HOST: str = os.environ.get("MNEMO_EMBED_HOST", "127.0.0.1")
-EMBED_PORT: int = int(os.environ.get("MNEMO_EMBED_PORT", "8917"))
+EMBED_PORT: int = int(os.environ.get("MNEMO_EMBED_PORT", "4645"))
 
 # The resident's shared secret lives with the ENGINE, not with the state.
 #
@@ -224,27 +229,25 @@ EMBED_SECONDS_PER_CHUNK: float = float(
 )
 EMBED_BATCH_TIMEOUT_FLOOR: float = 60.0
 
-# Idle exit for the resident. 0 = never exit on idle, which is the v3 default
-# (design §4: the model stays warm).
+# Idle exit for the resident, in seconds. 10800 (3h) is the default: long
+# enough that it essentially never fires mid-session (search stays instant
+# per FR-3), but still frees the ~1.6 GB during a genuine multi-hour idle
+# stretch (overnight, lunch) without needing the manual `mnemo embed unload`.
 #
-# `0` does NOT mean "always resident". The resident is still started on demand
-# by the next search or hook, and it is released by `mnemo service stop`,
-# which reaps it along with the backend. So the memory is recoverable by a
-# command the user already knows; it simply is not surrendered on a timer.
+# 0 = never exit on idle (the model stays warm until `mnemo service stop`,
+# which still reaps the resident along with the backend either way).
 #
-# WHY THE TIMER LOST, measured: once the resident has exited, the next search
-# pays ~9 s — 0.5 s failed probe + 2.3 s to spawn and bind + 6.2 s to load
-# e5-large. With the old 1800 s, the first search after any half-hour gap
-# cost that, against FR-3's "пошук — миттєвий". Paying 9 s repeatedly to
-# reclaim 1.6 GB that a single command can reclaim on purpose is the wrong
-# trade on a developer machine.
+# WHY NOT 0, measured: once the resident has exited, the next search pays
+# ~9 s — 0.5 s failed probe + 2.3 s to spawn and bind + 6.2 s to load
+# e5-large. That cost only matters right after the timer fires, and at 3h it
+# fires rarely enough that paying it occasionally beats holding 1.6 GB
+# resident indefinitely on a developer machine.
 #
-# This default waited on `service stop` genuinely reaping the *resident* —
+# This default relies on `service stop` genuinely reaping the *resident* —
 # not just the backend, which is a different process holding no model.
 # Verified before flipping: a live resident at 1501 MB, `stop_resident()` ->
 # stopped in 0.5 s, nothing left listening on the port, process gone.
-# Set MNEMO_EMBED_IDLE_TIMEOUT=1800 to restore the old behaviour.
-EMBED_IDLE_TIMEOUT: int = int(os.environ.get("MNEMO_EMBED_IDLE_TIMEOUT", "0"))
+EMBED_IDLE_TIMEOUT: int = int(os.environ.get("MNEMO_EMBED_IDLE_TIMEOUT", "10800"))
 
 # Embedding CPU cap. ONNX Runtime defaults to ALL cores per embed call;
 # the serial resident under multi-agent load then pegs the whole machine.
@@ -445,11 +448,11 @@ BANKS_FILE_OVERRIDE: str | None = os.environ.get("MNEMO_BANKS_FILE")
 
 # --- api / websocket (J) ------------------------  service-dev
 
-# Everything mnemo does goes through this one loopback backend. Port 8918,
-# not 8917: the embedding resident already owns 8917.
+# Everything mnemo does goes through this one loopback backend. Port 4646,
+# not 4645: the embedding resident already owns 4645.
 SERVICE_VERSION: str = "3.0.0"
 API_HOST: str = os.environ.get("MNEMO_API_HOST", "127.0.0.1")
-API_PORT: int = int(os.environ.get("MNEMO_API_PORT", "8918"))
+API_PORT: int = int(os.environ.get("MNEMO_API_PORT", "4646"))
 # The token is 48 hex chars in `STATE_DIR/api.token`, generated on first
 # start. The PATH is derived live by `api.token_file()` (see the note in the
 # registry section); only the value override belongs here.

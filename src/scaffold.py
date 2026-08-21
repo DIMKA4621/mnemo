@@ -65,7 +65,7 @@ from .config import resolve
 # Portable launcher reference. Each teammate's own $HOME resolves at run
 # time — nothing machine-specific lands in git. Needed only by the hook seeds;
 # the MCP wiring no longer uses it at all.
-_LAUNCHER = "~/.claude/mnemo/bin/mnemo"
+_LAUNCHER = "~/.mnemo/bin/mnemo"
 
 
 # The `mcpServers` key `init` writes, and the one thing in the file that says
@@ -115,7 +115,7 @@ def _var_prefix(instance: str) -> str:
 def _api_port() -> str:
     return str(
         getattr(config, "API_PORT", None)
-        or os.environ.get("MNEMO_API_PORT", "8918")
+        or os.environ.get("MNEMO_API_PORT", "4646")
     )
 
 
@@ -897,7 +897,7 @@ lookup() {
 	value="${line#*=}"
 	# Trim, then unquote. Spaces are tolerated around the `=` on the key side,
 	# so tolerating them on the value side is the only consistent reading --
-	# and `PORT = 8918` otherwise yields a port with spaces in it. A value that
+	# and `PORT = 4646` otherwise yields a port with spaces in it. A value that
 	# genuinely wants padding says so by quoting.
 	value="${value#"${value%%[![:space:]]*}"}"
 	value="${value%"${value##*[![:space:]]}"}"
@@ -1000,7 +1000,7 @@ foreach ($line in [IO.File]::ReadAllLines($envFile)) {
     $value = $line.Substring($split + 1)
     # Trim, then unquote. Spaces are tolerated around the `=` on the key side,
     # so tolerating them on the value side is the only consistent reading --
-    # and `PORT = 8918` otherwise yields a port with spaces in it. A value that
+    # and `PORT = 4646` otherwise yields a port with spaces in it. A value that
     # genuinely wants padding says so by quoting.
     $value = $value.Trim()
     # One layer of surrounding quotes, if the value carries them.
@@ -1063,7 +1063,7 @@ _RETIRED_ENV_VARS = ("BANK",)
 _ENV_EXAMPLE_COMMENT = (
     "# {instance} — the cabinet (`mnemo ui`) shows the bank's token, or read "
     "it from\n"
-    "# ~/.claude/mnemo/state/banks.json"
+    "# ~/.mnemo/state/banks.json"
 )
 
 

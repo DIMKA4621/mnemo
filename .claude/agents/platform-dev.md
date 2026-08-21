@@ -29,7 +29,7 @@ Do:
 - Keep installers idempotent and non-destructive: they must never touch
   `state/` (indexes) or `model-cache/`.
 - Preserve the canonical launcher contract — one logical path
-  `~/.claude/mnemo/bin/mnemo` (a real `mnemo.exe` on Windows) — and never
+  `~/.mnemo/bin/mnemo` (a real `mnemo.exe` on Windows) — and never
   modify the system `PATH`.
 - Keep git-tracked wiring portable and identical across OSes; platform
   differences belong in the installer, not in what ships in git.

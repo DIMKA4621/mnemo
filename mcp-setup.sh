@@ -27,7 +27,7 @@ lookup() {
 	value="${line#*=}"
 	# Trim, then unquote. Spaces are tolerated around the `=` on the key side,
 	# so tolerating them on the value side is the only consistent reading --
-	# and `PORT = 8918` otherwise yields a port with spaces in it. A value that
+	# and `PORT = 4646` otherwise yields a port with spaces in it. A value that
 	# genuinely wants padding says so by quoting.
 	value="${value#"${value%%[![:space:]]*}"}"
 	value="${value%"${value##*[![:space:]]}"}"

@@ -35,7 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # `config` reads the environment at import time, so the redirect has to happen
 # before anything imports it. Without this the test would write its index files
-# into the real `~/.claude/mnemo/state` and could collide with a live bank.
+# into the real `~/.mnemo/state` and could collide with a live bank.
 _STATE = tempfile.TemporaryDirectory(prefix="mnemo pipeline state ")
 os.environ["MNEMO_STATE_DIR"] = _STATE.name
 

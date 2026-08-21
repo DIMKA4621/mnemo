@@ -7,7 +7,7 @@ instead of spawning: NFR-2, and the reason `mnemo mcp` no longer exists.
 
 **The token is the whole address** (team-lead decision):
 
-    http://127.0.0.1:8918/mcp?token=<bank-token>
+    http://127.0.0.1:4646/mcp?token=<bank-token>
 
 Once a token belongs to a bank, naming the bank again in the URL is redundant
 — and worse than redundant, because two things that say which bank can

@@ -78,13 +78,13 @@ and **nothing is ever committed** — the user reviews and commits.
 
 ```powershell
 # native Windows
-& "$HOME\.claude\mnemo\bin\mnemo.exe" doctor
+& "$HOME\mnemo\bin\mnemo.exe" doctor
 Get-ChildItem CLAUDE.md, .mcp.json, .mcp.json.template, .claude -Force -EA SilentlyContinue
 Get-ChildItem .claude\rules, .claude\memory, .claude\agents -Force -EA SilentlyContinue
 ```
 ```bash
 # Linux / macOS
-~/.claude/mnemo/bin/mnemo doctor
+~/.mnemo/bin/mnemo doctor
 ls -la CLAUDE.md .mcp.json .mcp.json.template .claude 2>/dev/null
 ls -la .claude/rules .claude/memory .claude/agents 2>/dev/null
 ```
@@ -143,12 +143,12 @@ Only what was approved, in order:
 ```powershell
 # native Windows (PowerShell 5.1+)
 & .\install.ps1                                      # if the engine is missing
-& "$HOME\.claude\mnemo\bin\mnemo.exe" init
+& "$HOME\mnemo\bin\mnemo.exe" init
 ```
 ```bash
 # Linux / macOS
 ./install.sh                                         # if the engine is missing
-~/.claude/mnemo/bin/mnemo init
+~/.mnemo/bin/mnemo init
 ```
 
 The installer does the whole machine in one command — venv, deps,
@@ -239,14 +239,14 @@ empty `logs/` or any other structure.
 ```powershell
 (Select-String -Path .mcp.json -SimpleMatch '{{').Count    # MUST be 0
 Get-Content .mcp.json -Raw | ConvertFrom-Json | Out-Null; "mcp JSON OK"
-& "$HOME\.claude\mnemo\bin\mnemo.exe" status
-& "$HOME\.claude\mnemo\bin\mnemo.exe" search "architecture" --bank "$PWD\.claude\memory"
+& "$HOME\mnemo\bin\mnemo.exe" status
+& "$HOME\mnemo\bin\mnemo.exe" search "architecture" --bank "$PWD\.claude\memory"
 ```
 ```bash
 grep -c '{{' .mcp.json                                     # MUST be 0
 python3 -m json.tool .mcp.json > /dev/null && echo "mcp JSON OK"
-~/.claude/mnemo/bin/mnemo status
-~/.claude/mnemo/bin/mnemo search "architecture" --bank "$PWD/.claude/memory"
+~/.mnemo/bin/mnemo status
+~/.mnemo/bin/mnemo search "architecture" --bank "$PWD/.claude/memory"
 ```
 
 - `.mcp.json` holds one `mnemo-memory` entry, `"type": "http"`, a URL of

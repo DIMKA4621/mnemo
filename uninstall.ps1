@@ -356,7 +356,7 @@ function Invoke-Uninstall {
     $usingDefaultHome = [string]::IsNullOrWhiteSpace($InstallHome)
     $powerShellHome = [System.IO.Path]::GetFullPath([string]$HOME)
     if ($usingDefaultHome) {
-        $engineHome = Join-Path $powerShellHome ".claude\mnemo"
+        $engineHome = Join-Path $powerShellHome ".mnemo"
     }
     else {
         $engineHome = [System.IO.Path]::GetFullPath($InstallHome)

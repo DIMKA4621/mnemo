@@ -19,7 +19,7 @@
 # rather than a reason to abort. Exit code 1 only if something that exists
 # could not be removed.
 #
-# Default location: $HOME/.claude/mnemo  (override with $MNEMO_HOME).
+# Default location: $HOME/.mnemo  (override with $MNEMO_HOME).
 set -uo pipefail
 
 usage() {
@@ -31,7 +31,7 @@ say() { printf 'uninstall.sh: %s\n' "$1"; }
 line() { printf 'uninstall.sh:   %-15s %s\n' "$1" "$2"; }
 
 # --- flags -------------------------------------------------------------
-DEFAULT_HOME="$HOME/.claude/mnemo"
+DEFAULT_HOME="$HOME/.mnemo"
 MNEMO_HOME="${MNEMO_HOME:-$DEFAULT_HOME}"
 KEEP_MODEL=0
 KEEP_STATE=0

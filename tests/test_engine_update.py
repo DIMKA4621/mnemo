@@ -6,7 +6,7 @@ real engine the same way ``test_service_ctl.py`` is: ``MNEMO_STATE_DIR`` is
 redirected to a throwaway temp dir before ``src.config`` is ever imported,
 and every staging test patches ``config.VERSIONS_DIR``/``config.STATE_DIR``
 to throwaway trees too — nothing here ever writes under the real
-``~/.claude/mnemo``.
+``~/.mnemo``.
 
 Network tests hit the real internet (GitHub's public API and
 ``codeload.github.com``) — no token, no mocking of the transport, because

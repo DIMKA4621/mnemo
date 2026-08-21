@@ -617,6 +617,28 @@ function Stop-EngineService {
     Write-Status "service force-stopped for refresh (pid $ServicePid)"
 }
 
+function New-MnemoEnvStub {
+    param([string]$EngineHome)
+
+    # A stub only -- created once, never overwritten, so a machine's own
+    # overrides already written here survive every later install/update.
+    $envPath = Join-Path $EngineHome "state\mnemo.env"
+    if (Test-Path -LiteralPath $envPath) { return }
+    $lines = @(
+        "# mnemo machine-config overrides (read by config.py on every process start)",
+        "#",
+        "# KEY=value here overrides that variable's default in config.py, and",
+        "# survives every future engine update -- this file lives under state/,",
+        "# which install.ps1 never touches. See docs/Memory-contracts-v3.md,",
+        "# section 11.1, for the full list of variables.",
+        "#",
+        "# Example:",
+        "# MNEMO_EMBED_IDLE_TIMEOUT=0"
+    )
+    Set-Content -LiteralPath $envPath -Value $lines -Encoding utf8
+    Write-Status "mnemo.env stub created (state/mnemo.env)"
+}
+
 function Set-ApiTokenEnvironment {
     param([string]$VenvPython, [string]$EngineHome, [string]$SrcRoot)
 
@@ -706,14 +728,14 @@ function Invoke-Install {
                 $resolved = [System.IO.Path]::GetFullPath($candidate)
                 if ($resolved -ne $powerShellHome) {
                     # MCP no longer depends on this (it is a URL + token since
-                    # phase 4), but the git-tracked hook command still is
-                    # `~/.claude/mnemo/bin/mnemo`, and the engine itself lives
+                    # phase 4), but the launcher path `~/.mnemo/bin/mnemo`
+                    # resolves ~ at run time, and the engine itself lives
                     # under HOME. Both break if the two disagree.
-                    throw "HOME resolves to '$resolved', but PowerShell ~ resolves to '$powerShellHome'. mnemo requires both to match: the engine lives under HOME and the git-tracked hook resolves ~ at run time."
+                    throw "HOME resolves to '$resolved', but PowerShell ~ resolves to '$powerShellHome'. mnemo requires both to match: the engine lives under HOME and the launcher path resolves ~ at run time."
                 }
             }
         }
-        $engineHome = Join-Path $powerShellHome ".claude\mnemo"
+        $engineHome = Join-Path $powerShellHome ".mnemo"
     }
     else {
         $engineHome = [System.IO.Path]::GetFullPath($InstallHome)
@@ -789,7 +811,7 @@ function Invoke-Install {
         }
     }
     else {
-        Write-Status "custom InstallHome is for isolated/manual use; project wiring targets $powerShellHome\.claude\mnemo"
+        Write-Status "custom InstallHome is for isolated/manual use; project wiring targets $powerShellHome\mnemo"
     }
 
     $pythonCommand = Resolve-PythonCommand $Python
@@ -804,6 +826,7 @@ function Invoke-Install {
     )) {
         New-Item -ItemType Directory -Path $directory -Force | Out-Null
     }
+    New-MnemoEnvStub $engineHome
     Write-Status "engine home: $engineHome"
 
     # Taken before the build, because the build is what makes this a v3

@@ -35,7 +35,7 @@ foreach ($line in [IO.File]::ReadAllLines($envFile)) {
     $value = $line.Substring($split + 1)
     # Trim, then unquote. Spaces are tolerated around the `=` on the key side,
     # so tolerating them on the value side is the only consistent reading --
-    # and `PORT = 8918` otherwise yields a port with spaces in it. A value that
+    # and `PORT = 4646` otherwise yields a port with spaces in it. A value that
     # genuinely wants padding says so by quoting.
     $value = $value.Trim()
     # One layer of surrounding quotes, if the value carries them.

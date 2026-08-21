@@ -190,7 +190,7 @@ in-process модель — друга копія ~2.2 ГБ і ~50× повіл�
 відмови коштував проєкту найбільше часу, тому:
 
 * резидент вмикає `faulthandler` і пише нативний дамп у
-  **`~/.claude/mnemo/embed-crash.log`** (дескриптор тримається відкритим на
+  **`~/.mnemo/embed-crash.log`** (дескриптор тримається відкритим на
   весь час життя процесу — із сигнального обробника переоткривати небезпечно).
   Жорсткий `taskkill /F` він перехопити не може, і це теж інформація: **порожній
   лог після зникнення = мене хтось убив**, дамп = **я впав сам**;
@@ -694,7 +694,7 @@ else:                              status = "ready"
 ### 6.1 Розташування й формат
 
 Файл: `STATE_DIR / "banks.json"` (типово
-`~/.claude/mnemo/state/banks.json`), override — `MNEMO_BANKS_FILE`.
+`~/.mnemo/state/banks.json`), override — `MNEMO_BANKS_FILE`.
 Людиночитний, `indent=2`, `ensure_ascii=False`, правиться руками або через UI
 (`Memory-implementation-v3.md` §6).
 
@@ -1101,9 +1101,12 @@ def delete_index(index_id: str) -> tuple[int, list[Path]]   # (removed, locked)
 
 **Це не вимикач.** Вимкнений бекенд — не режим, а поломка; тут звільняється
 лише памʼять, а модель повертається на першому ж пошуку чи збереженому файлі,
-одноразово платячи ~7–8 с (виміряно: 7.6 с резидент, 8.4 с Ollama). Саме той
-компроміс, який `MNEMO_EMBED_IDLE_TIMEOUT = 0` навмисно віддав **команді, а
-не таймеру**.
+одноразово платячи ~7–8 с (виміряно: 7.6 с резидент, 8.4 с Ollama). Той самий
+компроміс лежить і за таймером: `MNEMO_EMBED_IDLE_TIMEOUT` типово **10800**
+(3 год) — достатньо довго, щоб під час звичайної роботи не спрацьовувати
+взагалі, і достатньо коротко, щоб звільнити ~1.6 ГБ після справжньої
+багатогодинної паузи без ручної команди. `0` (ніколи не вивантажувати самому)
+лишається доступним через ту саму змінну.
 
 `state()` віддає `backend`, `model`, `where`, `wake_s` і `holding`:
 
@@ -1178,9 +1181,9 @@ OpenAI-сумісний `/v1/embeddings` **приймає `keep_alive` і мов
   "model": {"cached":true, "needed":true},
   "sqlite_vec": {"ok":true, "error":null},
   "resident": {"applicable":true, "up":true,
-               "host":"127.0.0.1", "port":8917, "scope":"machine_port"},
+               "host":"127.0.0.1", "port":4645, "scope":"machine_port"},
   "endpoint": {"applicable":false},
-  "backend": {"up":true, "url":"http://127.0.0.1:8918",
+  "backend": {"up":true, "url":"http://127.0.0.1:4646",
               "serving_pid":123, "launcher_pid":122,
               "banks":2, "queue_depth":0, "scope":"machine_port"},
   "token": {"present":true, "source":"env",
@@ -1197,7 +1200,7 @@ OpenAI-сумісний `/v1/embeddings` **приймає `keep_alive` і мов
   тільки `key_set`. Endpoint у `doctor` **не викликається**: діагностику
   запускають повторно, і probe не має коштувати грошей чи rate limit.
 * **Machine port позначений буквально.** `MNEMO_HOME` ізольовує state на диску,
-  але не створює другі 8917/8918; CLI тому більше не кладе реальний backend із
+  але не створює другі 4645/4646; CLI тому більше не кладе реальний backend із
   двома банками під заголовок тимчасового дому так, наче вони належать йому.
   CLI робить loopback health probe, сервіс підставляє власні PID/чергу й не
   ходить HTTP-запитом у самого себе.
@@ -1448,7 +1451,7 @@ def snapshot() -> QueueSnapshot
 | Що | Значення |
 |---|---|
 | Bind | `MNEMO_API_HOST`, типово `127.0.0.1` |
-| Порт | `MNEMO_API_PORT`, типово **8918** **[NEW]** (8917 уже зайнятий embed-резидентом) |
+| Порт | `MNEMO_API_PORT`, типово **4646** **[NEW]** (4645 уже зайнятий embed-резидентом) |
 | Дані (**приватне**) | префікс `/api` — канал кабінет↔бекенд, `include_in_schema=False` **[NEW]** |
 | MCP (проєктне) | `/mcp` — **без сегмента банку**, банк із токена (10.3) |
 | MCP (адмінське) | `/mcp-admin` — **без сегмента банку** (10.5) **[NEW]** |
@@ -1525,7 +1528,7 @@ API token» відправило б її шукати неіснуючу про�
   потрапляє, і кожен тик у свагері віддає `401` без жодного способу це
   виправити. **[NEW]**
 * UI отримує токен так: `mnemo ui` читає файл і відкриває
-  `http://127.0.0.1:8918/ui/?token=…`; сторінка перекладає його в
+  `http://127.0.0.1:4646/ui/?token=…`; сторінка перекладає його в
   `sessionStorage` і далі шле заголовком. **[NEW]**
 
 Невірний / відсутній токен → `401` з тілом помилки (розділ 9.2).
@@ -1584,10 +1587,10 @@ OAuth-дискавері й стукає в `/.well-known/oauth-*`; за RFC 674
 ### 9.3 `GET /health` — без токена
 
 ```json
-{"ok": true, "version": "3.0.0", "pid": 12345, "port": 8918,
+{"ok": true, "version": "3.0.0", "pid": 12345, "port": 4646,
  "uptime_s": 3601.4, "banks": 3, "queue_depth": 0,
  "embed": {"provider": "local", "reachable": true,
-           "host": "127.0.0.1", "port": 8917}}
+           "host": "127.0.0.1", "port": 4645}}
 ```
 
 ### 9.4 `POST /api/search`
@@ -1823,10 +1826,10 @@ bge-m3 обидві мають 1024 виміри й усе одно живуть
 **`GET /api/status`**
 
 ```json
-{"service": {"version": "3.0.0", "pid": 12345, "port": 8918,
+{"service": {"version": "3.0.0", "pid": 12345, "port": 4646,
              "started_at": "2026-07-26T09:00:00+03:00", "uptime_s": 3601.4,
              "provider": "local", "priority_enabled": true,
-             "embed": {"reachable": true, "host": "127.0.0.1", "port": 8917,
+             "embed": {"reachable": true, "host": "127.0.0.1", "port": 4645,
                        "kind": "local"}},
  "queue": {"depth": 3, "high": 1, "normal": 0, "low": 2,
            "current": {"task_id": "7c1e…", "bank_id": "9f2a…",
@@ -1881,7 +1884,7 @@ bge-m3 обидві мають 1024 виміри й усе одно живуть
 
 ### 9.7 WebSocket `/ws`
 
-Підключення: `ws://127.0.0.1:8918/ws?token=<token>[&bank=<bank_id>]`.
+Підключення: `ws://127.0.0.1:4646/ws?token=<token>[&bank=<bank_id>]`.
 `bank` — необовʼязковий фільтр; без нього приходить усе.
 
 **Конверт — єдиний для всіх подій:**
@@ -1985,7 +1988,7 @@ GET /mcp-tools/search?bank=mnemo&query=черга&top_k=2
 ### 9.9 `/api/update/*` — самооновлення рушія (блок M, рішення #33) **[NEW]**
 
 Не про банки й не про проєкти — мутує лише сам рушій
-(`~/.claude/mnemo/`). Приватне: сервісний токен, `include_in_schema=False`;
+(`~/.mnemo/`). Приватне: сервісний токен, `include_in_schema=False`;
 немає ні MCP-тула, ні `/mcp-tools/*`-дзеркала — ця поверхня для кабінету, не
 для агента.
 
@@ -2192,7 +2195,7 @@ OpenAPI, бо це JSON-RPC, тож свагера на `/mcp` не буває �
 
 **Токен визначає банк. Більше нічого.**
 
-    http://127.0.0.1:8918/mcp?token=<bank-token>
+    http://127.0.0.1:4646/mcp?token=<bank-token>
 
 `registry.resolve_by_token` в `auth_middleware` перетворює предʼявлений токен
 на банк ще до того, як запит дійде до тула; id банку кладеться в ASGI-`scope`,
@@ -2270,12 +2273,12 @@ percent-encoding назви банку, яка на цій машині регу
 ```sh
 # .mcp.env.example (у git) — порожнє значення + коментар
 MNEMO_HOST=127.0.0.1
-MNEMO_PORT=8918
+MNEMO_PORT=4646
 MNEMO_TOKEN=
 
 # .mcp.env (gitignored) — справжні значення
 MNEMO_HOST=127.0.0.1
-MNEMO_PORT=8918
+MNEMO_PORT=4646
 MNEMO_TOKEN=3f1a…54ba        # токен банку — він же і є адресою
 ```
 
@@ -2576,9 +2579,9 @@ def read_service_info() -> dict | None
   ми не запускали.
 
   ```json
-  {"pid": 12345, "port": 8918, "host": "127.0.0.1",
+  {"pid": 12345, "port": 4646, "host": "127.0.0.1",
    "started_at": "2026-07-26T09:00:00+03:00", "version": "3.0.0",
-   "python": "C:/Users/dima/.claude/mnemo/.venv/Scripts/pythonw.exe"}
+   "python": "C:/Users/dima/mnemo/.venv/Scripts/pythonw.exe"}
   ```
 
 * `STATE_DIR / "service.pid"` — пише **тільки `service_ctl`**: чий процес ми
@@ -2836,14 +2839,14 @@ CLI лишається детермінованим примітивом: або
 
 | Env | Типово | Секція / власник | Призначення |
 |---|---|---|---|
-| `MNEMO_HOME` | `~/.claude/mnemo` | paths / engine-dev | корінь встановленого рушія |
+| `MNEMO_HOME` | `~/.mnemo` | paths / engine-dev | корінь встановленого рушія |
 | `MNEMO_STATE_DIR` | `$MNEMO_HOME/state` | paths / engine-dev | записуваний стан: індекси, токени, `service.db` |
 | `MNEMO_ROOT` | — | paths / engine-dev | корінь проєкту для `init` (лишається з v2) |
 | `MNEMO_PROVIDER` | `local` | providers / engine-dev | провайдер сервісу за замовчуванням |
 | `MNEMO_EMBED_BIND` | `127.0.0.1` | daemon / engine-dev | адреса, яку слухає резидент |
 | `MNEMO_EMBED_HOST` | `127.0.0.1` | daemon / engine-dev | адреса, яку набирає клієнт |
-| `MNEMO_EMBED_PORT` | `8917` | daemon / engine-dev | порт резидента |
-| `MNEMO_EMBED_IDLE_TIMEOUT` | `0` **(змінено)** | daemon / engine-dev | `0` = **немає idle-виходу**; резидент і далі підіймається **на першу потребу** й гине разом із `mnemo service stop` (не «висить завжди»). Старе `1800` коштувало ~9 с на першому пошуку після півгодинної паузи **[NEW]** |
+| `MNEMO_EMBED_PORT` | `4645` | daemon / engine-dev | порт резидента |
+| `MNEMO_EMBED_IDLE_TIMEOUT` | `10800` **(змінено)** | daemon / engine-dev | 3 год; `0` = **немає idle-виходу**. Резидент і так підіймається **на першу потребу** й гине разом із `mnemo service stop` (не «висить завжди») — таймер лише додатково звільняє памʼять після справжньої багатогодинної паузи. Старе `1800` коштувало ~9 с на першому пошуку вже після півгодинної паузи, що й було зависоким; `0` (перше виправлення) не звільняв памʼять сам ніколи **[NEW]** |
 | `MNEMO_EMBED_THREADS` | `cpu*3//4` | daemon / engine-dev | стеля ONNX-потоків (NFR-5, фаза 0) |
 | `MNEMO_EMBED_POOL` | `1` | daemon / engine-dev | к-сть інстансів резидента — **не реалізовано**: конкурентність дали дві смуги в одному процесі (implementation §4) |
 | `MNEMO_BATCH_SIZE` | `16` | indexer / engine-dev | **стеля** чанків на батч і на коміт (не розмір) |
@@ -2851,9 +2854,9 @@ CLI лишається детермінованим примітивом: або
 | `MNEMO_FILE_MAX_BYTES` | `2097152` | indexer / engine-dev | ліміт `GET /api/file` **[NEW]** |
 | `MNEMO_BANKS_FILE` | `$STATE_DIR/banks.json` | registry / service-dev | шлях реєстру **[NEW]** |
 | `MNEMO_API_HOST` | `127.0.0.1` | api / service-dev | bind бекенда **[NEW]** |
-| `MNEMO_API_PORT` | `8918` | api / service-dev | порт бекенда **[NEW]** |
+| `MNEMO_API_PORT` | `4646` | api / service-dev | порт бекенда **[NEW]** |
 | `MNEMO_API_TOKEN` | з `$STATE_DIR/api.token` | api / service-dev | токен; env перекриває файл **[NEW]** |
-| `MNEMO_API_URL` | `http://127.0.0.1:8918` | api / service-dev | база для `client.py` **[NEW]** |
+| `MNEMO_API_URL` | `http://127.0.0.1:4646` | api / service-dev | база для `client.py` **[NEW]** |
 | `MNEMO_QUEUE_PRIORITY` | `1` | queue / service-dev | `0` → чиста FIFO без витіснення |
 | `MNEMO_WORKERS` | `1` | queue / service-dev | воркерів індексації **[NEW]** |
 | `MNEMO_DEBOUNCE_MS` | `800` | watcher / service-dev | схлопування шторму збережень **[NEW]** |
@@ -2940,7 +2943,7 @@ CLI лишається детермінованим примітивом: або
 
 Ухвалено без змін: MCP через наявний `mcp` SDK замість окремого `fastmcp`;
 видалення `inject_log.py` у фазі 2; `chunk_uid`; `GET /api/file` та
-`start_char`/`end_char`; порт 8918; токен у `state/api.token` (Bearer для HTTP,
+`start_char`/`end_char`; порт 4646; токен у `state/api.token` (Bearer для HTTP,
 `?token=` для WS); 12-кодовий конверт помилки й 14 типів WS-подій (13 з
 основного контракту + `update_progress`, 9.9); витіснення
 в межах одного батчу; `bank_id` у нижньому регістрі на Windows;
@@ -2996,7 +2999,7 @@ CLI лишається детермінованим примітивом: або
 | Покоління | Форма `mcpServers.mnemo` | Звідки |
 |---|---|---|
 | L1 (найстарша) | `{"command": "/bin/sh", "args": ["-c", "exec \"$HOME/…/bin/mnemo\" mcp"]}` | v2 до windows-гілки |
-| L2 (windows-гілка) | `{"type": "stdio", "command": "${HOME}/.claude/mnemo/bin/mnemo", "args": ["mcp"]}` | `5ef2b54`, **поточний** `_MCP_SERVER` |
+| L2 (windows-гілка) | `{"type": "stdio", "command": "${HOME}/.mnemo/bin/mnemo", "args": ["mcp"]}` | `5ef2b54`, **поточний** `_MCP_SERVER` |
 | v3 (ціль) | HTTP-словник §10.4 | контракти |
 
 `--migrate` мусить впізнавати **L1 і L2** й переписувати обидві; звичайний
@@ -3007,7 +3010,7 @@ L2**, а не лише `/bin/sh`.
 **Що при цьому НЕ вмирає.** Портативна машинерія windows-гілки потрібна далі,
 просто вужче:
 
-* `_LAUNCHER = "~/.claude/mnemo/bin/mnemo"` лишається — на ньому тримається
+* `_LAUNCHER = "~/.mnemo/bin/mnemo"` лишається — на ньому тримається
   хук `hook-inject` (§11.1), а він у v3 зберігається.
 * Правило «`bin/mnemo` без розширення, ОС сама дорезолвлює `.exe`» лишається.
 * Гарантія `HOME == PowerShell ~` в `install.ps1` лишається **потрібною для
@@ -3029,7 +3032,7 @@ L2**, а не лише `/bin/sh`.
 Що з ним усе-таки не так — дві речі, обидві не «червоне зараз»:
 
 * він спавнить **встановлений** лаунчер
-  (`~/.claude/mnemo/bin/mnemo[.exe]`), тобто ганяє **старе дзеркало**
+  (`~/.mnemo/bin/mnemo[.exe]`), тобто ганяє **старе дзеркало**
   рушія, а не це дерево. Це *неперевірене*, а не зламане, і минає, щойно
   platform-dev переставить рушій;
 * у фазі 4 помирає весь транспорт: `StdioServerParameters` + підкоманда
@@ -3152,7 +3155,7 @@ src.cli update-apply`) не те саме, що їх повна відсутні
 
 | Пастка | Чому | Правило |
 |---|---|---|
-| `uvicorn` слухає реальний порт | 8918 може бути зайнятий, а на runner-ах бувають обмеження | тестувати через `ASGITransport`/`TestClient` **без сокета**; якщо сокет справді потрібен — `port=0` і читати призначений |
+| `uvicorn` слухає реальний порт | 4646 може бути зайнятий, а на runner-ах бувають обмеження | тестувати через `ASGITransport`/`TestClient` **без сокета**; якщо сокет справді потрібен — `port=0` і читати призначений |
 | watchdog у CI | FSEvents на macOS має помітну затримку, `ReadDirectoryChangesW` — свою; `sleep(0.5)` + assert буде мигати | **опитувати з дедлайном** (до 10 с), ніколи не фіксований sleep; окремий job, не в загальній матриці |
 | фонові процеси (`service start`) | лишають сироту й вішають job | teardown у `finally`; окремий job; на macOS — пропускати |
 | `uvicorn[standard]` | тягне `httptools`; `uvloop` **не** ставиться на Windows (marker `sys_platform != "win32"`) — це очікувано, не помилка | перевірити, що встановлення проходить на всіх 4 конфігураціях, перш ніж додавати тести |
