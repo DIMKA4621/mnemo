@@ -50,6 +50,7 @@ const settings = {
   updateCheckBusy: false,  // POST /api/update/check in flight
   updateCheckError: null,
   updateCheckResult: null,  // last check's outcome, worded for display
+  updateCheckAvailable: false,  // same check's update_available, for the note's color
   embed: null,         // GET /api/embed/state — what the backend holds now
   embedError: null,
   embedBusy: false,    // an unload/load is in flight
@@ -1043,7 +1044,23 @@ function renderAutoUpdate(body) {
   if (settings.updateCheckError) {
     body.appendChild(el('p', { className: 'modal-error', text: settings.updateCheckError }));
   } else if (settings.updateCheckResult) {
-    body.appendChild(el('p', { className: 'set-note', text: settings.updateCheckResult }));
+    // A real result, not page-description text -- badge it the same way the
+    // rest of the cabinet marks a live outcome: warm for "there's something
+    // new" (matches the sidebar banner, same wording too, so the same fact
+    // never reads as two different things in two places), a green bordered
+    // chip for "you're already current" (matches .tok-ok's success styling
+    // elsewhere). When something's available, this is now a second, real
+    // button onto the same modal the sidebar banner already opens -- click
+    // whichever one is closer, they do the same thing. "Up to date" has
+    // nothing to click through to, so it stays plain text.
+    if (settings.updateCheckAvailable) {
+      body.appendChild(el('button', {
+        className: 'upd-check-note is-available', text: settings.updateCheckResult,
+        on: { click: () => openUpdateModal() },
+      }));
+    } else {
+      body.appendChild(el('p', { className: 'upd-check-note is-current', text: settings.updateCheckResult }));
+    }
   }
 }
 
@@ -1065,10 +1082,13 @@ async function runUpdateCheck() {
   try {
     const result = await api('/api/update/check', { method: 'POST' });
     await refreshUpdateStatus();
+    settings.updateCheckAvailable = !!result.update_available;
     settings.updateCheckResult = result.error
       ? null
       : (result.update_available
-          ? 'Доступна ' + result.latest_tag + '.'
+          // Same wording the sidebar banner uses (renderSidebarUpdateBanner,
+          // update.js) -- one fact, one sentence, wherever it shows up.
+          ? 'Доступна нова версія ' + result.latest_tag
           : 'Актуальна версія.');
     if (result.error) settings.updateCheckError = result.error;
   } catch (err) {

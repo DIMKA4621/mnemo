@@ -40,6 +40,38 @@
   line-height: 1.5;
 }
 
+/* The "Перевірити оновлення" button's own result -- a live outcome, not
+   descriptive page text, so it gets a small bordered chip instead of
+   .set-note's muted color. Warm for "something's new" (matches the sidebar
+   banner), green for "you're current" (matches .tok-ok's success styling). */
+.upd-check-note {
+  display: inline-block;
+  width: fit-content;
+  max-width: 100%;
+  margin: 8px 0 0;
+  padding: 5px 9px;
+  border-radius: var(--radius);
+  font-size: 12px;
+  line-height: 1.4;
+  font-family: inherit;
+  text-align: left;
+}
+/* .is-available renders as a real <button> (opens the same modal the
+   sidebar banner does) -- reset the browser's own button chrome so it
+   still reads as the same chip, not a form control. */
+.upd-check-note.is-available {
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
+  color: var(--warn-fg);
+  cursor: pointer;
+}
+.upd-check-note.is-available:hover { filter: brightness(1.08); }
+.upd-check-note.is-current {
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  color: var(--success-fg);
+}
+
 .set-lead {
   margin: 0;
   color: var(--fg-dim);
