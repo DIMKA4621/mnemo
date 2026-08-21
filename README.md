@@ -67,8 +67,6 @@ It has these pages:
 
 ## Installing mnemo
 
-*(This section is being reworked — a new installer is coming, so for now just the bare commands.)*
-
 No clone needed — one command fetches a source snapshot and installs it:
 
 **Linux / macOS:**
@@ -83,7 +81,7 @@ curl -fsSL https://raw.githubusercontent.com/DIMKA4621/mnemo/master/get.sh | bas
 irm https://raw.githubusercontent.com/DIMKA4621/mnemo/master/get.ps1 | iex
 ```
 
-Or, if you'd rather clone the repo first (e.g. to develop mnemo itself):
+Or, if you'd rather clone the repo first:
 
 **Linux / macOS:**
 
