@@ -48,7 +48,7 @@ SETTINGS_VERSION = 1
 
 # Fields this module owns. Anything else in the document is carried through a
 # rewrite untouched — a note somebody added by hand is not ours to drop.
-_KNOWN_KEYS = frozenset({"version", "provider", "api"})
+_KNOWN_KEYS = frozenset({"version", "provider", "api", "auto_update"})
 _KNOWN_API_KEYS = frozenset({"url", "model", "dim", "key", "timeout"})
 
 _lock = threading.RLock()
@@ -208,6 +208,27 @@ def _as_float(value: Value, fallback: float) -> Value:
         return Value(fallback, value.source, value.env_var)
 
 
+def _as_bool(value: Value) -> Value:
+    """Coerce a resolved value to bool, tolerant of either representation.
+
+    The env var always arrives as a string ("true"/"1"/"false"/"0"); the
+    file may hold either a native JSON bool (the cabinet writes one) or a
+    string (a human hand-edited it). Anything not recognised as false-ish
+    falls back to Python truthiness rather than raising, matching
+    ``_as_int``/``_as_float``'s "never blow up resolving a setting" contract.
+    """
+    raw = value.value
+    if isinstance(raw, bool):
+        return value
+    if isinstance(raw, str):
+        lowered = raw.strip().lower()
+        if lowered in ("1", "true", "yes", "on"):
+            return Value(True, value.source, value.env_var)
+        if lowered in ("0", "false", "no", "off"):
+            return Value(False, value.source, value.env_var)
+    return Value(bool(raw), value.source, value.env_var)
+
+
 def provider() -> str:
     """Which embedding provider the service uses: ``local`` | ``api``.
 
@@ -268,6 +289,20 @@ def api_timeout() -> float:
     )
 
 
+def auto_update_enabled() -> bool:
+    """Whether the checker may auto-apply an eligible tag on its own.
+
+    Top-level bool, sibling of ``provider`` (not nested under ``api``) —
+    this is a machine-wide behaviour switch, not an endpoint config. Default
+    ``True`` is a deliberate, user-approved choice (see the self-update
+    auto-apply design note): out of the box, an eligible release applies
+    itself rather than waiting for someone to notice a banner.
+    """
+    return bool(
+        _as_bool(_resolve("MNEMO_AUTO_UPDATE_ENABLED", ("auto_update",), True)).value
+    )
+
+
 def effective() -> dict[str, Value]:
     """Every setting with its resolved value AND its origin.
 
@@ -277,6 +312,9 @@ def effective() -> dict[str, Value]:
     """
     return {
         "provider": _resolve("MNEMO_PROVIDER", ("provider",), "local"),
+        "auto_update": _as_bool(
+            _resolve("MNEMO_AUTO_UPDATE_ENABLED", ("auto_update",), True)
+        ),
         "api.url": _resolve("MNEMO_API_EMBED_URL", ("api", "url"), ""),
         "api.model": _resolve("MNEMO_API_EMBED_MODEL", ("api", "model"), ""),
         "api.dim": _as_int(_resolve("MNEMO_API_EMBED_DIM", ("api", "dim"), 0)),

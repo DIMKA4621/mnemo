@@ -91,12 +91,14 @@ def _network_up() -> bool:
 
 def test_default_state_shape() -> None:
     state = engine_update.default_state()
-    check("default_state has all four top-level keys",
-          set(state) == {"current", "installed", "last_check", "last_apply"})
+    check("default_state has all five top-level keys",
+          set(state) == {"current", "installed", "last_check", "last_apply", "auto"})
     check("default current is None", state["current"] is None)
     check("default installed is empty", state["installed"] == [])
     check("default last_check has update_available=False",
           state["last_check"]["update_available"] is False)
+    check("default auto has no pending trigger and an empty blacklist",
+          state["auto"] == {"pending_trigger": None, "blacklist": {}})
 
 
 def test_state_round_trip(work: Path) -> None:
@@ -362,6 +364,122 @@ def test_background_checker_runs_without_blocking(work: Path) -> None:
          patch.object(engine_update, "_checker", None):
         engine_update.start_checker(interval_s=0)
         check("no thread was recorded", engine_update._checker is None)
+
+
+# --------------------------------------------------------- auto-apply gate
+
+
+def test_auto_eligible_tag_fresh_tag_is_eligible(work: Path) -> None:
+    with patch.object(config, "STATE_DIR", work / "auto-fresh"), \
+         patch.object(engine_update.settings, "auto_update_enabled", lambda: True):
+        engine_update.record_installed(tag="v1.0.0", commit=None, status="active")
+        check("no update known yet -> not eligible",
+              engine_update.auto_eligible_tag() is None)
+
+        engine_update.record_check(latest_tag="v1.1.0", error=None)
+        check("a fresh tag with no blacklist record is eligible",
+              engine_update.auto_eligible_tag() == "v1.1.0")
+
+
+def test_auto_eligible_tag_respects_auto_update_setting(work: Path) -> None:
+    """The `auto_update` machine setting must win over everything else --
+    including a tag that is otherwise perfectly eligible.
+    """
+    with patch.object(config, "STATE_DIR", work / "auto-setting"):
+        with patch.object(engine_update.settings, "auto_update_enabled", lambda: True):
+            engine_update.record_installed(tag="v1.0.0", commit=None, status="active")
+            engine_update.record_check(latest_tag="v1.1.0", error=None)
+            check("eligible while the setting is on",
+                  engine_update.auto_eligible_tag() == "v1.1.0")
+
+        with patch.object(engine_update.settings, "auto_update_enabled", lambda: False):
+            check("never eligible once the setting is off, same state otherwise",
+                  engine_update.auto_eligible_tag() is None)
+
+
+def test_auto_eligible_tag_first_failure_opens_retry_window(work: Path) -> None:
+    with patch.object(config, "STATE_DIR", work / "auto-retry"), \
+         patch.object(engine_update.settings, "auto_update_enabled", lambda: True), \
+         patch.object(engine_update.config, "UPDATE_AUTO_APPLY_MAX_ATTEMPTS", 2), \
+         patch.object(engine_update.config, "UPDATE_AUTO_APPLY_RETRY_DELAY_S", 3600):
+        engine_update.record_installed(tag="v1.0.0", commit=None, status="active")
+        engine_update.record_check(latest_tag="v1.1.0", error=None)
+
+        state = engine_update.record_auto_outcome(tag="v1.1.0", result="rolled_back", error="boom")
+        entry = state["auto"]["blacklist"]["v1.1.0"]
+        check("1st failure: attempts=1, not (yet) blacklisted",
+              entry["attempts"] == 1 and entry["blacklisted"] is False, detail=str(entry))
+        check("1st failure opens a next_retry_at window", bool(entry["next_retry_at"]))
+        check("ineligible until the retry window passes",
+              engine_update.auto_eligible_tag() is None)
+
+        # Time-travel the retry window into the past directly (not a real
+        # sleep) -- this is the point being proven, not the clock's mercy.
+        state = engine_update.read_state()
+        state["auto"]["blacklist"]["v1.1.0"]["next_retry_at"] = "2000-01-01T00:00:00+00:00"
+        engine_update.write_state(state)
+        check("eligible again once the retry window (moved into the past) has passed",
+              engine_update.auto_eligible_tag() == "v1.1.0")
+
+
+def test_auto_eligible_tag_second_failure_permanently_blacklists(work: Path) -> None:
+    with patch.object(config, "STATE_DIR", work / "auto-blacklist"), \
+         patch.object(engine_update.settings, "auto_update_enabled", lambda: True), \
+         patch.object(engine_update.config, "UPDATE_AUTO_APPLY_MAX_ATTEMPTS", 2), \
+         patch.object(engine_update.config, "UPDATE_AUTO_APPLY_RETRY_DELAY_S", 3600):
+        engine_update.record_installed(tag="v1.0.0", commit=None, status="active")
+        engine_update.record_check(latest_tag="v1.1.0", error=None)
+
+        engine_update.record_auto_outcome(tag="v1.1.0", result="rolled_back", error="one")
+        state = engine_update.record_auto_outcome(tag="v1.1.0", result="failed", error="two")
+        entry = state["auto"]["blacklist"]["v1.1.0"]
+        check("2nd failure reaches max attempts and is permanently blacklisted",
+              entry["attempts"] == 2 and entry["blacklisted"] is True
+              and entry["next_retry_at"] is None, detail=str(entry))
+        check("a blacklisted tag is never eligible",
+              engine_update.auto_eligible_tag() is None)
+
+        # Even a retry time moved into the past must not resurrect a
+        # PERMANENTLY blacklisted entry -- blacklisted wins outright.
+        state = engine_update.read_state()
+        state["auto"]["blacklist"]["v1.1.0"]["next_retry_at"] = "2000-01-01T00:00:00+00:00"
+        engine_update.write_state(state)
+        check("still not eligible regardless of further time passing",
+              engine_update.auto_eligible_tag() is None)
+
+
+def test_auto_outcome_success_clears_blacklist_at_any_point(work: Path) -> None:
+    with patch.object(config, "STATE_DIR", work / "auto-clear"), \
+         patch.object(engine_update.settings, "auto_update_enabled", lambda: True), \
+         patch.object(engine_update.config, "UPDATE_AUTO_APPLY_MAX_ATTEMPTS", 2):
+        engine_update.record_installed(tag="v1.0.0", commit=None, status="active")
+        engine_update.record_check(latest_tag="v1.1.0", error=None)
+        engine_update.record_auto_outcome(tag="v1.1.0", result="rolled_back", error="boom")
+        check("a failure recorded a blacklist entry",
+              "v1.1.0" in engine_update.read_state()["auto"]["blacklist"])
+
+        state = engine_update.record_auto_outcome(tag="v1.1.0", result="applied")
+        check("a success clears the record entirely, even after a prior failure",
+              "v1.1.0" not in state["auto"]["blacklist"], detail=str(state["auto"]))
+        check("a clean slate is eligible again",
+              engine_update.auto_eligible_tag() == "v1.1.0")
+
+
+def test_pending_trigger_round_trip_and_default(work: Path) -> None:
+    with patch.object(config, "STATE_DIR", work / "auto-pending"):
+        check("no pending trigger recorded yet -> manual (safe default)",
+              engine_update.read_pending_trigger("v1.1.0") == "manual")
+
+        engine_update.set_pending_trigger("v1.1.0", "auto")
+        check("a pending trigger for a DIFFERENT tag is never attributed to this one",
+              engine_update.read_pending_trigger("v2.0.0") == "manual")
+        check("a pending trigger for the matching tag reads back as recorded",
+              engine_update.read_pending_trigger("v1.1.0") == "auto")
+
+        engine_update.set_pending_trigger("v1.2.0", "manual")
+        check("a later set_pending_trigger overwrites the earlier one",
+              engine_update.read_pending_trigger("v1.1.0") == "manual"
+              and engine_update.read_pending_trigger("v1.2.0") == "manual")
 
 
 # ------------------------------------------------------------------ step 7
@@ -645,6 +763,13 @@ def main() -> int:
         test_check_latest_release_unreachable_host()
         test_check_now_and_record_check_soft_failure_live(work)
         test_background_checker_runs_without_blocking(work)
+
+        test_auto_eligible_tag_fresh_tag_is_eligible(work)
+        test_auto_eligible_tag_respects_auto_update_setting(work)
+        test_auto_eligible_tag_first_failure_opens_retry_window(work)
+        test_auto_eligible_tag_second_failure_permanently_blacklists(work)
+        test_auto_outcome_success_clears_blacklist_at_any_point(work)
+        test_pending_trigger_round_trip_and_default(work)
 
         test_safe_members_rejects_path_traversal(work)
         test_stage_release_real_pipeline(work)

@@ -37,11 +37,11 @@ import subprocess
 import tarfile
 import threading
 from contextlib import suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from . import config, service_ctl
+from . import config, service_ctl, settings
 
 STATUS_ACTIVE = "active"
 STATUS_PREVIOUS = "previous"
@@ -71,6 +71,14 @@ def version_state_file() -> Path:
 def default_state() -> dict[str, Any]:
     """The shape when nothing has ever been recorded — also the recovery
     target for a missing or corrupt state file (see :func:`read_state`).
+
+    ``"auto"`` is deliberately named apart from the ``"auto_update"``
+    *setting* (``settings.py``'s ``state/settings.json``) — different files,
+    to avoid the two being read as the same thing. This holds the pending-
+    apply handoff and the per-tag blacklist (see :func:`set_pending_trigger`,
+    :func:`record_auto_outcome`, :func:`auto_eligible_tag`); a state file
+    predating this feature simply lacks the key, and every reader here
+    treats that the same as an empty one rather than requiring it.
     """
     return {
         "current": None,
@@ -87,6 +95,10 @@ def default_state() -> dict[str, Any]:
             "finished_at": None,
             "result": None,
             "error": None,
+        },
+        "auto": {
+            "pending_trigger": None,
+            "blacklist": {},
         },
     }
 
@@ -321,6 +333,146 @@ def check_now(*, timeout: float | None = None) -> dict[str, Any]:
         return record_check(latest_tag=tag, error=error)
 
 
+# --------------------------------------------------------- auto-apply gate
+#
+# Unattended auto-apply (block M extension). This section owns only the
+# STATE around it -- the pending-trigger handoff and the per-tag blacklist --
+# and the single eligibility gate the background checker consults. The
+# in-memory countdown, the WS event and the two confirm/cancel endpoints all
+# live in api.py (they need a live process to hold a threading.Timer and a
+# WS hub; this module has neither), and `update-apply`'s own orchestration
+# is unchanged -- it just now consults :func:`read_pending_trigger` once and
+# reports its outcome through :func:`record_auto_outcome` when that trigger
+# was "auto".
+
+
+def _iso_from_now(delta_seconds: float) -> str:
+    return (
+        datetime.now(timezone.utc).astimezone() + timedelta(seconds=delta_seconds)
+    ).isoformat()
+
+
+def set_pending_trigger(tag: str, trigger: str) -> None:
+    """Record which path -- ``"auto"`` or ``"manual"`` -- is about to invoke
+    `update-apply` for ``tag``.
+
+    This is how the fact survives the process handoff: the staging thread
+    that decides this (inside the long-lived API process) and the
+    separately-spawned `update-apply` process that actually performs the
+    switch and needs to attribute its outcome share no memory, only this
+    file. Overwritten on every apply, auto or manual alike -- only the most
+    recent attempt's origin matters.
+    """
+    state = read_state()
+    auto = dict(state.get("auto") or default_state()["auto"])
+    auto["pending_trigger"] = {"tag": tag, "trigger": trigger}
+    state["auto"] = auto
+    write_state(state)
+
+
+def read_pending_trigger(tag: str) -> str:
+    """``"auto"`` only when the recorded pending trigger's ``tag`` matches
+    the argument, else ``"manual"``.
+
+    Safe default: an apply of unknown or stale origin (nothing was ever
+    recorded, or it names a different tag) is never silently treated as
+    auto for blacklist bookkeeping.
+    """
+    state = read_state()
+    pending = (state.get("auto") or {}).get("pending_trigger") or {}
+    if pending.get("tag") == tag:
+        return str(pending.get("trigger") or "manual")
+    return "manual"
+
+
+def record_auto_outcome(*, tag: str, result: str, error: str | None = None) -> dict[str, Any]:
+    """Update the per-tag blacklist after an AUTO-triggered apply's outcome.
+
+    Call only once the caller has confirmed
+    ``read_pending_trigger(tag) == "auto"`` -- a pure staging failure (a
+    network/download error, before `update-apply` is even spawned) must
+    never reach this function, so it never burns an attempt. That path is
+    reached from a different place entirely (``api._run_staged_apply``'s
+    ``except`` clause), which never calls this.
+
+    ``result`` matches the vocabulary `_cmd_update_apply` already passes to
+    :func:`finish_apply`: ``"applied"`` / ``"rolled_back"`` / ``"failed"``
+    (the latter covers both "no rollback target" and "rollback itself also
+    failed health" -- both are genuine post-switch failures). ``error`` is
+    whatever detail the caller already has at hand for that same outcome
+    (the same string it passed, or would pass, to `finish_apply`'s own
+    ``error`` argument); optional because a clean rollback carries none.
+
+    * ``result == "applied"`` clears any existing blacklist entry for
+      ``tag`` -- a successful retry forgives past failures.
+    * Any other result is a genuine post-switch failure: ``attempts``
+      increments (creating the record at 1 if none existed), and on
+      reaching :data:`config.UPDATE_AUTO_APPLY_MAX_ATTEMPTS` the tag is
+      permanently ``blacklisted`` (``next_retry_at`` cleared); below that
+      threshold, a ``next_retry_at`` window opens
+      :data:`config.UPDATE_AUTO_APPLY_RETRY_DELAY_S` out.
+    """
+    state = read_state()
+    auto = dict(state.get("auto") or default_state()["auto"])
+    blacklist = dict(auto.get("blacklist") or {})
+
+    if result == "applied":
+        blacklist.pop(tag, None)
+    else:
+        entry = dict(
+            blacklist.get(tag)
+            or {"attempts": 0, "blacklisted": False, "next_retry_at": None}
+        )
+        attempts = int(entry.get("attempts", 0)) + 1
+        entry["attempts"] = attempts
+        entry["last_error"] = error
+        entry["last_failed_at"] = _now_iso()
+        if attempts >= config.UPDATE_AUTO_APPLY_MAX_ATTEMPTS:
+            entry["blacklisted"] = True
+            entry["next_retry_at"] = None
+        else:
+            entry["blacklisted"] = False
+            entry["next_retry_at"] = _iso_from_now(config.UPDATE_AUTO_APPLY_RETRY_DELAY_S)
+        blacklist[tag] = entry
+
+    auto["blacklist"] = blacklist
+    state["auto"] = auto
+    write_state(state)
+    return state
+
+
+def auto_eligible_tag() -> str | None:
+    """The single gate the background checker consults every tick: is
+    there a tag it may offer to auto-apply right now?
+
+    ``None`` whenever: the ``auto_update`` machine setting is off, there is
+    no known newer tag (or the last check does not say one is available),
+    the tag is permanently blacklisted, or its retry window has not opened
+    yet. Otherwise, the currently-known latest tag.
+    """
+    if not settings.auto_update_enabled():
+        return None
+    state = read_state()
+    last_check = state.get("last_check") or {}
+    tag = last_check.get("latest_tag")
+    if not tag or not last_check.get("update_available"):
+        return None
+    blacklist = (state.get("auto") or {}).get("blacklist") or {}
+    entry = blacklist.get(tag)
+    if entry:
+        if entry.get("blacklisted"):
+            return None
+        next_retry_at = entry.get("next_retry_at")
+        if next_retry_at:
+            try:
+                retry_at = datetime.fromisoformat(next_retry_at)
+            except ValueError:
+                retry_at = None
+            if retry_at is not None and retry_at > datetime.now(timezone.utc).astimezone():
+                return None
+    return tag
+
+
 # --------------------------------------------------------- background timer
 
 _checker: threading.Thread | None = None
@@ -368,6 +520,22 @@ def start_checker(interval_s: float | None = None) -> None:
             while True:
                 try:
                     check_now()
+                except Exception:  # noqa: BLE001 - never kill the thread
+                    pass
+                # Unattended auto-apply rides the same tick, deliberately --
+                # see the section docstring above. maybe_begin_auto_apply()
+                # only flips in-memory state and arms a short-lived
+                # threading.Timer before returning; the multi-minute staging
+                # work happens later, off this thread, when that timer fires
+                # or a confirm arrives (api._run_staged_apply is already
+                # invoked the same non-blocking way). A bug here must never
+                # kill the checker thread, same tolerance as check_now above.
+                try:
+                    tag = auto_eligible_tag()
+                    if tag:
+                        from . import api  # noqa: PLC0415 - deferred: api.py imports this module
+
+                        api.maybe_begin_auto_apply(tag)
                 except Exception:  # noqa: BLE001 - never kill the thread
                     pass
                 if _checker_stop.wait(every):

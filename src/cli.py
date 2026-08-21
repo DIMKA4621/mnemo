@@ -247,6 +247,14 @@ def _cmd_update_apply() -> int:
               "(nothing in engine_version.json's last_check says one is ready)")
         return 2
 
+    # Recorded by the API process (engine_update.set_pending_trigger) right
+    # before it spawned this process -- "auto" only if THIS tag's pending
+    # trigger says so, "manual" otherwise (unknown/stale origin is never
+    # silently treated as auto for blacklist bookkeeping). Read once, up
+    # front: every finish_apply(...) call site below reports its outcome
+    # through the same trigger.
+    trigger = engine_update.read_pending_trigger(tag)
+
     version_dir = service_ctl.versions_dir() / tag
     marker = version_dir / "VERSION"
     try:
@@ -314,6 +322,8 @@ def _cmd_update_apply() -> int:
         )
         removed = service_ctl.prune_versions()
         engine_update.finish_apply(tag=tag, result="applied")
+        if trigger == "auto":
+            engine_update.record_auto_outcome(tag=tag, result="applied")
         pruned_note = f"; pruned {', '.join(removed)}" if removed else ""
         print(f"mnemo update-apply: {tag} is active and healthy{pruned_note}")
         return EXIT_OK
@@ -324,10 +334,12 @@ def _cmd_update_apply() -> int:
     if prev_tag is None:
         print("mnemo update-apply: no previous version recorded — cannot "
               "roll back")
-        engine_update.finish_apply(
-            tag=tag, result="failed",
-            error="health check failed and there is no rollback target",
-        )
+        no_rollback_error = "health check failed and there is no rollback target"
+        engine_update.finish_apply(tag=tag, result="failed", error=no_rollback_error)
+        if trigger == "auto":
+            engine_update.record_auto_outcome(
+                tag=tag, result="failed", error=no_rollback_error
+            )
         return service_ctl.EXIT_DOWN
 
     with service_ctl.update_lock():
@@ -340,13 +352,17 @@ def _cmd_update_apply() -> int:
     )
     if rollback_rc == service_ctl.EXIT_OK:
         engine_update.finish_apply(tag=tag, result="rolled_back")
+        if trigger == "auto":
+            engine_update.record_auto_outcome(tag=tag, result="rolled_back")
         print(f"mnemo update-apply: rolled back to {prev_tag}, service is healthy")
         return EXIT_ERROR
 
-    engine_update.finish_apply(
-        tag=tag, result="failed",
-        error=f"rollback to {prev_tag} also failed health (rc={rollback_rc})",
-    )
+    rollback_failed_error = f"rollback to {prev_tag} also failed health (rc={rollback_rc})"
+    engine_update.finish_apply(tag=tag, result="failed", error=rollback_failed_error)
+    if trigger == "auto":
+        engine_update.record_auto_outcome(
+            tag=tag, result="failed", error=rollback_failed_error
+        )
     print("mnemo update-apply: ROLLBACK ALSO FAILED — service is down; "
           "check `mnemo service status` / `mnemo doctor`")
     return service_ctl.EXIT_DOWN

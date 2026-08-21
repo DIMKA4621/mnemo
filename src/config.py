@@ -592,12 +592,37 @@ UPDATE_RETENTION_COUNT: int = int(
 GITHUB_REPO: str = os.environ.get("MNEMO_GITHUB_REPO", "DIMKA4621/mnemo")
 
 # How often the backend polls GET /repos/<GITHUB_REPO>/releases/latest.
-# "кілька годин" (design topic's UX flow) -- frequent enough that a release
-# shows up same-day, infrequent enough nobody notices the traffic. 0 disables
-# the background timer entirely; the manual "check now" trigger (step 9)
-# still works on demand.
+# 10 minutes, not "кілька годин" any more: unattended auto-apply (below) now
+# rides this same tick -- a tag becoming eligible (or a blacklist retry
+# window opening) is only noticed the next time this fires, so the interval
+# is no longer just "frequent enough a human notices a banner", it is also
+# "how long an auto-apply can be silently overdue". 0 disables the
+# background timer entirely (auto-apply along with it, since it has nothing
+# left to check on); the manual "check now" trigger (step 9) still works on
+# demand.
 UPDATE_CHECK_INTERVAL_S: float = float(
-    os.environ.get("MNEMO_UPDATE_CHECK_INTERVAL_S", str(4 * 3600))
+    os.environ.get("MNEMO_UPDATE_CHECK_INTERVAL_S", "600")
+)
+
+# Unattended auto-apply (block M extension): how many post-switch failures
+# (rollback, or rollback-that-also-failed) a single tag tolerates before the
+# checker stops offering it automatically. A pure staging failure (network,
+# download) never counts an attempt -- see engine_update.record_auto_outcome.
+UPDATE_AUTO_APPLY_MAX_ATTEMPTS: int = int(
+    os.environ.get("MNEMO_UPDATE_AUTO_MAX_ATTEMPTS", "2")
+)
+
+# How long a blacklisted-but-not-yet-permanently-blacklisted tag waits before
+# the checker offers it again after its first failure.
+UPDATE_AUTO_APPLY_RETRY_DELAY_S: float = float(
+    os.environ.get("MNEMO_UPDATE_AUTO_RETRY_DELAY_S", "3600")
+)
+
+# How long the "about to auto-apply <tag>" countdown runs before firing on
+# its own -- long enough for a person watching the cabinet to click Cancel,
+# short enough that unattended really means unattended.
+UPDATE_AUTO_APPLY_COUNTDOWN_S: float = float(
+    os.environ.get("MNEMO_UPDATE_AUTO_COUNTDOWN_S", "10")
 )
 
 # Liveness budget for the GitHub call itself. Short and deliberately so: a

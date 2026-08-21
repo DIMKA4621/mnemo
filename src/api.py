@@ -37,7 +37,7 @@ import secrets
 import threading
 import time
 from contextlib import asynccontextmanager, contextmanager, redirect_stdout, suppress
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Literal
 
@@ -258,6 +258,12 @@ _ERROR_STATUS: dict[str, int] = {
     # twice at once (two concurrent `stage_release()` calls would race each
     # other building the same `versions/<tag>/`).
     "update_in_progress": 409,
+    # [NEW beyond §9.2] `POST /api/update/auto/confirm|cancel` called with
+    # nothing pending -- the timer already fired, it was already cancelled,
+    # or nothing was ever armed. 404-family: the "pending countdown" this
+    # request targets does not exist right now, same shape as any other
+    # "the thing you named is not there" response.
+    "auto_not_pending": 404,
     "internal": 500,
 }
 
@@ -2048,6 +2054,8 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
             raise ApiError("bad_request",
                            f"unknown provider {chosen!r} (known: local, api)")
         doc["provider"] = chosen
+    if "auto_update" in payload:
+        doc["auto_update"] = bool(payload["auto_update"])
     api_in = payload.get("api")
     if isinstance(api_in, dict):
         api_doc: dict = dict(settings.load().get("api") or {})
@@ -2072,7 +2080,7 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
                                "timeout must be a number") from None
         doc["api"] = api_doc
     if not doc:
-        raise ApiError("bad_request", "expected 'provider' and/or 'api'")
+        raise ApiError("bad_request", "expected 'provider', 'auto_update' and/or 'api'")
 
     settings.save(doc)
     # A cached provider instance holds the url/model/dim it was built with,
@@ -2280,10 +2288,113 @@ _apply_progress: dict[str, Any] = {
 _apply_progress_touched_at = 0.0
 
 
+# Unattended auto-apply's pending countdown (block M extension). Also
+# in-process only, same reasoning as `_apply_progress` above: it exists only
+# to let a human watching the cabinet see and cancel a countdown before it
+# fires, and once it settles (fired or confirmed) the real work continues
+# through `_begin_apply`/`_run_staged_apply`, which is what persists.
+#
+# The dict's mere presence IS the "pending" state -- no separate boolean to
+# go out of sync with it. Guarded by its own lock (unlike `_apply_progress`,
+# which has none): a timer firing and a confirm click can land within
+# milliseconds of each other, and only one of them may win.
+_auto_pending: dict[str, Any] | None = None
+_auto_pending_timer: threading.Timer | None = None
+_auto_pending_lock = threading.Lock()
+
+
 def _touch_apply_progress(**fields: Any) -> None:
     global _apply_progress_touched_at
     _apply_progress.update(fields)
     _apply_progress_touched_at = time.time()
+
+
+def maybe_begin_auto_apply(tag: str) -> None:
+    """Arm a countdown that auto-applies ``tag`` unless something intervenes.
+
+    Called by ``engine_update.start_checker``'s background loop once a tick
+    finds an eligible tag (``engine_update.auto_eligible_tag()``). No-op if
+    a countdown is already pending, or if an apply is already under way
+    (staging/switching/etc, per ``_apply_progress``) -- a countdown never
+    stacks on top of work already in progress.
+
+    Only flips in-memory state and starts a short-lived ``threading.Timer``
+    before returning; the actual multi-minute staging work happens later,
+    off this call, when that timer fires (``_fire_auto_pending``) or a
+    confirm arrives (``POST /api/update/auto/confirm``) -- both funnel into
+    :func:`_settle_auto_pending`, which is where ``_begin_apply`` actually
+    runs. Safe to call from the checker's own background thread on its
+    normal tick cadence for exactly that reason: nothing here blocks.
+    """
+    global _auto_pending, _auto_pending_timer
+    with _auto_pending_lock:
+        if _auto_pending is not None:
+            return
+        if _apply_progress["state"] not in ("idle", "done", "failed", "rolled_back"):
+            return
+        started_at = _now_iso()
+        deadline = (
+            datetime.now(timezone.utc).astimezone()
+            + timedelta(seconds=config.UPDATE_AUTO_APPLY_COUNTDOWN_S)
+        ).isoformat(timespec="milliseconds")
+        _auto_pending = {"tag": tag, "started_at": started_at, "deadline": deadline}
+        timer = threading.Timer(
+            config.UPDATE_AUTO_APPLY_COUNTDOWN_S, _fire_auto_pending, args=(tag,)
+        )
+        timer.daemon = True
+        _auto_pending_timer = timer
+        timer.start()
+
+    hub.publish(
+        "update_auto_pending",
+        {
+            "phase": "started", "tag": tag, "deadline": deadline,
+            "seconds": config.UPDATE_AUTO_APPLY_COUNTDOWN_S,
+        },
+        None,
+    )
+
+
+def _settle_auto_pending(tag: str) -> None:
+    """Cancel the countdown (idempotent) and hand off to ``_begin_apply``
+    with ``trigger="auto"``.
+
+    Shared by the timer firing on its own (:func:`_fire_auto_pending`) and
+    ``POST /api/update/auto/confirm`` arriving first -- whichever gets the
+    lock first clears ``_auto_pending`` and proceeds; the other sees it
+    already ``None`` and returns having done nothing. This is the race the
+    resolved flag calls out explicitly: a confirm click and a timer firing
+    within milliseconds of each other must not both start an apply.
+    """
+    global _auto_pending, _auto_pending_timer
+    with _auto_pending_lock:
+        if _auto_pending is None:
+            return
+        timer = _auto_pending_timer
+        _auto_pending = None
+        _auto_pending_timer = None
+    if timer is not None:
+        timer.cancel()
+    _begin_apply(tag, trigger="auto")
+
+
+def _fire_auto_pending(tag: str) -> None:
+    """The armed ``threading.Timer``'s own callback: the countdown elapsed
+    with nobody clicking Cancel (a Confirm click funnels through the same
+    settle path and would already have cleared ``_auto_pending`` by the
+    time this runs, in which case :func:`_settle_auto_pending` is a no-op).
+
+    Guards against a ``stale_target``/``update_in_progress`` ``ApiError``
+    from ``_begin_apply`` escaping unhandled into the Timer's own thread --
+    the same "never let a background callback raise into a void" tolerance
+    every other self-update background path in this codebase already
+    applies (``engine_update``'s checker loop, ``_run_staged_apply``'s own
+    ``except`` clauses).
+    """
+    try:
+        _settle_auto_pending(tag)
+    except Exception:  # noqa: BLE001 - background timer callback, never raise into it
+        log.exception("auto-apply countdown for %s failed to settle", tag)
 
 
 def _spawn_update_apply_breakaway(argv: list[str], cwd: Path) -> None:
@@ -2352,6 +2463,14 @@ def _spawn_update_apply_breakaway(argv: list[str], cwd: Path) -> None:
     quoted = " ".join(f'"{part}"' for part in argv)
     with os.fdopen(bat_fd, "w", encoding="utf-8") as fh:
         fh.write(f'start "" /D "{cwd}" /B {quoted}\r\n')
+        # Self-delete as the batch file's own last act, not something this
+        # process cleans up afterward: cmd.exe has already read this file
+        # into its own buffer by the time it runs a line, so a script
+        # deleting itself here is the standard, race-free Windows idiom --
+        # unlike an external delete from this process, which would have to
+        # guess when cmd.exe is done with it. Without this, every apply
+        # (successful or rolled back) left one file behind forever.
+        fh.write('del "%~f0"\r\n')
     # cmd.exe itself is still spawned as a direct child of this process --
     # that is fine and expected. It is `update-apply` (cmd's own child,
     # launched via `start /B`) that needs the broken link, and it gets one
@@ -2359,7 +2478,7 @@ def _spawn_update_apply_breakaway(argv: list[str], cwd: Path) -> None:
     service_ctl.spawn_detached(["cmd.exe", "/c", bat_path])
 
 
-def _run_staged_apply(tag: str) -> None:
+def _run_staged_apply(tag: str, *, trigger: str = "manual") -> None:
     """Background body of ``POST /api/update/apply``.
 
     Runs on its own daemon thread inside the API process — the current
@@ -2378,6 +2497,13 @@ def _run_staged_apply(tag: str) -> None:
     could reach it to ask even if there were. See `api_update_status`'s own
     comment for the fuller version of this reasoning: those two states are,
     by construction, never observable from a live HTTP response.
+
+    ``trigger`` ("manual" or "auto") is recorded via
+    ``engine_update.set_pending_trigger`` right before ``update-apply`` is
+    spawned — that record is how the fact survives the handoff to the
+    separately-spawned process, which shares no memory with this thread and
+    needs to know whether to attribute its own outcome to the auto-apply
+    blacklist (``engine_update.record_auto_outcome``).
     """
     from . import engine_update, service_ctl
 
@@ -2407,6 +2533,7 @@ def _run_staged_apply(tag: str) -> None:
     _touch_apply_progress(state="switching", step=None, finished_at=None)
     engine_root = Path(__file__).resolve().parent.parent
     cmd = [service_ctl.windowless_python(), "-m", "src.cli", "update-apply"]
+    engine_update.set_pending_trigger(tag, trigger)
     try:
         _spawn_update_apply_breakaway(cmd, engine_root)
     except OSError as exc:
@@ -2517,6 +2644,51 @@ def api_update_status() -> dict:
         "apply": apply_view,
         "history": state.get("installed", []),
         "retention": {"keep": config.UPDATE_RETENTION_COUNT},
+        "auto": _auto_status_view(state),
+    }
+
+
+def _auto_status_view(state: dict) -> dict:
+    """The ``"auto"`` block of ``GET /api/update/status``: whether
+    unattended auto-apply is on, what (if anything) is currently counting
+    down, and the per-tag blacklist -- everything needed to explain why
+    auto-apply is silently skipping a tag, without the client having to
+    guess.
+
+    ``seconds_left`` is computed HERE, server-side, at response time
+    (``max(0, deadline - now)``) rather than trusted from a client-side
+    timer -- the exact "status-poll is the truth, WS is only a live
+    preview" discipline this feature already established for the apply
+    progress modal (see ``_apply_view``'s own docstring), so a page reload
+    mid-countdown resumes showing the correct remaining time.
+    """
+    with _auto_pending_lock:
+        pending = dict(_auto_pending) if _auto_pending is not None else None
+
+    if pending is not None:
+        try:
+            deadline_dt = datetime.fromisoformat(pending["deadline"])
+            seconds_left = max(0, int((deadline_dt - datetime.now(timezone.utc).astimezone()).total_seconds()))
+        except ValueError:
+            seconds_left = 0
+        pending = {**pending, "seconds_left": seconds_left}
+
+    auto = state.get("auto") or {}
+    blacklist = auto.get("blacklist") or {}
+    return {
+        "enabled": settings.auto_update_enabled(),
+        "pending": pending,
+        "blacklist": [
+            {
+                "tag": tag,
+                "attempts": entry.get("attempts", 0),
+                "blacklisted": bool(entry.get("blacklisted")),
+                "last_error": entry.get("last_error"),
+                "last_failed_at": entry.get("last_failed_at"),
+                "next_retry_at": entry.get("next_retry_at"),
+            }
+            for tag, entry in blacklist.items()
+        ],
     }
 
 
@@ -2539,22 +2711,27 @@ def api_update_check() -> dict:
     }
 
 
-@app.post("/api/update/apply", status_code=202, include_in_schema=False)
-def api_update_apply(req: UpdateApplyRequest) -> dict:
-    """Stage ``req.tag`` and, on success, hand off to the detached
-    `update-apply` CLI (step 8). Returns immediately; the real work happens
-    on a background thread started here.
+def _begin_apply(tag: str, *, trigger: str) -> None:
+    """Guard-and-start: the shared body of both the manual apply endpoint
+    and the auto-apply countdown's settle path.
+
+    Same ``stale_target``/``update_in_progress`` guards either way -- an
+    auto-triggered apply cannot start against a tag that has gone stale, or
+    stack on top of one already running, any more than a manual one can.
+    Extracted from ``api_update_apply`` unchanged (pure refactor): the
+    manual endpoint below is now a thin wrapper over this with
+    ``trigger="manual"``, and its behaviour/response shape is unchanged.
     """
     from . import engine_update
 
     state = engine_update.read_state()
     last_check = state.get("last_check") or {}
-    if req.tag != last_check.get("latest_tag") or not last_check.get("update_available"):
+    if tag != last_check.get("latest_tag") or not last_check.get("update_available"):
         raise ApiError(
             "stale_target",
-            f"{req.tag!r} does not match the last known latest tag "
+            f"{tag!r} does not match the last known latest tag "
             f"({last_check.get('latest_tag')!r}) — run a check again",
-            tag=req.tag, latest_tag=last_check.get("latest_tag"),
+            tag=tag, latest_tag=last_check.get("latest_tag"),
         )
     if _apply_progress["state"] not in ("idle", "done", "failed", "rolled_back"):
         raise ApiError(
@@ -2564,11 +2741,62 @@ def api_update_apply(req: UpdateApplyRequest) -> dict:
         )
 
     thread = threading.Thread(
-        target=_run_staged_apply, args=(req.tag,),
-        name=f"mnemo-update-apply-{req.tag}", daemon=True,
+        target=_run_staged_apply, args=(tag,), kwargs={"trigger": trigger},
+        name=f"mnemo-update-apply-{tag}", daemon=True,
     )
     thread.start()
+
+
+@app.post("/api/update/apply", status_code=202, include_in_schema=False)
+def api_update_apply(req: UpdateApplyRequest) -> dict:
+    """Stage ``req.tag`` and, on success, hand off to the detached
+    `update-apply` CLI (step 8). Returns immediately; the real work happens
+    on a background thread started here.
+    """
+    _begin_apply(req.tag, trigger="manual")
     return {"accepted": True, "tag": req.tag}
+
+
+@app.post("/api/update/auto/confirm", status_code=202, include_in_schema=False)
+def api_update_auto_confirm() -> dict:
+    """Confirm the pending auto-apply countdown right now, instead of
+    waiting out the remaining seconds.
+
+    Still an "auto" trigger for blacklist purposes on failure -- clicking OK
+    during the countdown is not a manual apply, it is skipping ahead on an
+    apply that was already going to happen automatically (resolved flag,
+    self-update auto-apply design note).
+    """
+    with _auto_pending_lock:
+        pending = dict(_auto_pending) if _auto_pending is not None else None
+    if pending is None:
+        raise ApiError("auto_not_pending", "no auto-apply countdown is pending right now")
+    _settle_auto_pending(pending["tag"])
+    return {"accepted": True, "tag": pending["tag"]}
+
+
+@app.post("/api/update/auto/cancel", include_in_schema=False)
+def api_update_auto_cancel() -> dict:
+    """Cancel the pending auto-apply countdown.
+
+    Touches nothing durable: no blacklist write, no state persisted beyond
+    clearing the in-memory pending dict (resolved flag). The same tag's
+    countdown reappears on the next checker tick (~``UPDATE_CHECK_INTERVAL_S``
+    later) -- accepted as-is, no snooze/cooldown period for now.
+    """
+    global _auto_pending, _auto_pending_timer
+    with _auto_pending_lock:
+        pending = dict(_auto_pending) if _auto_pending is not None else None
+        timer = _auto_pending_timer
+        if pending is not None:
+            _auto_pending = None
+            _auto_pending_timer = None
+    if pending is None:
+        raise ApiError("auto_not_pending", "no auto-apply countdown is pending right now")
+    if timer is not None:
+        timer.cancel()
+    hub.publish("update_auto_pending", {"phase": "cancelled", "tag": pending["tag"]}, None)
+    return {"accepted": True, "tag": pending["tag"]}
 
 
 @app.get("/api/logs", include_in_schema=False)
