@@ -644,7 +644,7 @@ function New-MnemoEnvStub {
 }
 
 ## Set-ApiTokenEnvironment removed (2026-08-21): /api no longer requires a
-## token by default (design decision #34, Memory-design-v3.md §13). This
+## token by default (design decision #34, Memory-design-v3.md sec. 13). This
 ## function used to mint one and export it as a persistent User env var on
 ## every install where none existed yet -- exactly the auto-provisioning
 ## the decision removes. Its own rationale ("the git-tracked .mcp.json
