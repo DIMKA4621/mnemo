@@ -480,6 +480,9 @@ def embed_state_payload() -> dict:
             "cached": _MODEL_CACHED["value"],
             "where": "127.0.0.1:8917",
             "wake_s": 7.6,
+            # Fixture matches this session's real machine (3h override) so
+            # the field renders non-trivially in dev too.
+            "idle_timeout_s": 10800,
             "detail": None,
         }
     elif "11434" in url:

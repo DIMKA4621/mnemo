@@ -114,14 +114,17 @@
   line-height: 1.5;
 }
 
+/* A real consequence, not a neutral fact — same warm treatment as the
+   sidebar update banner, so "this changes what's saved on disk" reads as
+   something to actually notice, not just more page description. */
 .set-warn {
   margin: 0;
   padding: 9px 11px;
-  color: var(--fg-dim);
+  color: var(--warn-fg);
   font-size: 12px;
   line-height: 1.55;
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
+  background: var(--warn-bg);
+  border: 1px solid var(--warn-border);
   border-radius: var(--radius);
 }
 
@@ -165,23 +168,36 @@
 
 .set-row { display: flex; gap: 12px; }
 .set-row .set-field { flex: 0 0 auto; }
+/* Вимірів/Таймаут sit side by side, not stacked — the general
+   `.set-field + .set-field` divider (a top border) put a half-height line
+   above only the second one, which read as skewed rather than as a rule.
+   Cancelled here; the row gets one real, full-width `.set-divider` above it
+   instead (inserted where the row is built). */
+.set-row .set-field + .set-field { border-top: none; padding-top: 0; }
 
-/* Backend memory: a state line, then the actions it allows. Boxed like
-   `.set-stats` because it reports as much as it acts, and the border is what
-   keeps «Вивантажити» from reading as a second Save for the form above it. */
-.set-mem {
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  padding: 9px 11px;
-}
+/* Backend memory: no framing box — a caption+badge line, a caption+model
+   line, then the actions, all sitting directly in the field like any other
+   control here. The description above them (in `renderEmbedMemory`) is a
+   `.set-note` too, just ordered before this instead of after. */
+.mem-intro strong { color: var(--accent-muted); }
+/* A bit more room than the field's own 5px gap between the description and
+   the status line right below it — the two read as separate things, not
+   one continuous paragraph. */
+.mem-intro { margin-bottom: 4px; }
 .set-mem-line {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* Same two-box lesson as `.bank-row`: the badge and the model name wrap
-     between themselves rather than pushing the row wider than the column. */
   flex-wrap: wrap;
   min-width: 0;
+}
+.set-mem-line + .set-mem-line { margin-top: 6px; }
+.set-mem-caption {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--fg-mute);
+  text-transform: uppercase;
+  letter-spacing: .04em;
 }
 .set-mem-what {
   font-family: var(--mono);
@@ -190,8 +206,7 @@
   overflow-wrap: anywhere;
   min-width: 0;
 }
-.set-mem-actions { display: flex; gap: 7px; margin-top: 9px; flex-wrap: wrap; }
-.set-mem .set-note { margin-top: 7px; }
+.set-mem-actions { display: flex; gap: 7px; margin-top: 10px; flex-wrap: wrap; }
 
 /* Maintenance: the same facts as CLI doctor, grouped for scanning rather than
    poured into a preformatted transcript. Reuses the settings tokens and the

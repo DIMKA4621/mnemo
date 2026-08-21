@@ -2175,12 +2175,21 @@ def _embed_action(action) -> dict:
         # `EmbeddingUnavailable` mid-file and leaves the bank half-indexed —
         # a cost paid later, by someone who will not connect it to a button
         # pressed now.
-        raise ApiError(
-            "embed_busy",
-            f"the queue is still working ({depth} task(s) pending) — the "
-            f"worker embeds through this backend, so wait for it to drain",
-            depth=depth,
-        )
+        #
+        # `depth` alone undercounts: it is the QUEUED backlog and does not
+        # include the one file actively in flight, so `current` truthy with
+        # `depth == 0` is the common case, not an edge one — a message that
+        # only ever cited `depth` read as "0 pending" while also claiming
+        # "still working", which is exactly the contradiction a caller like
+        # the cabinet would otherwise have to explain away on its own.
+        if current and not depth:
+            detail = ("a file is being embedded through this backend right "
+                       "now — wait for it to finish")
+        else:
+            detail = (f"the queue is still working ({depth} task(s) pending) — "
+                       f"the worker embeds through this backend, so wait for "
+                       f"it to drain")
+        raise ApiError("embed_busy", detail, depth=depth)
     try:
         return action()
     except embedctl.EmbedControlUnavailable as exc:

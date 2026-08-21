@@ -31,6 +31,9 @@
   --fg-dim: #949cab;
   --fg-mute: #8d97a8;
   --accent: #6aa8ff;
+  /* `--accent` blended halfway toward `--fg-dim` — a blue that reads as
+     blue but doesn't compete with an actual link/selection for attention. */
+  --accent-muted: #7fa2d5;
   --ok: #4bbf7a;
   --busy: #e0a94a;
   --idle: #7b8494;
@@ -128,6 +131,7 @@
      pairing has plenty of margin. */
   --fg-mute: #5a6676;
   --accent: #2c66c9;
+  --accent-muted: #406199;
   --ok: #2f9257;
   --busy: #9d6c0c;
   --idle: #7b8494;
@@ -367,7 +371,10 @@ body.is-resizing-pane { cursor: col-resize; user-select: none; }
 }
 
 .badge-git    { color: var(--badge-git-fg); border-color: var(--badge-git-border); background: var(--badge-git-bg); }
-.badge-nogit  { color: var(--fg-mute); }
+/* Same tokens as `.badge-empty` ("не в памʼяті") — no git is a neutral fact
+   about a bank, not a fault, so it gets the same cool blue-grey instead of
+   `.badge-off`'s red, which is reserved for actually-off/disabled states. */
+.badge-nogit  { color: var(--badge-empty-fg); border-color: var(--badge-empty-border); background: var(--badge-empty-bg); }
 .badge-off    { color: var(--badge-off-fg); border-color: var(--badge-off-border); background: var(--badge-off-bg); }
 .badge-frozen { color: var(--badge-frozen-fg); border-color: var(--badge-frozen-border); background: var(--badge-frozen-bg); }
 

@@ -142,6 +142,10 @@ def _describe_local() -> dict[str, Any]:
         # next search pays after unloading, and the number is the whole
         # argument for why the default is a command and not a timer.
         "wake_s": 7.6,
+        # 0 = the documented default (never idle-exits); a machine that has
+        # set `MNEMO_EMBED_IDLE_TIMEOUT` wants to see that it took, not just
+        # trust that it did.
+        "idle_timeout_s": config.EMBED_IDLE_TIMEOUT,
         "detail": None,
     }
 

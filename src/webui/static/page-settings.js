@@ -53,6 +53,11 @@ const settings = {
   updateCheckAvailable: false,  // same check's update_available, for the note's color
   embed: null,         // GET /api/embed/state — what the backend holds now
   embedError: null,
+  // A load/unload/download's own outcome, shown next to the card that owns
+  // it — NOT through `settings.note`/`renderSettingsMessages()`, which
+  // renders at the very bottom of the whole tab and read as disconnected
+  // from the button that produced it.
+  embedNote: null,
   embedBusy: false,    // an unload/load is in flight
   maintenance: null,  // GET /api/doctor — loaded only when this section opens
   maintenanceBusy: false,
@@ -179,6 +184,10 @@ function chooseSettingsSection(id) {
   settings.maintenanceError = null;
   settings.cleanupConfirming = false;
   settings.cleanupNote = null;
+  // Same rule for an embed action's own outcome: it describes a click made
+  // in the section being left, not a fact about whatever tab comes next.
+  settings.embedError = null;
+  settings.embedNote = null;
   renderSettings();
   if (id === 'maint' && !settings.maintenance && !settings.maintenanceBusy) {
     refreshMaintenance();
@@ -390,6 +399,20 @@ function renderEmbedSection(body) {
   const presetList = settings.data.presets || [];
   const backend = backendPreset(settings.backendId);
 
+  // Consequences up front, not buried at the bottom of the tab — this is
+  // true regardless of which backend you're looking at, and it's the reason
+  // to read the rest of the tab carefully before touching anything in it.
+  // One `<br>` per sentence: each is its own fact (the trigger, when it
+  // takes effect, what happens to existing indexes), not one run-on line.
+  body.appendChild(el('p', { className: 'set-warn' }, [
+    document.createTextNode('Зміна моделі або ширини — це новий ключ перебудови.'),
+    el('br'),
+    document.createTextNode('Конфігурація діє після збереження налаштувань.'),
+    el('br'),
+    document.createTextNode('Старі індекси отримають REBUILD PENDING і пошук по них ' +
+      'відмовить, доки їх не перегенерувати.'),
+  ]));
+
   // -- backend tabs -----------------------------------------------------
   // `.set-backend-tabs`, not `.set-tabs`: the page's own tab bar (above,
   // outside this form) already owns that name for its full-width, bordered,
@@ -403,7 +426,21 @@ function renderEmbedSection(body) {
       on: { click: () => chooseBackend(item.id) },
     }));
   }
-  body.appendChild(setField('Бекенд', tabs, backend ? backend.note : null));
+  body.appendChild(setField('Бекенд ембедингу', tabs, backend ? backend.note : null));
+
+  // Same idiom as autostart/auto-update on Загальні: browsing a tab that
+  // isn't what's actually stored is a draft, not a change — say so before
+  // «Зберегти» is pressed, or a machine on OpenAI reads as already switched
+  // to Ollama the moment you click its tab to look at it.
+  if (settings.backendId !== backendForSettings()) {
+    const active = backendPreset(backendForSettings());
+    body.appendChild(el('p', {
+      className: 'set-override',
+      text: 'не збережено — зараз активний «' + (active ? active.label : '—') +
+            '»; натисніть «Зберегти», щоб перемкнути на «' +
+            (backend ? backend.label : '—') + '»',
+    }));
+  }
 
   const providerOverride = overrideNote('provider');
   if (providerOverride) body.appendChild(providerOverride);
@@ -417,8 +454,11 @@ function renderEmbedSection(body) {
       document.createTextNode('Вектори рахує резидент на цій машині — '),
       el('code', { text: model ? model.label : '—' }),
       document.createTextNode(model ? ' (' + model.dim + ' вимірів). ' : '. '),
-      document.createTextNode('Нічого налаштовувати не треба; жоден байт памʼяті ' +
-                              'не залишає машину.'),
+      // "Нічого налаштовувати не треба" dropped: `backend.note` right above
+      // ("нічого не треба налаштовувати; працює без мережі") already says
+      // it — this line only adds what that one doesn't, that memory stays
+      // on the machine.
+      document.createTextNode('Жоден байт памʼяті не залишає машину.'),
     ]));
     // The resident is what holds the most (~1.5 GB), so the one backend with
     // nothing to configure is the one where this block matters most.
@@ -502,6 +542,12 @@ function renderEmbedSection(body) {
     clearSettingsMessages();
   });
 
+  // Manual divider: the row below holds two `.set-field`s side by side, not
+  // stacked, so the usual `.set-field + .set-field` adjacent-sibling rule
+  // (a top border) would land on only the second one and read as a skewed
+  // half-line rather than a real divider — cancelled for `.set-row` in CSS,
+  // replaced with one full-width rule above the row instead.
+  body.appendChild(el('div', { className: 'set-divider' }));
   body.appendChild(el('div', { className: 'set-row' }, [
     setField('Вимірів', dim, null),
     setField('Таймаут, с', timeout, null),
@@ -522,6 +568,9 @@ function renderEmbedSection(body) {
 
   // -- key --------------------------------------------------------------
   if (backend.needs_key) {
+    // Preceded by a `set-note` and up to two `set-override` lines, none of
+    // them `.set-field` — same reason the row above needed a manual divider.
+    body.appendChild(el('div', { className: 'set-divider' }));
     const stored = (settingValue('api.key_set') || {}).value;
     const key = el('input', {
       className: 'fs-input set-wide',
@@ -550,14 +599,6 @@ function renderEmbedSection(body) {
     body.appendChild(el('div', { className: 'set-divider' }));
     renderEmbedMemory(body);
   }
-
-  // -- consequences ---------------------------------------------------------
-  body.appendChild(el('p', { className: 'set-warn' }, [
-    document.createTextNode('Зміна моделі або ширини — це новий ключ перебудови. ' +
-      'Конфігурація діє одразу для нової роботи; старі індекси отримають ' +
-      'REBUILD PENDING і пошук по них відмовить, доки їх не перегенерувати. ' +
-      'Спершу перевірте ендпоінт кнопкою вище.'),
-  ]));
 
   renderSettingsMessages();
 }
@@ -604,23 +645,45 @@ async function refreshEmbedState() {
  * a bank's reindex. Putting it behind Save would mean saving to make it
  * happen and then having nothing left to un-save.
  */
+const MEM_LABEL = 'Оперативна памʼять';
+
 function renderEmbedMemory(body) {
   const info = settings.embed;
-  const box = el('div', { className: 'set-mem' });
 
-  if (settings.embedError) {
-    box.appendChild(el('p', { className: 'set-note', text: settings.embedError }));
-    body.appendChild(setField('Оперативна памʼять', box, null));
-    return;
-  }
+  // Only when there is truly nothing else to show — the initial `GET
+  // /api/embed/state` never landed. A failed `load`/`unload` click below
+  // leaves `info` as the last known-good state and is shown as a note next
+  // to the card instead, not by replacing the whole field with an error.
   if (!info) {
-    box.appendChild(el('p', { className: 'empty-hint', text: 'Стан ще не отримано.' }));
-    body.appendChild(setField('Оперативна памʼять', box, null));
+    body.appendChild(el('div', { className: 'set-field' }, [
+      el('span', { className: 'set-label', text: MEM_LABEL }),
+      el('p', {
+        className: settings.embedError ? 'modal-error' : 'empty-hint',
+        text: settings.embedError || 'Стан ще не отримано.',
+      }),
+    ]));
     return;
   }
 
   const held = info.holding;
-  const line = el('div', { className: 'set-mem-line' }, [
+  const field = [el('span', { className: 'set-label', text: MEM_LABEL })];
+
+  // Description right under the heading, before the status card — this is
+  // the one thing worth reading before touching any control below it, so it
+  // does not wait behind the card the way an ordinary field's note would.
+  if (held === 'loaded' || held === 'unloaded') {
+    field.push(el('p', { className: 'set-note mem-intro' }, [
+      el('strong', { text: 'Модель піднімається сама, коли потрібна для пошуку чи індексації' }),
+      document.createTextNode(' — «не в памʼяті» це нормальний стан, не помилка. ' +
+        '«Вивантажити» звільняє памʼять одразу, замість тримати модель ' +
+        'постійно завантаженою про запас.'),
+    ]));
+  }
+
+  // -- status: caption + badge, caption + model — no framing box any more,
+  // just two lines sitting directly in the field, with the actions below --
+  field.push(el('div', { className: 'set-mem-line' }, [
+    el('span', { className: 'set-mem-caption', text: 'Статус:' }),
     el('span', {
       // `badge-empty`, never the red `badge-off`: an unloaded model is a
       // normal state that costs one wake-up, not a fault — the same reason
@@ -628,9 +691,23 @@ function renderEmbedMemory(body) {
       className: 'badge ' + (held === 'loaded' ? 'badge-ready' : 'badge-empty'),
       text: HOLD_LABEL[held] || String(held),
     }),
+  ]));
+  field.push(el('div', { className: 'set-mem-line' }, [
+    el('span', { className: 'set-mem-caption', text: 'Модель:' }),
     el('span', { className: 'set-mem-what', text: info.model || '—' }),
-  ]);
-  box.appendChild(line);
+  ]));
+  // Only where the backend actually has an idle-exit concept (`local`'s own
+  // `MNEMO_EMBED_IDLE_TIMEOUT` — Ollama's own TTL is a live `expires_at`
+  // timestamp, already shown as a footnote below, not a static duration).
+  if (info.idle_timeout_s != null) {
+    field.push(el('div', { className: 'set-mem-line' }, [
+      el('span', { className: 'set-mem-caption', text: 'Автовивантаження:' }),
+      el('span', {
+        className: 'set-mem-what',
+        text: info.idle_timeout_s > 0 ? humanUptime(info.idle_timeout_s) : 'вимкнено',
+      }),
+    ]));
+  }
 
   const buttons = el('div', { className: 'set-mem-actions' });
   if (held === 'loaded') {
@@ -663,42 +740,46 @@ function renderEmbedMemory(body) {
       on: { click: () => embedAction('load') },
     }));
   }
-  if (buttons.childNodes.length) box.appendChild(buttons);
+  if (buttons.childNodes.length) field.push(buttons);
 
   // `cached === false` only happens under `local`/Ollama-shaped `api` (§
   // `_describe_local`/`_describe_api`) — a hosted API reports `cached: null`
   // and never reaches this branch. Separate from the `held` buttons above:
   // this is "put the weights on disk", not "wake the resident" — the label
   // says "на диск" so it never reads like the RAM action above it.
-  if (info.cached === false) {
-    const download = info.download || {};
-    if (download.active) {
-      box.appendChild(el('div', { className: 'set-mem-line' }, [
-        el('i', { className: 'dot busy' }),
-        el('span', { text: 'Завантаження моделі…' }),
-      ]));
-    } else {
-      if (download.failed) {
-        box.appendChild(el('p', { className: 'set-note', text: 'Завантаження не вдалося — спробуйте ще раз.' }));
-      }
-      box.appendChild(el('div', { className: 'set-mem-actions' }, [
-        el('button', {
-          className: 'btn',
-          text: 'Завантажити модель на диск (2.2 ГБ)',
-          attrs: settings.embedBusy ? { disabled: '' } : {},
-          on: { click: () => startEmbedDownload() },
-        }),
-      ]));
-    }
+  const download = info.cached === false ? (info.download || {}) : null;
+  if (download && download.active) {
+    field.push(el('div', { className: 'set-mem-line' }, [
+      el('i', { className: 'dot busy' }),
+      el('span', { text: 'Завантаження моделі…' }),
+    ]));
+  } else if (download) {
+    field.push(el('div', { className: 'set-mem-actions' }, [
+      el('button', {
+        className: 'btn',
+        text: 'Завантажити модель на диск (2.2 ГБ)',
+        attrs: settings.embedBusy ? { disabled: '' } : {},
+        on: { click: () => startEmbedDownload() },
+      }),
+    ]));
   }
 
+  // A load/unload/download outcome, next to the card it acted on — not the
+  // page-level `settings.note`/`errorText`, which render at the very bottom
+  // of the whole tab and read as disconnected from the button that produced
+  // them ("кудись улітає рядок").
+  if (settings.embedError) {
+    field.push(el('p', { className: 'modal-error', text: settings.embedError }));
+  } else if (settings.embedNote) {
+    field.push(el('p', { className: 'tok-ok', text: settings.embedNote }));
+  }
+
+  // -- remaining, per-state footnotes -------------------------------------
   const notes = [];
-  // Said plainly, because «не в памʼяті» sits one line above a button whose
-  // own label carries the word «диск» — but only once, and the reassurance
-  // belongs here, not repeated on every render of the badge itself.
-  if (held === 'unloaded' && info.cached !== false) {
-    notes.push('Файл моделі лишається на диску — просто зараз не в ' +
-               'оперативній памʼяті. Підніметься сам при першому пошуку.');
+  // No number: the actual figure moves as hardware/model does, and "a few
+  // seconds" is the fact worth knowing, not a specific one to trust.
+  if (held === 'loaded' && info.wake_s) {
+    notes.push('Підніметься назад за кілька секунд.');
   }
   if (held === 'n/a') {
     // The cabinet's own wording, not the backend's `detail`. A steady state
@@ -710,11 +791,6 @@ function renderEmbedMemory(body) {
     notes.push('«Перевірити ендпоінт» зробить один embedding request. Для ' +
                'тарифікованого API це може бути платний виклик.');
   }
-  if (held === 'loaded' && info.wake_s) {
-    notes.push('Вивантаження звільняє памʼять зараз; наступний пошук або ' +
-               'збережений файл підніме модель назад за ~' +
-               Math.round(info.wake_s) + ' с. Це не вимикач.');
-  }
   if (info.expires_at) notes.push('Бекенд тримає її до ' + info.expires_at + '.');
   if (info.others_held) {
     // A count, never the names: the other models are somebody else's, and
@@ -722,34 +798,40 @@ function renderEmbedMemory(body) {
     notes.push('Там же ще ' + info.others_held + ' модел(і/ей) — не наші, ' +
                'їх не чіпаємо.');
   }
-  if (info.probe_dim) notes.push('Пробний вектор: ' + info.probe_dim + ' вимірів.');
-  if (info.detail) notes.push(info.detail);
-  for (const text of notes) {
-    box.appendChild(el('p', { className: 'set-note', text: text }));
+  if (download && !download.active && download.failed) {
+    notes.push('Завантаження не вдалося — спробуйте ще раз.');
   }
+  if (info.detail) notes.push(info.detail);
+  for (const text of notes) field.push(el('p', { className: 'set-note', text: text }));
 
-  body.appendChild(setField('Оперативна памʼять', box, null));
+  body.appendChild(el('div', { className: 'set-field' }, field));
 }
 
 async function embedAction(what) {
   settings.embedBusy = true;
   settings.embedError = null;
-  settings.note = null;
+  settings.embedNote = null;
   renderSettings();
   try {
     settings.embed = await api('/api/embed/' + what, { method: 'POST' });
     if (what === 'unload') {
-      settings.note = 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.';
+      settings.embedNote = 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.';
     } else if (settings.embed.holding === 'n/a') {
-      settings.note = 'Ендпоінт відповів' + (settings.embed.probe_dim
+      settings.embedNote = 'Ендпоінт відповів' + (settings.embed.probe_dim
         ? ' — пробний вектор має ' + settings.embed.probe_dim + ' вимірів.'
         : '.');
     } else {
-      settings.note = 'Бекенд відповів — модель у памʼяті.';
+      settings.embedNote = 'Бекенд відповів — модель у памʼяті.';
     }
   } catch (err) {
     if (isAuthError(err)) { openGate('rejected'); return; }
-    settings.embedError = err.message;
+    // The cabinet's own wording for the one error this button realistically
+    // hits — same reasoning as the `n/a` notes above: the backend's `detail`
+    // stays English by convention, and this is the one code worth naming
+    // instead of echoing that English sentence onto a Ukrainian screen.
+    settings.embedError = err.code === 'embed_busy'
+      ? 'Черга ще працює через цей бекенд — почекайте, доки вона звільниться, і спробуйте ще раз.'
+      : err.message;
   } finally {
     settings.embedBusy = false;
     renderSettings();
@@ -784,7 +866,7 @@ function startDownloadPolling() {
  *  confirm dialog on top (same decision as the terminal `warmup`). */
 async function startEmbedDownload() {
   settings.embedError = null;
-  settings.note = null;
+  settings.embedNote = null;
   try {
     await api('/api/embed/download', { method: 'POST' });
     await refreshEmbedState();
