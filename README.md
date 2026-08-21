@@ -69,17 +69,37 @@ It has these pages:
 
 *(This section is being reworked — a new installer is coming, so for now just the bare commands.)*
 
+No clone needed — one command fetches a source snapshot and installs it:
+
 **Linux / macOS:**
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/DIMKA4621/mnemo/master/get.sh | bash
+```
+
+**Windows:**
+
+```powershell
+irm https://raw.githubusercontent.com/DIMKA4621/mnemo/master/get.ps1 | iex
+```
+
+Or, if you'd rather clone the repo first (e.g. to develop mnemo itself):
+
+**Linux / macOS:**
+
 ```bash
 git clone https://github.com/DIMKA4621/mnemo.git
 cd mnemo && ./install.sh
 ```
 
 **Windows:**
+
 ```powershell
 git clone https://github.com/DIMKA4621/mnemo.git
 cd mnemo; .\install.ps1
 ```
+
+Either way takes the same flags — `--check`/`-Check`, `--no-model`/`-NoModel`, `--home DIR`/`-InstallHome DIR`, etc. Passing them through the one-liner needs each shell's own idiom for arguments after a pipe: `curl ... | bash -s -- --check`, and on PowerShell `iex "& { $(irm ...) } -Check"`.
 
 The launcher lands at `~/.mnemo/bin/mnemo` (`bin\mnemo.exe` on Windows) and isn't added to `PATH` automatically — call it by full path, or alias it once.
 
@@ -116,12 +136,32 @@ mnemo reindex              force a reindex (usually not needed — the watcher d
 
 ## Uninstall
 
+No clone around anymore? One command removes it — these only touch this machine, not any repo:
+
 **Linux / macOS:**
+
 ```bash
-./uninstall.sh 
+curl -fsSL https://raw.githubusercontent.com/DIMKA4621/mnemo/master/uninstall.sh | bash
 ```
 
 **Windows:**
+
+```powershell
+irm https://raw.githubusercontent.com/DIMKA4621/mnemo/master/uninstall.ps1 | iex
+```
+
+Passing a flag (`-DryRun`, `-KeepModel`, ...) through the piped PowerShell form needs the same wrapper as above: `iex "& { $(irm ...) } -DryRun"`.
+
+Or, if you already have the repo cloned:
+
+**Linux / macOS:**
+
+```bash
+./uninstall.sh
+```
+
+**Windows:**
+
 ```powershell
 .\uninstall.ps1
 ```
