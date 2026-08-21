@@ -111,3 +111,27 @@ mnemo init                 attach a project
 mnemo search "query"       search the current directory's bank (or --bank <name>)
 mnemo reindex              force a reindex (usually not needed — the watcher does it on its own)
 ```
+
+---
+
+## Uninstall
+
+**Linux / macOS:**
+```bash
+./uninstall.sh 
+```
+
+**Windows:**
+```powershell
+.\uninstall.ps1
+```
+
+Removes everything the installer put on this machine — the service, the model cache, the index, autostart — after showing the list and asking first.
+
+**Your projects and their `.md` files are never touched.**
+
+### Just reinstalling?
+
+`--keep-model`/`-KeepModel` — skips re-downloading the ~2.2 GB embedding model
+
+`--keep-state`/`-KeepState` — skips rebuilding every bank's index from scratch.
