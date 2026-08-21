@@ -37,7 +37,9 @@ const PAGES = {
   journal: {
     label: 'Журнал',
     header: () => journalHeaderHtml(),
-    count: () => state.logTotal,
+    // No sidebar count: unlike Памʼять's bank count (small, stable), the log
+    // total grows without bound and read as noise next to the label.
+    count: null,
     onEnter: () => { renderJournal(); },
   },
   settings: {

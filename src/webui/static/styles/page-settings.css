@@ -11,8 +11,7 @@
 
 .set-body { flex: 1; min-height: 0; overflow: auto; background: var(--bg-pane); }
 .set-form { max-width: 640px; padding: 20px 16px 90px; display: flex; flex-direction: column; gap: 14px; }
-.set-form h2 { margin: 0; font-size: 15px; font-weight: 650; }
-.lede { max-width: 60ch; margin: 8px 0 0; color: var(--fg-dim); font-size: 12.5px; line-height: 1.65; }
+.lede { max-width: 60ch; margin: 0; color: var(--fg-dim); font-size: 12.5px; line-height: 1.65; }
 
 .set-foot {
   flex: none;
@@ -28,9 +27,29 @@
 
 .set-field { display: flex; flex-direction: column; gap: 5px; }
 
+/* A subtle rule between adjacent fields (theme / autostart / auto-update /
+   …) — the gap alone read as one long unbroken form; this is not meant to be
+   loud, just enough to tell one setting's control from the next one's. */
+.set-field + .set-field {
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+
+/* Same rule, placed by hand where a field is not directly preceded by
+   another `.set-field` (a check button, a result badge, a runtime note sit
+   between them) so the adjacent-sibling rule above cannot reach it. */
+.set-divider {
+  height: 0;
+  border-top: 1px solid var(--line);
+}
+
+/* Bolder and a shade darker than `.set-note` below it: the two used to be
+   nearly the same weight, so the setting's own name did not read as more
+   important than its description. */
 .set-label {
-  color: var(--fg-dim);
-  font-size: 12px;
+  color: var(--fg);
+  font-size: 12.5px;
+  font-weight: 650;
 }
 
 .set-note {

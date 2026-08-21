@@ -67,8 +67,11 @@ function memoryHeaderHtml() {
     '<button class="seg' + (mobPane === id ? ' is-active' : '') + '" data-mob="' + id + '">' +
     label + '</button>';
   return '<span class="page-title">Памʼять</span>' +
-    '<span class="page-sub">' + banks.length + ' банк(и) · ' + files + ' файлів · ' +
-    chunks + ' чанків</span>' +
+    '<span class="page-sub">' +
+    banks.length + ' ' + pluralizeUk(banks.length, ['банк', 'банки', 'банків']) + ' · ' +
+    files + ' ' + pluralizeUk(files, ['файл', 'файли', 'файлів']) + ' · ' +
+    chunks + ' ' + pluralizeUk(chunks, ['чанк', 'чанки', 'чанків']) +
+    '</span>' +
     '<div class="grow"></div>' +
     '<div class="segmented mob-panes" aria-label="Панель">' +
       mob('banks', 'Банки') + mob('tree', 'Файли') + mob('file', 'Вміст') +
@@ -386,8 +389,23 @@ function bankCard(bank) {
   const stats = el('div', { className: 'bank-stats' }, [
     el('span', { text: 'файлів ' + bank.files }),
     el('span', { text: 'чанків ' + bank.chunks }),
-    el('span', { text: 'у черзі ' + bank.queued }),
+    // An empty queue is the normal state, not a fact worth a stat of its own —
+    // shown only once there is actually something in it.
+    bank.queued ? el('span', { text: 'у черзі ' + bank.queued }) : null,
     el('span', { text: fmtBytes(bank.db_bytes), title: 'розмір індексу' }),
+  ]);
+
+  // `statusNote` earns its own line only when it says something the status
+  // badge above does not — the plain "ready" reading is the same fact twice.
+  // While actively indexing it gets the same warm `--busy` tint as the badge
+  // and the live progress line below it, instead of the same flat grey as
+  // "остання індексація" — everything temporary reads as one group, the one
+  // durable fact (when the index last actually finished) reads as another.
+  const noteRow = bank.status === 'ready' ? null : el('div', { className: 'bank-stats' }, [
+    el('span', {
+      className: bank.status === 'indexing' ? 'note-live' : 'muted',
+      text: statusNote(bank),
+    }),
   ]);
 
   const card = el('div', {
@@ -399,12 +417,15 @@ function bankCard(bank) {
     el('span', { className: 'bank-root', text: bank.root }),
     stats,
     el('div', { className: 'bank-stats' }, [
-      el('span', { className: 'muted', text: statusNote(bank) }),
-    ]),
-    el('div', { className: 'bank-stats' }, [
-      el('span', { className: 'muted', text: 'востаннє: ' + fmtDateTime(bank.last_indexed) }),
+      el('span', { className: 'muted', text: 'остання індексація: ' + fmtDateTime(bank.last_indexed) }),
     ]),
   ]);
+
+  // Placed after the permanent facts above and right before the live
+  // progress block below — everything that only describes "right now"
+  // clusters at the bottom of the card instead of sitting between two
+  // durable facts.
+  if (noteRow) card.appendChild(noteRow);
 
   const live = state.progress.get(bank.id);
   if (live) card.appendChild(progressBlock(live));
@@ -487,7 +508,9 @@ function renderTree() {
     return;
   }
 
-  sub.textContent = state.tree.files + ' файлів · ' + state.tree.dirs + ' тек';
+  sub.textContent =
+    state.tree.files + ' ' + pluralizeUk(state.tree.files, ['файл', 'файли', 'файлів']) + ' · ' +
+    state.tree.dirs + ' ' + pluralizeUk(state.tree.dirs, ['директорія', 'директорії', 'директорій']);
 
   const root = state.tree.tree;
   const children = (root && root.children) || [];
@@ -604,28 +627,33 @@ function makeSlicer(text) {
 
 function renderFile() {
   const body = $('file-body');
-  const title = $('file-title');
   const button = $('file-reindex');
   clear(body);
 
+  // `#file-title` stays the static "Вміст" caption from index.html — same
+  // small-caps treatment as "Банки"/"Файли" above it. The path used to be
+  // written in its place, which is why it rendered in a different (lowercase,
+  // mono) style from the other two column headers; it now lives as its own
+  // line inside `.file-meta`, below.
   const file = state.file;
   if (!file) {
-    title.textContent = 'Вміст';
     button.disabled = true;
     body.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть файл у дереві.' }));
     return;
   }
 
-  title.textContent = file.path;
   button.disabled = false;
 
   const chunks = (file.chunks || []).slice().sort((a, b) => a.start_char - b.start_char);
 
   body.appendChild(el('div', { className: 'file-meta' }, [
-    el('span', { text: fmtBytes(file.size) }),
-    el('span', { text: file.indexed ? 'в індексі' : 'не в індексі' }),
-    el('span', { text: chunks.length + ' чанків' }),
-    el('span', { text: 'sha256 ' + String(file.sha256 || '').slice(0, 12), title: file.sha256 }),
+    el('div', { className: 'file-meta-path', text: file.path, title: file.path }),
+    el('div', { className: 'file-meta-info' }, [
+      el('span', { text: fmtBytes(file.size) }),
+      el('span', { text: file.indexed ? 'в індексі' : 'не в індексі' }),
+      el('span', { text: chunks.length + ' чанків' }),
+      el('span', { text: 'sha256 ' + String(file.sha256 || '').slice(0, 12), title: file.sha256 }),
+    ]),
   ]));
 
   const doc = el('div', { className: 'doc' });

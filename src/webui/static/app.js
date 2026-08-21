@@ -392,6 +392,20 @@ function fmtMs(v) {
   return v >= 1000 ? (v / 1000).toFixed(2) + ' s' : v.toFixed(1) + ' ms';
 }
 
+/**
+ * Ukrainian count-noun agreement: 1 файл, 2 файли, 5 файлів, 21 файл, 11 файлів.
+ * `forms` is `[one, few, many]` — the standard Slavic triad. Works for any
+ * countable noun (банк/файл/чанк/…), so a page just supplies its own triad
+ * instead of hardcoding a single plural for every count.
+ */
+function pluralizeUk(n, forms) {
+  const mod10 = n % 10;
+  const mod100 = n % 100;
+  if (mod10 === 1 && mod100 !== 11) return forms[0];
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return forms[1];
+  return forms[2];
+}
+
 const STATUS_LABEL = { ready: 'готово', indexing: 'індексується', empty: 'порожньо' };
 
 // ---------------------------------------------------------------------------

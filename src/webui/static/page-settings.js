@@ -83,12 +83,10 @@ const SETTINGS_SECTIONS = [
 ];
 
 const SECTION_LEDE = {
-  general: 'Тема кабінету, автозапуск при вході в систему й стан процесу цієї ' +
-           'машини. Кабінет не пропонує кнопку, яка вбиває процес, що віддає ' +
-           'саму сторінку.',
-  embed: 'Бекенд обирається пресетом: URL, модель, ширина вектора й префікси ' +
-         'змінюються разом — поле, яке можна забути, відтворило б ту саму тиху ' +
-         'ваду.',
+  general: 'Те, що стосується самого кабінету й машини в цілому — не окремого ' +
+           'банку і не бекенда ембедингу.',
+  embed: 'Який бекенд рахує вектори для пошуку в банках і скільки оперативної ' +
+         'памʼяті він для цього займає.',
   maint: 'Той самий структурований doctor report, який CLI показує текстом. ' +
          'Перевірки запускаються лише при відкритті цього розділу.',
 };
@@ -378,8 +376,9 @@ function renderSettings() {
     return;
   }
 
+  // No section <h2> here: the active tab button right above already names
+  // this section — repeating it as a heading said the same word twice.
   const form = el('div', { className: 'set-form' }, [
-    el('h2', { text: section.label }),
     el('p', { className: 'lede', text: SECTION_LEDE[section.id] || '' }),
   ]);
   body.appendChild(form);
@@ -423,7 +422,10 @@ function renderEmbedSection(body) {
     ]));
     // The resident is what holds the most (~1.5 GB), so the one backend with
     // nothing to configure is the one where this block matters most.
-    if (settings.backendId === backendForSettings()) renderEmbedMemory(body);
+    if (settings.backendId === backendForSettings()) {
+      body.appendChild(el('div', { className: 'set-divider' }));
+      renderEmbedMemory(body);
+    }
     // Switching TO local is a save like any other, and this branch returns
     // early — without this the one backend that needs no configuration was
     // also the one whose «Збережено» never appeared, so the click read as
@@ -544,7 +546,10 @@ function renderEmbedSection(body) {
   // Only for the backend that is actually in use. `settings.embed` describes
   // the machine as configured, so showing it under a tab the user is merely
   // *considering* would report another backend's memory as this one's.
-  if (settings.backendId === backendForSettings()) renderEmbedMemory(body);
+  if (settings.backendId === backendForSettings()) {
+    body.appendChild(el('div', { className: 'set-divider' }));
+    renderEmbedMemory(body);
+  }
 
   // -- consequences ---------------------------------------------------------
   body.appendChild(el('p', { className: 'set-warn' }, [
@@ -849,6 +854,12 @@ function renderGeneralSection(body) {
     return;
   }
 
+  // A manual divider, not `.set-field + .set-field`: the auto-update field
+  // above ends with a check button and its result badge, neither of them a
+  // `.set-field`, so the adjacent-sibling rule that separates every other
+  // field here never fires before this one.
+  body.appendChild(el('div', { className: 'set-divider' }));
+
   const box = el('div', { className: 'set-stats' }, [
     setStat('Версія', svc.version, true),
     setStat('PID', svc.pid, true),
@@ -858,13 +869,6 @@ function renderGeneralSection(body) {
     setStat('Черга пріоритетів', svc.priority_enabled ? 'увімкнена' : 'вимкнена'),
   ]);
   body.appendChild(setField('Стан', box, null));
-
-  body.appendChild(el('p', {
-    className: 'set-warn',
-    text: 'Зупинку й перезапуск робить лише команда — mnemo service ' +
-          'stop | restart. Кнопка тут обірвала б сторінку, яка нею ж і ' +
-          'подається, а підняти службу назад мусить хтось поза нею.',
-  }));
 
   renderSettingsMessages();
 }
@@ -893,8 +897,7 @@ function renderTheme(body) {
     }));
   }
   body.appendChild(setField('Тема кабінету', seg,
-    'Вибір цього браузера, не машинне значення — тому застосовується одразу ' +
-    'й не чекає «Зберегти».'));
+    'Вибір цього браузера — тому застосовується одразу й не чекає «Зберегти».'));
 }
 
 /**

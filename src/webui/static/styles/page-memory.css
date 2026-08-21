@@ -47,10 +47,6 @@
 }
 
 .pane-head h2 { white-space: nowrap; }
-.pane-head h2.file-title {
-  letter-spacing: 0; text-transform: none; font: 500 12px/1.4 var(--mono); color: var(--fg);
-  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-}
 
 .pane-sub {
   font-family: var(--mono);
@@ -211,6 +207,11 @@
   word-break: break-all;
 }
 
+/* Same tint as the "індексується" badge and `.progress-text` below it — a
+   bank card's live/temporary state reads as one visual group, distinct from
+   the plain grey `.muted` used for durable facts like "остання індексація". */
+.note-live { color: var(--busy); }
+
 /* ---- tree ----------------------------------------------------------------- */
 
 .tree { padding: 4px 0; }
@@ -247,9 +248,29 @@
 
 /* ---- file view -------------------------------------------------------------- */
 
+/* Two lines: the path (what used to sit in the column header, in the mono
+   weight the header's own caps style never carried) above the facts about it
+   — mirrors "Банки"/"Файли", whose headers stay a static caption and never
+   carry per-item content either. */
 .file-meta {
   padding: 7px 14px;
   border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-meta-path {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-meta-info {
   font-family: var(--mono);
   font-size: 11px;
   color: var(--fg-mute);
