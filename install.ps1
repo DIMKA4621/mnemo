@@ -61,6 +61,53 @@ function Invoke-Checked {
     }
 }
 
+function Invoke-CheckedWithHeartbeat {
+    <#
+        Same contract as Invoke-Checked, for the two steps long enough that
+        silence alone reads as a hang: installing python deps and
+        downloading the embedding model. Runs the command as a background
+        job purely so a dot can be printed roughly once a second while it's
+        alive -- not for real concurrency. Deliberately NOT Start-Process
+        with -ArgumentList: that joins an array into one string without
+        quoting elements that contain spaces (an -InstallHome under
+        "C:\Program Files\..." would silently mis-split), where a job's own
+        `& $fp @fargs` call operator splats exactly like Invoke-Checked
+        already does everywhere else in this file. Captured output is
+        discarded on success and dumped on failure, so a clean run stays
+        exactly as quiet as Invoke-Checked's, just not motionless.
+    #>
+    param(
+        [string]$FilePath,
+        [string[]]$Arguments,
+        [string]$Label,
+        [string]$FailureMessage
+    )
+    Write-Host -NoNewline "install.ps1: $Label"
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+    $job = Start-Job -ScriptBlock {
+        param($fp, $fargs)
+        & $fp @fargs *>&1
+        $LASTEXITCODE
+    } -ArgumentList $FilePath, $Arguments
+
+    while ($job.State -eq "Running") {
+        Start-Sleep -Milliseconds 700
+        Write-Host -NoNewline "."
+    }
+    $output = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
+    $jobFailed = $job.State -ne "Completed"
+    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    Write-Host (" done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+
+    $exitCode = if ($output.Count -gt 0) { $output[-1] } else { 1 }
+    if ($jobFailed -or $exitCode -ne 0) {
+        if ($output.Count -gt 1) {
+            $output | Select-Object -SkipLast 1 | ForEach-Object { Write-Host "install.ps1:   $_" }
+        }
+        throw "$FailureMessage (exit $exitCode)"
+    }
+}
+
 function Resolve-PythonCommand {
     param([string]$ExplicitPython)
 
@@ -439,7 +486,7 @@ function Build-EngineVersion {
     }
 
     Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
-    Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $VersionDir "requirements.txt")) "Failed to install Python dependencies"
+    Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $VersionDir "requirements.txt")) "installing python dependencies" "Failed to install Python dependencies"
     Write-Status "python deps installed"
 
     # Fail here rather than at the user's first search: everything below
@@ -571,8 +618,10 @@ function Confirm-ModelDownload {
 function Invoke-ModelWarmup {
     param([string]$Launcher)
 
-    & $Launcher warmup
-    if ($LASTEXITCODE -ne 0) {
+    try {
+        Invoke-CheckedWithHeartbeat $Launcher @("warmup") "downloading the embedding model (~2.2 GB, one time)" "model download failed"
+    }
+    catch {
         Write-Status "the model download failed; retry with '$Launcher' warmup"
         return $false
     }
@@ -771,7 +820,7 @@ function Invoke-Install {
                 -Destination (Join-Path $currentLink $file) -Force
         }
         Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
-        Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $currentLink "requirements.txt")) "Failed to install Python dependencies"
+        Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $currentLink "requirements.txt")) "installing python dependencies" "Failed to install Python dependencies"
         # Refresh the launcher package's declared dependencies (they are read
         # from requirements.txt at build time) so `pip check` stays honest.
         # bin\mnemo.exe is deliberately not rewritten: mnemo_bootstrap now
