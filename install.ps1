@@ -936,5 +936,14 @@ try {
 }
 catch {
     [Console]::Error.WriteLine("install.ps1: ERROR: $($_.Exception.Message)")
-    exit 1
+    # $PSCommandPath is empty when this script's TEXT was run via `iex`/
+    # `& { ... }` rather than as a real file -- confirmed live: `exit` with
+    # no real file behind the execution terminates the CURRENT PowerShell
+    # process, i.e. the user's whole open terminal. install.ps1 is always
+    # a real file in every documented path (a clone, or get.ps1's own
+    # extracted copy invoked via `&`), so this only guards a direct,
+    # undocumented `iex (irm .../install.ps1)`.
+    if ($PSCommandPath) {
+        exit 1
+    }
 }

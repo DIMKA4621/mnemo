@@ -88,5 +88,16 @@ finally {
 }
 
 if ($code) {
-    exit $code
+    # $PSCommandPath is empty when this script's TEXT was run via `iex`/
+    # `& { ... }` rather than as a real file (-File, or `.\get.ps1` typed at
+    # a prompt) -- confirmed live: `exit` from code with no real file behind
+    # it terminates the CURRENT PowerShell process, i.e. the user's whole
+    # open terminal, not just "this script." A one-liner install failing
+    # should never take the user's shell down with it. When $PSCommandPath
+    # IS set (our own test suite invokes get.ps1 via -File), exit normally
+    # so a real process exit code is still reported.
+    if ($PSCommandPath) {
+        exit $code
+    }
+    Write-Host "get.ps1: failed (exit code $code)" -ForegroundColor Red
 }

@@ -520,9 +520,23 @@ if ($MyInvocation.InvocationName -eq ".") {
 }
 
 try {
-    exit (Invoke-Uninstall)
+    $result = Invoke-Uninstall
+    # $PSCommandPath is empty when this script's TEXT was run via `iex`/
+    # `& { ... }` rather than as a real file -- confirmed live, not a
+    # guess: `exit`, even with a successful $result of 0, terminates the
+    # CURRENT PowerShell process when there's no real file behind the
+    # execution, which for the one-liner IS the user's whole open
+    # terminal (that is exactly what "iex \"& { \$(irm ...) } -Yes\""
+    # does). A real file invocation (a clone's `.\uninstall.ps1`, or our
+    # own test suite's `-File`) still exits normally so a real process
+    # exit code is reported.
+    if ($PSCommandPath) {
+        exit $result
+    }
 }
 catch {
     [Console]::Error.WriteLine("uninstall.ps1: ERROR: $($_.Exception.Message)")
-    exit 1
+    if ($PSCommandPath) {
+        exit 1
+    }
 }
