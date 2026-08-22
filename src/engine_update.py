@@ -178,6 +178,26 @@ def base_version_tag(tag: str | None) -> str | None:
     return _LOCAL_BUILD_SUFFIX_RE.sub(r"\1", tag)
 
 
+_SEMVER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
+
+
+def _major_version(tag: str | None) -> int | None:
+    """The leading ``MAJOR`` out of a ``vMAJOR.MINOR.PATCH`` tag, or ``None``
+    for anything that does not match that exact shape (``"local"``, a
+    trailing local-build ``l`` not yet stripped by :func:`base_version_tag`,
+    a malformed tag from some future format change).
+
+    ``None`` is the deliberate "I don't know" answer, not "block it" --
+    :func:`auto_eligible_tag` treats it as permission to proceed, same as
+    before this gate existed. Every tag this project mints today matches
+    the pattern; this only exists for whatever does not.
+    """
+    if not tag:
+        return None
+    match = _SEMVER_RE.match(tag)
+    return int(match.group(1)) if match else None
+
+
 def _is_valid(data: Any) -> bool:
     """Structural sanity check, not a full schema validator.
 
@@ -279,11 +299,20 @@ def record_installed(*, tag: str, commit: str | None, status: str) -> dict[str, 
     return state
 
 
-def start_apply(tag: str) -> dict[str, Any]:
-    """Record that an apply attempt for ``tag`` has begun."""
+def start_apply(tag: str, *, trigger: str = "manual") -> dict[str, Any]:
+    """Record that an apply attempt for ``tag`` has begun.
+
+    ``trigger`` ("manual" or "auto") rides along on ``last_apply`` itself so
+    a client reading ``/api/update/status`` after the fact — possibly a
+    fresh process, post-restart — can tell the two apart (the frontend's own
+    auto-close-on-success behaviour depends on it). Purely descriptive here;
+    the blacklist-affecting decision still reads ``read_pending_trigger()``
+    directly, unchanged.
+    """
     state = read_state()
     state["last_apply"] = {
         "tag": tag,
+        "trigger": trigger,
         "started_at": _now_iso(),
         "finished_at": None,
         "result": None,
@@ -293,11 +322,14 @@ def start_apply(tag: str) -> dict[str, Any]:
     return state
 
 
-def finish_apply(*, tag: str, result: str, error: str | None = None) -> dict[str, Any]:
+def finish_apply(
+    *, tag: str, result: str, error: str | None = None, trigger: str = "manual"
+) -> dict[str, Any]:
     """Record how an apply attempt for ``tag`` ended."""
     state = read_state()
     state["last_apply"] = {
         "tag": tag,
+        "trigger": trigger,
         "started_at": (state.get("last_apply") or {}).get("started_at"),
         "finished_at": _now_iso(),
         "result": result,
@@ -525,6 +557,17 @@ def auto_eligible_tag() -> str | None:
     no known newer tag (or the last check does not say one is available),
     the tag is permanently blacklisted, or its retry window has not opened
     yet. Otherwise, the currently-known latest tag.
+    A MAJOR version bump is never auto-applied, regardless of everything
+    else above — a major release is where a breaking change is allowed to
+    live, and an unattended machine should never cross that line on its
+    own. Minor/patch bumps are unaffected. Decided live with the user after
+    the console-window investigation: "мажорна версія оновлюється тільки
+    вручну" (2026-08-22). Comparison is by parsed MAJOR, not string
+    equality, so it survives a local-build ``l`` suffix on either side
+    (:func:`base_version_tag` strips it first). Either side failing to
+    parse as ``vMAJOR.MINOR.PATCH`` (:func:`_major_version` returning
+    ``None``) falls back to the OLD behaviour — allow it — rather than
+    blocking on a tag shape this project has never actually minted.
     """
     if not settings.auto_update_enabled():
         return None
@@ -532,6 +575,10 @@ def auto_eligible_tag() -> str | None:
     last_check = state.get("last_check") or {}
     tag = last_check.get("latest_tag")
     if not tag or not last_check.get("update_available"):
+        return None
+    current_major = _major_version(base_version_tag(effective_current_tag(state)))
+    target_major = _major_version(base_version_tag(tag))
+    if current_major is not None and target_major is not None and target_major > current_major:
         return None
     blacklist = (state.get("auto") or {}).get("blacklist") or {}
     entry = blacklist.get(tag)

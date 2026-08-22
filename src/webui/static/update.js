@@ -81,6 +81,11 @@ const updateModal = {
   autoPendingPollTimer: null,
   autoPendingTickTimer: null,
   autoPendingError: null,
+  // 'terminal' phase, auto-triggered success only (see renderUpdateTerminal):
+  // a purely client-side, non-resumable dismiss countdown — nothing to
+  // persist across a reload, since this modal itself is never reopened by
+  // refreshUpdateStatus() for an already-'done' apply.
+  terminalAutoCloseTimer: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -136,9 +141,17 @@ function closeUpdateModal() {
   if (updateModal.phase === 'progress') return; // guarded — see buildUpdateModal
   stopUpdatePolling();
   stopAutoPendingWatch();
+  stopTerminalAutoClose();
   updateModal.phase = 'idle';
   updateModal.root.hidden = true;
   renderSidebarUpdateBanner();
+}
+
+function stopTerminalAutoClose() {
+  if (updateModal.terminalAutoCloseTimer) {
+    clearInterval(updateModal.terminalAutoCloseTimer);
+    updateModal.terminalAutoCloseTimer = null;
+  }
 }
 
 function renderUpdateModal() {
@@ -526,6 +539,7 @@ function renderUpdateTerminal() {
   clear(updateModal.body);
   clear(updateModal.foot);
   updateModal.closeBtn.hidden = false;
+  stopTerminalAutoClose(); // re-render must not stack a second interval
 
   const u = state.update || {};
   const apply = u.apply || {};
@@ -555,9 +569,34 @@ function renderUpdateTerminal() {
   }
 
   updateModal.body.appendChild(el('p', { className: 'upd-row ' + cls, text: text }));
+
+  // Auto-triggered AND successful only — a failed/rolled-back outcome needs
+  // a human's attention regardless of trigger, and a manual click already
+  // means someone is watching this screen right now. Decided live with the
+  // user (2026-08-22): unattended updates should not leave a stale "click
+  // to dismiss" dialog sitting on screen indefinitely.
+  const autoCloseRow = (apply.state === 'done' && apply.trigger === 'auto')
+    ? el('p', { className: 'upd-row upd-terminal-autoclose' }, [
+        document.createTextNode('Закриється автоматично через '),
+        el('strong', { className: 'upd-countdown', text: '10' }),
+        document.createTextNode(' с.'),
+      ])
+    : null;
+  if (autoCloseRow) updateModal.body.appendChild(autoCloseRow);
+
   updateModal.foot.appendChild(el('button', {
     className: 'btn btn-primary', text: 'Закрити', on: { click: () => closeUpdateModal() },
   }));
+
+  if (autoCloseRow) {
+    const countdownEl = autoCloseRow.querySelector('.upd-countdown');
+    let secondsLeft = 10;
+    updateModal.terminalAutoCloseTimer = setInterval(() => {
+      secondsLeft -= 1;
+      if (secondsLeft <= 0) { closeUpdateModal(); return; }
+      if (countdownEl) countdownEl.textContent = String(secondsLeft);
+    }, 1000);
+  }
 }
 
 // ---------------------------------------------------------------------------
