@@ -52,7 +52,7 @@
 'use strict';
 
 const UPDATE_POLL_MS = 2000;
-const UPDATE_POLL_TIMEOUT_MS = 3 * 60 * 1000; // 3 minutes of silence before giving up
+const UPDATE_POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes of silence before giving up
 
 // Ordered for display only — the real state machine is `apply.state` +
 // `apply.step` from the backend (see updateStepIndex()).
@@ -683,11 +683,22 @@ function onUpdateProgress(data) {
 // sidebar banner
 // ---------------------------------------------------------------------------
 
+// A local build's tag carries its base release plus a lowercase "l" marker
+// ("v3.0.1l", install.ps1/install.sh's Get-LocalCheckoutVersionTag /
+// get_local_checkout_version_tag scheme, 2026-08-22) -- strip it before
+// comparing to a release tag, mirroring engine_update.py's own
+// base_version_tag(). Without this, a local build sitting on top of the
+// latest release can never string-match it and nags "update available"
+// forever, offering to overwrite its own fixes with the vanilla release.
+function baseVersionTag(tag) {
+  return tag ? tag.replace(/(\d)l$/, '$1') : tag;
+}
+
 function shouldShowUpdateBanner(u) {
   if (!u || !u.latest_known || !u.latest_known.update_available) return false;
   // See file header: `update_available` is not recomputed after a switch,
   // so a tag comparison against `current` is the narrower, correct guard.
-  if (u.current && u.current.tag && u.current.tag === u.latest_known.tag) return false;
+  if (u.current && u.current.tag && baseVersionTag(u.current.tag) === u.latest_known.tag) return false;
   return true;
 }
 

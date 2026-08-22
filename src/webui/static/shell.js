@@ -145,12 +145,25 @@ function initShell() {
 // keep the logic they always had, they just target the new location.
 // ---------------------------------------------------------------------------
 
+// A trailing lowercase "l" right after a digit is install.ps1/install.sh's
+// own marker (Get-LocalCheckoutVersionTag / get_local_checkout_version_tag,
+// 2026-08-22) for "built from this checkout, not the official release it's
+// based on" -- e.g. "v3.0.1l". Real release tags never end this way.
+const LOCAL_BUILD_VERSION_RE = /\dl$/;
+
 function renderService() {
   const provider = $('sb-provider-text');
   const version = $('sb-version-text');
   const svc = state.service;
   if (provider) provider.textContent = svc ? (svc.provider || '—') : '—';
-  if (version) version.textContent = svc ? ('v ' + (svc.version || '—')) : '—';
+  if (version) {
+    const v = svc ? (svc.version || '—') : '—';
+    // A real tag (from effective_current_tag(), 2026-08-22) already carries
+    // its own "v" prefix ("v3.0.1", "v3.0.0l") -- only a bare number or the
+    // "local"/"—" sentinels need one prepended, else this read "v v3.0.1".
+    version.textContent = (/^v\d/.test(v) ? v : 'v ' + v);
+    version.classList.toggle('is-local-build', LOCAL_BUILD_VERSION_RE.test(v));
+  }
   const foot = $('sb-foot');
   if (foot && svc) {
     foot.title = 'провайдер ' + (svc.provider || '—') + ' · версія ' + (svc.version || '—');
@@ -217,6 +230,14 @@ function resyncAll() {
   loadBanks().catch(reportError);
   loadStatus().catch(() => {});
   loadLogs().catch(() => {});
+  // Self-update kills this socket mid-switch by design (update.js's header
+  // comment) — without this, a tab that wasn't actively watching an open
+  // progress modal when the switch happened (auto-apply firing server-side,
+  // or another tab/CLI triggering it) is left with a permanently stale
+  // `state.update` — a stuck badge, a stale tag comparison — until a manual
+  // full reload. Same "stays silent, not banner-worthy on its own" contract
+  // `refreshUpdateStatus()` already documents for its own fetch failure.
+  refreshUpdateStatus().catch(() => {});
   if (state.selectedBankId) loadTree().catch(() => {});
 }
 
