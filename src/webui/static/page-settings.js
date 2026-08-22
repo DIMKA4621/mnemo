@@ -1,7 +1,7 @@
 /* Налаштування (contract 9.5: GET/PUT /api/settings) — horizontal tabs under
  * the header instead of the old fixed `.screen` overlay with a vertical
  * `.set-nav`. The section bodies below are a close-to-mechanical port of the
- * current live cabinet's form-building code; only the frame around them
+ * current live console's form-building code; only the frame around them
  * changed shape.
  *
  * This is also the last script the page loads, so `boot()` (app.js) is
@@ -88,7 +88,7 @@ const SETTINGS_SECTIONS = [
 ];
 
 const SECTION_LEDE = {
-  general: 'Те, що стосується самого кабінету й машини в цілому — не окремого ' +
+  general: 'Те, що стосується самої консолі й машини в цілому — не окремого ' +
            'банку і не бекенда ембедингу.',
   embed: 'Який бекенд рахує вектори для пошуку в банках і скільки оперативної ' +
          'памʼяті він для цього займає.',
@@ -782,7 +782,7 @@ function renderEmbedMemory(body) {
     notes.push('Підніметься назад за кілька секунд.');
   }
   if (held === 'n/a') {
-    // The cabinet's own wording, not the backend's `detail`. A steady state
+    // The console's own wording, not the backend's `detail`. A steady state
     // that every client renders the same way belongs to the interface — the
     // API stays English by convention, and echoing it here would put one
     // English line in the middle of a Ukrainian screen.
@@ -794,7 +794,7 @@ function renderEmbedMemory(body) {
   if (info.expires_at) notes.push('Бекенд тримає її до ' + info.expires_at + '.');
   if (info.others_held) {
     // A count, never the names: the other models are somebody else's, and
-    // this cabinet unloads ours alone.
+    // this console unloads ours alone.
     notes.push('Там же ще ' + info.others_held + ' модел(і/ей) — не наші, ' +
                'їх не чіпаємо.');
   }
@@ -825,7 +825,7 @@ async function embedAction(what) {
     }
   } catch (err) {
     if (isAuthError(err)) { openGate('rejected'); return; }
-    // The cabinet's own wording for the one error this button realistically
+    // The console's own wording for the one error this button realistically
     // hits — same reasoning as the `n/a` notes above: the backend's `detail`
     // stays English by convention, and this is the one code worth naming
     // instead of echoing that English sentence onto a Ukrainian screen.
@@ -918,7 +918,7 @@ function humanUptime(seconds) {
  * is to show the state and name the command.
  */
 /**
- * What applies to this machine's cabinet regardless of which bank is open:
+ * What applies to this machine's console regardless of which bank is open:
  * the browser's own preference first (theme — applies on click, nothing for
  * Save to do with it), then what changes the machine (autostart — needs
  * Save), then what merely reports (process facts, sitting under both since
@@ -978,12 +978,12 @@ function renderTheme(body) {
       },
     }));
   }
-  body.appendChild(setField('Тема кабінету', seg,
+  body.appendChild(setField('Тема консолі', seg,
     'Вибір цього браузера — тому застосовується одразу й не чекає «Зберегти».'));
 }
 
 /**
- * Start at logon — a `.segmented` pair, the control this cabinet already uses
+ * Start at logon — a `.segmented` pair, the control this console already uses
  * for a two-state choice.
  *
  * Unlike stopping the service this is safe to offer: registering a scheduled
@@ -1103,7 +1103,7 @@ function renderAutoUpdate(body) {
 
   body.appendChild(setField('Автоматичне оновлення', seg,
     'Придатний реліз застосовується сам — з коротким відліком і кнопкою ' +
-    '«Скасувати» просто в кабінеті. Вимкнено — лишається тільки банер і ' +
+    '«Скасувати» просто в консолі. Вимкнено — лишається тільки банер і ' +
     'ручне підтвердження, як і раніше.'));
 
   const autoUpdateOverride = overrideNote('auto_update');
@@ -1130,7 +1130,7 @@ function renderAutoUpdate(body) {
     body.appendChild(el('p', { className: 'modal-error', text: settings.updateCheckError }));
   } else if (settings.updateCheckResult) {
     // A real result, not page-description text -- badge it the same way the
-    // rest of the cabinet marks a live outcome: warm for "there's something
+    // rest of the console marks a live outcome: warm for "there's something
     // new" (matches the sidebar banner, same wording too, so the same fact
     // never reads as two different things in two places), a green bordered
     // chip for "you're already current" (matches .tok-ok's success styling

@@ -1,6 +1,6 @@
 """The backend: one loopback HTTP service, one writer, many thin faces.
 
-Everything mnemo does from the outside — MCP, CLI, hooks, the web cabinet —
+Everything mnemo does from the outside — MCP, CLI, hooks, the web console —
 is a client of this app (Memory-contracts-v3 §9). It owns the registry, the
 journal and (from phase 3) the queue and the watcher; nothing else writes an
 index.
@@ -10,7 +10,7 @@ Shape of the thing:
 * bound to ``127.0.0.1``. ``/mcp``, ``/mcp-admin`` and ``/mcp-tools`` are
   guarded by a bearer token (``STATE_DIR/api.token`` for the service token,
   minted lazily on first use of one of those three faces). ``/api`` — the
-  cabinet and CLI's own channel — is **open by default**: a loopback-only
+  console and CLI's own channel — is **open by default**: a loopback-only
   local UI gated behind a login token was friction with no real security
   benefit against local access, so `/api` requires the token only when one
   has been explicitly configured (``$MNEMO_API_TOKEN``, or a future opt-in
@@ -203,7 +203,7 @@ _MCP_401 = (
     "bank, and nothing else does. This one does not match any registered "
     "bank.\n"
     "If you just cloned this project, its `.mcp.env` is not in git and your "
-    "MNEMO_TOKEN is still blank. Fix it in three steps: open the cabinet "
+    "MNEMO_TOKEN is still blank. Fix it in three steps: open the console "
     "(`mnemo ui`), copy the token of the bank this project uses, paste it as "
     "MNEMO_TOKEN in `.mcp.env`, then run `bash mcp-setup.sh` to regenerate "
     "`.mcp.json`. A project with no `.mcp.json.template` instead gets its "
@@ -752,7 +752,7 @@ def _queue_snapshot_json() -> dict:
         "high": snap.high,
         "normal": snap.normal,
         "low": snap.low,
-        # Service-wide totals cannot tell the cabinet which of 12 queued
+        # Service-wide totals cannot tell the console which of 12 queued
         # tasks belong to which bank — and a bank list is exactly that view.
         # The worker already has the breakdown, so it travels with every
         # queue event and is the single source for per-bank counters.
@@ -1052,7 +1052,7 @@ async def auth_middleware(request: Request, call_next):
         #   /api/*        the service token — but ONLY if one has been
         #                 deliberately configured (`_configured_token()`).
         #                 With none configured (the default), `/api` is open:
-        #                 it is the cabinet's and CLI's own local channel,
+        #                 it is the console's and CLI's own local channel,
         #                 loopback-only, and a login token bought no real
         #                 security there while costing every fresh `mnemo ui`
         #                 open a "paste the token" screen. Set
@@ -1172,7 +1172,7 @@ class ReindexRequest(BaseModel):
 
 
 class CleanOrphansRequest(BaseModel):
-    # The ids the cabinet just displayed. The endpoint re-lists and re-checks
+    # The ids the console just displayed. The endpoint re-lists and re-checks
     # each one; accepting "all" would let an index that appeared after the
     # confirmation be deleted without ever having been shown.
     ids: list[str] = Field(default_factory=list, max_length=1000)
@@ -1457,7 +1457,7 @@ def api_patch_bank(bank_id: str, req: PatchBankRequest) -> dict:
 #
 # The credential a project's own wiring carries. `/api`, so: service token,
 # hidden from the schema. Deliberately NOT part of `_bank_info` — a bank list
-# is rendered in the cabinet and pasted into issues, and a secret that rides
+# is rendered in the console and pasted into issues, and a secret that rides
 # along with every listing is a secret that leaks by accident. It is fetched
 # for one bank, on purpose, by the one view that shows it.
 
@@ -1563,7 +1563,7 @@ def _unlink_index(bank: Bank) -> tuple[int, list[Path]]:
 # A browser cannot tell a page which folder the user picked. `webkitdirectory`
 # yields relative names only, and `showDirectoryPicker()` hands back a handle
 # while withholding the path *on purpose* — the absolute path is treated as
-# private to the machine. So the cabinet's "add a bank" picker cannot come from
+# private to the machine. So the console's "add a bank" picker cannot come from
 # the page; the walking has to happen on this side, and this is that endpoint.
 #
 # It is deliberately the smallest thing that answers the two questions a person
@@ -1878,7 +1878,7 @@ def _as_indexed(raw: bytes) -> str:
     ``start_char`` / ``end_char`` are **Python code-point offsets** into this
     string — not bytes, not UTF-16 units. Two conversions have to match the
     indexer's ``Path.read_text(encoding="utf-8")`` or every boundary the
-    cabinet draws is silently wrong:
+    console draws is silently wrong:
 
     * **UTF-8 decode**, so one Cyrillic letter is one position, not two;
     * **universal newlines**, so a CRLF file (the norm on Windows) counts one
@@ -1967,7 +1967,7 @@ def api_status() -> dict:
         "service": {
             "version": SERVICE_VERSION,
             "pid": os.getpid(),
-            # Both halves of the address, because the cabinet builds the
+            # Both halves of the address, because the console builds the
             # config snippets a project pastes and cannot read the binding
             # from anywhere else. `location.hostname` is not the same fact:
             # it is how *this browser* reached the service, which on a
@@ -2060,7 +2060,7 @@ def api_settings() -> dict:
     """Machine settings, each with the value AND where it came from.
 
     The origin is not decoration. Precedence is environment > file, so a
-    value the cabinet stored can be inert, and a form that cannot say
+    value the console stored can be inert, and a form that cannot say
     "overridden by MNEMO_PROVIDER" shows a field that silently does nothing
     when saved.
     """
@@ -2077,7 +2077,7 @@ def api_settings() -> dict:
             }
             for key, item in resolved.items()
         },
-        # Shown, never editable: the cabinet reaches the service through this
+        # Shown, never editable: the console reaches the service through this
         # port and every project's `.mcp.json` holds it, so changing it from
         # a form would cut the page off from its own backend and break wiring
         # the form cannot see. It is an installer-level decision.
@@ -2145,7 +2145,7 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
 
 
 # A `warmup --force` we spawned, tracked by PID so a page reload (or a
-# second cabinet tab) still sees it in progress. Module-level and
+# second console tab) still sees it in progress. Module-level and
 # single-slot: only one download can be in flight at a time, which is also
 # what `download_in_progress` refuses against.
 _download: dict[str, Any] = {"pid": None, "started_at": None, "failed": False}
@@ -2154,7 +2154,7 @@ _download: dict[str, Any] = {"pid": None, "started_at": None, "failed": False}
 def _download_status() -> dict:
     """Reconcile `_download` against reality, then report it.
 
-    Lazy rather than a polling thread: the cabinet already refetches
+    Lazy rather than a polling thread: the console already refetches
     `/api/embed/state` every few seconds while the button is disabled, so a
     check made right here catches the transition just as fast for a lot less
     code. Once the tracked PID has exited, the model being cached is success
@@ -2179,7 +2179,7 @@ def api_embed_state() -> dict:
 
     Its own endpoint rather than a field on `/api/status`, for the reason
     `/api/autostart` is separate: answering can cost an HTTP round trip to
-    Ollama, and the cabinet refetches status on every indexing event. This
+    Ollama, and the console refetches status on every indexing event. This
     is read when the settings screen opens.
     """
     from . import embedctl
@@ -2234,7 +2234,7 @@ def _embed_action(action) -> dict:
         # `depth == 0` is the common case, not an edge one — a message that
         # only ever cited `depth` read as "0 pending" while also claiming
         # "still working", which is exactly the contradiction a caller like
-        # the cabinet would otherwise have to explain away on its own.
+        # the console would otherwise have to explain away on its own.
         if current and not depth:
             detail = ("a file is being embedded through this backend right "
                        "now — wait for it to finish")
@@ -2272,7 +2272,7 @@ def api_autostart() -> dict:
     """Is the service registered to start at logon.
 
     Its own endpoint rather than a field in `/api/status`: answering costs a
-    `schtasks` (or `systemctl`) subprocess, ~45 ms measured, and the cabinet
+    `schtasks` (or `systemctl`) subprocess, ~45 ms measured, and the console
     refetches status on every indexing event. That is a real cost paid
     constantly for a fact that changes when somebody deliberately changes it,
     so it is fetched when the settings screen opens instead.
@@ -2288,7 +2288,7 @@ def api_autostart_set(payload: dict = Body(...)) -> dict:
 
     Returns the state as re-read afterwards, not the state we intended: the
     registration can fail (a missing launcher, a policy that forbids the task)
-    and a cabinet that ticked its own checkbox on an optimistic reply would
+    and a console that ticked its own checkbox on an optimistic reply would
     then show autostart as on while nothing was registered.
     """
     from . import autostart
@@ -2352,7 +2352,7 @@ _apply_progress_touched_at = 0.0
 
 # Unattended auto-apply's pending countdown (block M extension). Also
 # in-process only, same reasoning as `_apply_progress` above: it exists only
-# to let a human watching the cabinet see and cancel a countdown before it
+# to let a human watching the console see and cancel a countdown before it
 # fires, and once it settles (fired or confirmed) the real work continues
 # through `_begin_apply`/`_run_staged_apply`, which is what persists.
 #
@@ -2962,7 +2962,7 @@ async def ws_endpoint(
         hub.disconnect(websocket)
 
 
-# The cabinet's assets — `src.webui.STATIC_DIR` and nothing else from that
+# The console's assets — `src.webui.STATIC_DIR` and nothing else from that
 # package. Mounting the package directory would put `devserver.py` (a
 # developer tool) on the request path; the static tree is the only thing the
 # service serves. Mounted only when ui-dev has shipped it, so the backend
@@ -2996,7 +2996,7 @@ if _STATIC_DIR is not None and _STATIC_DIR.is_dir():
 #
 # These are also the ONLY routes in the OpenAPI schema: every `/api` route is
 # `include_in_schema=False`, so `/docs` shows what is meant to be looked at
-# from outside and not the cabinet's private plumbing.
+# from outside and not the console's private plumbing.
 
 _MIRROR_TAGS = ["mcp-tools"]
 

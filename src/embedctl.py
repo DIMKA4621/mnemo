@@ -38,7 +38,7 @@ fact; it is confined to the ``ollama`` preset id, next to the other things
 that are true only of that backend.
 
 Only **our** model is unloaded, never everything Ollama happens to hold:
-other models there belong to whoever loaded them, and this cabinet is not
+other models there belong to whoever loaded them, and this console is not
 where somebody's chat model gets evicted.
 """
 from __future__ import annotations

@@ -1,4 +1,4 @@
-/* mnemo web cabinet (FR-7, v1) — shared chrome.
+/* mnemo web console (FR-7, v1) — shared chrome.
  *
  * Thin client over the v3 HTTP API (contract 9.5) and the WebSocket progress
  * channel (contract 9.7). It renders what the backend reports and nothing
@@ -56,7 +56,7 @@ function resolveTheme() {
  * Sets the attribute the CSS keys off and persists the choice.
  *
  * There is no permanent theme control in the shell any more — it moved into
- * Налаштування → Загальні (design decision, `.claude/memory/topics/cabinet-ui.md`)
+ * Налаштування → Загальні (design decision, `.claude/memory/topics/console-ui.md`)
  * as the one control on that screen that applies on click rather than
  * waiting for «Зберегти». Whatever renders that control is responsible for
  * reflecting the active choice; this function only ever sets it.
@@ -244,7 +244,7 @@ function reportError(err) {
 const GATE_COPY = {
   missing: {
     title: 'Потрібен токен доступу',
-    text: 'Щоб відкрити кабінет, потрібен токен. ' +
+    text: 'Щоб відкрити консоль, потрібен токен. ' +
           'Команда друкує посилання з чинним токеном і відкриває його:',
     lead: null,
     note: null,
@@ -508,7 +508,7 @@ function progressBlock(live) {
       className: 'progress-text',
       text: progressText(live),
       title: live.approx
-        ? 'час відколи кабінет побачив цю задачу — вона почалася раніше'
+        ? 'час відколи консоль побачила цю задачу — вона почалася раніше'
         : 'час від початку задачі',
     }),
   ]);
@@ -615,7 +615,7 @@ function reconcileProgress(queue) {
  * Replace one bank's row with a fresh BankInfo and repaint.
  *
  * Shared by the `bank_status` event and by any request that answers with a
- * BankInfo, so a change applied through the cabinet lands exactly the way the
+ * BankInfo, so a change applied through the console lands exactly the way the
  * same change arriving over the socket would.
  */
 function applyBank(info) {
@@ -1076,7 +1076,7 @@ const bankToken = {
  * The port a generated config must point at.
  *
  * `/api/status` is the service's own statement of where it listens; the page's
- * own URL is the fallback, because a cabinet answering at :8919 was plainly
+ * own URL is the fallback, because a console answering at :8919 was plainly
  * served by something on :8919. A hardcoded 8918 would hand out a config that
  * cannot connect the moment the service moves.
  */
@@ -1395,7 +1395,7 @@ function entryHintText() {
  *
  * There is really one question here: does this project substitute values from
  * `.mcp.env`, or hold them directly? `SCOPE_HINT` below is what answers it,
- * because the cabinet cannot look at the project and see for itself.
+ * because the console cannot look at the project and see for itself.
  */
 const SCOPE_TABS = [
   ['literal', 'зі значеннями · .mcp.json або ~/.claude.json'],
@@ -1582,7 +1582,7 @@ function renderTokenPanel() {
   body.appendChild(el('p', {
     className: 'tok-note',
     text: 'Відкриває лише банк «' + bank.name + '». Службовий токен, яким ' +
-          'відкрито цей кабінет, ширший — у конфіг проєкту він не потрібен.',
+          'відкрито цю консоль, ширший — у конфіг проєкту він не потрібен.',
   }));
 
   // The URL no longer carries the bank, so two mnemo entries side by side
@@ -1819,7 +1819,7 @@ function closeBankMenu() {
 // ---------------------------------------------------------------------------
 // removing a bank (contract 9.5: DELETE /api/banks/{id})
 //
-// The only irreversible action in the cabinet, and what makes it irreversible
+// The only irreversible action in the console, and what makes it irreversible
 // is not the index — that rebuilds — but the token. Bank ids are derived from
 // the root and come back identical on re-registration; tokens are minted, so a
 // removed bank cannot be restored to the projects that address it. That is why
@@ -2037,7 +2037,7 @@ async function start() {
   }
   connectSocket();
   // Not part of the try/catch above: a self-update check failing must not
-  // block the rest of the cabinet, and it has its own error handling (it
+  // block the rest of the console, and it has its own error handling (it
   // simply stays silent — see update.js).
   refreshUpdateStatus();
 }

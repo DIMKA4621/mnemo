@@ -130,7 +130,7 @@ def _cmd_warmup(args: argparse.Namespace) -> int:
 
 
 def _cmd_doctor() -> int:
-    """One report, rendered for the terminal from the cabinet's same data."""
+    """One report, rendered for the terminal from the console's same data."""
     from . import diagnostics
 
     report = diagnostics.collect()
@@ -649,13 +649,13 @@ def _cmd_logs(args: argparse.Namespace) -> int:
 
 
 def _cmd_ui() -> int:
-    """Print the cabinet's URL. Opens nothing.
+    """Print the console's URL. Opens nothing.
 
     `/api` is open by default — no login token — since it is a loopback-only
     local channel (2026-08-21 decision, api.py's `auth_middleware`). So the
     plain URL is enough; nothing to fill in. If a token has been explicitly
     configured (`$MNEMO_API_TOKEN`, or a future opt-in "generate" step), it
-    is still appended so the cabinet stays reachable in that mode too.
+    is still appended so the console stays reachable in that mode too.
 
     It used to call `webbrowser.open` as well. Which browser that reaches is
     not a decision this command gets to make: it is whatever the OS has
@@ -909,7 +909,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     sub.add_parser(
         "ui",
-        help="Print the link to the local cabinet — banks, file tree, chunk "
+        help="Print the link to the local console — banks, file tree, chunk "
              "boundaries, reindex buttons, journal. Token filled in; opens "
              "no browser.",
     )

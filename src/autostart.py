@@ -352,10 +352,10 @@ def state() -> dict:
     the same question asked once, in the form both faces can use.
 
     Read-only and side-effect free by contract: it is answered inside
-    ``/api/status``, which the cabinet polls, so registering or repairing
+    ``/api/status``, which the console polls, so registering or repairing
     anything from here would turn opening a page into changing the machine.
 
-    ``supported`` is what keeps the cabinet honest about an OS we do not
+    ``supported`` is what keeps the console honest about an OS we do not
     register on: absent is not the same fact as "not applicable here", and a
     checkbox cannot show the difference on its own.
     """

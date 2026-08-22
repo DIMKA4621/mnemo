@@ -1,5 +1,5 @@
-/* Журнал: master-detail, new for the real cabinet. Ported from
- * docs/cabinet-design.html's fixture almost unchanged.
+/* Журнал: master-detail, new for the real console. Ported from
+ * docs/console-design.html's fixture almost unchanged.
  *
  * The events/detail split is drag-resizable, same `.pane-resizer` (base.css)
  * and `wireColumnResizer` (app.js) as Памʼять — `.jl`'s grid-template-columns

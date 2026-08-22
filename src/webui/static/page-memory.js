@@ -1,5 +1,5 @@
 /* Памʼять: Банки → Файли → Вміст. A close-to-mechanical port of the current
- * live cabinet's three-pane workspace — same ids, same behaviour — plus the
+ * live console's three-pane workspace — same ids, same behaviour — plus the
  * header summary line and the mobile pane switch the new shell needs now
  * that the three panes are no longer always side by side.
  */
@@ -741,7 +741,7 @@ function clampPaneWidth(px) {
 
 /** The stored [Банки, Файли] widths, or the default when nothing was ever
  *  dragged (or the stored value is corrupt — same "fall through, don't
- *  throw" rule as every other localStorage read in this cabinet). */
+ *  throw" rule as every other localStorage read in this console). */
 function loadPaneWidths() {
   try {
     const raw = JSON.parse(localStorage.getItem('mnemo_pane_widths'));

@@ -33,7 +33,7 @@
  * this by also requiring `current.tag !== latest_known.tag` — strictly
  * narrower than the literal "banner on update_available" instruction, never
  * hiding a real update, only suppressing the false-positive re-appearance
- * right after this cabinet's own successful apply.
+ * right after this console's own successful apply.
  *
  * Unattended auto-apply (backend: commit 4f977b6) extends this with a
  * second, independent entry point: the checker's own background tick can
@@ -500,7 +500,7 @@ function renderUpdateTimeout() {
   updateModal.body.appendChild(el('p', {
     className: 'upd-row modal-error',
     text: 'Не вдалося дізнатися результат оновлення за відведений час. Служба ' +
-          'могла ще перезапускатися, або кабінет тимчасово не звʼязується з ' +
+          'могла ще перезапускатися, або консоль тимчасово не звʼязується з ' +
           'нею. Перевірте вручну (mnemo doctor) або спробуйте ще раз.',
   }));
 

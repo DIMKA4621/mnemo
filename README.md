@@ -4,7 +4,7 @@
 
 You write `.md` — within a second, any agent, in any session, already sees the change. Nothing needs to be re-read — it's just already there.
 
-<img src="docs/cabinet.png" width="820" alt="The mnemo cabinet: banks, a file tree, and a document with its chunk boundaries drawn in">
+<img src="docs/console.png" width="820" alt="The mnemo console: banks, a file tree, and a document with its chunk boundaries drawn in">
 
 ## How it works
 
@@ -51,7 +51,7 @@ If you need isolation, just set up another bank — separate notes for a differe
 
 Every bank logs its own events, and its index can be rebuilt independently.
 
-### The cabinet
+### The console
 
 A local web interface — http://127.0.0.1:4646/ui
 
@@ -101,7 +101,7 @@ cd mnemo; .\install.ps1
 
 Both ways take the same two flags. Leave them alone unless you specifically know you want something other than the default:
 
-- `--no-model`/`-NoModel` — skip the ~2 GB embedding model download. **Default: it downloads.** The one-liner downloads it right away; a manual `install.sh`/`install.ps1` run asks first (or skips quietly if there's no one to ask). Skipped it? Fetch it anytime with `mnemo warmup`, or from the cabinet's Settings page.
+- `--no-model`/`-NoModel` — skip the ~2 GB embedding model download. **Default: it downloads.** The one-liner downloads it right away; a manual `install.sh`/`install.ps1` run asks first (or skips quietly if there's no one to ask). Skipped it? Fetch it anytime with `mnemo warmup`, or from the console's Settings page.
 - `--home DIR`/`-InstallHome DIR` — install somewhere other than the default `~/.mnemo`.
 
 Passing a flag through the one-liner needs each shell's own idiom for arguments after a pipe: `curl ... | bash -s -- --no-model`, and on PowerShell `iex "& { $(irm ...) } -NoModel"`.
@@ -118,20 +118,20 @@ mnemo init
 
 What it does:
 
-- registers the project's `.claude/memory/` as a bank, wires it into the cabinet, and indexes it right away;
+- registers the project's `.claude/memory/` as a bank, wires it into the console, and indexes it right away;
 - creates the MCP connection for it at the project root — `.mcp.json`: if the file already exists, it just adds its own entry; if not, it creates one;
 - adds the rule for how to use this memory: when to search, how to write notes, how the whole layout stays current.
 
 ## Commands
 
-Everything you need can be done through the cabinet — `mnemo ui`.
+Everything you need can be done through the console — `mnemo ui`.
 
 The essentials are below; for the full list — `mnemo --help`.
 
 ```
 mnemo service start|stop   start / stop the service
 mnemo status | doctor      service state, model, tokens, banks
-mnemo ui                   link to the cabinet
+mnemo ui                   link to the console
 mnemo init                 attach a project
 mnemo search "query"       search the current directory's bank (or --bank <name>)
 mnemo reindex              force a reindex (usually not needed — the watcher does it on its own)

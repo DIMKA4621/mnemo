@@ -289,7 +289,7 @@
 
     <figure>
       <svg viewBox="0 0 900 470" role="img"
-           aria-label="Один бекенд на порту 8918 роздає п'ять шляхів: /mcp відкривається токеном банку для сесії Claude Code; /mcp-admin і /mcp-tools — сервісним токеном; /ui віддає статику кабінету без токена, а сам кабінет і CLI ходять у /api за сервісним токеном">
+           aria-label="Один бекенд на порту 8918 роздає п'ять шляхів: /mcp відкривається токеном банку для сесії Claude Code; /mcp-admin і /mcp-tools — сервісним токеном; /ui віддає статику консолі без токена, а сама консоль і CLI ходять у /api за сервісним токеном">
         <defs>
           <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5"
                   markerWidth="7" markerHeight="7" orient="auto-start-reverse">
@@ -336,11 +336,11 @@
 
         <rect class="bx" x="340" y="286" width="520" height="56" rx="3"/>
         <text class="t" x="356" y="310">/ui/</text>
-        <text class="t-sm" x="356" y="329">статика кабінету — єдине, що не за токеном</text>
+        <text class="t-sm" x="356" y="329">статика консолі — єдине, що не за токеном</text>
 
         <rect class="bx" x="340" y="356" width="520" height="56" rx="3"/>
         <text class="t" x="356" y="380">/api/*</text>
-        <text class="t-sm" x="356" y="399">приватний канал кабінету · схований з OpenAPI</text>
+        <text class="t-sm" x="356" y="399">приватний канал консолі · схований з OpenAPI</text>
 
         <!-- arrows -->
         <g style="color: var(--ink)">
@@ -379,7 +379,7 @@
           <tr><td class="k">/mcp</td><td class="auth">токен банку</td><td class="no">сервісний → 401</td><td>читання одного банку</td></tr>
           <tr><td class="k">/mcp-admin</td><td class="auth">сервісний</td><td class="no">токен банку → 401</td><td>керування банками</td></tr>
           <tr><td class="k">/mcp-tools/*</td><td class="auth">сервісний</td><td class="no">токен банку → 401</td><td>ті самі тули для людини</td></tr>
-          <tr><td class="k">/api/*</td><td class="auth">сервісний</td><td class="no">токен банку → 401</td><td>кабінет ↔ бекенд</td></tr>
+          <tr><td class="k">/api/*</td><td class="auth">сервісний</td><td class="no">токен банку → 401</td><td>консоль ↔ бекенд</td></tr>
         </tbody>
       </table>
     </div>
@@ -550,7 +550,7 @@
         </thead>
         <tbody>
           <tr><td class="k">banks.json</td><td>реєстр банків: корінь, ім'я, токен</td><td>перереєструвати банки вручну</td></tr>
-          <tr><td class="k">api.token</td><td>сервісний токен (48 hex)</td><td>переписати wiring кабінету</td></tr>
+          <tr><td class="k">api.token</td><td>сервісний токен (48 hex)</td><td>переписати wiring консолі</td></tr>
           <tr><td class="k">&lt;bank&gt;.db</td><td>індекс банку: вектори, FTS, sha256</td><td class="no">нічого — відбудується з .md</td></tr>
           <tr><td class="k">service.db</td><td>журнал запитів та індексацій</td><td class="no">історію, не дані</td></tr>
           <tr><td class="k">service.json / .pid</td><td>де і ким піднято бекенд</td><td class="no">нічого — пишеться на старті</td></tr>

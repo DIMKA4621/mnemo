@@ -8,14 +8,14 @@ own.
 **Precedence: environment > file > code default.** A variable exported for one
 run must still beat a stored value, or scripts and CI stop being predictable.
 The cost is that a stored value can be silently inert, so `effective()`
-reports *where* each value came from and the cabinet is expected to say so —
+reports *where* each value came from and the console is expected to say so —
 otherwise a click appears to do nothing and the page is lying.
 
 **What belongs here is only what a person genuinely configures**: which
 provider, and the endpoint that provider needs. The other ~30 knobs stay
 environment-only debug levers. Two were considered and deliberately left out:
 
-* the **API port** — the cabinet reaches the service *through* it, and every
+* the **API port** — the console reaches the service *through* it, and every
   project's ``.mcp.json`` holds it, so changing it from a form would cut the
   page off from its own backend and break wiring the form cannot see. It is
   an installer-level decision, shown here but not editable.
@@ -24,7 +24,7 @@ environment-only debug levers. Two were considered and deliberately left out:
   here when the calibration button can measure and write it.
 
 **Everything is a function, never an import-time constant.** ``config.py``
-evaluates its knobs once at import; a value the cabinet can edit cannot be one
+evaluates its knobs once at import; a value the console can edit cannot be one
 of those. This is the same scar as ``BANKS_FILE`` — a constant derived from
 ``STATE_DIR`` froze the path and leaked empty databases into the real state
 directory. So: call ``provider()``, never ``from .settings import PROVIDER``.
@@ -151,7 +151,7 @@ class Value:
     """One resolved setting, and where it came from.
 
     ``source`` is why this type exists: with environment > file, a value the
-    cabinet stored can be overridden and therefore inert. A form that cannot
+    console stored can be overridden and therefore inert. A form that cannot
     say so shows the user a field that does nothing when they save it.
     """
 
@@ -212,7 +212,7 @@ def _as_bool(value: Value) -> Value:
     """Coerce a resolved value to bool, tolerant of either representation.
 
     The env var always arrives as a string ("true"/"1"/"false"/"0"); the
-    file may hold either a native JSON bool (the cabinet writes one) or a
+    file may hold either a native JSON bool (the console writes one) or a
     string (a human hand-edited it). Anything not recognised as false-ish
     falls back to Python truthiness rather than raising, matching
     ``_as_int``/``_as_float``'s "never blow up resolving a setting" contract.
@@ -306,7 +306,7 @@ def auto_update_enabled() -> bool:
 def effective() -> dict[str, Value]:
     """Every setting with its resolved value AND its origin.
 
-    What the cabinet's settings page renders: the value to show, plus whether
+    What the console's settings page renders: the value to show, plus whether
     an environment variable is overriding what the file says, so a stored
     value that cannot take effect is visible rather than mysterious.
     """

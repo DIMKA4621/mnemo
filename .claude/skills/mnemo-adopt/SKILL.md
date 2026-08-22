@@ -280,7 +280,7 @@ belongs to `init`.
 Review the diffs above, then commit — your message, your call.
 Do NOT add .mcp.json or .mcp.env: they hold this bank's live token and are
 git-ignored on purpose. Anyone cloning gets their own token from the
-cabinet (`mnemo ui`) into .mcp.env and runs mcp-setup.
+console (`mnemo ui`) into .mcp.env and runs mcp-setup.
 Then trust the project when Claude Code prompts (MCP) and restart the
 session so MCP, the rule and the agent team load. Nothing is injected
 automatically — memory is reached by calling `search`.
@@ -297,7 +297,7 @@ Tailor the file list to what actually changed. Never run `git add` or
   CLAUDE.md / agents / team-flag / migration.
 - **A teammate cloned the repo and MCP does not connect** — expected: the
   token is not in git. They copy their machine's token for that bank from
-  the cabinet (`mnemo ui`) into `.mcp.env` and re-run mcp-setup. Never
+  the console (`mnemo ui`) into `.mcp.env` and re-run mcp-setup. Never
   paste a token into a git-tracked file to shortcut this.
 - **The project already has other MCP servers** — `init` carries them into
   the template rather than losing them, and names them when it does. Their

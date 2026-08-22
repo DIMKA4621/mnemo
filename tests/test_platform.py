@@ -1133,7 +1133,7 @@ def test_adopted_project_discovery() -> None:
 def test_removal_lifts_the_queue_cancellation() -> None:
     """Removing a bank must not poison the next bank at the same root.
 
-    Found the first time the cabinet could remove a bank at all: remove one,
+    Found the first time the console could remove a bank at all: remove one,
     re-register the same folder, and it indexed nothing. Status `empty`,
     queue depth 0, an empty index log, and `reindex` cheerfully answering
     "queued 1 task(s)".
@@ -1953,7 +1953,7 @@ def test_orphan_indexes() -> None:
 
 
 def test_structured_doctor_and_cleanup() -> None:
-    """CLI text and cabinet JSON are two renderings of the same safe facts."""
+    """CLI text and console JSON are two renderings of the same safe facts."""
     from src import registry
 
     print("\n=== structured doctor and cleanup ===")

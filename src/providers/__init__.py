@@ -44,7 +44,7 @@ def get_provider(spec: str | None = None) -> EmbeddingProvider:
     setting (``MNEMO_PROVIDER`` or ``settings.json``) → ``"local"``.
 
     The machine default is read **here, per call**, and only the resolved name
-    is memoised. Reading it at import — as this did — meant the cabinet could
+    is memoised. Reading it at import — as this did — meant the console could
     store a new provider, the service could restart its settings, and every
     caller would still be handed the provider the module was imported with.
     """

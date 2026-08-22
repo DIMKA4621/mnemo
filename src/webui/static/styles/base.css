@@ -1,4 +1,4 @@
-/* mnemo web cabinet — deliberately plain: no framework, no external font.
+/* mnemo web console — deliberately plain: no framework, no external font.
  *
  * Tokens, reset and the controls every page reuses (buttons, segmented
  * choice, toggle, badges). Page-specific rules live in styles/page-*.css;
@@ -11,7 +11,7 @@
    easy to diff against each other. Every color used anywhere in this file
    is named here — nothing past this point should contain a literal hex.
    The base palette (through `--sidebar-rail`) is copied verbatim from
-   `docs/cabinet-design.html`'s frozen `:root` — it is what that mockup's own
+   `docs/console-design.html`'s frozen `:root` — it is what that mockup's own
    Lighthouse accessibility 100 was measured against (`--fg-mute` in
    particular was tuned there for contrast; the older product tokens it
    replaced were not, and failed `color-contrast` at 3.29:1). Everything

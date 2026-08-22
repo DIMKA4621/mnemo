@@ -10,7 +10,7 @@ Two rules shape the whole module:
   its own errors; a failed write costs a log line, not a search.
 * **Both halves of a query are recorded** — the request *and* the sections
   that went back (``hits_json``), because "what did mnemo actually return for
-  that prompt" is the question the cabinet exists to answer.
+  that prompt" is the question the console exists to answer.
 
 Retention is ``$MNEMO_LOG_RETENTION_DAYS`` (30), pruned at start and every six
 hours, with a row-count backstop for a machine that queries far more than it
@@ -80,7 +80,7 @@ _last_vacuum = 0.0
 
 _pruner: threading.Thread | None = None
 _pruner_stop = threading.Event()
-# Read connections live per thread so a long cabinet query never queues
+# Read connections live per thread so a long console query never queues
 # behind — or in front of — the writer.
 _readers = threading.local()
 
@@ -162,7 +162,7 @@ def _reader() -> sqlite3.Connection:
     """A per-thread read connection, separate from the writer's.
 
     Reads used to share the writer's connection and therefore the writer's
-    lock, so one cabinet query for a thousand log rows serialised every
+    lock, so one console query for a thousand log rows serialised every
     ``log_query`` behind it — and ``prune`` could hold that lock through a
     ``VACUUM``. WAL lets readers run beside the writer, so the only thing
     that was actually serialising them was us.
@@ -368,7 +368,7 @@ def last_index_error(bank_id: str) -> str | None:
         return None
     # Latest-event-wins, which IS the lifecycle: an error sets the field and
     # the next successful index for that bank clears it. Reporting "the most
-    # recent error ever" instead would leave the cabinet's red badge lit
+    # recent error ever" instead would leave the console's red badge lit
     # forever, long after the cause was fixed.
     if row is None or row["result"] != "error":
         return None

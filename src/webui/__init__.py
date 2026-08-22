@@ -1,4 +1,4 @@
-"""Static web cabinet (FR-7, phase 6).
+"""Static web console (FR-7, phase 6).
 
 The UI is a thin client over the HTTP API and the WebSocket progress channel;
 it holds no memory logic of its own. Everything it needs is under `static/`

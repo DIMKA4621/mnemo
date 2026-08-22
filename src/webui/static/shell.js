@@ -4,13 +4,13 @@
  * page-settings.js in the load order but below app.js's shared chrome.
  *
  * Header content is built as an HTML string per page (matching
- * docs/cabinet-design.html) rather than through app.js's `el()`/textContent
+ * docs/console-design.html) rather than through app.js's `el()`/textContent
  * convention: unlike bank cards, file paths or journal queries, nothing
  * rendered here ever carries backend-sourced text — only static Ukrainian
  * labels and trusted counts — so the stricter convention buys nothing here
  * and the mockup's markup can be reused close to verbatim.
  *
- * Deliberate deviation from the mockup: `docs/cabinet-design.html`'s
+ * Deliberate deviation from the mockup: `docs/console-design.html`'s
  * `renderHead()` rebuilds `#top-left` and re-attaches `addEventListener` on
  * every page switch — a real duplicate-listener bug (documented in
  * `.claude/memory/logs/2026-08-19-cabinet-tabs.md`). Header *content* still

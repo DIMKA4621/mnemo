@@ -1,4 +1,4 @@
-/* Памʼять: Банки → Файли → Вміст. Ported from the current live cabinet's
+/* Памʼять: Банки → Файли → Вміст. Ported from the current live console's
  * `.layout`/`.pane*`/`.bank*`/`.tree*`/`.doc*` rules almost unchanged — only
  * the three fixed columns (320/450/1fr) shrink to the mockup's 300/300/1fr
  * now that the machine facts moved out of the header, plus the mobile

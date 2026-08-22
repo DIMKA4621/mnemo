@@ -232,7 +232,7 @@ def test_index_and_chunks() -> None:
                   detail=f"{store.file_count(conn)} files, "
                          f"{store.chunk_count(conn)} chunks")
 
-            # The chunk viz in the cabinet draws these offsets over the raw
+            # The chunk viz in the console draws these offsets over the raw
             # file, so a chunk whose text is not exactly the slice it claims
             # would draw a boundary in the wrong place.
             source = (root / "topics/deployment.md").read_text(encoding="utf-8")

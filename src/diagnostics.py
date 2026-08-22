@@ -1,13 +1,13 @@
-"""Structured machine diagnostics shared by the CLI and the cabinet.
+"""Structured machine diagnostics shared by the CLI and the console.
 
 ``mnemo doctor`` used to be a chain of ``print`` calls. That was enough for a
-terminal and unusable for the cabinet: parsing its prose would turn wording
+terminal and unusable for the console: parsing its prose would turn wording
 into an API contract, while reimplementing the checks in ``api.py`` would give
 one machine two doctors that could quietly disagree.
 
 This module owns the facts. ``collect()`` returns plain JSON-shaped data with
 no credentials; the CLI renders it as text and ``GET /api/doctor`` returns it
-as data for the cabinet. A caller supplies the backend facts it already knows:
+as data for the console. A caller supplies the backend facts it already knows:
 the CLI probes the loopback endpoint, while the service describes itself and
 never makes an HTTP request back into its own process.
 

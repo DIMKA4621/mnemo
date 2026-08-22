@@ -1,8 +1,8 @@
-"""DEV-ONLY mock backend for the web cabinet. Never part of the request path.
+"""DEV-ONLY mock backend for the web console. Never part of the request path.
 
 Phase 6 is built ahead of phases 2-4 on purpose, so this script stands in for
 `src/api.py` until it exists: it serves `static/` at `/ui` and answers the
-subset of contract 9.5 / 9.7 that the cabinet actually calls, using the JSON
+subset of contract 9.5 / 9.7 that the console actually calls, using the JSON
 fixtures in `fixtures/`. Every response is shaped exactly like the contract —
 if it ever diverges, the fixture is the bug, not the page.
 
@@ -914,7 +914,7 @@ def mark_indexed(bank_id: str, rel: str) -> int:
 
     The real backend flips `indexed` and the chunk count the moment a file
     task commits, and `/api/tree` reports it on the next read. A simulator
-    that never changes state cannot show whether the cabinet keeps up, so it
+    that never changes state cannot show whether the console keeps up, so it
     changes state here too. A file that had no chunks gets one covering the
     whole text, which is coherent for both the tree and the file view.
     """
@@ -982,7 +982,7 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
                   normal=1 if path else 0, low=0 if path else len(targets) - position,
                   # `queue.current.started_at` is absolute EPOCH SECONDS, not
                   # an ISO string like the service's own `started_at` above —
-                  # the cabinet computes elapsed time from it at render time.
+                  # the console computes elapsed time from it at render time.
                   current={"task_id": task_id, "bank_id": bank_id, "kind": "file",
                            "path": rel, "batch": 0, "batches": batches,
                            "started_at": time.time()})
@@ -1021,7 +1021,7 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
             bank["chunks"] = total_chunks
             bank["files"] = len(files)  # every .md in the bank, indexed or not
             # A completed rebuild now carries the active provider identity, so
-            # the cabinet's REBUILD PENDING banner has a real transition to
+            # the console's REBUILD PENDING banner has a real transition to
             # observe rather than a fixture that warns forever.
             bank["index_provider_key"] = _fixture_provider_key(bank)[1]
     set_queue(depth=0, high=0, normal=0, low=0, current=None)

@@ -689,7 +689,7 @@ def regenerate_token(bank_id: str) -> str:
     """Mint a fresh token for one bank. The old one stops working at once.
 
     Every `.mcp.json` pointed at this bank has to be re-issued afterwards —
-    which is the point of the button in the cabinet that calls this.
+    which is the point of the button in the console that calls this.
     """
     with _lock, _file_lock():
         banks = load(force=True)
@@ -896,7 +896,7 @@ def delete_index(index_id: str) -> tuple[int, list[Path]]:
 
     The registry is re-read here rather than trusted from the caller's earlier
     listing: between listing and confirming, a bank may have been registered
-    on exactly this root — by the cabinet, by another session, by `init`. A
+    on exactly this root — by the console, by another session, by `init`. A
     stale list must not be able to delete a live index.
     """
     if index_id in _NON_BANK_DB:

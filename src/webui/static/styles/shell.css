@@ -1,5 +1,5 @@
 /* shell: sidebar (three routes, nothing else) + persistent header + the
- * page stack. Ported from docs/cabinet-design.html (frozen 2026-08-19),
+ * page stack. Ported from docs/console-design.html (frozen 2026-08-19),
  * which is the source of truth for this file's rules. */
 
 .app {
@@ -154,7 +154,7 @@
   .sb-foot { justify-content: center; padding: 8px 4px; }
   .sb-foot .txt, .sb-foot .sep, .sb-foot .ver { display: none; }
   /* The rail is too narrow for a sentence; the update modal is still
-     reachable once the viewport widens, and this is a v1 cabinet meant for
+     reachable once the viewport widens, and this is a v1 console meant for
      loopback desktop use, not a mobile-first surface. */
   .sb-update-banner { display: none; }
   .sb-item { justify-content: center; padding: 0; }

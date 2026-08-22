@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <!--
   ============================================================================
-  ЗАТВЕРДЖЕНИЙ МАКЕТ КАБІНЕТУ v3 — ЗАМОРОЖЕНО 2026-08-19
+  ЗАТВЕРДЖЕНИЙ МАКЕТ КОНСОЛІ v3 — ЗАМОРОЖЕНО 2026-08-19
   ============================================================================
 
   Це НЕ код продукту. Продукт живе в `src/webui/static/`.
@@ -17,7 +17,7 @@
   «Відкрити в Памʼяті» (перемикає і банк теж), розділи налаштувань, тема.
 
   НЕ РЕДАГУВАТИ мимохідь. Якщо макет має змінитись — це рішення, і воно
-  записується в `.claude/memory/topics/cabinet-ui.md` разом зі зміною файла.
+  записується в `.claude/memory/topics/console-ui.md` разом зі зміною файла.
   Рішення, які цей файл втілює, пояснені там же; денний запис —
   `.claude/memory/logs/2026-08-19-cabinet-tabs.md`.
 
@@ -27,12 +27,12 @@
   color-contrast (3.29:1) на найдрібнішому тексті оболонки — знайдено під
   час реалізації в `src/webui/static/`. Це виправлення стилю, не
   архітектури: значення підтягнуто до того самого, що вже стоїть у
-  реалізації (`styles/base.css`). Подробиці — `.claude/memory/topics/cabinet-ui.md`.
+  реалізації (`styles/base.css`). Подробиці — `.claude/memory/topics/console-ui.md`.
   ============================================================================
 -->
 </head>
 <body>
-<title>Mnemo Cabinet</title>
+<title>Mnemo Console</title>
 <!--
 АРХІТЕКТУРА ВКЛАДОК (прототип структури, не фінальних стилів)
 
@@ -591,7 +591,7 @@
       </button>
     </div>
 
-    <nav class="sb-nav" aria-label="Розділи кабінету">
+    <nav class="sb-nav" aria-label="Розділи консолі">
       <button class="sb-item is-active" data-page="memory" title="Памʼять">
         <svg viewBox="0 0 24 24"><path d="M5 4.5h11.5A2.5 2.5 0 0 1 19 7v12H7.5A2.5 2.5 0 0 1 5 16.5z"/><path d="M5 16.5A2.5 2.5 0 0 1 7.5 14H19"/></svg>
         <span class="lbl">Памʼять</span>
@@ -730,7 +730,7 @@
     { t: 'file', name: '2026-08-16-settings-sections.md', path: 'logs/2026-08-16-settings-sections.md', n: 9 },
     { t: 'file', name: '2026-08-17-cabinet-navigation.md', path: 'logs/2026-08-17-cabinet-navigation.md', n: 4 },
     { t: 'dir', name: 'topics/', n: 12 },
-    { t: 'file', name: 'cabinet-ui.md', path: 'topics/cabinet-ui.md', n: 18 },
+    { t: 'file', name: 'console-ui.md', path: 'topics/console-ui.md', n: 18 },
     { t: 'file', name: 'provider-settings.md', path: 'topics/provider-settings.md', n: 17 },
     { t: 'root', name: 'MEMORY.md', path: 'MEMORY.md', n: 8 }
   ];
@@ -738,8 +738,8 @@
   const FILES = {
     'logs/2026-08-17-cabinet-navigation.md': { size: '2.8 KiB', chunks: 4, sha: '9c41…e82', html:
       `<div class="chunk-divider"><span>#1 · 0–1018</span></div><h1># Глобальна навігація кабінету й окремий журнал</h1><p>Після аудиту живої сторінки узгоджено інформаційну архітектуру наступного кроку.</p><h2>## Узгоджені рішення</h2><ul><li>Сайдбар тримає <strong>лише три пункти</strong>; банки в ньому не дублюються.</li><li>Кожна сторінка займає вікно <strong>цілком</strong>.</li><li>Нижній dock журналу прибирається з Памʼяті повністю.</li></ul><div class="chunk-divider"><span>#2 · 1019–1930</span></div><h2>## Журнал як окрема сторінка</h2><p>Виклики ліворуч прямокутниками, повні деталі вибраного — праворуч.</p><div class="chunk-divider"><span>#3 · 1931–2862</span></div><p>У service journal зберігається точний snapshot content кожного повернутого hit.</p>` },
-    'topics/cabinet-ui.md': { size: '9.4 KiB', chunks: 18, sha: 'a17b…3d1', html:
-      `<div class="chunk-divider"><span>#14 · 9210–10442</span></div><h1># Кабінет: рішення інтерфейсу</h1><h2>## Усі дії банку — в одному меню ···</h2><p>У правому кінці рядка з назвою: синхронізація, повний реіндекс, доступ MCP, прибрати. Власних кнопок картка не має.</p><p>Саме той ряд кнопок зажимав ширину колонки <strong>з двох боків</strong>.</p>` },
+    'topics/console-ui.md': { size: '9.4 KiB', chunks: 18, sha: 'a17b…3d1', html:
+      `<div class="chunk-divider"><span>#14 · 9210–10442</span></div><h1># Консоль: рішення інтерфейсу</h1><h2>## Усі дії банку — в одному меню ···</h2><p>У правому кінці рядка з назвою: синхронізація, повний реіндекс, доступ MCP, прибрати. Власних кнопок картка не має.</p><p>Саме той ряд кнопок зажимав ширину колонки <strong>з двох боків</strong>.</p>` },
     'logs/2026-08-16-settings-sections.md': { size: '3.1 KiB', chunks: 9, sha: 'b204…9fa', html:
       `<div class="chunk-divider"><span>#1 · 0–1160</span></div><h1># Розділи налаштувань і автозапуск як контрол</h1><h2>## Сторінка налаштувань уже існувала</h2><p>Робота — не «зробити сторінку», а додати їй навігацію розділів із <strong>SETTINGS_SECTIONS</strong>.</p>` },
     'logs/2026-08-16-bank-states.md': { size: '4.2 KiB', chunks: 9, sha: 'c38e…447', html:
@@ -760,14 +760,14 @@
 
   const QUERIES = [
     { id: 1284, at: '17:48:55', date: '2026-08-17', bank: 'mnemo', face: 'mcp', status: 'ready', hits: 3, took: '150.3 мс', prefix: '—', snap: true,
-      q: 'глобальна навігація сторінки Памʼять Банки Агенти Налаштування кабінет',
+      q: 'глобальна навігація сторінки Памʼять Банки Агенти Налаштування консоль',
       res: [
         { p: 'logs/2026-08-17-cabinet-navigation.md', h: 'Узгоджені рішення', c: 1, sc: '0.1148', sim: '0.842', tx: 'Сайдбар тримає лише три пункти; банки в ньому не дублюються. Кожна сторінка займає вікно цілком.' },
-        { p: 'topics/cabinet-ui.md', h: 'Усі дії банку — в одному меню ···', c: 14, sc: '0.1129', sim: '0.827', tx: 'У правому кінці рядка з назвою: синхронізація, повний реіндекс, доступ MCP, прибрати. Власних кнопок картка не має.' },
+        { p: 'topics/console-ui.md', h: 'Усі дії банку — в одному меню ···', c: 14, sc: '0.1129', sim: '0.827', tx: 'У правому кінці рядка з назвою: синхронізація, повний реіндекс, доступ MCP, прибрати. Власних кнопок картка не має.' },
         { p: 'logs/2026-08-13-settings-ui.md', h: 'Форма: окремий екран', c: 2, sc: '0.1054', sim: '0.801', tx: 'Цей екран про машину і роботу заміщає.' }
       ] },
     { id: 1283, at: '17:47:00', date: '2026-08-17', bank: 'mnemo', face: 'mcp', status: 'ready', hits: 8, took: '130.9 мс', prefix: '—', snap: true,
-      q: 'налаштування окремий екран навігація журнал подій веб кабінет банки агенти UX',
+      q: 'налаштування окремий екран навігація журнал подій веб консоль банки агенти UX',
       res: [
         { p: 'logs/2026-08-16-settings-sections.md', h: 'Сторінка налаштувань уже існувала', c: 1, sc: '0.1109', sim: '0.789', tx: 'Розділи будуються з єдиної таблиці SETTINGS_SECTIONS.' }
       ] },
@@ -775,7 +775,7 @@
       q: 'event log panel collapsible hide bottom drawer webui responsive bank list settings screen',
       res: [
         { p: 'logs/2026-08-16-settings-sections.md', h: 'Сторінка налаштувань уже існувала', c: 1, sc: '0.1109', sim: '0.775' },
-        { p: 'topics/cabinet-ui.md', h: 'Налаштування — екран, а не модалка', c: 4, sc: '0.1063', sim: '0.763' }
+        { p: 'topics/console-ui.md', h: 'Налаштування — екран, а не модалка', c: 4, sc: '0.1063', sim: '0.763' }
       ] },
     { id: 1281, at: '03:28:56', date: '2026-08-17', bank: 'neoversity', face: 'mcp', status: 'indexing', hits: 5, took: '284.8 мс', prefix: 'topics/', snap: true,
       q: 'гілка dima master merge злиття гілок git workflow',
@@ -820,7 +820,7 @@
     </div>`,
     service: `<div class="set-form">
       <h2>Служба</h2>
-      <p class="lede">Стан процесу, machine-port факти й автозапуск. Кабінет не пропонує кнопку, яка вбиває процес, що віддає саму сторінку.</p>
+      <p class="lede">Стан процесу, machine-port факти й автозапуск. Консоль не пропонує кнопку, яка вбиває процес, що віддає саму сторінку.</p>
       <section class="fs">
         <div class="kv"><b>Стан</b><span><i class="dot"></i>працює</span></div>
         <div class="kv"><b>Версія</b><span>3.0.0</span></div>
@@ -834,7 +834,7 @@
         <p class="fn">Task Scheduler. Зміна застосовується після «Зберегти».</p>
       </section>
       <section class="fs">
-        <span class="fl">Тема кабінету</span>
+        <span class="fl">Тема консолі</span>
         <div class="segmented" id="theme">
           <button class="seg" data-theme="dark">Темна</button>
           <button class="seg" data-theme="light">Світла</button>

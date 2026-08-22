@@ -404,7 +404,7 @@ FILE_MAX_BYTES: int = int(os.environ.get("MNEMO_FILE_MAX_BYTES", str(2 * 1024 * 
 
 # Which provider, and how to reach an external one, are NOT constants here.
 #
-# They are the settings the cabinet edits, and this module evaluates every
+# They are the settings the console edits, and this module evaluates every
 # knob once at import — so a constant would serve whatever the process started
 # with, forever, no matter what was saved. That is the same frozen-path scar
 # as `BANKS_FILE` two sections down, and the reason both live behind a call.
@@ -622,7 +622,7 @@ UPDATE_AUTO_APPLY_RETRY_DELAY_S: float = float(
 )
 
 # How long the "about to auto-apply <tag>" countdown runs before firing on
-# its own -- long enough for a person watching the cabinet to actually read
+# its own -- long enough for a person watching the console to actually read
 # the message and click Cancel (raised from 10s to 20s -- 10 didn't leave
 # enough time to read it), short enough that unattended really means
 # unattended.

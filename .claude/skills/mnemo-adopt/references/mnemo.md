@@ -120,7 +120,7 @@ credential that reaches every bank on the machine.
 
 For hand-checking there is `/mcp-tools/<tool_name>` (service token,
 plain HTTP, Swagger at `/docs`), which calls the very same tool bodies
-and so cannot drift from what an agent reads. `/api/*` is the cabinet's
+and so cannot drift from what an agent reads. `/api/*` is the console's
 private channel and is not published.
 
 ## The binding rule vs CLAUDE.md (critical)

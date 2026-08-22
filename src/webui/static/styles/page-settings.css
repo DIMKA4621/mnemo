@@ -1,7 +1,7 @@
 /* Налаштування: horizontal tabs under the header instead of the old fixed
  * `.screen` overlay with a vertical `.set-nav`. The tab bar and body frame
- * are new (ported from docs/cabinet-design.html); the form field rules below
- * them are the current live cabinet's `.set-*`/`.maint-*` rules, unchanged
+ * are new (ported from docs/console-design.html); the form field rules below
+ * them are the current live console's `.set-*`/`.maint-*` rules, unchanged
  * except where the mockup renamed a class. */
 
 .set-tabs { flex: none; display: flex; gap: 2px; padding: 6px 12px; background: var(--bg-pane); border-bottom: 1px solid var(--line); overflow-x: auto; }
@@ -159,7 +159,7 @@
 /* `.set-backend-tabs` used to be named `.set-tabs`, the same class the page
    nav above now owns for the horizontal section bar — the two are different
    components (a `.segmented` picker nested in a form field vs. the page's
-   own tab strip) that happened to share a name in the pre-shell cabinet,
+   own tab strip) that happened to share a name in the pre-shell console,
    where there was only one kind of tabs on screen. Both are `.segmented`
    internally; this alone keeps the embed backend picker from stretching to
    the tab bar's full-width, bordered, horizontally-scrolling look. */

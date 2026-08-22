@@ -21,7 +21,7 @@ rebuildable vector index makes it searchable.
 - Index: one SQLite file per bank at `~/.mnemo/state/<bankhash>.db`
   — gitignored realm, deletable, fully rebuildable from the `.md`.
 - Access: **one persistent local service** owns the registry, the index
-  and the watcher; CLI, MCP, hooks and the web cabinet are thin clients
+  and the watcher; CLI, MCP, hooks and the web console are thin clients
   of its loopback HTTP API. v3 deliberately reverses v2's "no server, no
   daemon" — the daemon is the point.
 
@@ -102,7 +102,7 @@ Service (the persistent backend):
 - `src/servicelog.py` — `service.db`: query + index events, retention.
 - `src/api.py` — FastAPI/uvicorn loopback host, and the router that
   decides which credential opens which face. **Private** `/api/*` for the
-  cabinet (`/search`, `/reindex`, `/tree`, `/status`, `/banks`,
+  console (`/search`, `/reindex`, `/tree`, `/status`, `/banks`,
   `/banks/{id}/token`, `/fs/dirs`, `/file`, `/logs`, `/settings`, `/embed/*`,
   `/autostart`, `/doctor`, `/clean-orphans` — hidden from
   OpenAPI); **external** `/mcp-tools/<tool_name>`, the tools as plain
@@ -110,7 +110,7 @@ Service (the persistent backend):
   `/mcp` and `/mcp-admin`. `/mcp`, `/mcp-admin` and `/mcp-tools` also take
   `?token=`, because an MCP client configures a URL, not headers.
   `/mcp-tools/*` and `/mcp-admin` take the **service** token; `/mcp` takes
-  a **bank** token and nothing else. `/api/*` — the cabinet's and CLI's own
+  a **bank** token and nothing else. `/api/*` — the console's and CLI's own
   channel — takes the service token **only if one has been deliberately
   configured** (`$MNEMO_API_TOKEN`, or a future opt-in "generate" step);
   with none configured, the default, `/api` is open (2026-08-21 decision:
@@ -122,7 +122,7 @@ Service (the persistent backend):
   watchdog→debounce→enqueue path (**phase 3, in flight**).
 - `src/service_ctl.py` — `mnemo service …`, windowless spawn, PID/port
   state (**phase 5, in flight**).
-- `src/webui/` — the local cabinet served by the backend; `devserver.py`
+- `src/webui/` — the local console served by the backend; `devserver.py`
   answers contract shapes from fixtures and is a dev tool only, so it grows a
   route whenever the real API does or dev mode breaks. **Every per-bank action
   lives in one `···` menu** at the right end of the card's title row —
@@ -172,7 +172,7 @@ Faces:
   more** beyond the `hook-postedit` no-op shim: the discipline lives in
   the rule, not in an injection.
 - `src/diagnostics.py` — one structured `doctor` report shared by CLI and
-  cabinet. CLI renders text; `GET /api/doctor` returns the same facts; neither
+  console. CLI renders text; `GET /api/doctor` returns the same facts; neither
   echoes credentials nor probes a metered endpoint. Owns race-safe explicit
   orphan cleanup for both CLI and `POST /api/clean-orphans`.
 - `src/scaffold.py` — `mnemo init`: additive, idempotent, refuses on
@@ -256,7 +256,7 @@ mnemo reindex [--bank B] [--full]   queue a reindex (`ingest` is a deprecated al
 mnemo banks list|add|remove         registry, through the API
 mnemo banks freeze|unfreeze         a bank's state: frozen keeps it searchable
      |disable <ref>                 while it stops following its files
-mnemo status | logs | tree | ui     service state, journal, tree, cabinet
+mnemo status | logs | tree | ui     service state, journal, tree, console
 mnemo embed [status|unload|load]    what the backend holds in memory, and give
                                     it back — NOT an off switch
 mnemo doctor                        engine, provider, model, tokens, ports, banks,
@@ -271,7 +271,7 @@ them and something calls them: `serve` (what `service start` spawns),
 exists *only* so an already-wired v2 hook does not fail), `ingest`
 (deprecated alias, still warns), and `update-apply` (engine self-update's
 `stop → switch current → start → health-gate → rollback`, spawned detached
-by the cabinet's apply button; also runnable by hand for diagnostics — exit
+by the console's apply button; also runnable by hand for diagnostics — exit
 0/1/2/3 = applied / rolled back / nothing staged / both apply and rollback
 failed, service down). The two hook seeds are **gone**, not
 hidden. Hidden by omitting `help=` on the subparser: `argparse.SUPPRESS`
@@ -423,7 +423,7 @@ re-warmup and no re-index are needed for a code-only update. No skill is
 required — this is a plain shell command, not a `mnemo` subcommand.
 
 **This git-pull path is one of two ways the engine updates now.** The other
-is self-update from the cabinet (design decision #33, `docs/
+is self-update from the console (design decision #33, `docs/
 Memory-contracts-v3.md` §9.9): the backend checks GitHub tags on a timer (or
 on demand), and a click stages and applies a *tagged release* under
 `versions/<tag>/` with a health-gated rollback if the new build doesn't come
@@ -496,7 +496,7 @@ machine starts one that never was.
   the whole point of that path — `--no-model`/`-NoModel` opts out.
 - Everything on loopback; nothing exposed outward without an explicit
   decision. `/mcp`, `/mcp-admin` and `/mcp-tools` stay behind a bearer
-  token always. `/api` (cabinet + CLI) is the one exception (2026-08-21):
+  token always. `/api` (console + CLI) is the one exception (2026-08-21):
   open by default on loopback, gated only once a token is explicitly
   configured — see `src/api.py`'s `auth_middleware`.
 

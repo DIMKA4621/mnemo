@@ -13,7 +13,7 @@ Wire format (Memory-contracts-v3 §2.2):
     -> {"data": [{"embedding": [...]}, ...]}
 
 Configuration is read through ``settings`` **per call**, never imported as a
-constant: these are the values the cabinet edits, and an import-time binding
+constant: these are the values the console edits, and an import-time binding
 would serve the value the process started with forever (the same frozen-path
 scar as ``BANKS_FILE``). Each is resolved environment > ``settings.json`` >
 default.
@@ -46,7 +46,7 @@ class ApiProvider(EmbeddingProvider):
         # Read once here and held for this instance's life: `dim` and `model`
         # go into the bank's `provider_key`, so they must not change under a
         # running index. A settings edit takes effect on the next service
-        # start, which is exactly what the cabinet promises.
+        # start, which is exactly what the console promises.
         self._url = settings.api_url()
         self._model = settings.api_model()
         self._dim = settings.api_dim()

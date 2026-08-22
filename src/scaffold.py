@@ -36,7 +36,7 @@ terminal it does nothing and prints the command).
 address.** It opens that one bank's two read tools, and it is what tells the
 backend which bank this connection is for — there is no bank name and no path
 segment in anything `init` writes. The service-wide token belongs to the
-cabinet, the CLI and the admin face, and never to a project file.
+console, the CLI and the admin face, and never to a project file.
 
 **No hook is written, and no flag makes one appear.** `settings.json` is
 left alone entirely; `--migrate` only *removes* hooks earlier generations
@@ -95,7 +95,7 @@ _LEGACY_INSTANCE = "mnemo"
 # placeholder with no matching `-e` line passes through verbatim while the
 # script still exits 0.
 #
-# A *second* entry, pasted by hand from the cabinet, varies **only its token
+# A *second* entry, pasted by hand from the console, varies **only its token
 # variable** (`MNEMO_NOTES_TOKEN`) and shares `MNEMO_HOST` / `MNEMO_PORT`. That
 # split follows what the values describe: host and port are the service's
 # address — one backend, one answer — so a per-bank copy of them would be
@@ -1061,7 +1061,7 @@ _RETIRED_ENV_VARS = ("BANK",)
 # skill's `templates/mnemo.example` — it is what tells the next person where
 # the blank value comes from.
 _ENV_EXAMPLE_COMMENT = (
-    "# {instance} — the cabinet (`mnemo ui`) shows the bank's token, or read "
+    "# {instance} — the console (`mnemo ui`) shows the bank's token, or read "
     "it from\n"
     "# ~/.mnemo/state/banks.json"
 )
@@ -2129,7 +2129,7 @@ def _run_setup_script(proj: Path) -> tuple[bool, list[str], Path | None]:
         return False, [], None
 
     # `init` (and therefore this) also runs inside the windowless
-    # FastAPI/uvicorn service process — the cabinet's add-bank "init"
+    # FastAPI/uvicorn service process — the console's add-bank "init"
     # checkbox calls `init_project` directly, no console attached. Without
     # this flag a bare `subprocess.run(["powershell", ...])` there would
     # flash a visible console window on the user's desktop for no reason;

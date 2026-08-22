@@ -108,7 +108,7 @@ class QueueSnapshot:
     current_started_at: float = 0.0
     # bank_id -> {"depth": int, "indexing": bool}. Service-wide totals cannot
     # answer "is THIS bank busy", which is the question every bank row in the
-    # cabinet asks and the question `status` is computed from.
+    # console asks and the question `status` is computed from.
     by_bank: dict[str, dict[str, Any]] = field(default_factory=dict)
 
 
@@ -759,7 +759,7 @@ def _may_run(bank: registry.Bank, task: Task) -> bool:
 
     A **frozen** bank runs nothing the system decided by itself — that is what
     freezing is — but it does run a task somebody explicitly asked for. Without
-    that carve-out the cabinet's "full rebuild" would silently do nothing on a
+    that carve-out the console's "full rebuild" would silently do nothing on a
     frozen bank, and the only way to refresh one would be to unfreeze it first,
     which is a worse answer than simply honouring the request. It also leaves
     the reasonable workflow intact: freeze, change the machine's backend,
