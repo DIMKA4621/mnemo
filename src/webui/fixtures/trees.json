@@ -1,0 +1,115 @@
+{
+  "b1cfcadf81e9fe53": {
+    "bank_id": "b1cfcadf81e9fe53",
+    "root": "E:/work_projects/other/mnemo/.claude",
+    "files": 4,
+    "dirs": 2,
+    "tree": {
+      "name": "",
+      "type": "dir",
+      "path": "",
+      "children": [
+        {
+          "name": "logs",
+          "type": "dir",
+          "path": "logs",
+          "children": [
+            {
+              "name": "2026-07-26.md",
+              "type": "file",
+              "path": "logs/2026-07-26.md",
+              "size": 716,
+              "indexed": true,
+              "chunks": 4,
+              "headings": [
+                "2026-07-26",
+                "Зроблено",
+                "Рішення",
+                "Наступне"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "topics",
+          "type": "dir",
+          "path": "topics",
+          "children": [
+            {
+              "name": "draft.md",
+              "type": "file",
+              "path": "topics/draft.md",
+              "size": 221,
+              "indexed": false,
+              "chunks": 0,
+              "headings": []
+            },
+            {
+              "name": "queue.md",
+              "type": "file",
+              "path": "topics/queue.md",
+              "size": 1287,
+              "indexed": true,
+              "chunks": 4,
+              "headings": [
+                "Priority queue",
+                "Пріоритети",
+                "Витіснення",
+                "Дедуплікація"
+              ]
+            }
+          ]
+        },
+        {
+          "name": "MEMORY.md",
+          "type": "file",
+          "path": "MEMORY.md",
+          "size": 566,
+          "indexed": true,
+          "chunks": 3,
+          "headings": [
+            "Memory Index",
+            "Quick facts",
+            "Topics"
+          ]
+        }
+      ]
+    }
+  },
+  "42c3326ed6e1a1b7": {
+    "bank_id": "42c3326ed6e1a1b7",
+    "root": "E:/notes",
+    "files": 0,
+    "dirs": 0,
+    "tree": {
+      "name": "",
+      "type": "dir",
+      "path": "",
+      "children": []
+    }
+  },
+  "09b7d876d501c789": {
+    "bank_id": "09b7d876d501c789",
+    "root": "D:/archive/memory",
+    "files": 0,
+    "dirs": 0,
+    "tree": {
+      "name": "",
+      "type": "dir",
+      "path": "",
+      "children": []
+    }
+  },
+  "410d981426af108f": {
+    "bank_id": "410d981426af108f",
+    "root": "E:/gone/.claude",
+    "files": 0,
+    "dirs": 0,
+    "tree": {
+      "name": "",
+      "type": "dir",
+      "path": "",
+      "children": []
+    }
+  }
+}

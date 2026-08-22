@@ -1,0 +1,357 @@
+/* Памʼять: Банки → Файли → Вміст. Ported from the current live console's
+ * `.layout`/`.pane*`/`.bank*`/`.tree*`/`.doc*` rules almost unchanged — only
+ * the three fixed columns (320/450/1fr) shrink to the mockup's 300/300/1fr
+ * now that the machine facts moved out of the header, plus the mobile
+ * pane-switch that a single-page layout never needed.
+ *
+ * The first two column widths are drag-resizable (page-memory.js wires
+ * `.pane-resizer`), so `grid-template-columns` here is only the fallback for
+ * the instant before that script runs; the two 6px tracks are the resizer
+ * handles themselves, sitting between the panes as real grid columns rather
+ * than an overlay, so dragging one never has to fight the pane it sits on
+ * for hit-testing. */
+
+.layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 300px 6px 300px 6px minmax(0, 1fr);
+}
+
+.pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  border-right: 1px solid var(--line);
+  background: var(--bg-pane);
+}
+
+.pane:last-child { border-right: none; }
+
+/* Fixed, not `min-height`: the three heads carry different content (a lone
+   refresh icon, a subtitle span, a checkbox plus a text button), so a
+   min-height only clamped the shortest one — the other two grew past it by
+   however much their tallest child needed, and the three rows sat at visibly
+   different heights. A fixed height plus `align-items: center` makes every
+   row the same regardless of what it holds. */
+.pane-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+  height: 37px;
+}
+
+.pane-head h2 { white-space: nowrap; }
+
+.pane-sub {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-mute);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pane-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pane-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+/* ---- stale-provider rebuild notice ----------------------------------------
+   Separate from `#banner`, which is an error channel. A provider change is
+   not a failed request: it is durable machine state with a remedy, and
+   hiding it because some later request succeeded would be the same silence
+   that made the settings switch look as if it did nothing. Lives inside the
+   Памʼять page (it is what pending rebuilds affect), not in the shared
+   overlay banner. */
+.rebuild-banner {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 14px;
+  background: var(--badge-indexing-bg);
+  border-bottom: 1px solid var(--badge-indexing-border);
+  color: var(--badge-indexing-fg);
+  font-size: 12px;
+}
+
+.rebuild-banner-text { flex: 1 1 auto; min-width: 0; }
+.rebuild-banner .btn { flex: none; }
+
+/* ---- banks -------------------------------------------------------------- */
+
+.bank {
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.bank:hover { background: var(--bg-hover); }
+.bank.is-selected { background: var(--sel-bg); box-shadow: inset 2px 0 0 var(--accent); }
+.bank.is-disabled .bank-name { color: var(--fg-mute); }
+
+/* The title row is two boxes, not one wrapping list: the name and its badges
+   wrap among themselves, and the menu button stays on the first line however
+   many badges there are. `min-width: 0` lets the left box actually shrink —
+   a flex item defaults to its content width and would otherwise push the
+   button out of the row rather than wrap. */
+.bank-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+}
+
+.bank-head {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.bank-name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+/* Pushed to the far end by `.bank-head` taking the remaining space, and kept
+   from shrinking so a long name never squeezes the glyph. */
+.btn-menu {
+  flex: none;
+  padding: 0 7px 3px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 1px;
+}
+
+.bank-root {
+  display: block;
+  margin: 3px 0 5px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-mute);
+  word-break: break-all;
+}
+
+.bank-stats {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-dim);
+}
+
+.bank-error {
+  margin-top: 6px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  background: var(--danger-bg-soft);
+  color: var(--danger-fg-soft);
+  font-family: var(--mono);
+  font-size: 11px;
+  word-break: break-word;
+}
+
+/* live progress bar on a bank card ---------------------------------------- */
+
+.bank-progress {
+  margin-top: 7px;
+}
+
+.bar {
+  height: 4px;
+  border-radius: 2px;
+  background: var(--track-bg);
+  overflow: hidden;
+}
+
+.bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--busy);
+  transition: width .12s linear;
+}
+
+.bar.is-indeterminate > i {
+  width: 35%;
+  animation: slide 1.1s ease-in-out infinite alternate;
+}
+
+@keyframes slide {
+  from { margin-left: 0; }
+  to   { margin-left: 65%; }
+}
+
+.progress-text {
+  margin-top: 3px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--busy);
+  word-break: break-all;
+}
+
+/* Same tint as the "індексується" badge and `.progress-text` below it — a
+   bank card's live/temporary state reads as one visual group, distinct from
+   the plain grey `.muted` used for durable facts like "остання індексація". */
+.note-live { color: var(--busy); }
+
+/* ---- tree ----------------------------------------------------------------- */
+
+.tree { padding: 4px 0; }
+
+.tree-node {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 2px 12px 2px 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tree-node.is-file { cursor: pointer; }
+.tree-node.is-file:hover { background: var(--bg-hover); }
+.tree-node.is-selected { background: var(--sel-bg); color: var(--sel-fg); }
+
+.tree-dir { color: var(--fg-dim); }
+
+/* `flex: none` is load-bearing, not decoration. These are flex items in a
+   nowrap row: a span with text cannot shrink below its min-content width, but
+   the twisty is empty, so its min-content is 0 and flex happily collapses it
+   the moment a long filename overflows the pane. The label then slides 10px
+   left on exactly those rows, which reads as ragged indentation. */
+.tree-twisty { flex: none; width: 10px; color: var(--fg-mute); }
+.tree-chunks { flex: none; color: var(--fg-mute); font-size: 11px; }
+
+/* Muted colour plus the literal "не в індексі" beside it already say this.
+   A font-style change must not: a synthesised oblique has different metrics
+   from the upright face and would cost the column alignment that is the whole
+   point of a monospace list. Any third signal here has to be metric-neutral. */
+.tree-node.not-indexed .tree-label { color: var(--fg-mute); }
+
+/* ---- file view -------------------------------------------------------------- */
+
+/* Two lines: the path (what used to sit in the column header, in the mono
+   weight the header's own caps style never carried) above the facts about it
+   — mirrors "Банки"/"Файли", whose headers stay a static caption and never
+   carry per-item content either. */
+.file-meta {
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.file-meta-path {
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-meta-info {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--fg-mute);
+  display: flex;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.doc {
+  padding: 10px 14px 40px;
+}
+
+.doc pre {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.62;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--fg);
+}
+
+/* the chunk boundary itself: a plain divider line with a small caption */
+.chunk-divider {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 1px 0;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 10.5px;
+  letter-spacing: .04em;
+  user-select: none;
+}
+
+.chunk-divider::after {
+  content: "";
+  flex: 1 1 auto;
+  height: 0;
+  border-top: 1px dashed var(--chunk-line);
+}
+
+.chunk-divider.is-end::after { border-top-style: solid; }
+.chunk-divider .cd-label { white-space: nowrap; }
+.chunk-divider .cd-range { color: var(--fg-mute); }
+
+.chunk-body,
+.gap-body { padding: 2px 0 4px; }
+
+/* The blank line a file puts between two sections. The splitter leaves it
+   outside both chunks, so it renders as its own `pre`, scaled down rather
+   than collapsed: six blank lines still read as more than two, and the text
+   itself is untouched, so offsets, selection and copy all still match the
+   file. */
+.gap-body.is-blank { line-height: .8; }
+
+.gap-note {
+  margin: 2px 0;
+  font-family: var(--mono);
+  font-size: 10.5px;
+  color: var(--fg-mute);
+}
+
+/* ---- mobile pane switch ----------------------------------------------------
+   New: a single-page layout never needed this, but under 940px three fixed
+   columns cannot sit side by side any more, so the header's segmented
+   control below picks which of the three fills the page. */
+.mob-panes { display: none; }
+
+/* Below 940px the three columns stack into one mobile pane switch instead of
+   sitting side by side (below) — nothing left to drag, so the resizers go
+   with the rest of `.layout`'s grid tracks. */
+@media (max-width: 940px) {
+  .layout { display: block; position: relative; }
+  .layout .pane { position: absolute; inset: 0; display: none; border-right: 0; }
+  .layout .pane.is-mob { display: flex; }
+  .pane-resizer { display: none; }
+  .mob-panes { display: inline-flex; }
+}
+
+@media (max-width: 620px) {
+  .pane-head { height: auto; min-height: 34px; flex-wrap: wrap; padding: 7px 12px; }
+  .pane-actions { margin-left: 0; }
+}

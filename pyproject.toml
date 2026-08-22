@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mnemo-bootstrap"
+version = "0.0.0"
+description = "Self-locating launcher for the mnemo engine"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+]
+# Engine runtime deps live in requirements.txt (single source of truth for the
+# installers); declared here dynamically so the two can never drift apart.
+dynamic = ["dependencies"]
+
+[project.scripts]
+mnemo = "mnemo_bootstrap:main"
+
+# GUI-subsystem launcher (pythonw-backed) for background processes only:
+# Task Scheduler and shortcuts control no creation flags, so "no console" has
+# to be a property of the executable. It has its OWN entry point, which
+# refuses any subcommand needing stdio — under pythonw there is no stdout and
+# print() fails silently, so the guard has to be structural, not a comment.
+[project.gui-scripts]
+mnemow = "mnemo_bootstrap:main_gui"
+
+[tool.setuptools]
+py-modules = ["mnemo_bootstrap"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }

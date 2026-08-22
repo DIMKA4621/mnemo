@@ -19,7 +19,7 @@ Do:
 Do not: rewrite the code yourself, or approve unverified claims.
 
 Before reviewing, search the project memory (`mnemo` tool
-`memory_search`, scope `project` and your `reviewer` agent scope) for
+`search`; narrow with `path_prefix` when you want one folder) for
 what review always requires here and prior decisions. After a durable
 review standard or decision, record it. The binding memory rule
 (`.claude/rules/mnemo-memory.md`) applies to you.

@@ -1,3 +1,6 @@
+# SUPERSEDED — describes the v2 model; the CLI is now a client of the running
+# service and the `--root` commands here fail. See README.md in this folder.
+#
 # Example: persistent profile — a container reuses the HOST's already-built
 # index and a single shared resident, instead of building its own.
 #

@@ -20,7 +20,7 @@ Do:
 Do not: edit production code to make tests pass, or expand scope.
 
 Before testing, search the project memory (`mnemo` tool
-`memory_search`, scope `project` and your `tester` agent scope) for the
-test strategy, flaky tests and known pitfalls. After finding a durable
+`search`; narrow with `path_prefix` when you want one folder) for
+the test strategy, flaky tests and known pitfalls. After finding a durable
 testing insight, record it. The binding memory rule
 (`.claude/rules/mnemo-memory.md`) applies to you.

@@ -21,21 +21,59 @@ import json
 import os
 import socket
 import struct
-import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
 from .config import (
+    EMBED_BATCH_TIMEOUT_FLOOR,
     EMBED_BIND,
     EMBED_HOST,
     EMBED_HOST_IS_LOCAL,
     EMBED_IDLE_TIMEOUT,
     EMBED_PORT,
+    EMBED_PROBE_TIMEOUT,
+    EMBED_SECONDS_PER_CHUNK,
     EMBED_TOKEN_FILE,
+    LEGACY_EMBED_TOKEN_FILE,
+    USER_HOME,
 )
 
 _HDR = struct.Struct("!I")  # 4-byte length prefix
+
+# Two lanes over ONE model, instead of a pool of residents.
+#
+# The resident used to answer strictly one request at a time, so a search
+# arriving mid-index queued behind the whole batch: measured **15.7 s**, and
+# at the 20 s client ceiling it sometimes returned nothing at all. The
+# specified fix was a pool of N residents — but that buys concurrency with a
+# second full copy of the model, and since the resident no longer idle-exits
+# that ~1.6 GB is permanent. ~3.1 GB at rest to avoid a 16 s wait.
+#
+# One ONNX session is safe to Run() from several threads, and verified here:
+# concurrent results are bit-identical to serial (delta 0.00e+00). So a
+# query and a batch can share the session and split its intra-op threads.
+# Measured: the query drops to ~0.37 s and the batch pays ~2%.
+#
+# Each kind gets its OWN permit rather than a shared priority queue, which
+# is what makes starvation impossible in both directions: a flood of queries
+# can never take the batch lane, and a long batch can never hold the query
+# lane. No aging, no priority inversion, nothing to tune.
+_QUERY_LANE = threading.Semaphore(1)
+_BATCH_LANE = threading.Semaphore(1)
+# Bounds threads if a client misbehaves; matches the listen backlog.
+_inflight = threading.Semaphore(8)
+
+
+class TokenRejected(RuntimeError):
+    """The resident is alive and refused our token.
+
+    A distinct type because it needs a distinct response. "Unreachable" means
+    fall back and embed locally; "refused" means we are talking to a resident
+    that is not ours, and falling back would quietly load a second copy of the
+    model — the failure mode this exception exists to make impossible.
+    """
 
 
 def _recv_n(sock: socket.socket, n: int) -> bytes:
@@ -59,15 +97,42 @@ def _recv(sock: socket.socket, timeout: float) -> dict:
     return json.loads(_recv_n(sock, n).decode("utf-8"))
 
 
+def token_file() -> Path:
+    """Where the shared secret lives, resolved per call.
+
+    Not frozen at import: a test or a container sets
+    ``MNEMO_EMBED_TOKEN_FILE`` at runtime, and a constant captured when the
+    module first loaded would quietly ignore it — the same import-time freeze
+    that made the token follow ``STATE_DIR`` in the first place.
+    """
+    override = os.environ.get("MNEMO_EMBED_TOKEN_FILE")
+    return Path(override) if override else EMBED_TOKEN_FILE
+
+
 def _token() -> str:
-    """Read the shared secret, creating it (0600) on first server start."""
-    if EMBED_TOKEN_FILE.exists():
-        return EMBED_TOKEN_FILE.read_text().strip()
-    EMBED_TOKEN_FILE.parent.mkdir(parents=True, exist_ok=True)
-    tok = os.urandom(24).hex()
-    EMBED_TOKEN_FILE.write_text(tok)
+    """Read the machine's shared secret, creating it (0600) on first use.
+
+    On first run after the move out of STATE_DIR, adopt the token from the
+    old default location if it is there: a resident may already be running
+    with it, and minting a new one would make this client's very next call
+    fail against a resident that is otherwise perfectly healthy.
+    """
+    path = token_file()
+    if path.exists():
+        return path.read_text().strip()
+
+    tok = ""
+    if LEGACY_EMBED_TOKEN_FILE.exists():
+        try:
+            tok = LEGACY_EMBED_TOKEN_FILE.read_text().strip()
+        except OSError:
+            tok = ""
+    tok = tok or os.urandom(24).hex()
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(tok)
     try:
-        os.chmod(EMBED_TOKEN_FILE, 0o600)  # best-effort; no-op on some FS
+        os.chmod(path, 0o600)  # best-effort; no-op on some FS
     except OSError:
         pass
     return tok
@@ -76,12 +141,68 @@ def _token() -> str:
 # --------------------------------------------------------------- server
 
 
+def _enable_crash_trace() -> None:
+    """Leave a trace if this process dies without a Python exception.
+
+    The resident is spawned with stderr on devnull, so a native death —
+    a segfault inside ONNX Runtime, a stack overflow, anything below the
+    interpreter — currently vanishes completely: no traceback, no log, and
+    the client sees only a connection reset. Its production symptom is
+    therefore a *silent* fallback to an in-process model, which is exactly
+    the class of failure that has cost this project the most time.
+
+    ``faulthandler`` costs nothing at runtime and turns that silence into a
+    stack dump. It cannot catch a hard kill (``taskkill /F``), which is
+    itself useful: an empty log after a disappearance says "something killed
+    me", a dump says "I fell over".
+    """
+    import faulthandler
+
+    try:
+        # USER_HOME, not the token's directory and not STATE_DIR: the handle
+        # stays open for the process's life (a signal handler cannot safely
+        # reopen), so it must live somewhere permanent. Anchoring it to a
+        # relocatable path pins a temp directory open and breaks cleanup —
+        # which is exactly what it did the first time I wrote this.
+        path = USER_HOME / "embed-crash.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Kept open for the process's life on purpose: faulthandler writes to
+        # this descriptor from a signal handler, where reopening is unsafe.
+        handle = path.open("a", encoding="utf-8")
+        handle.write(
+            f"--- resident {os.getpid()} started "
+            f"{time.strftime('%Y-%m-%dT%H:%M:%S')} on port {EMBED_PORT} ---\n"
+        )
+        handle.flush()
+        faulthandler.enable(file=handle, all_threads=True)
+    except OSError:
+        pass  # diagnostics must never be the reason a resident fails to start
+
+
 def serve() -> None:
     """Resident model holder. Binds $MNEMO_EMBED_BIND, serves embeddings,
     exits on idle. Singleton: if the port is already held, this instance
     steps aside — but says so on stderr, because a resident bound to a
     narrower address (e.g. a loopback one that autostarted first) silently
-    shadows a wanted shared bind and cuts every remote client off."""
+    shadows a wanted shared bind and cuts every remote client off.
+
+    Refuses to start without a cached model. The resident is autostarted by
+    clients (a search, a hook), and its first request would call
+    ``TextEmbedding(...)``, which *downloads* ~2.2 GB when the model is
+    absent. That would put an implicit download behind an ordinary search —
+    the one thing "the model is fetched only by an explicit `warmup`" forbids.
+    The in-process legs check ``is_model_cached()`` already; this closes the
+    same hole on the spawn path."""
+    from .embedder import is_model_cached
+
+    if not is_model_cached():
+        print(
+            "mnemo embed-server: no model in the cache — refusing to start. "
+            "Run `mnemo warmup` once (the only step allowed to download it).",
+            file=sys.stderr,
+        )
+        return
+    _enable_crash_trace()
     tok = _token()
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -100,21 +221,39 @@ def serve() -> None:
     # 0 -> no idle exit: stay resident for the environments we serve.
     srv.settimeout(EMBED_IDLE_TIMEOUT or None)
 
-    # Lazy: the model loads on the first request (the documented ~3 s cost,
-    # paid once per cold start, not per message).
+    # Lazy: the model loads on the first request that needs it. It must NOT
+    # be preloaded here — binding and then loading for ~6 s before the first
+    # accept() leaves liveness probes (`server_is_up`, `stop_resident`)
+    # timing out against a resident that is perfectly healthy, just busy.
+    # `embedder._model` is locked internally, so the two lanes racing on the
+    # first request still build only one session.
     from .embedder import embed_passages, embed_query
 
     while True:
         try:
             conn, _ = srv.accept()
         except socket.timeout:
-            return  # idle long enough -> free the ~1.6 GB
+            if _inflight.acquire(blocking=False):
+                _inflight.release()
+                return  # idle AND nothing running -> free the ~1.6 GB
+            continue   # work in flight; a daemon thread would die with us
+        _inflight.acquire()
+        threading.Thread(
+            target=_serve_one,
+            args=(conn, tok, embed_passages, embed_query),
+            daemon=True,
+        ).start()
+
+
+def _serve_one(conn, tok: str, embed_passages, embed_query) -> None:
+    """Handle one connection, in the lane its request belongs to."""
+    try:
         with conn:
             try:
                 req = _recv(conn, timeout=10.0)
                 if req.get("token") != tok:
                     _send(conn, {"error": "unauthorized"})
-                    continue
+                    return
                 if req.get("kind") == "passages":
                     texts = req.get("texts")
                     if (
@@ -125,26 +264,39 @@ def serve() -> None:
                         )
                     ):
                         _send(conn, {"error": "empty"})
-                        continue
-                    _send(conn, {"vecs": embed_passages(texts)})
-                    continue
+                        return
+                    with _BATCH_LANE:
+                        vecs = embed_passages(texts)
+                    _send(conn, {"vecs": vecs})
+                    return
                 text = (req.get("text") or "").strip()
                 if not text:
                     _send(conn, {"error": "empty"})
-                    continue
-                if req.get("kind") == "passage":
-                    vec = embed_passages([text])[0]
-                else:
-                    vec = embed_query(text)
+                    return
+                with _QUERY_LANE:
+                    if req.get("kind") == "passage":
+                        vec = embed_passages([text])[0]
+                    else:
+                        vec = embed_query(text)
                 _send(conn, {"vec": vec})
             except (OSError, ValueError, json.JSONDecodeError):
                 pass  # one bad client must never kill the resident
+    finally:
+        _inflight.release()
 
 
 # --------------------------------------------------------------- client
 
 
-def _connect(timeout: float) -> socket.socket | None:
+def _connect(timeout: float | None = None) -> socket.socket | None:
+    """Probe the resident. ``timeout=None`` uses the configured probe budget.
+
+    Loopback gets the tight budget (a live resident accepts in ~0.5 ms); a
+    remote resident keeps the generous one, since the measurement that
+    justified tightening it was taken on loopback only.
+    """
+    if timeout is None:
+        timeout = EMBED_PROBE_TIMEOUT if EMBED_HOST_IS_LOCAL else 0.5
     try:
         return socket.create_connection((EMBED_HOST, EMBED_PORT), timeout=timeout)
     except OSError:
@@ -152,24 +304,27 @@ def _connect(timeout: float) -> socket.socket | None:
 
 
 def _spawn_server() -> None:
-    """Start the resident detached — cross-platform."""
+    """Start the resident windowless and detached — cross-platform.
+
+    Delegates to ``service_ctl.spawn_detached`` rather than assembling flags
+    here: ``DETACHED_PROCESS`` alone is NOT enough on Windows (a child that
+    calls ``AllocConsole()`` gets a real visible window), and MSDN says
+    ``CREATE_NO_WINDOW`` is *ignored* when OR-ed with it — so the obvious
+    "fix" of adding the flag would have degraded silently. One primitive,
+    used by every spawn we make, is the only way NFR-1 stays true.
+
+    Note the doc is wrong here: contracts §11.2 prescribes
+    ``CREATE_NO_WINDOW | DETACHED_PROCESS``. docs-keeper is correcting it.
+    """
+    from .service_ctl import spawn_detached, windowless_python
+
     engine_root = Path(__file__).resolve().parent.parent
-    cmd = [sys.executable, "-m", "src.cli", "embed-server"]
-    kwargs: dict = dict(
-        cwd=str(engine_root),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    if os.name == "nt":
-        kwargs["creationflags"] = (
-            subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
-            | subprocess.CREATE_NEW_PROCESS_GROUP
-        )
-    else:
-        kwargs["start_new_session"] = True
+    # pythonw.exe is a GUI-subsystem binary: it cannot own a console at all,
+    # which is the only form of the guarantee that survives being launched by
+    # Task Scheduler or a shortcut.
+    cmd = [windowless_python(), "-m", "src.cli", "embed-server"]
     try:
-        subprocess.Popen(cmd, **kwargs)
+        spawn_detached(cmd, cwd=engine_root)
     except OSError:
         pass
 
@@ -181,19 +336,30 @@ def _obtain_socket() -> socket.socket | None:
     $MNEMO_EMBED_HOST names a remote one, we take it as-is: an unreachable
     remote must not make us load a second copy of the model right next to it.
 
+    Nor do we spawn one that cannot serve. ``serve()`` refuses to start
+    without a cached model, so on a model-less machine every call would
+    otherwise launch a process, wait out the poll loop and still come back
+    empty — measured at 7-20 s per search, repeated for every search, for a
+    result that was never going to arrive. Checking the cache first turns
+    that into one refused connection (~0.5 s) and an honest "unavailable".
+
     Returns None if the resident cannot be reached — every caller must
     treat that as "degrade gracefully", never as fatal.
     """
-    sock = _connect(timeout=0.5)
+    sock = _connect()
     if sock is not None:
         return sock
     if not EMBED_HOST_IS_LOCAL:
         return None
+    from .embedder import is_model_cached
+
+    if not is_model_cached():
+        return None  # nothing to serve; spawning would only burn wall clock
     _spawn_server()
     deadline = time.time() + 5.0  # process bind is fast (no model yet)
     while time.time() < deadline:
         time.sleep(0.2)
-        sock = _connect(timeout=0.5)
+        sock = _connect()
         if sock is not None:
             return sock
     return None
@@ -207,11 +373,51 @@ def server_is_up() -> bool:
     container that ships no model and dials a shared remote one). Does not
     autostart anything — a pure liveness check on the configured address.
     """
-    sock = _connect(timeout=0.5)
+    sock = _connect()
     if sock is None:
         return False
     sock.close()
     return True
+
+
+def _warn_died_mid_request(what: str, exc: BaseException) -> None:
+    """A resident that died WHILE serving us is not "never reachable".
+
+    The two look identical to a caller — both end in a fallback to an
+    in-process model, a second ~2.2 GB and a ~50x slowdown — but only one of
+    them means something broke. A resident has been observed vanishing with
+    no Python traceback and an empty stderr (a native death), and the only
+    production symptom of that is the silent fallback. So the client says it
+    happened, because nothing else will.
+    """
+    print(
+        f"mnemo: the embedding resident at {EMBED_HOST}:{EMBED_PORT} accepted "
+        f"our {what} request and then died ({type(exc).__name__}). That is a "
+        f"crash, not an absent resident. Falling back to an in-process model "
+        f"— much slower, ~2.2 GB here. Check "
+        f"{USER_HOME / 'embed-crash.log'} for a native trace.",
+        file=sys.stderr,
+    )
+
+
+def _raise_if_unauthorized(resp: dict) -> None:
+    """Turn the resident's refusal into a loud, specific failure.
+
+    Raised rather than returned so no caller can absorb it by accident. The
+    message names the fix, because the cause is almost always one process
+    reading a different token file than the resident did.
+    """
+    if resp.get("error") != "unauthorized":
+        return
+    message = (
+        f"the embedding resident at {EMBED_HOST}:{EMBED_PORT} refused our "
+        f"token (read from {token_file()}). It is running with a "
+        f"different secret — restart it, or point MNEMO_EMBED_TOKEN_FILE at "
+        f"the one it used. NOT falling back to an in-process model: that "
+        f"would load a second ~2.2 GB copy beside a working resident."
+    )
+    print(f"mnemo: {message}", file=sys.stderr)
+    raise TokenRejected(message)
 
 
 def embed_query_via_server(
@@ -220,12 +426,14 @@ def embed_query_via_server(
     """Query embedding from the resident, starting it if needed.
 
     ``budget_s`` overrides the default recv timeout so callers with a
-    wall-clock budget (hook-inject, MCP memory_search) can bound this
+    wall-clock budget (hook-inject, MCP search) can bound this
     step. ``None`` keeps the historical 20 s ceiling for batch / ingest
     paths where cold start (~3 s) must comfortably fit.
 
-    Returns None on ANY failure — the caller skips injection and never
-    blocks the user's turn.
+    Returns None when the resident cannot be reached — the caller skips
+    injection and never blocks the user's turn. Raises ``TokenRejected`` when
+    it *can* be reached and refuses us, because that is not a degradation to
+    absorb silently.
     """
     if not text.strip():
         return None
@@ -243,8 +451,12 @@ def embed_query_via_server(
             # Generous default: first request after a cold start loads the
             # model (~3 s). Steady state is milliseconds.
             resp = _recv(sock, timeout=budget_s if budget_s is not None else 20.0)
+        _raise_if_unauthorized(resp)
         vec = resp.get("vec")
         return vec if isinstance(vec, list) else None
+    except (ConnectionError, EOFError) as exc:
+        _warn_died_mid_request("query", exc)
+        return None
     except (OSError, ValueError, json.JSONDecodeError):
         return None
 
@@ -257,9 +469,11 @@ def embed_passages_via_server(texts: list[str]) -> list[list[float]] | None:
     loads the ~2.2 GB model itself — that in-process load was the cause
     of both the per-edit CPU storm and the multi-GB MCP growth.
 
-    Returns None on ANY failure so the caller can fall back to an
-    in-process embed (keeps ``mnemo ingest`` / tests deterministic when
-    the resident is genuinely unavailable, e.g. offline / CI).
+    Returns None when the resident is genuinely unreachable, so the caller
+    can fall back to an in-process embed (keeps ``mnemo ingest`` / tests
+    deterministic offline / in CI). Raises ``TokenRejected`` when a live
+    resident refuses us — falling back there would load a second copy of the
+    model beside a perfectly good one and run 50x slower without a word.
     """
     if not texts or not all(isinstance(t, str) and t.strip() for t in texts):
         return None
@@ -271,15 +485,30 @@ def embed_passages_via_server(texts: list[str]) -> list[list[float]] | None:
     sock = _obtain_socket()
     if sock is None:
         return None
+    # Budget scales with the batch: this waits on a CPU-bound embed whose
+    # duration depends on batch size and machine load, so a fixed ceiling is
+    # the wrong shape. The old fixed 60 s was measured being crossed by a
+    # 16-chunk batch at 4 threads (61.7 s) — a coin flip under load.
+    budget = max(EMBED_BATCH_TIMEOUT_FLOOR, EMBED_SECONDS_PER_CHUNK * len(texts))
     try:
         with sock:
             _send(sock, {"token": tok, "texts": texts, "kind": "passages"})
-            # Cold start loads the model (~3 s) then embeds the batch;
-            # steady state is milliseconds. Generous ceiling.
-            resp = _recv(sock, timeout=60.0)
+            resp = _recv(sock, timeout=budget)
+        _raise_if_unauthorized(resp)
         vecs = resp.get("vecs")
         if not isinstance(vecs, list) or len(vecs) != len(texts):
             return None
         return vecs
+    except TimeoutError:
+        # Giving up on a resident that is merely slow makes the caller load
+        # its own ~2.2 GB copy. That used to happen in silence; say it.
+        print(
+            f"mnemo: the embedding resident did not answer within {budget:.0f}s "
+            f"for a batch of {len(texts)} chunks. Falling back to an "
+            f"in-process model, which is much slower and holds ~2.2 GB here. "
+            f"Raise MNEMO_EMBED_SECONDS_PER_CHUNK if this recurs.",
+            file=sys.stderr,
+        )
+        return None
     except (OSError, ValueError, json.JSONDecodeError):
         return None

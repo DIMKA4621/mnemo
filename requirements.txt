@@ -1,5 +1,21 @@
-# Memory POC runtime deps — intentionally minimal (Memory-design-v2: light, git-clone-bootstrappable, no heavy infra).
+# mnemo runtime deps — intentionally minimal (Memory-design-v3: native, no heavy infra).
 fastembed>=0.4.0
 sqlite-vec>=0.1.6
 semantic-text-splitter>=0.18.0
-mcp>=1.0.0
+# The MCP SDK ships the server class both faces mount (`MCPServer`, formerly
+# `FastMCP`); the separate `fastmcp` distribution is deliberately NOT a
+# dependency.
+#
+# The major is pinned, and that is the point. An unbounded `mcp>=1.0.0` was
+# how 2.0 arrived unannounced: it renamed `mcp.server.fastmcp` to
+# `mcp.server.mcpserver`, so every *fresh* install died at startup with
+# ModuleNotFoundError while every venv resolved months earlier kept working.
+# The bug was invisible to anyone who already had one. Raising this ceiling
+# means porting the faces, not editing a number.
+mcp>=2.0,<3
+
+# v3 service layer: loopback backend + WebSocket, watcher, HTTP clients.
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+watchdog>=4.0.0
+httpx>=0.27.0

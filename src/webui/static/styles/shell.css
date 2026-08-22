@@ -1,0 +1,170 @@
+/* shell: sidebar (three routes, nothing else) + persistent header + the
+ * page stack. Ported from docs/console-design.html (frozen 2026-08-19),
+ * which is the source of truth for this file's rules. */
+
+.app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  height: 100%;
+  transition: grid-template-columns 140ms ease;
+}
+.app.is-collapsed { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
+
+.sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.sb-top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+.sb-brand { flex: 1; min-width: 0; font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+.is-collapsed .sb-brand { display: none; }
+.sb-toggle {
+  flex: none;
+  display: inline-flex;
+  padding: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-mute);
+}
+.sb-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+.is-collapsed .sb-toggle { margin: 0 auto; }
+.is-collapsed .sb-toggle svg { transform: scaleX(-1); }
+
+.sb-nav { flex: 1; min-height: 0; overflow: auto; padding: 8px 6px; }
+.sb-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-dim);
+  text-align: left;
+  white-space: nowrap;
+}
+.sb-item + .sb-item { margin-top: 2px; }
+.sb-item:hover { background: var(--bg-hover); color: var(--fg); }
+.sb-item.is-active { background: var(--sel-bg); color: var(--sel-fg); font-weight: 500; }
+.sb-item svg { flex: none; }
+.sb-item .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.sb-item .cnt { flex: none; color: var(--fg-mute); font: 11px/1 var(--mono); }
+.sb-item.is-active .cnt { color: var(--sel-fg); }
+.is-collapsed .sb-item { justify-content: center; padding: 0; }
+.is-collapsed .sb-item .lbl, .is-collapsed .sb-item .cnt { display: none; }
+
+/* Self-update banner (update.js) — sits directly above the machine footer,
+   same corner of the sidebar the design's "плашка знизу-зліва" points at.
+   A real <button>, like .sb-item / .chip elsewhere: it opens the update
+   modal (or, mid-update, reopens the progress view). */
+.sb-update-banner {
+  flex: none;
+  display: block;
+  width: calc(100% - 16px);
+  margin: 0 8px 6px;
+  padding: 6px 8px;
+  /* Warm, not the accent blue -- "something new" should read differently
+     from an ordinary interactive element, and this reuses the theme's
+     existing warning tokens (already dark/light-aware) rather than adding
+     a fourth color language just for this banner. */
+  border: 1px solid var(--warn-border);
+  border-radius: var(--radius);
+  background: var(--warn-bg);
+  color: var(--warn-fg);
+  font-size: 11px;
+  text-align: left;
+  line-height: 1.4;
+  cursor: pointer;
+}
+.sb-update-banner:hover { filter: brightness(1.08); }
+.sb-update-banner.is-busy {
+  border-color: var(--busy); color: var(--busy);
+  background: var(--bg-pane);
+}
+.is-collapsed .sb-update-banner { display: none; }
+
+/* The machine's three facts sit at the bottom of the sidebar, where an app
+   usually puts the account chip. They belong to the machine, not to a page,
+   so they must not ride in the header — that space is for a page's actions. */
+.sb-foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 34px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-mute);
+  font: 10.5px/1.4 var(--mono);
+  white-space: nowrap;
+  overflow: hidden;
+}
+.sb-foot .sep { color: var(--line); }
+.sb-foot .ver { margin-left: auto; }
+.is-collapsed .sb-foot { justify-content: center; padding: 8px 4px; }
+.is-collapsed .sb-foot .txt, .is-collapsed .sb-foot .sep, .is-collapsed .sb-foot .ver { display: none; }
+
+.dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.dot.busy { background: var(--busy); }
+.dot.err { background: var(--err); }
+.dot.idle { background: var(--idle); }
+
+.stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.pages { position: relative; flex: 1; min-width: 0; min-height: 0; }
+.page { position: absolute; inset: 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+
+/* Persistent header. The left half swaps with the tab; the right half never
+   does — it is the machine, and the machine does not depend on the page. */
+.topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 7px 12px;
+  background: var(--bg-pane);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.top-left { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+
+/* ---- shared header bits -------------------------------------------------- */
+.page-title { font-size: 13.5px; font-weight: 650; white-space: nowrap; }
+.page-sub { color: var(--fg-mute); font-size: 11.5px; white-space: nowrap; }
+.grow { flex: 1; min-width: 4px; }
+
+@media (max-width: 940px) {
+  .app, .app.is-collapsed { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
+  .sb-brand { display: none; }
+  .sb-foot { justify-content: center; padding: 8px 4px; }
+  .sb-foot .txt, .sb-foot .sep, .sb-foot .ver { display: none; }
+  /* The rail is too narrow for a sentence; the update modal is still
+     reachable once the viewport widens, and this is a v1 console meant for
+     loopback desktop use, not a mobile-first surface. */
+  .sb-update-banner { display: none; }
+  .sb-item { justify-content: center; padding: 0; }
+  .sb-item .lbl, .sb-item .cnt { display: none; }
+  .sb-toggle { display: none; }
+}
+
+@media (max-width: 620px) {
+  .topbar { flex-wrap: wrap; }
+  .page-sub { display: none; }
+}
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mnemo-memory": {
+      "type": "http",
+      "url": "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp?token={{MNEMO_TOKEN}}"
+    }
+  }
+}

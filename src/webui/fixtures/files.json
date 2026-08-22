@@ -1,0 +1,123 @@
+{
+  "b1cfcadf81e9fe53": {
+    "MEMORY.md": {
+      "path": "MEMORY.md",
+      "size": 566,
+      "sha256": "641db4de32eb10140141fcc96cf547b719342066391d0dc2577fce01f7a90ba2",
+      "indexed": true,
+      "text": "# Memory Index\n\nКурований індекс памʼяті проєкту. Тримати під 200 рядків.\n\n## Quick facts\n\n- Джерело правди — `.md` у git; індекс одноразовий і відтворюваний.\n- Один банк = один корінь = один файл `<bank_id>.db`.\n- Порт бекенда — 4646; ембединг-резидент — 4645.\n\n## Topics\n\n- `topics/queue.md` — черга й воркер.\n- `topics/store.md` — схема бази банку.\n- `logs/` — денні логи.\n",
+      "chunks": [
+        {
+          "chunk_uid": "859cbe1832922a2e",
+          "chunk_index": 0,
+          "heading": "Memory Index",
+          "start_char": 0,
+          "end_char": 75
+        },
+        {
+          "chunk_uid": "04a0458b9deaa57e",
+          "chunk_index": 1,
+          "heading": "Quick facts",
+          "start_char": 75,
+          "end_char": 263
+        },
+        {
+          "chunk_uid": "12ae3d1e12361153",
+          "chunk_index": 2,
+          "heading": "Topics",
+          "start_char": 263,
+          "end_char": 376
+        }
+      ],
+      "bank_id": "b1cfcadf81e9fe53"
+    },
+    "topics/queue.md": {
+      "path": "topics/queue.md",
+      "size": 1287,
+      "sha256": "4055ddc087e038aebb291a2604c6ec9cdd0a95640adad126643664d785f9461a",
+      "indexed": true,
+      "text": "# Priority queue\n\nЧерга — це те, що робить індексацію фоновою й керованою.\n\n## Пріоритети\n\n`HIGH` — поодинока правка від watcher. `NORMAL` — явний реіндекс файлу з\nконсолі або CLI. `LOW` — масові задачі: новий банк, повна перебудова,\nреконсиляція на старті.\n\nКлюч у черзі — кортеж `(priority, seq)`. `seq` монотонний і глобальний, тож\nусередині одного пріоритету завжди FIFO.\n\n## Витіснення\n\n`index_file` після кожного закомміченого батчу питає `should_yield()`. Воркер\nповертає `True`, якщо поточна задача — `LOW`, а в черзі вже чекає `HIGH`.\nТоді файл повертається в чергу з `start_batch=n`, і термінова правка чекає\nщонайбільше один батч.\n\n## Дедуплікація\n\nEnqueue `file`-задачі для пари `(bank_id, path)`, яка вже чекає, не додає\nдругу. Вищий пріоритет підвищує наявну; нижчий ігнорується.\n",
+      "chunks": [
+        {
+          "chunk_uid": "8196e1d32c67afe1",
+          "chunk_index": 0,
+          "heading": "Priority queue",
+          "start_char": 0,
+          "end_char": 76
+        },
+        {
+          "chunk_uid": "79ce947e22dc4f62",
+          "chunk_index": 1,
+          "heading": "Пріоритети",
+          "start_char": 76,
+          "end_char": 378
+        },
+        {
+          "chunk_uid": "df38b7b3569bf6ee",
+          "chunk_index": 2,
+          "heading": "Витіснення",
+          "start_char": 378,
+          "end_char": 644
+        },
+        {
+          "chunk_uid": "63a8e0ade3bd4b34",
+          "chunk_index": 3,
+          "heading": "Дедуплікація",
+          "start_char": 644,
+          "end_char": 795
+        }
+      ],
+      "bank_id": "b1cfcadf81e9fe53"
+    },
+    "topics/draft.md": {
+      "path": "topics/draft.md",
+      "size": 221,
+      "sha256": "df4e978692ebb4a7671ba764b1d3eb40ed020687b33886196eadeaa4749ebb82",
+      "indexed": false,
+      "text": "# Чернетка\n\nЦей файл ще не потрапив в індекс — консоль має показати його як\nнеіндексований, без жодної лінії-роздільника.\n",
+      "chunks": [],
+      "bank_id": "b1cfcadf81e9fe53"
+    },
+    "logs/2026-07-26.md": {
+      "path": "logs/2026-07-26.md",
+      "size": 716,
+      "sha256": "5f6966a024bd42fc6e77d910d57255d34df4b376450ed568af7065fd26ef4c88",
+      "indexed": true,
+      "text": "# 2026-07-26\n\n## Зроблено\n\n- 🚀 Підняли фазу 6: консоль пишеться на моках, поки бекенда ще немає.\n- Зафіксували контракт `/api/file` — саме він дає `start_char`/`end_char`.\n\n## Рішення\n\nСтатус рахується як `indexing > empty > ready`, і в payload завжди їдуть\nобидва поля — `queued` і `chunk_count`. Тому «перший білд у процесі» і\n«справді порожньо» — це різні стани, а не один.\n\n## Наступне\n\nЗустріти реальний бекенд і зняти мок-сервер зі шляху запиту.\n",
+      "chunks": [
+        {
+          "chunk_uid": "bb11147321e5a0bd",
+          "chunk_index": 0,
+          "heading": "2026-07-26",
+          "start_char": 0,
+          "end_char": 14
+        },
+        {
+          "chunk_uid": "85c9cd956bc353c7",
+          "chunk_index": 1,
+          "heading": "Зроблено",
+          "start_char": 14,
+          "end_char": 173
+        },
+        {
+          "chunk_uid": "832e721fbfff0b3f",
+          "chunk_index": 2,
+          "heading": "Рішення",
+          "start_char": 173,
+          "end_char": 378
+        },
+        {
+          "chunk_uid": "2064fc7c9fc8d259",
+          "chunk_index": 3,
+          "heading": "Наступне",
+          "start_char": 378,
+          "end_char": 452
+        }
+      ],
+      "bank_id": "b1cfcadf81e9fe53"
+    }
+  },
+  "42c3326ed6e1a1b7": {},
+  "09b7d876d501c789": {},
+  "410d981426af108f": {}
+}

@@ -1,57 +1,177 @@
-"""Read path: query -> relevant sections, scoped to a project root.
+"""Read path: query -> relevant sections of one bank.
 
-Vector search is primary; FTS5/BM25 is the secondary lexical net.
-Results are blended with reciprocal rank fusion (RRF). Scope
-(project / agent) is filtered on chunk metadata.
+Vector search is primary; FTS5/BM25 is the secondary lexical net. Results are
+blended with reciprocal rank fusion (RRF).
+
+v3: the bank is flat, so there is no scope filter. Narrowing is optional and
+purely navigational — ``path_prefix`` matches on the ``chunks.path`` that is
+already stored, at segment boundaries, so no new metadata is needed.
+
+This module stays **pure** (Memory-contracts-v3 §5): it is handed an open
+connection and a provider, and knows nothing about banks, the registry or the
+queue. It never composes a status — ``indexing`` / ``empty`` / ``ready``
+depends on the work queue, which lives in the API layer.
 """
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 from dataclasses import dataclass
-from pathlib import Path
 
 import sqlite_vec
 
-from .config import MIN_QUERY_CHARS, MIN_SIM, NEIGHBOR_WINDOW, RRF_K, TOP_K, resolve
-from .embedder import embed_query
-from .store import connect, get_vectors
+from .config import (
+    FOLD_PATH_CASE,
+    MIN_QUERY_CHARS,
+    MIN_SIM,
+    NEIGHBOR_WINDOW,
+    RRF_K,
+    RRF_VECTOR_WEIGHT,
+    TOP_K,
+)
+from .providers import EmbeddingProvider, EmbeddingUnavailable, get_provider
+from .store import get_vectors
+
+class DimensionMismatch(RuntimeError):
+    """The query vector and the indexed vectors are of different widths.
+
+    sqlite-vec refuses a MATCH whose vector is not the column's width, and it
+    is right to: the two are different embedding spaces. It surfaces as a bare
+    ``OperationalError`` from inside the extension, which reads as "something
+    broke in SQLite" — so it is translated here, where the cause is known, and
+    the API turns it into `bank_stale`.
+
+    Note this is only the half of the problem that *announces itself*. Two
+    models of the SAME width (e5-large and bge-m3 are both 1024) raise
+    nothing at all and silently rank one space against another; catching that
+    needs the provider key, which is `api._stale_index_error`.
+    """
 
 
 @dataclass
 class Hit:
-    path: str
+    """One result. For a merged neighbour window (``span`` set), ``chunk_uid``
+    and ``chunk_index`` identify the *anchor* — the best-scoring chunk in the
+    window — while ``span`` gives the inclusive range of chunk indices whose
+    text was concatenated into ``content``. A UI highlighting a hit should
+    follow ``span`` when present and ``chunk_uid`` only otherwise."""
+
+    chunk_uid: str
+    path: str                 # POSIX relpath inside the bank
     heading: str
-    scope: str
-    agent_name: str | None
     content: str
-    score: float
-    sim: float | None = None  # cosine sim vs query; set only on gated calls
+    score: float              # RRF score
     chunk_index: int = -1     # position in file; -1 only for merged windows
     span: tuple[int, int] | None = None  # (first, last) chunk_index after merge
+    sim: float | None = None  # cosine sim vs query; set only on gated calls
+
+
+def _normalize_prefix(path_prefix: str | None) -> str | None:
+    """POSIX relpath from the bank root; '' and '.' mean "no filter".
+
+    Each segment is stripped separately: a prefix pasted out of a UI arrives
+    as ``" logs / 2026 "`` often enough, and stripping the whole string first
+    would leave ``"logs / 2026"`` — which matches nothing, silently.
+    """
+    if not path_prefix:
+        return None
+    segments = [s.strip() for s in path_prefix.replace("\\", "/").split("/")]
+    cleaned = "/".join(s for s in segments if s and s != ".")
+    return cleaned or None
+
+
+def _fold(value: str) -> str:
+    """Case-fold where the filesystem does — NTFS indexes ``NOTES.MD`` and a
+    user typing ``--path-prefix notes`` means it. POSIX keeps them distinct."""
+    return value.lower() if FOLD_PATH_CASE else value
+
+
+def _under_prefix(path: str, prefix: str) -> bool:
+    """Segment-boundary match: 'log' must NOT match 'logs/x.md'."""
+    path, prefix = _fold(path), _fold(prefix)
+    return path == prefix or path.startswith(prefix + "/")
 
 
 def _vector_ranked(conn: sqlite3.Connection, qvec: list[float], limit: int) -> list[int]:
-    rows = conn.execute(
-        "SELECT rowid FROM vec_chunks "
-        "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-        (sqlite_vec.serialize_float32(qvec), limit),
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT rowid FROM vec_chunks "
+            "WHERE embedding MATCH ? AND k = ? ORDER BY distance",
+            (sqlite_vec.serialize_float32(qvec), limit),
+        ).fetchall()
+    except sqlite3.OperationalError as exc:
+        if "dimension mismatch" in str(exc).lower():
+            raise DimensionMismatch(str(exc)) from exc
+        raise
     return [r["rowid"] for r in rows]
 
 
-def _fts_escape(query: str) -> str:
-    """Treat the whole query as one quoted phrase — robust against operators."""
-    return '"' + query.replace('"', '""') + '"'
+# A query term, for the lexical leg. `\w+` keeps letters, digits and `_` in
+# any script and drops everything FTS5 would read as syntax (`*`, `^`, `:`,
+# parentheses, `-`), which is what makes the result injection-proof without
+# quoting the whole thing.
+_FTS_TERM = re.compile(r"\w+", re.UNICODE)
 
 
-def _fts_ranked(conn: sqlite3.Connection, query: str, limit: int) -> list[int]:
-    rows = conn.execute(
-        "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ? "
-        "ORDER BY bm25(fts_chunks) LIMIT ?",
-        (_fts_escape(query), limit),
-    ).fetchall()
-    return [r["rowid"] for r in rows]
+def _fts_query(query: str) -> str | None:
+    """Build the MATCH expression: OR over the query's terms.
+
+    This used to wrap the whole query in quotes, and a quoted string in FTS5
+    is a PHRASE — the words had to appear consecutively, in order. On a real
+    question that matches nothing: measured on this repo's own bank,
+    "чому індексація повільна" and "watcher debounce" both returned zero
+    rows, while the same terms OR-ed returned 12 and 6. So RRF was fusing a
+    full vector ranking with an empty list, and the hybrid search was
+    vector-only for anything longer than a single word.
+
+    The intent behind the quoting was sound — a user's question must never be
+    read as FTS5 syntax — so each term is still quoted individually. A quoted
+    term is a literal, so a stray ``AND`` / ``NEAR`` / ``*`` in the question
+    cannot become an operator.
+
+    OR rather than AND because this is a CANDIDATE POOL for RRF, not an
+    answer: bm25() does the ranking, and a term that matches everything
+    (a stopword) earns a low IDF and contributes almost nothing to the score.
+    AND would reproduce the old failure — measured, it also returned zero on
+    the same questions.
+
+    Prefix matching (``term*``, for Ukrainian's suffix inflection) was tried
+    and is not worth it here: 18 rows against 17 on the query where it helped
+    most. Real stemming is not available — FTS5 ships `porter`, which is
+    English-only.
+
+    Returns None when the query holds no usable term, so the caller can skip
+    the lexical leg instead of building a malformed expression.
+    """
+    terms = [t for t in _FTS_TERM.findall(query) if len(t) > 1]
+    if not terms:
+        return None
+    # `\w+` cannot contain a double quote, so the terms need no escaping.
+    return " OR ".join(f'"{t}"' for t in terms)
+
+
+def _fts_ranked(
+    conn: sqlite3.Connection, query: str, limit: int, prefix: str | None
+) -> list[int]:
+    match = _fts_query(query)
+    if match is None:
+        return []
+    sql = "SELECT rowid FROM fts_chunks WHERE fts_chunks MATCH ?"
+    params: list[object] = [match]
+    if prefix is not None:
+        # The lexical leg can narrow in SQL (unlike kNN), so it does. LIKE is
+        # ASCII-case-insensitive in SQLite, which may over-select — harmless,
+        # because `_under_prefix` is the authority and re-checks every row.
+        # Under-selecting is what would silently lose hits, so never use `=`.
+        sql += (
+            " AND rowid IN (SELECT id FROM chunks "
+            "WHERE path LIKE ? OR path LIKE ?)"
+        )
+        params += [prefix, prefix + "/%"]
+    sql += " ORDER BY bm25(fts_chunks) LIMIT ?"
+    params.append(limit)
+    return [r["rowid"] for r in conn.execute(sql, params).fetchall()]
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -61,12 +181,19 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb) if na and nb else 0.0
 
 
-def _rrf(*rankings: list[int]) -> dict[int, float]:
-    """Reciprocal rank fusion: sum 1 / (RRF_K + rank)."""
+def _rrf(
+    *rankings: list[int], weights: tuple[float, ...] | None = None
+) -> dict[int, float]:
+    """Reciprocal rank fusion: sum weight / (RRF_K + rank).
+
+    ``weights`` defaults to 1 per leg — the textbook form, which assumes the
+    legs are equally trustworthy. Ours are not; see ``RRF_VECTOR_WEIGHT``.
+    """
+    factors = weights or (1.0,) * len(rankings)
     scores: dict[int, float] = {}
-    for ranking in rankings:
+    for weight, ranking in zip(factors, rankings):
         for rank, cid in enumerate(ranking):
-            scores[cid] = scores.get(cid, 0.0) + 1.0 / (RRF_K + rank + 1)
+            scores[cid] = scores.get(cid, 0.0) + weight / (RRF_K + rank + 1)
     return scores
 
 
@@ -128,10 +255,9 @@ def _expand_neighbors(
             content = "\n\n".join(by_idx[i]["content"] for i in ordered_idxs)
             expanded.append(
                 Hit(
+                    chunk_uid=best.chunk_uid,
                     path=path,
                     heading=best.heading,
-                    scope=best.scope,
-                    agent_name=best.agent_name,
                     content=content,
                     score=best.score,
                     sim=best.sim,
@@ -146,52 +272,56 @@ def _expand_neighbors(
 
 
 def search(
+    conn: sqlite3.Connection,
     query: str,
     *,
-    root: Path | str | None = None,
-    scope: str | None = None,
-    agent_name: str | None = None,
-    top_k: int = TOP_K,
     qvec: list[float] | None = None,
+    provider: EmbeddingProvider | None = None,
+    top_k: int = TOP_K,
+    path_prefix: str | None = None,
     gate: bool = False,
     min_sim: float | None = None,
     expand_window: int | None = None,
 ) -> list[Hit]:
-    """Hybrid (vector-primary + FTS) search with optional scope filter.
+    """Hybrid (vector-primary + FTS) search with an optional path filter.
+
+    Takes an **open connection**: the caller owns the bank's lifecycle, which
+    is what lets the backend hold one long-lived read connection per bank
+    instead of reopening the database on every request.
 
     ``qvec``: a precomputed query embedding (the auto-inject path passes the
     one obtained from the warm helper, so the model is never loaded in this
-    process). ``gate``: drop empty/too-short queries and weak matches by a
-    cosine-similarity floor — used ONLY by auto-inject; manual MCP/CLI
+    process). ``provider``: used only when ``qvec`` is None; defaults to the
+    service provider. ``gate``: drop empty/too-short queries and weak matches
+    by a cosine-similarity floor — used ONLY by auto-inject; manual MCP/CLI
     search stays ungated (the agent judges relevance itself).
     """
     if gate and len(query.strip()) < MIN_QUERY_CHARS:
         return []
-    db = resolve(root).db
-    if not db.exists():
-        return []
-    conn = connect(db)
+    prefix = _normalize_prefix(path_prefix)
     try:
         if qvec is None:
-            # Prefer the resident so a container / model-less host offloads
-            # the query embedding to the shared model. Fall back in-process
-            # ONLY if a model is actually cached — a search must never
-            # trigger an implicit ~2 GB download; if it can't embed, it
-            # degrades to "no results".
-            from .embed_server import embed_query_via_server
-            qvec = embed_query_via_server(query)
-            if qvec is None:
-                from .embedder import is_model_cached
-                if not is_model_cached():
-                    return []
-                qvec = embed_query(query)
-        pool = max(top_k * 4, 20)
+            # A search must never trigger an implicit ~2 GB download; if it
+            # cannot embed, it degrades to "no results" (NFR-10).
+            try:
+                qvec = (provider or get_provider()).embed_query(query)
+            except EmbeddingUnavailable:
+                return []
+        # kNN cannot filter by path, so the filter is applied after it. With a
+        # prefix the candidate pool is widened, otherwise a narrow subfolder in
+        # a big bank returns almost nothing.
+        pool = (
+            min(max(top_k * 40, 200), 500)
+            if prefix is not None
+            else max(top_k * 4, 20)
+        )
         vec_ids = _vector_ranked(conn, qvec, pool)
         try:
-            fts_ids = _fts_ranked(conn, query, pool)
+            fts_ids = _fts_ranked(conn, query, pool, prefix)
         except sqlite3.OperationalError:
             fts_ids = []
-        fused = _rrf(vec_ids, fts_ids)
+        fused = _rrf(vec_ids, fts_ids,
+                    weights=(RRF_VECTOR_WEIGHT, 1.0))
         if not fused:
             return []
 
@@ -212,9 +342,7 @@ def search(
             row = meta.get(cid)
             if row is None:
                 continue
-            if scope and row["scope"] != scope:
-                continue
-            if agent_name and row["agent_name"] != agent_name:
+            if prefix is not None and not _under_prefix(row["path"], prefix):
                 continue
             sim: float | None = None
             if gate:
@@ -226,10 +354,9 @@ def search(
                     continue
             hits.append(
                 Hit(
+                    chunk_uid=row["chunk_uid"],
                     path=row["path"],
                     heading=row["heading"] or "",
-                    scope=row["scope"],
-                    agent_name=row["agent_name"],
                     content=row["content"],
                     score=fused[cid],
                     sim=sim,
@@ -240,5 +367,9 @@ def search(
                 break
         win = NEIGHBOR_WINDOW if expand_window is None else expand_window
         return _expand_neighbors(conn, hits, win)
-    finally:
-        conn.close()
+    except sqlite3.OperationalError as exc:
+        # A bank whose schema was never created reads as "nothing here" — the
+        # connection may deliberately be read-only, so we do not create it.
+        if "no such table" in str(exc):
+            return []
+        raise
