@@ -812,9 +812,16 @@ def test_stage_release_real_pipeline(work: Path) -> None:
             check("bin/mnemo.exe --help (real install shape) succeeds cleanly",
                   full.returncode == 0 and bool(full.stdout), detail=full.stderr[:300])
 
+            # `--quiet` was dropped from the pip install call (2026-08-22,
+            # stall-detection fix) specifically so pip prints per-package
+            # lines; _watch_pip_progress now relays those as extra "venv"
+            # progress events while the build call blocks, so this can no
+            # longer assert an exact single "venv" in the middle.
             steps = [p["step"] for p in progress]
-            check("progress went download -> venv -> done",
-                  steps == ["download", "venv", "done"], detail=str(steps))
+            check("progress went download -> venv(*) -> done",
+                  steps[0] == "download" and steps[-1] == "done"
+                  and all(s == "venv" for s in steps[1:-1]),
+                  detail=str(steps))
 
             # Re-staging the SAME tag must be idempotent (fresh build, old
             # one replaced) -- exercises stage_release's "stale final_dir"

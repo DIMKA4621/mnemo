@@ -825,7 +825,13 @@ def _ps_quote(path: Path) -> str:
     return str(path).replace("'", "''")
 
 
-def _build_engine_version(repo_root: Path, version_dir: Path, *, timeout: float = 1800.0) -> None:
+def _build_engine_version(
+    repo_root: Path,
+    version_dir: Path,
+    *,
+    timeout: float = 3600.0,
+    progress_file: Path | None = None,
+) -> None:
     """Build a full ``{src, .venv}`` tree at ``version_dir`` from
     ``repo_root``'s source, by dot-sourcing THAT checkout's own
     ``install.ps1`` and calling its ``Build-EngineVersion`` function
@@ -854,6 +860,16 @@ def _build_engine_version(repo_root: Path, version_dir: Path, *, timeout: float 
     whole self-update feature to the one machine it exists for; ``install.sh``
     never grew a reusable ``Build-EngineVersion`` equivalent (its venv build
     is inline), so there is nothing to call on POSIX yet.
+
+    ``timeout`` is a last-resort backstop only (bumped from the original
+    1800s to a generous 3600s) — the real slow-vs-dead distinction now lives
+    inside ``install.ps1``'s own ``Invoke-CheckedWithHeartbeat`` stall
+    detector (``-StallTimeoutSec``), which kills a genuinely stalled pip
+    install in ~2 minutes regardless of this ceiling. This one only fires if
+    PowerShell itself gets wedged outside pip's control. ``progress_file``,
+    when given, is forwarded as ``-ProgressFile`` so the pip-install step
+    can report an approximate running status; see :func:`stage_release`
+    for who reads it.
     """
     if os.name != "nt":
         raise NotImplementedError(
@@ -865,11 +881,15 @@ def _build_engine_version(repo_root: Path, version_dir: Path, *, timeout: float 
     if not installer.is_file():
         raise RuntimeError(f"release archive has no install.ps1 at {installer}")
 
+    progress_arg = (
+        f" -ProgressFile '{_ps_quote(progress_file)}'" if progress_file else ""
+    )
     script = (
         f". '{_ps_quote(installer)}'; "
         "$py = Resolve-PythonCommand ''; "
         f"Build-EngineVersion -RepoRoot '{_ps_quote(repo_root)}' "
-        f"-VersionDir '{_ps_quote(version_dir)}' -PythonCommand $py | Out-Null; "
+        f"-VersionDir '{_ps_quote(version_dir)}' -PythonCommand $py"
+        f"{progress_arg} | Out-Null; "
         "Write-Output 'MNEMO_BUILD_OK'"
     )
     # This runs inside the windowless backend process (the apply handler's
@@ -897,12 +917,59 @@ def _build_engine_version(repo_root: Path, version_dir: Path, *, timeout: float 
         )
 
 
+def _pip_progress_detail(status: dict[str, Any]) -> str | None:
+    """Turn install.ps1's ``{"phase","count","at"}`` status into the
+    ``detail`` string shown in the console. ``count`` is a rough,
+    approximate tally of ``Collecting`` lines seen (see
+    ``Invoke-CheckedWithHeartbeat``'s own docstring on why this is never an
+    exact "N of M") — worded accordingly, no denominator implied.
+    """
+    phase = status.get("phase")
+    count = status.get("count") or 0
+    if phase == "collecting":
+        return f"встановлення пакетів… (побачено ~{count})"
+    if phase in ("installing", "done"):
+        return "завершення встановлення пакетів…"
+    return None
+
+
+def _watch_pip_progress(tag: str, progress_file: Path, stop_event: threading.Event) -> None:
+    """Poll ``progress_file`` while :func:`_build_engine_version`'s blocking
+    call runs, forwarding changes via :func:`_emit_progress`.
+
+    Deliberately a side-channel file, not a streaming rewrite of
+    ``_build_engine_version`` itself: that call stays a plain
+    ``subprocess.run`` (scope decision — the concurrent-stdout-across-a-
+    process-boundary rewrite was ruled out as bigger and riskier than this
+    problem needs). This thread only ever reads a file install.ps1's own
+    heartbeat writes best-effort; a missing or unreadable file (nothing
+    written yet, or the caller passed none) just means no update this tick,
+    never an error.
+    """
+    last_raw: str | None = None
+    while not stop_event.wait(1.0):
+        try:
+            raw = progress_file.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if raw == last_raw:
+            continue
+        last_raw = raw
+        try:
+            status = json.loads(raw)
+        except ValueError:
+            continue
+        detail = _pip_progress_detail(status)
+        if detail:
+            _emit_progress(tag, "venv", detail=detail)
+
+
 def stage_release(
     tag: str,
     *,
     tarball_url: str | None = None,
     download_timeout: float | None = None,
-    build_timeout: float = 1800.0,
+    build_timeout: float = 3600.0,
 ) -> Path:
     """Download, extract and build a venv for ``tag`` under
     ``versions/<tag>/`` — the whole of step 7, and nothing past it.
@@ -952,7 +1019,9 @@ def stage_release(
     alike ("не лишити напіврозпаковану теку").
 
     Emits ``update_progress`` (§9.7) at each step: ``download``, ``venv``,
-    then ``done`` or ``failed``. Raises on any failure — the caller (the
+    then ``done`` or ``failed`` — plus zero or more extra ``venv`` events
+    with an approximate ``detail`` while pip install runs (see
+    :func:`_watch_pip_progress`). Raises on any failure — the caller (the
     apply handler) decides what a failed stage means for the running
     service; this function's only side effect on failure is that nothing
     usable exists under ``versions/<tag>/`` (no ``VERSION`` marker, and the
@@ -979,7 +1048,25 @@ def stage_release(
         final_dir.parent.mkdir(parents=True, exist_ok=True)
         if final_dir.exists():
             shutil.rmtree(final_dir)  # a stale, incomplete stage of this same tag
-        _build_engine_version(repo_root, final_dir, timeout=build_timeout)
+
+        # Best-effort live detail for the "venv" step: _build_engine_version
+        # stays a plain blocking call (see _watch_pip_progress's own
+        # docstring for why), so a side-channel file + a polling thread is
+        # what surfaces progress while it runs, instead of nothing at all
+        # between the one _emit_progress above and the call returning.
+        progress_file = staging_root / "pip-progress.json"
+        stop_watch = threading.Event()
+        watcher = threading.Thread(
+            target=_watch_pip_progress, args=(tag, progress_file, stop_watch), daemon=True
+        )
+        watcher.start()
+        try:
+            _build_engine_version(
+                repo_root, final_dir, timeout=build_timeout, progress_file=progress_file
+            )
+        finally:
+            stop_watch.set()
+            watcher.join(timeout=2.0)
 
         (final_dir / "VERSION").write_text(tag, encoding="utf-8")
         built = True
