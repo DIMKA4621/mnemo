@@ -921,8 +921,13 @@ function Invoke-Install {
     Write-Status "verifying --"
     & $launcher doctor
 
-    Write-Status "done. One thing left, and only you know where:"
-    Write-Status "  cd <your project>;  & '$launcher' init"
+    Write-Status "done."
+    # Highlighted because it's the one line the user actually needs to act
+    # on. A new terminal, not this one: the profile function just written by
+    # Register-PowerShellProfile only loads when a shell starts, so THIS
+    # window still needs the full path -- the fallback below.
+    Write-Host "install.ps1: Open a new terminal -- 'mnemo init' will already work there." -ForegroundColor Yellow
+    Write-Status "  (or right now, in this window:  cd <your project>;  & '$launcher' init)"
 }
 
 # Dot-sourcing (`. .\install.ps1`) loads the functions without installing -

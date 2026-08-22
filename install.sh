@@ -30,6 +30,17 @@ usage() {
 }
 
 say() { printf 'install.sh: %s\n' "$1"; }
+# Same as say(), highlighted -- for the one line the user actually needs to
+# act on. Guarded on a real terminal: raw ANSI codes have nowhere to go once
+# stdout is redirected (a log file, `curl | bash` with no tty) and would just
+# show up as garbage text there.
+say_hl() {
+	if [ -t 1 ]; then
+		printf 'install.sh: \033[33m%s\033[0m\n' "$1"
+	else
+		printf 'install.sh: %s\n' "$1"
+	fi
+}
 
 file_size() {
 	# One file's size in bytes. `stat` takes different flags on GNU and BSD,
@@ -567,5 +578,9 @@ fi
 say "verifying --"
 "$LAUNCHER" doctor || true
 
-say "done. One thing left, and only you know where:"
-say "  cd <your project> && $LAUNCHER init"
+say "done."
+# A new terminal, not this one: the profile function just registered above
+# only loads when a shell starts, so THIS shell still needs the full path --
+# the fallback below.
+say_hl "Open a new terminal -- \"mnemo init\" will already work there."
+say "  (or right now, in this shell: cd <your project> && $LAUNCHER init)"
