@@ -148,13 +148,13 @@ Remove it with one command, or from a cloned repo if you already have one — th
 **Linux / macOS:**
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/DIMKA4621/mnemo/master/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/DIMKA4621/mnemo/master/uninstall.sh | bash -s -- --yes
 ```
 
 **Windows:**
 
 ```powershell
-irm https://raw.githubusercontent.com/DIMKA4621/mnemo/master/uninstall.ps1 | iex
+iex "& { $(irm https://raw.githubusercontent.com/DIMKA4621/mnemo/master/uninstall.ps1) } -Yes"
 ```
 
 Or, from a cloned repo:
@@ -178,6 +178,7 @@ Removes everything the installer put on this machine — the service, the model 
 Both ways take the same flags. Leave them alone unless you specifically know you want something other than the default:
 
 - `--dry-run`/`-DryRun` — show what would be removed and change nothing. **Default: it removes.**
+- `--yes`/`-y`/`-Yes` — don't ask for confirmation. **Default: it asks.**
 - `--keep-model`/`-KeepModel` — skip re-downloading the ~2.2 GB embedding model on your next install.
 - `--keep-state`/`-KeepState` — skip rebuilding every bank's index from scratch on your next install.
 
