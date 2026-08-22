@@ -1,6 +1,6 @@
 # mnemo
 
-**Your markdown files are a universal real-time memory for all your agents.**
+### Your markdown files are a universal real-time memory for all your agents.
 
 You write `.md` — within a second, any agent, in any session, already sees the change. Nothing needs to be re-read — it's just already there.
 
