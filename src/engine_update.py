@@ -945,23 +945,47 @@ def _watch_pip_progress(tag: str, progress_file: Path, stop_event: threading.Eve
     heartbeat writes best-effort; a missing or unreadable file (nothing
     written yet, or the caller passed none) just means no update this tick,
     never an error.
+
+    **Bug found live (2026-08-22), fixed here:** the original shape was
+    ``while not stop_event.wait(1.0): read...`` — a read only ever happened
+    AFTER a full timeout elapsed with no stop signal. The moment
+    ``stage_release`` calls ``stop_event.set()`` (right when the blocking
+    build call returns), ``wait()`` returns ``True`` immediately and the
+    loop exits WITHOUT reading — so any build that finished faster than one
+    poll interval, or whose last progress write landed inside the final
+    partial interval, reported no detail at all. Confirmed live: a real
+    ``stage_release()`` run with a warm pip cache produced a bare
+    ``{"step": "venv", "detail": None}``. Restructured so every iteration
+    reads first and checks the stop signal after — the loop still exits
+    promptly (``wait()`` still returns as soon as the event is set, it just
+    no longer skips that iteration's read).
     """
     last_raw: str | None = None
-    while not stop_event.wait(1.0):
+    while True:
+        stopped = stop_event.wait(0.5)
         try:
-            raw = progress_file.read_text(encoding="utf-8")
+            # "utf-8-sig", not "utf-8": Windows PowerShell 5.1's
+            # `Set-Content -Encoding utf8` always prepends a BOM (unlike
+            # PowerShell 7+). Found live (2026-08-22): with plain "utf-8"
+            # the leading U+FEFF landed inside the decoded string, so
+            # every json.loads() below raised and was silently swallowed
+            # by the `except ValueError` — the file was written correctly
+            # the whole time, nothing ever got past this read.
+            raw = progress_file.read_text(encoding="utf-8-sig")
         except OSError:
-            continue
-        if raw == last_raw:
-            continue
-        last_raw = raw
-        try:
-            status = json.loads(raw)
-        except ValueError:
-            continue
-        detail = _pip_progress_detail(status)
-        if detail:
-            _emit_progress(tag, "venv", detail=detail)
+            raw = None
+        if raw is not None and raw != last_raw:
+            last_raw = raw
+            try:
+                status = json.loads(raw)
+            except ValueError:
+                status = None
+            if status is not None:
+                detail = _pip_progress_detail(status)
+                if detail:
+                    _emit_progress(tag, "venv", detail=detail)
+        if stopped:
+            return
 
 
 def stage_release(

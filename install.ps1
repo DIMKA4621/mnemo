@@ -214,6 +214,31 @@ function Invoke-CheckedWithHeartbeat {
         Remove-Job -Job $stdErrSub -Force -ErrorAction SilentlyContinue
     }
 
+    # A child that exits before `while (-not $proc.HasExited)` is even first
+    # evaluated (a fast pip install, e.g. everything already in pip's own
+    # wheel cache) runs that loop's body zero times -- $captured is never
+    # scanned and $ProgressFile never written, no matter how many packages
+    # actually got installed. Found live (2026-08-22): a real self-update
+    # with a warm pip cache reported no detail at all. One final unconditional
+    # scan of the FULL $captured after the loop guarantees at least one write.
+    if ($ProgressFile -and $captured.Count -gt $lastCapturedCount) {
+        for ($i = $lastCapturedCount; $i -lt $captured.Count; $i++) {
+            $line = [string]$captured[$i]
+            if ($line -match '^Collecting ') { $pkgCount++; $phase = 'collecting' }
+            elseif ($line -match '^Installing collected packages') { $phase = 'installing' }
+            elseif ($line -match '^Successfully installed') { $phase = 'done' }
+        }
+        try {
+            [pscustomobject]@{
+                phase = $phase
+                count = $pkgCount
+                at    = (Get-Date).ToUniversalTime().ToString('o')
+            } | ConvertTo-Json -Compress | Set-Content -LiteralPath $ProgressFile -Encoding utf8
+        } catch {
+            # best-effort status only -- never fail the real install over this
+        }
+    }
+
     if ($stalled) {
         Write-Host (" stalled ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
         $captured | ForEach-Object { Write-Host "install.ps1:   $_" }

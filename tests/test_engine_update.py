@@ -665,6 +665,62 @@ def test_download_and_extract_real_github_tarball(work: Path) -> None:
           (extracted / "requirements.txt").is_file())
 
 
+def test_watch_pip_progress(work: Path) -> None:
+    """Unit-level coverage for `_watch_pip_progress`/`_pip_progress_detail`,
+    isolated from PowerShell entirely — two real bugs were found live
+    (2026-08-22) only by testing the full pipeline end to end, and neither
+    had a targeted regression test pinning it down on its own:
+
+    1. Windows PowerShell 5.1's `Set-Content -Encoding utf8` always writes a
+       UTF-8 BOM (unlike PowerShell 7+). Reading with plain "utf-8" put the
+       leading U+FEFF inside the decoded string, `json.loads()` raised, and
+       the `except ValueError` swallowed it silently — the progress file was
+       being written correctly the whole time, nothing ever got past the
+       read. Fixed by reading with "utf-8-sig".
+    2. The watcher loop used to be `while not stop_event.wait(1.0): read...`
+       — a read only happened AFTER a full timeout with no stop signal, so
+       a build that finished faster than one poll interval (or whose last
+       write landed in the final partial interval) reported nothing at all.
+       Fixed by reading on every iteration, checking the stop signal after.
+    """
+    progress_file = work / "watch-progress.json"
+
+    detail = engine_update._pip_progress_detail({"phase": "collecting", "count": 7})
+    check("collecting phase mentions the running count", "7" in detail, detail=detail)
+    detail = engine_update._pip_progress_detail({"phase": "installing", "count": 7})
+    check("installing phase has its own wording", detail is not None, detail=detail)
+    detail = engine_update._pip_progress_detail({"phase": "starting", "count": 0})
+    check("the initial 'starting' phase has no detail yet", detail is None)
+
+    # Byte-for-byte what Set-Content -Encoding utf8 actually produces on
+    # Windows PowerShell 5.1: a UTF-8 BOM followed by the JSON text.
+    progress_file.write_bytes(b"\xef\xbb\xbf" + json.dumps({"phase": "collecting", "count": 3}).encode("utf-8"))
+
+    emitted: list[dict] = []
+    stop_event = threading.Event()
+    watcher = threading.Thread(
+        target=engine_update._watch_pip_progress,
+        args=("watchtag", progress_file, stop_event),
+        daemon=True,
+    )
+    watcher.start()
+    # The bug this pins down: stopping (near-)immediately must still trigger
+    # a read before the thread exits -- this is deliberately not a "wait a
+    # while, then stop" test, since that would pass even with the ORIGINAL
+    # buggy "wait first, read only after a full timeout" shape whenever the
+    # test happened to run slower than the timeout.
+    with patch.object(engine_update, "_emit_progress",
+                       lambda t, step, detail=None, error=None:
+                           emitted.append({"tag": t, "step": step, "detail": detail})):
+        stop_event.set()
+        watcher.join(timeout=5.0)
+
+    check("the watcher thread actually stopped", not watcher.is_alive())
+    check("a BOM-prefixed progress file still parses and gets relayed",
+          any(e["tag"] == "watchtag" and e["detail"] and "3" in e["detail"] for e in emitted),
+          detail=str(emitted))
+
+
 def _make_local_release_tarball(dest: Path) -> Path:
     """Package THIS repo's own working tree the way GitHub's auto-archive
     wraps a release -- one top-level directory -- so the FULL step-7
@@ -910,6 +966,7 @@ def main() -> int:
         test_pending_trigger_round_trip_and_default(work)
 
         test_safe_members_rejects_path_traversal(work)
+        test_watch_pip_progress(work)
         test_stage_release_real_pipeline(work)
         test_stage_release_failure_leaves_nothing_behind(work)
 
