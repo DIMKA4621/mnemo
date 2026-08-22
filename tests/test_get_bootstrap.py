@@ -101,6 +101,85 @@ def _leftover_temp_dirs() -> set[str]:
     return {p.name for p in base.glob("mnemo-src-*") if p.is_dir()}
 
 
+def _make_stub_install_zip(dest: Path) -> Path:
+    """A minimal archive whose "install.ps1" only records the args it
+    received, for testing get.ps1's own -Model default-forwarding logic
+    without running the real (network- and time-heavy) install pipeline.
+
+    Writes to $env:MNEMO_TEST_MARKER rather than anywhere under
+    $PSScriptRoot: get.ps1 deletes its own temp copy (which is where the
+    stub lives) in its `finally` block before this test process gets to
+    read the marker back, so the marker must live outside that temp dir.
+    """
+    wrap = "mnemo-master"
+    stub = (
+        "$args | Out-File -FilePath $env:MNEMO_TEST_MARKER -Encoding utf8\n"
+    )
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr(f"{wrap}/install.ps1", stub)
+    return dest
+
+
+def test_get_ps1_default_model_flag(work: Path) -> None:
+    """get.ps1 must add -Model by default (a one-liner should finish the
+    job in one command), but never when -Model/-NoModel was already passed
+    -- this is the behaviour that differs from install.ps1's own default,
+    so it gets its own fast, network-free check against a stub install.ps1.
+    """
+    if os.name != "nt":
+        print("SKIP  get.ps1 default -Model test (Windows-only)")
+        return
+
+    import functools
+    import http.server
+    import threading as th
+
+    check_script_encoding(GET_PS1)
+
+    archive = _make_stub_install_zip(work / "stub-install.zip")
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=str(work))
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_address[1]
+    server_thread = th.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+    marker = work / "received-args.txt"
+    env = {
+        **os.environ,
+        "MNEMO_GET_ARCHIVE_URL": f"http://127.0.0.1:{port}/{archive.name}",
+        "MNEMO_TEST_MARKER": str(marker),
+    }
+
+    def received_args() -> list[str]:
+        assert marker.is_file(), "stub install.ps1 never ran"
+        try:
+            # PowerShell's `Out-File -Encoding utf8` writes a BOM; "utf-8"
+            # keeps it as a literal ﻿ on the first line, "utf-8-sig"
+            # strips it.
+            text = marker.read_text(encoding="utf-8-sig")
+            return [line.strip() for line in text.splitlines() if line.strip()]
+        finally:
+            marker.unlink()
+
+    try:
+        run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(GET_PS1)], env=env, timeout=60)
+        assert "-Model" in received_args(), "get.ps1 did not default to -Model"
+        ok("get.ps1 adds -Model by default when neither -Model nor -NoModel was passed")
+
+        run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(GET_PS1), "-NoModel"], env=env, timeout=60)
+        args_with_nomodel = received_args()
+        assert "-NoModel" in args_with_nomodel
+        assert "-Model" not in args_with_nomodel
+        ok("get.ps1 respects an explicit -NoModel and does not also add -Model")
+
+        run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(GET_PS1), "-Model"], env=env, timeout=60)
+        args_with_model = received_args()
+        assert args_with_model.count("-Model") == 1, "get.ps1 double-added -Model"
+        ok("get.ps1 does not duplicate an already-explicit -Model")
+    finally:
+        httpd.shutdown()
+        server_thread.join(timeout=5)
+
+
 def test_get_ps1_windows(work: Path) -> None:
     if os.name != "nt":
         print("SKIP  get.ps1 bootstrap test (Windows-only)")
@@ -135,6 +214,7 @@ def test_get_ps1_windows(work: Path) -> None:
                 "-File", str(GET_PS1),
                 "-InstallHome", str(engine),
                 "-Python", sys.executable,
+                "-NoModel",
             ],
             env=env,
             timeout=600,
@@ -189,6 +269,7 @@ def test_get_sh_syntax() -> None:
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mnemo get-bootstrap ") as raw:
         work = Path(raw)
+        test_get_ps1_default_model_flag(work)
         test_get_ps1_windows(work)
         test_get_sh_syntax()
 

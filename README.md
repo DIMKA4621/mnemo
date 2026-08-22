@@ -67,7 +67,9 @@ It has these pages:
 
 ## Installing mnemo
 
-No clone needed — one command fetches a source snapshot and installs it:
+> **Read this section to the end before running anything below — the flags matter.**
+
+Install with one command, or clone the repo first if you'd rather see what you're running:
 
 **Linux / macOS:**
 
@@ -81,7 +83,7 @@ curl -fsSL https://raw.githubusercontent.com/DIMKA4621/mnemo/master/get.sh | bas
 irm https://raw.githubusercontent.com/DIMKA4621/mnemo/master/get.ps1 | iex
 ```
 
-Or, if you'd rather clone the repo first:
+Or, cloning first:
 
 **Linux / macOS:**
 
@@ -97,7 +99,12 @@ git clone https://github.com/DIMKA4621/mnemo.git
 cd mnemo; .\install.ps1
 ```
 
-Either way takes the same flags — `--check`/`-Check`, `--no-model`/`-NoModel`, `--home DIR`/`-InstallHome DIR`, etc. Passing them through the one-liner needs each shell's own idiom for arguments after a pipe: `curl ... | bash -s -- --check`, and on PowerShell `iex "& { $(irm ...) } -Check"`.
+Both ways take the same two flags. Leave them alone unless you specifically know you want something other than the default:
+
+- `--no-model`/`-NoModel` — skip the ~2 GB embedding model download. **Default: it downloads.** The one-liner downloads it right away; a manual `install.sh`/`install.ps1` run asks first (or skips quietly if there's no one to ask). Skipped it? Fetch it anytime with `mnemo warmup`, or from the cabinet's Settings page.
+- `--home DIR`/`-InstallHome DIR` — install somewhere other than the default `~/.mnemo`.
+
+Passing a flag through the one-liner needs each shell's own idiom for arguments after a pipe: `curl ... | bash -s -- --no-model`, and on PowerShell `iex "& { $(irm ...) } -NoModel"`.
 
 The launcher lands at `~/.mnemo/bin/mnemo` (`bin\mnemo.exe` on Windows) and isn't added to `PATH` automatically — call it by full path, or alias it once.
 
@@ -134,7 +141,9 @@ mnemo reindex              force a reindex (usually not needed — the watcher d
 
 ## Uninstall
 
-No clone around anymore? One command removes it — these only touch this machine, not any repo:
+> **Read this section to the end before running anything below — this removes real files.**
+
+Remove it with one command, or from a cloned repo if you already have one — these only touch this machine, not any repo:
 
 **Linux / macOS:**
 
@@ -148,9 +157,7 @@ curl -fsSL https://raw.githubusercontent.com/DIMKA4621/mnemo/master/uninstall.sh
 irm https://raw.githubusercontent.com/DIMKA4621/mnemo/master/uninstall.ps1 | iex
 ```
 
-Passing a flag (`-DryRun`, `-KeepModel`, ...) through the piped PowerShell form needs the same wrapper as above: `iex "& { $(irm ...) } -DryRun"`.
-
-Or, if you already have the repo cloned:
+Or, from a cloned repo:
 
 **Linux / macOS:**
 
@@ -166,10 +173,12 @@ Or, if you already have the repo cloned:
 
 Removes everything the installer put on this machine — the service, the model cache, the index, autostart — after showing the list and asking first.
 
-**Your projects and their `.md` files are never touched.**
+> **Your projects and their `.md` files are never touched.**
 
-### Just reinstalling?
+Both ways take the same flags. Leave them alone unless you specifically know you want something other than the default:
 
-`--keep-model`/`-KeepModel` — skips re-downloading the ~2.2 GB embedding model
+- `--dry-run`/`-DryRun` — show what would be removed and change nothing. **Default: it removes.**
+- `--keep-model`/`-KeepModel` — skip re-downloading the ~2.2 GB embedding model on your next install.
+- `--keep-state`/`-KeepState` — skip rebuilding every bank's index from scratch on your next install.
 
-`--keep-state`/`-KeepState` — skips rebuilding every bank's index from scratch.
+Passing a flag through the one-liner needs each shell's own idiom for arguments after a pipe: `curl ... | bash -s -- --dry-run`, and on PowerShell `iex "& { $(irm ...) } -DryRun"`.

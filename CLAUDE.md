@@ -489,7 +489,11 @@ machine starts one that never was.
   provider interface.
 - Vector search primary; FTS5/BM25 secondary; blended with RRF.
 - The index is disposable and rebuilds deterministically from `.md`.
-- The model is never downloaded implicitly — explicit `warmup` only.
+- The model is never downloaded implicitly by a hook, a service or a search
+  — only `warmup`, or an install the user just ran themselves. The one-liner
+  bootstrap (`get.ps1`/`get.sh`) is the one installer path that defaults to
+  downloading it without asking, specifically because piping one command is
+  the whole point of that path — `--no-model`/`-NoModel` opts out.
 - Everything on loopback; nothing exposed outward without an explicit
   decision. `/mcp`, `/mcp-admin` and `/mcp-tools` stay behind a bearer
   token always. `/api` (cabinet + CLI) is the one exception (2026-08-21):

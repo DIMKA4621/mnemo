@@ -15,6 +15,13 @@
 # updating when those change. Its two internal knobs -- which branch to
 # fetch, and a test-only archive URL override -- are environment variables
 # instead: $env:MNEMO_GET_REF (default "master"), $env:MNEMO_GET_ARCHIVE_URL.
+#
+# One default differs from install.ps1's own: unless -Model or -NoModel is
+# already among the forwarded args, get.ps1 adds -Model itself. install.ps1
+# left un-piped still asks (or silently skips when it can't ask); a one-
+# liner's whole point is a single command that finishes the job, so this
+# path assumes yes instead of leaving a ~2 GB download for the user to
+# trigger by hand afterward. Pass -NoModel to opt out.
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
@@ -27,6 +34,11 @@ $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("mnemo-src-" + [guid]::NewGu
 New-Item -ItemType Directory -Path $tmp | Out-Null
 $zipPath = Join-Path $tmp "src.zip"
 $code = 0
+# Read under Set-StrictMode before any native command has ever run in this
+# process, $LASTEXITCODE throws "cannot be retrieved because it has not
+# been set" instead of just being $null -- initialize it so the read below
+# is always safe, whether or not install.ps1 itself calls exit.
+$global:LASTEXITCODE = 0
 
 try {
     Write-Host "get.ps1: downloading mnemo ($ref)..."
@@ -46,8 +58,25 @@ try {
         throw "extracted source is missing install.ps1"
     }
 
+    # $args must be splatted UNCHANGED, never copied into a new array or
+    # List<string> first -- confirmed live, not a guess. PowerShell's
+    # automatic $args (populated because this script has no param() block)
+    # carries engine-level metadata marking which elements were originally
+    # "-Name" tokens, and only that lets `@args` bind them as named
+    # parameters on install.ps1 downstream. A freshly built array of the
+    # very same strings loses that metadata, so `@args` splats every
+    # element positionally instead -- "-InstallHome" itself ends up bound
+    # as $InstallHome's VALUE, and a later "-Python" then has no positional
+    # slot left to land in and the whole call fails. So -Model can only be
+    # ADDED as a separate literal token in the call itself, never merged
+    # into a rebuilt copy of $args.
     Write-Host "get.ps1: installing..."
-    & $installScript @args
+    if ($args -match '^-(No)?Model$') {
+        & $installScript @args
+    }
+    else {
+        & $installScript @args -Model
+    }
     $code = $LASTEXITCODE
 }
 catch {
