@@ -21,10 +21,16 @@
 # actually tagged and shipped, same source engine_update.py's own
 # self-update pulls from, not whatever happens to be on master mid-work.
 # MNEMO_GET_REF overrides this and is taken as a BRANCH name (heads/), for
-# pointing the bootstrapper at an unreleased branch by hand. If the
-# releases/latest lookup itself fails -- no releases yet, GitHub
-# unreachable -- this falls back to `master` rather than failing the whole
-# install over a single API call.
+# pointing the bootstrapper at an unreleased branch by hand -- an explicit,
+# deliberate override, never an error path.
+#
+# If the releases/latest lookup itself fails -- no releases yet, GitHub
+# unreachable, rate-limited -- this is a hard installation error, NOT a
+# silent fallback to `master` (2026-08-22 decision, reversing the original
+# soft-fallback behaviour, mirroring get.ps1): a one-liner that silently
+# hands someone unreleased `master` when it meant to hand them the latest
+# release would make the version they end up running depend on which
+# GitHub API call happened to work that day.
 #
 # One default differs from install.sh's own: unless --model or --no-model
 # is already among the forwarded args, get.sh adds --model itself.
@@ -46,16 +52,24 @@ elif [ -n "${MNEMO_GET_REF:-}" ]; then
 else
 	API_URL="${MNEMO_GET_RELEASE_API_URL:-https://api.github.com/repos/${REPO}/releases/latest}"
 	TAG=""
+	LOOKUP_OK=false
 	if RELEASE_JSON="$(curl -fsS --max-time 10 -H 'Accept: application/vnd.github+json' -H 'User-Agent: mnemo-bootstrap' "$API_URL" 2>/dev/null)"; then
+		LOOKUP_OK=true
 		TAG="$(printf '%s' "$RELEASE_JSON" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -n1)"
 	fi
 	if [ -n "$TAG" ]; then
 		ARCHIVE_URL="https://codeload.github.com/${REPO}/tar.gz/refs/tags/${TAG}"
 		REF_LABEL="$TAG"
 	else
-		echo "get.sh: no GitHub release found, falling back to master"
-		ARCHIVE_URL="https://codeload.github.com/${REPO}/tar.gz/refs/heads/master"
-		REF_LABEL="master"
+		echo "get.sh: could not find a GitHub release to install." >&2
+		if [ "$LOOKUP_OK" = true ]; then
+			echo "get.sh: GitHub reported no releases for ${REPO}." >&2
+		else
+			echo "get.sh: could not reach the GitHub API -- check your network connection." >&2
+		fi
+		echo "get.sh: install from a manual clone instead:" >&2
+		echo "get.sh:   git clone https://github.com/${REPO}.git && cd mnemo && ./install.sh" >&2
+		exit 1
 	fi
 fi
 
@@ -81,6 +95,19 @@ for arg in "$@"; do
 done
 if [ "$has_model_flag" = false ]; then
     set -- "$@" --model
+fi
+
+# GitHub's archive carries no .git directory, so install.sh's own
+# get_local_checkout_tag() can never see a tag here -- without this, every
+# get.sh install would report itself as "local" forever and nag to
+# "update" to the very release it just installed. get.sh already knows the
+# exact tag it resolved -- pass it through rather than making install.sh
+# re-derive it from nothing. Only set for a CONFIRMED release ($TAG, from
+# the releases/latest branch above); stays unset for the master fallback,
+# a custom archive, or an explicit MNEMO_GET_REF override -- none of those
+# name an installable version, so "local" remains the correct answer.
+if [ -n "${TAG:-}" ]; then
+	export MNEMO_INSTALL_TAG="$TAG"
 fi
 
 echo "get.sh: installing..."

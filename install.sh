@@ -90,6 +90,44 @@ human() {
 # --- locate the repo (this script's own directory) ---------------------
 SRC_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# A display-worthy version derived from this checkout's own git history,
+# or nothing if no tag is reachable at all (no git, not a repo, no tags in
+# history). Two outcomes, user-decided scheme (2026-08-22, mirrors
+# install.ps1's Get-LocalCheckoutVersionTag):
+#   - Clean tree, HEAD exactly on a tag -> that tag verbatim ("v3.0.1").
+#   - Anything else with a reachable tag (commits on top of it, or
+#     uncommitted changes) -> the nearest ancestor tag + lowercase "l"
+#     ("v3.0.1l") -- a real base version instead of the uninformative bare
+#     "local", marked as NOT the official release (lowercase, same
+#     convention as alpha/beta suffixes). A checkout at v3.0.1 with local
+#     edits on top is not actually v3.0.1 -- reporting it as plain
+#     "v3.0.1" would make self-update think "already have it, nothing to
+#     do" while running modified code (the class of "current lies about
+#     what is actually running" bug engine_update.py's effective_current_tag
+#     exists to close).
+get_local_checkout_version_tag() {
+	local repo_root="$1"
+	command -v git >/dev/null 2>&1 || return 0
+	(
+		cd "$repo_root" || exit 1
+		[ "$(git rev-parse --is-inside-work-tree 2>/dev/null)" = "true" ] || exit 1
+
+		if [ -z "$(git status --porcelain 2>/dev/null)" ]; then
+			exact="$(git describe --tags --exact-match HEAD 2>/dev/null)" || exact=""
+			if [ -n "$exact" ]; then
+				printf '%s\n' "$exact"
+				exit 0
+			fi
+		fi
+
+		# --abbrev=0 gives just the nearest ancestor tag's name, no
+		# "-N-gHASH" commit-count suffix -- exactly the base version this
+		# scheme wants to append "l" to.
+		nearest="$(git describe --tags --abbrev=0 HEAD 2>/dev/null)" || nearest=""
+		[ -n "$nearest" ] && printf '%sl\n' "$nearest"
+	) || true
+}
+
 # --- resolve the engine home and parse flags ---------------------------
 DEFAULT_HOME="$HOME/.mnemo"
 MNEMO_HOME="${MNEMO_HOME:-$DEFAULT_HOME}"
@@ -120,14 +158,28 @@ done
 # versions/<tag>/, and `current` is a stable alias a switch repoints.
 # state/ and model-cache/ stay siblings of versions/current -- shared
 # across every version, never duplicated, never touched by anything
-# below. A plain from-source install (this script; no GitHub release
-# involved) always targets the fixed tag "local" -- real release tags
-# ("v3.1.0", ...) are what a self-update apply stages under versions/
-# instead (platform-dev's install.ps1, mirrored on POSIX by nothing yet --
-# staging is Windows-only for now, see the design topic's migration-risk
-# decision). Repeated runs of this script therefore refresh the SAME
-# versions/local/ in place, exactly as idempotent as the old flat layout
-# was.
+# below. The version tag is resolved in priority order so `mnemo doctor`/
+# the console report the correct version instead of a permanent "local"
+# that then nags to "update" back to the very tag already running:
+#   1. $MNEMO_INSTALL_TAG -- set by get.sh when it downloaded a CONFIRMED
+#      GitHub release (its own archive carries no .git directory, so this
+#      is the only way this script can know). Used verbatim -- get.sh only
+#      sets this when the checkout genuinely IS that exact release.
+#   2. get_local_checkout_version_tag -- a manual git-based run: the exact
+#      tag if HEAD sits on one with a clean tree, else the nearest ancestor
+#      tag + a lowercase "l" (e.g. "v3.0.1l") to mark it as a local build
+#      rather than the official release.
+#   3. The fixed tag "local" -- the original, still-safe default when
+#      neither of the above can answer (mid-development with no git
+#      history reachable, no git at all, or get.sh's custom-archive/
+#      explicit-ref override paths, none of which name a version). Real
+#      release tags ("v3.1.0", ...) are also what a self-update apply
+#      stages under versions/ (platform-dev's
+#      install.ps1, mirrored on POSIX by nothing yet -- staging is
+#      Windows-only for now, see the design topic's migration-risk
+#      decision). Repeated runs of this script therefore refresh the SAME
+#      versions/<tag>/ in place, exactly as idempotent as the old flat
+#      layout was.
 #
 # This mirrors install.ps1's Build-EngineVersion / Set-CurrentVersion
 # split structurally (same steps, same ordering) -- see that script's own
@@ -138,7 +190,11 @@ done
 # Publish-Launchers equivalent here or in any future self-update apply --
 # nothing here embeds a venv path at build time for retention to break.
 VERSIONS_DIR="$MNEMO_HOME/versions"
-VERSION_TAG="local"
+VERSION_TAG="${MNEMO_INSTALL_TAG:-}"
+if [ -z "$VERSION_TAG" ]; then
+	VERSION_TAG="$(get_local_checkout_version_tag "$SRC_REPO")"
+fi
+VERSION_TAG="${VERSION_TAG:-local}"
 VERSION_DIR="$VERSIONS_DIR/$VERSION_TAG"
 CURRENT_LINK="$MNEMO_HOME/current"
 
