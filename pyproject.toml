@@ -7,6 +7,10 @@ name = "mnemo-bootstrap"
 version = "0.0.0"
 description = "Self-locating launcher for the mnemo engine"
 requires-python = ">=3.10"
+license = { file = "LICENSE" }
+classifiers = [
+    "License :: OSI Approved :: GNU Affero General Public License v3",
+]
 # Engine runtime deps live in requirements.txt (single source of truth for the
 # installers); declared here dynamically so the two can never drift apart.
 dynamic = ["dependencies"]
