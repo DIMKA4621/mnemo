@@ -485,3 +485,78 @@ during the run and could not confirm visually either way — the fix is
 verified by code inspection (matches the established, already-proven
 pattern everywhere else) and by the successful real staging run, not by an
 eyewitness "no window" observation this time.
+
+**Confirmed live afterwards, eyewitness, real self-update apply:** committed
+straight to `master` (`ca508e3`) per explicit user request, then published
+as a real GitHub release. First attempt retargeted the existing `v3.0.2`
+draft/release via `PATCH .../releases/{id}` — this silently failed to move
+the actual git tag: GitHub only honours `target_commitish` when a tag is
+first CREATED, and the user had already published that draft (creating the
+`v3.0.2` tag at the OLD pre-fix commit) minutes earlier. `git ls-remote
+--tags` confirmed `v3.0.2 -> 1819cfe6` (no fix) after the "successful"
+PATCH response claimed otherwise — the JSON echoes back whatever
+`target_commitish` you send even when the underlying ref never moved, so
+the API response alone is not proof of anything for an already-existing
+tag. **Lesson: never trust a release PATCH's `target_commitish` field once
+the tag might already exist — verify the actual ref with `git ls-remote
+--tags` before treating a retarget as done.** Fixed by cutting a new
+`v3.0.3` release instead (immutable tags are never fought once real,
+same spirit as not force-pushing over a public branch) — verified
+`v3.0.3 -> ca508e3` for real via `git ls-remote` before telling the user
+it was safe to test.
+
+User rebuilt locally first (`install.ps1` re-mirror -> `v3.0.2l`, already
+carrying this fix since it's a from-source local build), then self-updated
+for real from `v3.0.2l` to the real `v3.0.3` release through the console UI
+-- eyewitness-confirmed: **no console window** during the `pip install`
+staging step. Closes root cause 6 for real, not just by code inspection.
+
+Noted for next time this needs explaining: the staging subprocess call that
+needs `CREATE_NO_WINDOW` is always the CURRENTLY RUNNING engine's own copy
+of `_build_engine_version` (it stages the new version, then something else
+switches to it afterwards) -- so the fix protects an update only once it is
+present in whatever version is running *before* that update, not merely in
+the target release. A machine still on the real, unfixed `v3.0.1` will see
+the console once more on its first hop to a fixed release; every update
+after that is clean.
+
+## Two new decisions, same day, on branch `fix/self-update-followups`
+
+Not bugs — new policy/UX the user asked for after the console-window fix
+shipped and was verified live.
+
+**1. MAJOR-version bumps are manual-only.** `engine_update.auto_eligible_tag()`
+now compares the parsed `MAJOR` of `base_version_tag(effective_current_tag())`
+against the candidate's — if the candidate's major is strictly greater, the
+tag is never offered to the unattended checker (`None`), regardless of
+blacklist/retry state. Manual apply via the console button is completely
+unaffected; only the *unattended* countdown path is gated. Parsing is
+`_major_version()` against a strict `^v(\d+)\.(\d+)\.(\d+)$` — deliberately
+fails **open** (falls back to the old "allow" behaviour) when either side
+doesn't match that shape, e.g. a bare `"local"` dev tag — an unrecognised
+format was judged not worth blocking on, since every tag this project mints
+today matches. Verified against a local-build tag specifically
+(`"v3.0.1l"` vs a `v4.0.0` candidate) to make sure the trailing `l` marker
+doesn't accidentally defeat the gate via a parse failure — `base_version_tag()`
+strips it before parsing, so it compares correctly. `tests/test_engine_update.py::
+test_auto_eligible_tag_never_offers_a_major_bump` — 100/100 total.
+
+**2. The terminal result modal self-closes 10s after a successful AUTO-triggered
+apply.** A manual trigger is unchanged (waits for a click on "Закрити"), and a
+failed/rolled-back outcome is never auto-closed regardless of trigger — it
+needs a human's attention. Needed threading `trigger` ("auto"/"manual") all
+the way through, since it did not exist on `/api/update/status` before this:
+`engine_update.start_apply()`/`finish_apply()` now take and persist a
+`trigger` kwarg (default `"manual"`) onto `last_apply`, `cli.py`'s
+`update-apply` (which already computed `trigger` via
+`read_pending_trigger()` for blacklist bookkeeping) now passes it to all 5
+call sites, and `api.py`'s `_apply_view()`/`_apply_progress` surface it in
+both the disk-derived and in-memory branches. Frontend: `update.js`'s
+`renderUpdateTerminal()` starts a plain client-side `setInterval` (no
+server-side "seconds_left" needed — this modal is never resumed across a
+reload, `refreshUpdateStatus()` doesn't reopen it for an already-`done`
+apply) showing a live countdown (`.upd-countdown`, same class the
+auto-pending countdown already uses) and calls `closeUpdateModal()` at
+zero; `closeUpdateModal()`/a re-render both clear any existing timer first
+to avoid stacking. New tests: `test_record_installed_and_apply_helpers`
+extended with explicit-`trigger` cases for both functions.

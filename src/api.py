@@ -2363,7 +2363,7 @@ def api_autostart_set(payload: dict = Body(...)) -> dict:
 # is nothing here worth surviving a restart.
 _apply_progress: dict[str, Any] = {
     "state": "idle", "tag": None, "step": None, "error": None,
-    "started_at": None, "finished_at": None,
+    "started_at": None, "finished_at": None, "trigger": None,
 }
 # Wall-clock time of the last _apply_progress mutation — see _apply_view's
 # docstring for why freshness, not "which side is idle", is what decides
@@ -2600,7 +2600,7 @@ def _run_staged_apply(tag: str, *, trigger: str = "manual") -> None:
 
     _touch_apply_progress(
         state="staging", tag=tag, step="download", error=None,
-        started_at=_now_iso(), finished_at=None,
+        started_at=_now_iso(), finished_at=None, trigger=trigger,
     )
     engine_update.add_progress_listener(_on_progress)
     try:
@@ -2672,10 +2672,12 @@ def _apply_view(state: dict) -> dict:
                 "tag": disk_tag, "step": None, "error": last_apply.get("error"),
                 "started_at": last_apply.get("started_at"),
                 "finished_at": last_apply.get("finished_at"),
+                "trigger": last_apply.get("trigger"),
             }
         return {
             "state": "switching", "tag": disk_tag, "step": None, "error": None,
             "started_at": last_apply.get("started_at"), "finished_at": None,
+            "trigger": last_apply.get("trigger"),
         }
     return dict(_apply_progress)
 

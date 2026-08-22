@@ -185,12 +185,23 @@ def test_record_installed_and_apply_helpers(work: Path) -> None:
         mid = engine_update.read_state()["last_apply"]
         check("start_apply records tag+started_at, no result yet",
               mid["tag"] == "v1.2.0" and mid["started_at"] and mid["result"] is None)
+        check("start_apply defaults trigger to manual", mid["trigger"] == "manual")
 
         engine_update.finish_apply(tag="v1.2.0", result="ok", error=None)
         done = engine_update.read_state()["last_apply"]
         check("finish_apply preserves started_at and sets result",
               done["started_at"] == mid["started_at"] and done["result"] == "ok"
               and done["finished_at"], detail=str(done))
+        check("finish_apply defaults trigger to manual too", done["trigger"] == "manual")
+
+        engine_update.start_apply("v1.3.0", trigger="auto")
+        auto_mid = engine_update.read_state()["last_apply"]
+        check("start_apply records an explicit auto trigger",
+              auto_mid["trigger"] == "auto")
+        engine_update.finish_apply(tag="v1.3.0", result="applied", trigger="auto")
+        auto_done = engine_update.read_state()["last_apply"]
+        check("finish_apply carries the auto trigger through to the terminal record",
+              auto_done["trigger"] == "auto", detail=str(auto_done))
 
 
 def test_record_check_soft_failure(work: Path) -> None:
@@ -521,6 +532,50 @@ def test_auto_eligible_tag_second_failure_permanently_blacklists(work: Path) -> 
               engine_update.auto_eligible_tag() is None)
 
 
+def test_auto_eligible_tag_never_offers_a_major_bump(work: Path) -> None:
+    """A MAJOR version bump is manual-only, decided live with the user
+    2026-08-22 -- see auto_eligible_tag()'s own docstring. Minor/patch bumps
+    on the same major are unaffected; an unparseable tag on either side
+    falls back to the pre-existing (allow) behaviour rather than blocking.
+    """
+    with patch.object(config, "STATE_DIR", work / "auto-major"), \
+         patch.object(engine_update.settings, "auto_update_enabled", lambda: True):
+        engine_update.record_installed(tag="v3.0.2", commit=None, status="active")
+        engine_update.record_check(latest_tag="v4.0.0", error=None)
+        check("a MAJOR bump is never auto-eligible",
+              engine_update.auto_eligible_tag() is None)
+
+        state = engine_update.read_state()
+        state["last_check"]["latest_tag"] = "v3.4.0"
+        state["last_check"]["update_available"] = True
+        engine_update.write_state(state)
+        check("a MINOR bump on the same major stays eligible",
+              engine_update.auto_eligible_tag() == "v3.4.0")
+
+    with patch.object(config, "STATE_DIR", work / "auto-major-local"), \
+         patch.object(engine_update.settings, "auto_update_enabled", lambda: True):
+        # A local build ("v3.0.1l") sitting on top of a release must compare
+        # by its stripped base tag, not fail to parse and fall through to
+        # "allow" by accident -- that would defeat the gate for the exact
+        # machine (this one) most likely to be running one.
+        engine_update.record_installed(tag="v3.0.1l", commit=None, status="active")
+        engine_update.record_check(latest_tag="v4.0.0", error=None)
+        check("a local build correctly compares against its base major",
+              engine_update.auto_eligible_tag() is None)
+
+    with patch.object(config, "STATE_DIR", work / "auto-major-unparseable"), \
+         patch.object(engine_update.settings, "auto_update_enabled", lambda: True):
+        # Neither side matches vMAJOR.MINOR.PATCH -- falls back to the OLD
+        # behaviour (allow) rather than blocking on an unrecognised shape.
+        engine_update.record_installed(tag="local", commit=None, status="active")
+        engine_update.record_check(latest_tag="local", error=None)
+        state = engine_update.read_state()
+        state["last_check"]["update_available"] = True
+        engine_update.write_state(state)
+        check("an unparseable tag on both sides falls back to eligible",
+              engine_update.auto_eligible_tag() == "local")
+
+
 def test_auto_outcome_success_clears_blacklist_at_any_point(work: Path) -> None:
     with patch.object(config, "STATE_DIR", work / "auto-clear"), \
          patch.object(engine_update.settings, "auto_update_enabled", lambda: True), \
@@ -843,6 +898,7 @@ def main() -> int:
         test_auto_eligible_tag_respects_auto_update_setting(work)
         test_auto_eligible_tag_first_failure_opens_retry_window(work)
         test_auto_eligible_tag_second_failure_permanently_blacklists(work)
+        test_auto_eligible_tag_never_offers_a_major_bump(work)
         test_auto_outcome_success_clears_blacklist_at_any_point(work)
         test_pending_trigger_round_trip_and_default(work)
 

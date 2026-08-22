@@ -276,7 +276,7 @@ def _cmd_update_apply() -> int:
 
     prev_tag = service_ctl.current_tag()
 
-    engine_update.start_apply(tag)
+    engine_update.start_apply(tag, trigger=trigger)
     print(f"mnemo update-apply: applying {tag} (currently {prev_tag or '(none)'})")
 
     service_ctl.stop()
@@ -321,7 +321,7 @@ def _cmd_update_apply() -> int:
             tag=tag, commit=None, status=engine_update.STATUS_ACTIVE
         )
         removed = service_ctl.prune_versions()
-        engine_update.finish_apply(tag=tag, result="applied")
+        engine_update.finish_apply(tag=tag, result="applied", trigger=trigger)
         if trigger == "auto":
             engine_update.record_auto_outcome(tag=tag, result="applied")
         pruned_note = f"; pruned {', '.join(removed)}" if removed else ""
@@ -335,7 +335,9 @@ def _cmd_update_apply() -> int:
         print("mnemo update-apply: no previous version recorded — cannot "
               "roll back")
         no_rollback_error = "health check failed and there is no rollback target"
-        engine_update.finish_apply(tag=tag, result="failed", error=no_rollback_error)
+        engine_update.finish_apply(
+            tag=tag, result="failed", error=no_rollback_error, trigger=trigger
+        )
         if trigger == "auto":
             engine_update.record_auto_outcome(
                 tag=tag, result="failed", error=no_rollback_error
@@ -351,14 +353,16 @@ def _cmd_update_apply() -> int:
         target=rollback_spawn.argv, cwd=rollback_spawn.cwd, wait_ready=True
     )
     if rollback_rc == service_ctl.EXIT_OK:
-        engine_update.finish_apply(tag=tag, result="rolled_back")
+        engine_update.finish_apply(tag=tag, result="rolled_back", trigger=trigger)
         if trigger == "auto":
             engine_update.record_auto_outcome(tag=tag, result="rolled_back")
         print(f"mnemo update-apply: rolled back to {prev_tag}, service is healthy")
         return EXIT_ERROR
 
     rollback_failed_error = f"rollback to {prev_tag} also failed health (rc={rollback_rc})"
-    engine_update.finish_apply(tag=tag, result="failed", error=rollback_failed_error)
+    engine_update.finish_apply(
+        tag=tag, result="failed", error=rollback_failed_error, trigger=trigger
+    )
     if trigger == "auto":
         engine_update.record_auto_outcome(
             tag=tag, result="failed", error=rollback_failed_error
