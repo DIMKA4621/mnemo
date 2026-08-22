@@ -271,19 +271,23 @@ def test_tarball_url_shape() -> None:
 # ------------------------------------------------------------------ step 6
 
 
-def test_check_latest_release_real_no_releases_yet() -> None:
-    """DIMKA4621/mnemo has no tagged releases yet (confirmed by hand:
-    `curl https://api.github.com/repos/DIMKA4621/mnemo/releases/latest` ->
-    404) -- a real request against the real, still-unreleased repo.
+def test_check_latest_release_real_own_repo() -> None:
+    """DIMKA4621/mnemo now has a real tagged release (v3.0.0, published
+    after the feat/v3 -> master merge) -- a real request against the real
+    repo this engine actually self-updates from. This test used to assert
+    the opposite (404, no releases yet) from before that release existed;
+    once the release shipped, that assertion would have started failing
+    for real rather than testing anything -- the same class of staleness
+    already caught once in tests/test_install_posix.py (see
+    .claude/memory/logs/2026-08-22-posix-test-stale-assert-ci-red.md).
     """
     if not _network_up():
-        print("SKIP  no network -- test_check_latest_release_real_no_releases_yet")
+        print("SKIP  no network -- test_check_latest_release_real_own_repo")
         return
     with patch.object(config, "GITHUB_REPO", "DIMKA4621/mnemo"):
         tag, error = engine_update.check_latest_release(timeout=10)
-    check("no tag on a repo with no releases", tag is None)
-    check("the 404 is surfaced as an error string", error is not None and "404" in error,
-          detail=str(error))
+    check("a real release tag comes back", error is None and bool(tag) and tag.startswith("v"),
+          detail=f"tag={tag!r} error={error!r}")
 
 
 def test_check_latest_release_real_success() -> None:
@@ -758,7 +762,7 @@ def main() -> int:
         test_update_available_clears_on_switch(work)
         test_tarball_url_shape()
 
-        test_check_latest_release_real_no_releases_yet()
+        test_check_latest_release_real_own_repo()
         test_check_latest_release_real_success()
         test_check_latest_release_unreachable_host()
         test_check_now_and_record_check_soft_failure_live(work)
