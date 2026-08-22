@@ -4,10 +4,11 @@ get.ps1/get.sh have exactly one job: fetch a source snapshot from GitHub,
 extract it, and hand off to the real install.ps1/install.sh -- unmodified --
 from inside that extracted copy. install.ps1/install.sh are already proven
 by test_install_windows.py / test_install_posix.py; this file proves only
-the bootstrap step itself (download, extract, forward, clean up), the same
-way test_engine_update.py's test_stage_release_real_pipeline proves the
-self-update download step against a local HTTP server standing in for
-GitHub -- there is no real release yet to fetch from either.
+the bootstrap step itself (resolve a ref, download, extract, forward, clean
+up), the same way test_engine_update.py's test_stage_release_real_pipeline
+proves the self-update download step against a local HTTP server standing
+in for GitHub -- a local server here too, so these tests stay deterministic
+and network-free even though a real release now exists.
 """
 from __future__ import annotations
 
@@ -180,6 +181,75 @@ def test_get_ps1_default_model_flag(work: Path) -> None:
         server_thread.join(timeout=5)
 
 
+def _json_handler(payload: bytes):
+    import functools
+    import http.server
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802 - http.server's own naming
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):  # silence per-request stderr noise
+            pass
+
+    return functools.partial(_Handler)
+
+
+def test_get_ps1_resolves_release_tag(work: Path) -> None:
+    """get.ps1 must default to the latest GitHub release, not `master`
+    (2026-08-22 request). MNEMO_GET_RELEASE_API_URL is a test-only override
+    on the release lookup itself, so the tag_name it returns can be a local
+    fixture -- but the resulting codeload URL is still real, since get.ps1
+    takes no override for that. A made-up tag 404s there almost instantly
+    (no multi-MB download, no install ever starts), which is enough to
+    prove the resolved tag actually reached the download step unmangled --
+    the same "real network, skip if offline" tolerance test_engine_update.py
+    already relies on elsewhere in this repo, kept to the smallest possible
+    real request.
+    """
+    if os.name != "nt":
+        print("SKIP  get.ps1 release-resolution test (Windows-only)")
+        return
+
+    import http.server
+    import socket
+    import threading as th
+
+    try:
+        socket.create_connection(("codeload.github.com", 443), timeout=5).close()
+    except OSError:
+        print("SKIP  get.ps1 release-resolution test (no network)")
+        return
+
+    fake_tag = "v9.9.9-mnemo-test-fixture"
+    handler = _json_handler(f'{{"tag_name": "{fake_tag}"}}'.encode())
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_address[1]
+    server_thread = th.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+    env = {
+        **os.environ,
+        "MNEMO_GET_RELEASE_API_URL": f"http://127.0.0.1:{port}/releases/latest",
+    }
+
+    try:
+        result = run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(GET_PS1)],
+            env=env, timeout=30,
+        )
+        assert f"downloading mnemo ({fake_tag})" in result.stdout, result.stdout
+        ok("get.ps1 resolves the tag_name from releases/latest and labels the download with it")
+        assert result.returncode != 0, "a made-up tag should not exist on codeload"
+        ok("the resolved tag reaches the real codeload URL unmangled (404, not a malformed request)")
+    finally:
+        httpd.shutdown()
+        server_thread.join(timeout=5)
+
+
 def test_get_ps1_windows(work: Path) -> None:
     if os.name != "nt":
         print("SKIP  get.ps1 bootstrap test (Windows-only)")
@@ -270,6 +340,7 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mnemo get-bootstrap ") as raw:
         work = Path(raw)
         test_get_ps1_default_model_flag(work)
+        test_get_ps1_resolves_release_tag(work)
         test_get_ps1_windows(work)
         test_get_sh_syntax()
 

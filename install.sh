@@ -42,6 +42,33 @@ say_hl() {
 	fi
 }
 
+run_with_heartbeat() {
+	# Runs a command with a background dot-per-second heartbeat, so a slow
+	# step (installing deps, downloading the model) never reads as a hang.
+	# Output is captured to a temp log and only shown on failure -- a
+	# successful run stays exactly as quiet as calling the command
+	# directly, just not motionless. $1 is the label; the rest is the
+	# command to run. Exit code is returned like any other command, so
+	# callers under `set -e` behave exactly as an unwrapped call would.
+	label="$1"; shift
+	heartbeat_log="$(mktemp "${TMPDIR:-/tmp}/mnemo-install-XXXXXX.log")"
+	printf 'install.sh: %s' "$label"
+	"$@" >"$heartbeat_log" 2>&1 &
+	heartbeat_pid=$!
+	while kill -0 "$heartbeat_pid" 2>/dev/null; do
+		sleep 1
+		printf '.'
+	done
+	wait "$heartbeat_pid"
+	heartbeat_code=$?
+	printf ' done\n'
+	if [ "$heartbeat_code" -ne 0 ]; then
+		cat "$heartbeat_log" >&2
+	fi
+	rm -f "$heartbeat_log"
+	return "$heartbeat_code"
+}
+
 file_size() {
 	# One file's size in bytes. `stat` takes different flags on GNU and BSD,
 	# and `wc -c` needs neither -- it just has to read the file.
@@ -266,7 +293,7 @@ if [ "$DEPS_ONLY" -eq 1 ]; then
 	say "engine home: $MNEMO_HOME"
 	cp "$SRC_REPO/requirements.txt" "$CURRENT_LINK/requirements.txt"
 	"$PY_BIN" -m pip install --quiet --upgrade pip
-	"$PY_BIN" -m pip install --quiet -r "$CURRENT_LINK/requirements.txt"
+	run_with_heartbeat "installing python dependencies" "$PY_BIN" -m pip install --quiet -r "$CURRENT_LINK/requirements.txt"
 	say "python deps installed (deps-only: engine code untouched)"
 	exit 0
 fi
@@ -378,7 +405,7 @@ else
 fi
 
 "$VERSION_PY_BIN" -m pip install --quiet --upgrade pip
-"$VERSION_PY_BIN" -m pip install --quiet -r "$VERSION_DIR/requirements.txt"
+run_with_heartbeat "installing python dependencies" "$VERSION_PY_BIN" -m pip install --quiet -r "$VERSION_DIR/requirements.txt"
 say "python deps installed"
 
 # Fail here rather than at the user's first search. Everything below this
@@ -559,7 +586,8 @@ want_model() {
 if model_cached; then
 	say "model already cached"
 elif want_model; then
-	"$LAUNCHER" warmup || say "the model download failed; retry with: $LAUNCHER warmup"
+	run_with_heartbeat "downloading the embedding model (~2.2 GB, one time)" "$LAUNCHER" warmup \
+		|| say "the model download failed; retry with: $LAUNCHER warmup"
 else
 	say "skipped the model. Search will not work until you run:"
 	say "  $LAUNCHER warmup"
