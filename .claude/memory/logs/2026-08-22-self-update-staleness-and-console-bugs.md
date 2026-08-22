@@ -446,3 +446,42 @@ its known fix still apply.
   the user to trigger (a normal `install.ps1` re-mirror, or a real
   self-update once a new tag exists), not run unprompted given it stops and
   restarts their real production service.
+
+## Root cause 6 (found after PR #4 merged, live) — the STAGING call itself still popped a console
+
+Root cause 3's fix only covered the console spawned *inside* `install.ps1`
+(`Invoke-CheckedWithHeartbeat`'s own `pip install`/warmup step). It missed
+the OUTER spawn: `engine_update._build_engine_version()`
+(`engine_update.py:828`) runs `subprocess.run(["powershell", ...])` to
+dot-source the release's `install.ps1` and call `Build-EngineVersion` — this
+call happens from inside the windowless backend's apply thread, and it had
+no `creationflags=CREATE_NO_WINDOW` at all. Confirmed by `grep` across
+`src/`: it was the only `subprocess.run(["powershell", ...])` in the whole
+codebase missing the flag (`service_ctl.py`, `scaffold.py`, `autostart.py`
+all already carry it, with matching comments explaining why). This is
+exactly the blank blue window the user saw during a real v3.0.1l -> v3.0.2
+self-update apply.
+
+**Fix:** added the same `creationflags=0x08000000` (CREATE_NO_WINDOW) guard,
+same pattern as everywhere else.
+
+**Verification, and why the quick isolated repro was inconclusive:** a
+direct `pythonw.exe`-spawned `subprocess.run(["powershell", "Start-Sleep
+5"])`, with and without the flag, run via Claude Code's own Bash tool,
+showed no window either way on this machine — Git Bash's terminal layer
+apparently doesn't reproduce real desktop console-allocation behaviour for
+a child's child. The only test that meant anything was reproducing the
+REAL spawn chain: a throwaway local-tarball HTTP server (same technique as
+`tests/test_engine_update.py::_make_local_release_tarball`) plus
+`service_ctl.spawn_detached()` (the exact function and flags that spawn the
+real backend) launching a worker that calls `engine_update.stage_release()`
+directly — a genuine `pip install`-driven venv build running inside a truly
+console-less, CREATE_NO_WINDOW-spawned process, same as production. First
+attempt used the system `pythonw.exe` (no `httpx` there) and failed before
+reaching the build step; retried with the venv interpreter that has
+`httpx` and it staged successfully end to end
+(`STAGE_OK ...\fake-home\versions\test-console-fix`). The user stepped away
+during the run and could not confirm visually either way — the fix is
+verified by code inspection (matches the established, already-proven
+pattern everywhere else) and by the successful real staging run, not by an
+eyewitness "no window" observation this time.

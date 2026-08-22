@@ -825,12 +825,23 @@ def _build_engine_version(repo_root: Path, version_dir: Path, *, timeout: float 
         f"-VersionDir '{_ps_quote(version_dir)}' -PythonCommand $py | Out-Null; "
         "Write-Output 'MNEMO_BUILD_OK'"
     )
+    # This runs inside the windowless backend process (the apply handler's
+    # background thread) — a bare `subprocess.run(["powershell", ...])` here
+    # flashes a new visible console for the whole build (the exact "blank
+    # blue window during self-update" bug found live: this was the one
+    # `powershell` subprocess.run in the codebase missing the flag). Same
+    # constant and same reasoning as `service_ctl._CREATE_NO_WINDOW` and
+    # `scaffold.py`'s mcp-setup runner; harmless if a console already exists.
+    kwargs: dict = {}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
     completed = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script],
         capture_output=True,
         text=True,
         timeout=timeout,
         check=False,
+        **kwargs,
     )
     if completed.returncode != 0 or "MNEMO_BUILD_OK" not in completed.stdout:
         raise RuntimeError(
