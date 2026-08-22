@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # The engine is installed into a Cyrillic path on purpose, so the installer's
@@ -80,6 +81,70 @@ def check_script_encoding(script: Path) -> None:
     ok(f"{script.name} parses with zero errors")
 
 
+def test_heartbeat_stall_detection() -> None:
+    """`Invoke-CheckedWithHeartbeat`'s stall detector (2026-08-22): "still
+    alive" and "still making progress" are different claims — a child that
+    keeps printing, however slowly, must run to completion; one that goes
+    genuinely silent must be killed and reported well before its own
+    process would ever exit on its own, and well before any outer ceiling.
+    Isolated `.ps1` harness (dot-source + direct call), same pattern
+    `check_script_encoding` already uses for exercising this file's
+    functions without a full install.
+    """
+    with tempfile.TemporaryDirectory(prefix="mnemo heartbeat ") as raw:
+        work = Path(raw)
+
+        trickle = work / "trickle.py"
+        trickle.write_text(
+            "import sys, time\n"
+            "for i in range(4):\n"
+            "    time.sleep(0.5)\n"
+            "    print('line', i)\n"
+            "    sys.stdout.flush()\n",
+            encoding="utf-8",
+        )
+        stall = work / "stall.py"
+        stall.write_text(
+            "import sys, time\n"
+            "print('one line, then silence')\n"
+            "sys.stdout.flush()\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+
+        trickle_cmd = (
+            f". '{INSTALLER}'; "
+            f"Invoke-CheckedWithHeartbeat '{sys.executable}' @('{trickle}') "
+            "'test trickle' 'trickle failed' -StallTimeoutSec 2; "
+            "Write-Output 'MNEMO_TEST_TRICKLE_OK'"
+        )
+        trickle_result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", trickle_cmd],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        assert trickle_result.returncode == 0, trickle_result.stdout + trickle_result.stderr
+        assert "MNEMO_TEST_TRICKLE_OK" in trickle_result.stdout
+        ok("a slow-but-alive child (output every 0.5s) is never treated as stalled")
+
+        stall_cmd = (
+            f". '{INSTALLER}'; "
+            f"Invoke-CheckedWithHeartbeat '{sys.executable}' @('{stall}') "
+            "'test stall' 'stall failed' -StallTimeoutSec 2"
+        )
+        started = time.monotonic()
+        stall_result = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", stall_cmd],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        )
+        elapsed = time.monotonic() - started
+        combined = stall_result.stdout + stall_result.stderr
+        assert stall_result.returncode != 0, combined
+        assert "looks stalled, not just slow" in combined, combined
+        ok('a genuinely silent child throws the "looks stalled" error')
+        assert elapsed < 15, f"took {elapsed:.1f}s -- the stalled child was not actually killed"
+        ok("the stalled child is killed promptly, not waited out to its own 30s sleep")
+
+
 def main() -> int:
     if os.name != "nt":
         print("SKIP  native Windows installer test")
@@ -87,6 +152,7 @@ def main() -> int:
 
     check_script_encoding(INSTALLER)
     check_script_encoding(UNINSTALLER)
+    test_heartbeat_stall_detection()
 
     with tempfile.TemporaryDirectory(prefix="mnemo install ") as raw:
         mismatched_env = {

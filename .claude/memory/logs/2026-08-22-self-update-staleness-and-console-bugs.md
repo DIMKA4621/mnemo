@@ -560,3 +560,96 @@ auto-pending countdown already uses) and calls `closeUpdateModal()` at
 zero; `closeUpdateModal()`/a re-render both clear any existing timer first
 to avoid stacking. New tests: `test_record_installed_and_apply_helpers`
 extended with explicit-`trigger` cases for both functions.
+
+## Third round, same day: force-reload after apply + stall-based pip timeout
+
+Two more user-driven asks, on top of everything above (not yet on a branch
+at the time of writing — plan file `majestic-stirring-pnueli.md`, reused
+after the earlier staleness plan it originally held was long since done).
+
+**1. Force-reload after a successful apply.** `renderUpdateTerminal()`'s
+dismiss paths (✕, backdrop, Escape, the "Закрити" button, the 10s auto-close
+countdown) all funnelled into `closeUpdateModal()`, which only re-syncs
+*data* over WS (`resyncAll()`) — never the page's own JS/CSS, which the just-
+applied version may have changed. New `dismissUpdateModal()` is now the one
+place every dismiss path calls: `window.location.reload()` when
+`phase === 'terminal' && apply.state === 'done'`, plain `closeUpdateModal()`
+otherwise (nothing changed on a failed/rolled-back outcome, no reason to
+reload).
+
+**2. Stall-based pip-install timeout, scoped down deliberately.** Real
+report: a worse WiFi connection died on the flat 30-minute
+`_build_engine_version(timeout=1800.0)` ceiling even while `pip install` was
+still making genuine progress — one number punishes slow-but-alive exactly
+like dead. Asked via `AskUserQuestion` whether to also rebuild
+`_build_engine_version` into a streaming `Popen` with live progress threaded
+through `api.py`/`update.js` (bigger, riskier — concurrent stdout reads
+across a process boundary, the same deadlock class already fought once in
+this file's own `Invoke-CheckedWithHeartbeat`) — user chose internal-only,
+but also asked for an approximate visible status if it could be had cheaply
+without that rewrite.
+
+**Design landed:** `--quiet` dropped from both pip-install call sites
+(`install.ps1`'s `Build-EngineVersion` and the `-DepsOnly` refresh path) so
+pip prints its normal `Collecting X` / `Installing collected packages` /
+`Successfully installed` lines, which `Invoke-CheckedWithHeartbeat` already
+captures into `$captured` for the failure dump. New `-StallTimeoutSec`
+param (only the two pip call sites opt in, 120s; the `warmup` call site is
+untouched — a single silent big-file download is a different failure shape):
+each heartbeat tick, growth in `$captured` resets an activity clock; real
+silence past the threshold kills the child and throws `"... (no output for
+Ns -- looks stalled, not just slow)"` instead of waiting for any outer
+ceiling. `_build_engine_version`'s own `timeout` (still a plain blocking
+`subprocess.run`, never rewritten to streaming) bumped 1800s -> 3600s, now
+purely a last-resort backstop for a wedged PowerShell process itself.
+
+**The approximate live status, without a streaming rewrite:** a side-channel
+file. New `-ProgressFile` param on `Invoke-CheckedWithHeartbeat`/
+`Build-EngineVersion`: written (best-effort, `{"phase","count","at"}`) every
+time `$captured` grows, by regexing the newest lines for `^Collecting `
+(count++, phase=collecting) / `^Installing collected packages`
+(phase=installing) / `^Successfully installed` (phase=done).
+`engine_update.stage_release()` computes `progress_file = staging_root /
+"pip-progress.json"` and starts a small daemon `threading.Thread`
+(`_watch_pip_progress`) that polls it once a second *while the still-
+blocking* `_build_engine_version()` call runs, calling `_emit_progress(tag,
+"venv", detail=...)` on each change — genuinely live-ish progress into the
+browser without touching `_build_engine_version`'s core blocking-call
+structure at all. Worded as approximate on purpose (`"встановлення
+пакетів… (побачено ~{count})"` — no "N of M": there is no reliable
+denominator, and pip's text output is not a stable contract across
+versions/resolver backtracking).
+
+`detail` threaded the rest of the way: `_apply_progress` dict gained a
+`"detail"` key, `_run_staged_apply`'s `_on_progress` callback now copies it,
+`_apply_view()`'s two disk-derived branches carry `"detail": None` for shape
+consistency. `update.js`: `onUpdateProgress()`/`pollUpdateStatusOnce()` both
+copy it into `state.update.apply.detail`; `renderUpdateProgress()` shows it
+(reusing the already-styled `.upd-note` class, no new CSS) under the steps
+box while `apply.step === 'venv'`.
+
+**Frontend give-up clock made stall-based too**, same principle as the
+backend: `checkUpdatePollTimeout()` used to measure from
+`pollStartedAt` (fixed at modal-open) — now from a new `lastProgressAt`,
+bumped by a shared `noteUpdateProgress(step, detail)` helper called from
+both the REST poll and the WS preview whenever either actually changes.
+Same `UPDATE_POLL_TIMEOUT_MS` (5 min), now meaning "5 minutes of the backend
+saying nothing new" instead of "5 minutes total no matter what".
+
+**Verified live:** `tests/test_engine_update.py`'s real end-to-end
+`test_stage_release_real_pipeline` (genuinely builds a venv via a real pip
+install, no mocking below `stage_release`) needed its `steps ==
+["download", "venv", "done"]` assertion loosened to `steps[0] ==
+"download" and steps[-1] == "done" and all(s == "venv" for s in
+steps[1:-1])` — dropping `--quiet` means this real install now legitimately
+emits extra `"venv"` progress events. **100/100** after the change. New
+`tests/test_install_windows.py::test_heartbeat_stall_detection` — isolated
+`.ps1` harness (dot-source + direct call, same pattern
+`check_script_encoding` already uses), two real subprocess cases: a script
+printing every 0.5s with `-StallTimeoutSec 2` runs to completion; a script
+that prints once then sleeps 30s with the same threshold throws the "looks
+stalled" message in well under 15s, proving the child was actually killed
+rather than waited out. **32/32** total. `test_mcp.py` independently
+confirmed broken on a clean `master` too (`git stash` + rerun) — a local
+`mcp` client package version mismatch in this machine's venv, unrelated to
+any of this session's edits.

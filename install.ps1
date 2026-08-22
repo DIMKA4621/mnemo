@@ -105,12 +105,35 @@ function Invoke-CheckedWithHeartbeat {
         synchronously after the fact -- a synchronous read of both streams
         in sequence can deadlock if the child fills the OS pipe buffer on
         the other one first.
+
+        -StallTimeoutSec (opt-in, 0 = disabled): "still alive" is not the
+        same claim as "still making progress" -- the dot above prints on a
+        fixed timer regardless of what the child is actually doing, so it
+        cannot tell a live-but-stalled pip install (dead network, hung
+        resolver) from a merely slow one apart. When set, this instead
+        watches $captured for genuine growth: any new line resets the
+        clock, and only real silence past the threshold kills the child
+        and throws -- so a slow-but-alive install runs as long as it keeps
+        talking, and a truly dead one fails fast instead of waiting for
+        whatever outer ceiling the caller set. Only the two pip-install
+        call sites opt in; a single large silent download (the warmup call
+        site) is a different failure shape and isn't a good fit for this.
+
+        -ProgressFile (optional): best-effort, approximate status for a
+        caller that wants to show something nicer than silence while this
+        runs -- written only when $captured grows, never on every tick.
+        Parses pip's own text output (`Collecting X` / `Installing
+        collected packages` / `Successfully installed`), which is not a
+        stable contract across pip versions -- treat the resulting
+        phase/count as a rough heartbeat, never an exact "N of M".
     #>
     param(
         [string]$FilePath,
         [string[]]$Arguments,
         [string]$Label,
-        [string]$FailureMessage
+        [string]$FailureMessage,
+        [int]$StallTimeoutSec = 0,
+        [string]$ProgressFile = ''
     )
     Write-Host -NoNewline "install.ps1: $Label"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
@@ -140,14 +163,48 @@ function Invoke-CheckedWithHeartbeat {
     $proc.StartInfo = $psi
     $stdOutSub = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $onData -MessageData $captured
     $stdErrSub = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $onData -MessageData $captured
+    $stalled = $false
     try {
         [void]$proc.Start()
         $proc.BeginOutputReadLine()
         $proc.BeginErrorReadLine()
 
+        $lastCapturedCount = 0
+        $lastActivity = [System.Diagnostics.Stopwatch]::StartNew()
+        $pkgCount = 0
+        $phase = 'starting'
+
         while (-not $proc.HasExited) {
             Start-Sleep -Milliseconds 700
             Write-Host -NoNewline "."
+
+            $currentCount = $captured.Count
+            if ($currentCount -gt $lastCapturedCount) {
+                $lastActivity.Restart()
+                for ($i = $lastCapturedCount; $i -lt $currentCount; $i++) {
+                    $line = [string]$captured[$i]
+                    if ($line -match '^Collecting ') { $pkgCount++; $phase = 'collecting' }
+                    elseif ($line -match '^Installing collected packages') { $phase = 'installing' }
+                    elseif ($line -match '^Successfully installed') { $phase = 'done' }
+                }
+                $lastCapturedCount = $currentCount
+                if ($ProgressFile) {
+                    try {
+                        [pscustomobject]@{
+                            phase = $phase
+                            count = $pkgCount
+                            at    = (Get-Date).ToUniversalTime().ToString('o')
+                        } | ConvertTo-Json -Compress | Set-Content -LiteralPath $ProgressFile -Encoding utf8
+                    } catch {
+                        # best-effort status only -- never fail the real install over this
+                    }
+                }
+            }
+            elseif ($StallTimeoutSec -gt 0 -and $lastActivity.Elapsed.TotalSeconds -gt $StallTimeoutSec) {
+                $stalled = $true
+                try { $proc.Kill() } catch { }
+                break
+            }
         }
         $proc.WaitForExit()
     } finally {
@@ -156,6 +213,13 @@ function Invoke-CheckedWithHeartbeat {
         Remove-Job -Job $stdOutSub -Force -ErrorAction SilentlyContinue
         Remove-Job -Job $stdErrSub -Force -ErrorAction SilentlyContinue
     }
+
+    if ($stalled) {
+        Write-Host (" stalled ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+        $captured | ForEach-Object { Write-Host "install.ps1:   $_" }
+        throw "$FailureMessage (no output for ${StallTimeoutSec}s -- looks stalled, not just slow)"
+    }
+
     Write-Host (" done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
 
     if ($proc.ExitCode -ne 0) {
@@ -476,11 +540,18 @@ function Build-EngineVersion {
 
         Returns a pscustomobject: VenvPython, MnemoExe, MnemowExe -- the
         paths Publish-Launchers and the rest of Invoke-Install need next.
+
+        -ProgressFile is passed straight through to the pip-install
+        Invoke-CheckedWithHeartbeat call -- see that function's own
+        docstring. Optional: a plain local install has no caller reading
+        it, only self-update staging (engine_update._build_engine_version)
+        supplies a real path.
     #>
     param(
         [string]$RepoRoot,
         [string]$VersionDir,
-        [pscustomobject]$PythonCommand
+        [pscustomobject]$PythonCommand,
+        [string]$ProgressFile = ''
     )
 
     $source = Join-Path $RepoRoot "src"
@@ -542,7 +613,7 @@ function Build-EngineVersion {
     }
 
     Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
-    Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $VersionDir "requirements.txt")) "installing python dependencies" "Failed to install Python dependencies"
+    Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "-r", (Join-Path $VersionDir "requirements.txt")) "installing python dependencies" "Failed to install Python dependencies" -StallTimeoutSec 120 -ProgressFile $ProgressFile
     Write-Status "python deps installed"
 
     # Fail here rather than at the user's first search: everything below
@@ -977,7 +1048,7 @@ function Invoke-Install {
                 -Destination (Join-Path $currentLink $file) -Force
         }
         Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
-        Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "--quiet", "-r", (Join-Path $currentLink "requirements.txt")) "installing python dependencies" "Failed to install Python dependencies"
+        Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "-r", (Join-Path $currentLink "requirements.txt")) "installing python dependencies" "Failed to install Python dependencies" -StallTimeoutSec 120
         # Refresh the launcher package's declared dependencies (they are read
         # from requirements.txt at build time) so `pip check` stays honest.
         # bin\mnemo.exe is deliberately not rewritten: mnemo_bootstrap now

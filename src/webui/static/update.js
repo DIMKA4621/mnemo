@@ -74,6 +74,13 @@ const updateModal = {
   everSwitching: false,
   pollTimer: null,
   pollStartedAt: 0,
+  // Stall-based give-up clock (see checkUpdatePollTimeout): reset whenever
+  // apply.step/detail actually changes, not just on a fixed schedule from
+  // when the modal opened — a slow-but-alive install must not time out
+  // just because it is taking a while.
+  lastProgressAt: 0,
+  lastSeenStep: null,
+  lastSeenDetail: null,
   // 'auto-pending' phase's own watch: a slower re-sync against the backend
   // (settlement/cancellation can happen without this tab doing anything —
   // another tab, or the timer firing server-side) plus a faster local tick
@@ -96,7 +103,7 @@ function buildUpdateModal() {
   updateModal.title = el('h2', { text: 'Оновлення mnemo' });
   updateModal.closeBtn = el('button', {
     className: 'btn btn-ghost', text: '✕', title: 'Закрити (Esc)',
-    on: { click: () => closeUpdateModal() },
+    on: { click: () => dismissUpdateModal() },
   });
   updateModal.body = el('div', { className: 'modal-body' });
   updateModal.foot = el('div', { className: 'modal-foot' });
@@ -116,14 +123,14 @@ function buildUpdateModal() {
     attrs: { hidden: '' },
     // Design point 3: once applied, "без можливості щось натиснути" — the
     // backdrop click that closes every other modal here is a no-op mid-progress.
-    on: { click: () => { if (updateModal.phase !== 'progress') closeUpdateModal(); } },
+    on: { click: () => { if (updateModal.phase !== 'progress') dismissUpdateModal(); } },
   }, [updateModal.box]);
   document.body.appendChild(updateModal.root);
 
   document.addEventListener('keydown', (ev) => {
     if (ev.key !== 'Escape' || updateModal.root.hidden) return;
     if (updateModal.phase === 'progress') return; // same guard as the backdrop
-    closeUpdateModal();
+    dismissUpdateModal();
   });
 
   const banner = $('sb-update-banner');
@@ -145,6 +152,23 @@ function closeUpdateModal() {
   updateModal.phase = 'idle';
   updateModal.root.hidden = true;
   renderSidebarUpdateBanner();
+}
+
+// Every "dismiss this modal" path (✕, backdrop, Escape, the terminal
+// screen's own button/countdown) funnels through here instead of calling
+// closeUpdateModal() directly. A successful apply means the running
+// backend genuinely changed — resyncAll's WS re-sync only refreshes DATA,
+// never this page's own JS/CSS — so the only safe way to stop running
+// whatever the OLD version's frontend code was is a real reload. Any other
+// outcome (nothing applied yet, or applied-but-failed/rolled-back —
+// nothing to reload for) keeps the plain dismiss.
+function dismissUpdateModal() {
+  const apply = (state.update && state.update.apply) || {};
+  if (updateModal.phase === 'terminal' && apply.state === 'done') {
+    window.location.reload();
+  } else {
+    closeUpdateModal();
+  }
 }
 
 function stopTerminalAutoClose() {
@@ -491,6 +515,13 @@ function renderUpdateProgress() {
   });
   updateModal.body.appendChild(stepsBox);
 
+  // Approximate, best-effort status from install.ps1's own pip-output
+  // parsing (see engine_update._pip_progress_detail) — never an exact
+  // "N of M", just proof of life while "Встановлення пакетів" runs.
+  if (apply.step === 'venv' && apply.detail) {
+    updateModal.body.appendChild(el('p', { className: 'upd-note', text: apply.detail }));
+  }
+
   if (updateModal.everSwitching) {
     updateModal.body.appendChild(el('p', {
       className: 'upd-note',
@@ -585,7 +616,7 @@ function renderUpdateTerminal() {
   if (autoCloseRow) updateModal.body.appendChild(autoCloseRow);
 
   updateModal.foot.appendChild(el('button', {
-    className: 'btn btn-primary', text: 'Закрити', on: { click: () => closeUpdateModal() },
+    className: 'btn btn-primary', text: 'Закрити', on: { click: () => dismissUpdateModal() },
   }));
 
   if (autoCloseRow) {
@@ -593,7 +624,7 @@ function renderUpdateTerminal() {
     let secondsLeft = 10;
     updateModal.terminalAutoCloseTimer = setInterval(() => {
       secondsLeft -= 1;
-      if (secondsLeft <= 0) { closeUpdateModal(); return; }
+      if (secondsLeft <= 0) { dismissUpdateModal(); return; }
       if (countdownEl) countdownEl.textContent = String(secondsLeft);
     }, 1000);
   }
@@ -606,6 +637,9 @@ function renderUpdateTerminal() {
 function startUpdatePolling() {
   stopUpdatePolling();
   updateModal.pollStartedAt = Date.now();
+  updateModal.lastProgressAt = Date.now();
+  updateModal.lastSeenStep = null;
+  updateModal.lastSeenDetail = null;
   pollUpdateStatusOnce();
   updateModal.pollTimer = setInterval(pollUpdateStatusOnce, UPDATE_POLL_MS);
 }
@@ -614,6 +648,17 @@ function stopUpdatePolling() {
   if (updateModal.pollTimer) {
     clearInterval(updateModal.pollTimer);
     updateModal.pollTimer = null;
+  }
+}
+
+// Bumps the stall clock whenever the backend actually reports something new
+// — called from both the REST poll and the WS preview, so either channel
+// alone is enough to prove the update is still alive.
+function noteUpdateProgress(step, detail) {
+  if (step !== updateModal.lastSeenStep || detail !== updateModal.lastSeenDetail) {
+    updateModal.lastSeenStep = step;
+    updateModal.lastSeenDetail = detail;
+    updateModal.lastProgressAt = Date.now();
   }
 }
 
@@ -634,6 +679,7 @@ async function pollUpdateStatusOnce() {
   state.update = data;
   const apply = data.apply || {};
   if (apply.state === 'switching') updateModal.everSwitching = true;
+  noteUpdateProgress(apply.step, apply.detail);
 
   if (updateModal.phase !== 'progress') {
     // A poll from a previous cycle landing after the modal moved on
@@ -655,7 +701,10 @@ async function pollUpdateStatusOnce() {
 
 function checkUpdatePollTimeout() {
   if (updateModal.phase !== 'progress') return;
-  if (Date.now() - updateModal.pollStartedAt < UPDATE_POLL_TIMEOUT_MS) return;
+  // Measured from the last time the backend actually reported something
+  // new, not from when the modal opened — a slow-but-alive pip install
+  // must not time out just because the whole thing is taking a while.
+  if (Date.now() - updateModal.lastProgressAt < UPDATE_POLL_TIMEOUT_MS) return;
   stopUpdatePolling();
   updateModal.phase = 'timeout';
   renderUpdateModal();
@@ -682,6 +731,8 @@ function onUpdateProgress(data) {
   u.apply = u.apply || {};
   u.apply.tag = data.tag;
   u.apply.step = data.step;
+  u.apply.detail = data.detail;
+  noteUpdateProgress(data.step, data.detail);
 
   if (data.step === 'failed') {
     // Staging itself failed — always pre-switch (see stage_release's own

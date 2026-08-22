@@ -2362,7 +2362,7 @@ def api_autostart_set(payload: dict = Body(...)) -> dict:
 # `update-apply` calls `service_ctl.stop()` on it — so by construction there
 # is nothing here worth surviving a restart.
 _apply_progress: dict[str, Any] = {
-    "state": "idle", "tag": None, "step": None, "error": None,
+    "state": "idle", "tag": None, "step": None, "detail": None, "error": None,
     "started_at": None, "finished_at": None, "trigger": None,
 }
 # Wall-clock time of the last _apply_progress mutation — see _apply_view's
@@ -2595,6 +2595,7 @@ def _run_staged_apply(tag: str, *, trigger: str = "manual") -> None:
             return
         _touch_apply_progress(
             step=payload.get("step"),
+            detail=payload.get("detail"),
             error=payload.get("error") if payload.get("step") == "failed" else _apply_progress["error"],
         )
 
@@ -2669,13 +2670,13 @@ def _apply_view(state: dict) -> dict:
             }
             return {
                 "state": result_to_state.get(last_apply.get("result"), "failed"),
-                "tag": disk_tag, "step": None, "error": last_apply.get("error"),
+                "tag": disk_tag, "step": None, "detail": None, "error": last_apply.get("error"),
                 "started_at": last_apply.get("started_at"),
                 "finished_at": last_apply.get("finished_at"),
                 "trigger": last_apply.get("trigger"),
             }
         return {
-            "state": "switching", "tag": disk_tag, "step": None, "error": None,
+            "state": "switching", "tag": disk_tag, "step": None, "detail": None, "error": None,
             "started_at": last_apply.get("started_at"), "finished_at": None,
             "trigger": last_apply.get("trigger"),
         }
