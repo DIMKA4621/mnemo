@@ -83,7 +83,28 @@ def _cfg(name: str, env: str, default: Any, cast: Any = str) -> Any:
         return default
 
 
-SERVICE_VERSION: str = getattr(config, "SERVICE_VERSION", "3.0.0")
+def _detect_service_version() -> str:
+    """The tag this running process actually is, not a source literal.
+
+    ``config.SERVICE_VERSION`` is a hardcoded string nobody bumps per
+    release (confirmed: it read "3.0.0" while genuinely running v3.0.1 on a
+    real machine) -- completely disconnected from the self-update tag-
+    tracking system, which is why the sidebar footer and `/api/update/status`
+    could disagree about what version this even is. Deriving both from the
+    same `engine_update.effective_current_tag()` ties them to one source of
+    truth; the literal remains only as the last-resort fallback for a
+    devserver/test run outside the versioned `~/.mnemo/versions/<tag>/`
+    layout, where there is nothing to detect.
+    """
+    from . import engine_update  # noqa: PLC0415 - avoid a top-level sibling import
+
+    return (
+        engine_update.effective_current_tag(engine_update.read_state())
+        or getattr(config, "SERVICE_VERSION", "3.0.0")
+    )
+
+
+SERVICE_VERSION: str = _detect_service_version()
 API_HOST: str = _cfg("API_HOST", "MNEMO_API_HOST", "127.0.0.1")
 API_PORT: int = int(_cfg("API_PORT", "MNEMO_API_PORT", 4646, int))
 
@@ -2681,7 +2702,7 @@ def api_update_status() -> dict:
     from . import engine_update
 
     state = engine_update.read_state()
-    current_tag = state.get("current")
+    current_tag = engine_update.effective_current_tag(state)
     current_entry = next(
         (e for e in state.get("installed", []) if e.get("tag") == current_tag), None
     )
@@ -2766,7 +2787,7 @@ def api_update_check() -> dict:
     last_check = state.get("last_check") or {}
     return {
         "latest_tag": last_check.get("latest_tag"),
-        "current_tag": state.get("current"),
+        "current_tag": engine_update.effective_current_tag(state),
         "update_available": bool(last_check.get("update_available")),
         "checked_at": last_check.get("at"),
         "error": last_check.get("error"),

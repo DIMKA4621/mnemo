@@ -216,6 +216,75 @@ def test_record_check_soft_failure(work: Path) -> None:
               after_same["last_check"]["update_available"] is False)
 
 
+def test_effective_current_tag_self_detects_fresh_install(work: Path) -> None:
+    """Fresh install gap (found live, 2026-08-22): install.ps1/install.sh
+    never call record_installed(), so `current` stays None until the FIRST
+    self-update ever runs — every check until then reads as "update
+    available", even for the version just installed. effective_current_tag()
+    self-detects from this process's own versions/<tag>/ directory as a
+    fallback; verified here by monkeypatching _detect_own_tag() directly,
+    since a normal test run's __file__ lives under the repo checkout, not a
+    versioned ~/.mnemo/versions/<tag>/ layout.
+    """
+    check("real test environment has nothing to self-detect (not a versioned install)",
+          engine_update._detect_own_tag() is None)
+
+    with patch.object(config, "STATE_DIR", work / "self-detect"):
+        with patch.object(engine_update, "_detect_own_tag", return_value="v9.9.9"):
+            check("effective_current_tag falls back to the self-detected tag",
+                  engine_update.effective_current_tag(engine_update.default_state()) == "v9.9.9")
+
+            after_same = engine_update.record_check(latest_tag="v9.9.9", error=None)
+            check("a fresh install is never mistaken for an available update",
+                  after_same["last_check"]["update_available"] is False,
+                  detail=str(after_same["last_check"]))
+
+            after_newer = engine_update.record_check(latest_tag="v10.0.0", error=None)
+            check("a genuinely newer tag still reads as available",
+                  after_newer["last_check"]["update_available"] is True)
+
+            # Found live, real machine, same day: a *local* install.ps1
+            # rebuild repoints `current` to versions/local/ directly,
+            # without ever calling record_installed() -- a local rebuild is
+            # not a self-update. engine_version.json is left holding a
+            # STALE tag from a real prior self-update while the engine
+            # actually running is "local". Self-detection must win here,
+            # not the stale registry entry.
+            check("self-detection wins over a stale recorded current",
+                  engine_update.effective_current_tag({"current": "v3.0.1"}) == "v9.9.9")
+
+    # Outside the patch, self-detection is unavailable again (real test
+    # environment) -- state["current"] is the only thing left to answer with.
+    check("registry current is the fallback when nothing can be self-detected",
+          engine_update.effective_current_tag({"current": "v1.0.0"}) == "v1.0.0")
+
+
+def test_base_version_tag_strips_local_build_marker(work: Path) -> None:
+    """Found live, real machine, same day: a local build sitting ON TOP of
+    the latest release ("v3.0.1l") can never string-match the release tag
+    ("v3.0.1"), so record_check()'s update_available nagged "update
+    available" forever — offering to overwrite the local build's own fixes
+    with the vanilla release it is already based on. base_version_tag()
+    strips the trailing lowercase "l" marker before the comparison.
+    """
+    check("plain tag is untouched", engine_update.base_version_tag("v3.0.1") == "v3.0.1")
+    check("local-build marker stripped", engine_update.base_version_tag("v3.0.1l") == "v3.0.1")
+    check("None stays None", engine_update.base_version_tag(None) is None)
+    check("bare \"local\" (no digit before the l) is untouched",
+          engine_update.base_version_tag("local") == "local")
+
+    with patch.object(config, "STATE_DIR", work / "base-version-tag"):
+        with patch.object(engine_update, "_detect_own_tag", return_value="v3.0.1l"):
+            after = engine_update.record_check(latest_tag="v3.0.1", error=None)
+            check("a local build already based on the latest release is not nagged",
+                  after["last_check"]["update_available"] is False,
+                  detail=str(after["last_check"]))
+
+            after_newer = engine_update.record_check(latest_tag="v3.0.2", error=None)
+            check("a release newer than the local build's OWN base still reads as available",
+                  after_newer["last_check"]["update_available"] is True)
+
+
 def test_update_available_clears_on_switch(work: Path) -> None:
     """The bug ui-dev found in step 11's live run: `update_available` used
     to be computed only inside `record_check()`, so a successful switch
@@ -759,6 +828,8 @@ def main() -> int:
         test_state_recovers_from_corrupt_file(work)
         test_record_installed_and_apply_helpers(work)
         test_record_check_soft_failure(work)
+        test_effective_current_tag_self_detects_fresh_install(work)
+        test_base_version_tag_strips_local_build_marker(work)
         test_update_available_clears_on_switch(work)
         test_tarball_url_shape()
 

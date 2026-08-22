@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import tarfile
@@ -101,6 +102,80 @@ def default_state() -> dict[str, Any]:
             "blacklist": {},
         },
     }
+
+
+def _detect_own_tag() -> str | None:
+    """Best-effort: the name of this process's own ``versions/<tag>/``
+    directory (e.g. ``"v3.0.1"``, or ``"local"`` for a dev build). ``None``
+    outside the versioned layout (devserver, tests, a checkout run
+    directly) -- there is no tag to detect there.
+
+    Exists to close a real gap: a fresh install (``get.ps1``/``install.ps1``)
+    builds ``versions/<tag>/`` straight from a release archive but never
+    calls :func:`record_installed` -- confirmed by reading both installers,
+    zero calls. So ``current`` stays ``None`` until the FIRST self-update
+    ever runs, and every comparison against ``latest_tag`` until then reads
+    as "update available", even for the version that was just installed.
+    Self-detecting from the directory this code is actually running from
+    closes that gap without requiring either installer to remember an extra
+    step, and self-heals if the state file is ever missing, deleted, or
+    hand-edited -- see :func:`effective_current_tag`.
+    """
+    try:
+        this_file = Path(__file__).resolve()
+        if this_file.parent.parent.parent.name == "versions":
+            return this_file.parent.parent.name
+    except Exception:  # noqa: BLE001 - best-effort only, never worth crashing over
+        pass
+    return None
+
+
+def effective_current_tag(state: dict[str, Any]) -> str | None:
+    """This process's own self-detected tag (see :func:`_detect_own_tag`)
+    when available, else whatever the registry last recorded.
+
+    Self-detection wins, not the registry, on purpose -- found live
+    (2026-08-22, same day as the rest of this module): running a *local*
+    `install.ps1` rebuild against a machine that had previously done a real
+    self-update repoints `current` to `versions/local/` directly, without
+    ever calling :func:`record_installed` (a local rebuild is not a
+    self-update). `engine_version.json`'s `current` is left holding the
+    OLD tag (e.g. "v3.0.1") while the engine actually running is "local" --
+    reproduced live: `doctor`/`/api/update/status` kept reporting the old
+    tag straight after `current -> local` printed. `state.get("current")`
+    reflects "what the last recorded switch WAS", not "what is actually
+    running right now" the moment anything reassigns `current` outside the
+    self-update path -- and self-detection is ground truth for exactly that
+    question, so it must win whenever it can answer at all. The registry
+    stays the fallback for when self-detection genuinely cannot answer
+    (devserver, tests, a checkout run directly, outside ~/.mnemo entirely).
+
+    Use this everywhere "current" is compared against a known-latest tag.
+    """
+    return _detect_own_tag() or state.get("current")
+
+
+_LOCAL_BUILD_SUFFIX_RE = re.compile(r"(\d)l$")
+
+
+def base_version_tag(tag: str | None) -> str | None:
+    """Strip a trailing lowercase "l" local-build marker (2026-08-22
+    scheme, ``Get-LocalCheckoutVersionTag``/``get_local_checkout_version_tag``)
+    off a tag like ``"v3.0.1l"``, giving ``"v3.0.1"`` -- the release it is
+    actually based on. Identity on a tag with no such marker.
+
+    Found live: comparing ``effective_current_tag()`` against ``latest_tag``
+    literally means a local build sitting on TOP of the latest release
+    (uncommitted fixes on a checkout at v3.0.1, tag "v3.0.1l") can never
+    match "v3.0.1" by string equality, so it nags "update available"
+    forever -- offering to overwrite those very fixes with the vanilla
+    release. Comparing base tags instead answers the question this is
+    actually asking: is there a release newer than what this build is
+    based on, not "is this string byte-identical to a release tag."
+    """
+    if not tag:
+        return tag
+    return _LOCAL_BUILD_SUFFIX_RE.sub(r"\1", tag)
 
 
 def _is_valid(data: Any) -> bool:
@@ -296,7 +371,8 @@ def record_check(*, latest_tag: str | None, error: str | None) -> dict[str, Any]
         state["last_check"] = {
             "at": _now_iso(),
             "latest_tag": latest_tag,
-            "update_available": bool(latest_tag) and latest_tag != state.get("current"),
+            "update_available": bool(latest_tag)
+            and latest_tag != base_version_tag(effective_current_tag(state)),
             "error": None,
         }
     else:
