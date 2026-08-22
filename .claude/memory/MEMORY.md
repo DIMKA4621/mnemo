@@ -29,7 +29,20 @@ detail lives in `topics/`, day notes in `logs/`.
   тепер тягнуть **останній реліз**, не `master` (фолбек на master, якщо lookup
   впав); heartbeat-прогрес на `pip install`/`mnemo warmup`; і **урок з
   реального інциденту** — ad hoc запуск без `-InstallHome` реально зачепив
-  користувацький `~/.mnemo`, виправлено `switch_current`.
+  користувацький `~/.mnemo`, виправлено `switch_current`. 2026-08-22 (другий
+  раз того ж дня): heartbeat-хелпер сам ламав інваріант «без консольних
+  вікон» (`Start-Job` спавнить власний хост-процес повз `CREATE_NO_WINDOW`) —
+  переписано на `System.Diagnostics.Process`; заразом живцем спіймано, що
+  `ProcessStartInfo.ArgumentList` на цій машині повертає `$null` (не помилку,
+  не порожню колекцію) і `List<T>` не має `::Synchronized` (це метод
+  `ArrayList`). Того ж дня: `effective_current_tag` спершу довіряла
+  застарілому запису в реєстрі більше за self-detection — знайдено живцем
+  саме при передеплої на реальну машину, пріоритет розвернуто. І ще:
+  `install.ps1`/`install.sh`, запущені напряму, тепер можуть віддати
+  реальний тег замість вічного `"local"` — або з `get.ps1`/`get.sh`
+  (`$env:MNEMO_INSTALL_TAG`, коли реліз підтверджений), або з локального
+  git-checkout на чистому дереві точно на тезі (`Get-LocalCheckoutTag`).
+  Деталі в `logs/2026-08-22-self-update-staleness-and-console-bugs.md`.
 - [Консоль](topics/console-ui.md) — вибір теки обходить ФС на боці бекенда
   (`webkitdirectory` шляху не дає), усі дії банку в одному меню `···`,
   налаштування як **екран, а не модалка** (затемнений фон показував би
@@ -103,6 +116,14 @@ detail lives in `topics/`, day notes in `logs/`.
   кроках — у `logs/2026-08-2[01]-engine-self-update-*.md` (13 файлів).
   Реальний рушій користувача (`~/.claude/mnemo`) **ще не мігрований** на
   нову розкладку — фіча готова, живий перехід попереду, окрема дія.
+  **2026-08-22, після реального v3.0.1-релізу:** ще 4 реальні баги того ж
+  сімейства знайдено на живих машинах користувача й виправлено —
+  `current` невідомий до першого self-update (install.ps1/.sh ніколи не
+  писали `engine_version.json`), `SERVICE_VERSION` — захардкожений літерал
+  поза self-update-трекінгом, `resyncAll()` не рефрешив `/api/update/status`
+  при WS-реконекті, плюс окрема регресія (не з self-update-фічі, а з пізнішого
+  heartbeat-прогресу) — `Start-Job` ламав інваріант «без консольних вікон».
+  Деталі: `logs/2026-08-22-self-update-staleness-and-console-bugs.md`.
 
 ## Quick facts
 

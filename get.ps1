@@ -22,10 +22,17 @@
 # actually tagged and shipped, same source engine_update.py's own
 # self-update pulls from, not whatever happens to be on master mid-work.
 # $env:MNEMO_GET_REF overrides this and is taken as a BRANCH name (heads/),
-# for pointing the bootstrapper at an unreleased branch by hand. If the
-# releases/latest lookup itself fails -- no releases yet, GitHub
-# unreachable -- this falls back to `master` rather than failing the whole
-# install over a single API call.
+# for pointing the bootstrapper at an unreleased branch by hand -- an
+# explicit, deliberate override, never an error path.
+#
+# If the releases/latest lookup itself fails -- no releases yet, GitHub
+# unreachable, rate-limited -- this is a hard installation error, NOT a
+# silent fallback to `master` (2026-08-22 decision, reversing the original
+# soft-fallback behaviour): a one-liner that silently hands someone
+# unreleased `master` when it meant to hand them the latest release would
+# make the version they end up running depend on which GitHub API call
+# happened to work that day. The error message names the likely causes and
+# points at the manual-clone fallback.
 #
 # One default differs from install.ps1's own: unless -Model or -NoModel is
 # already among the forwarded args, get.ps1 adds -Model itself. install.ps1
@@ -41,15 +48,16 @@ $repo = "DIMKA4621/mnemo"
 
 function Resolve-MnemoArchiveUrl {
     if ($env:MNEMO_GET_ARCHIVE_URL) {
-        return @{ Url = $env:MNEMO_GET_ARCHIVE_URL; Label = "custom archive" }
+        return @{ Url = $env:MNEMO_GET_ARCHIVE_URL; Label = "custom archive"; Tag = $null }
     }
     if ($env:MNEMO_GET_REF) {
         $ref = $env:MNEMO_GET_REF
-        return @{ Url = "https://codeload.github.com/$repo/zip/refs/heads/$ref"; Label = $ref }
+        return @{ Url = "https://codeload.github.com/$repo/zip/refs/heads/$ref"; Label = $ref; Tag = $null }
     }
 
     $apiUrl = if ($env:MNEMO_GET_RELEASE_API_URL) { $env:MNEMO_GET_RELEASE_API_URL } else { "https://api.github.com/repos/$repo/releases/latest" }
     $tag = $null
+    $lookupError = $null
     try {
         $release = Invoke-RestMethod -Uri $apiUrl -TimeoutSec 10 -Headers @{
             Accept       = "application/vnd.github+json"
@@ -58,19 +66,19 @@ function Resolve-MnemoArchiveUrl {
         if ($release.tag_name) { $tag = $release.tag_name }
     }
     catch {
-        # No releases yet, GitHub unreachable, rate-limited -- any of these
-        # falls through to master below rather than failing the install.
+        $lookupError = $_.Exception.Message
     }
     if ($tag) {
-        return @{ Url = "https://codeload.github.com/$repo/zip/refs/tags/$tag"; Label = $tag }
+        return @{ Url = "https://codeload.github.com/$repo/zip/refs/tags/$tag"; Label = $tag; Tag = $tag }
     }
-    Write-Host "get.ps1: no GitHub release found, falling back to master" -ForegroundColor Yellow
-    return @{ Url = "https://codeload.github.com/$repo/zip/refs/heads/master"; Label = "master" }
-}
 
-$resolved = Resolve-MnemoArchiveUrl
-$url = $resolved.Url
-$refLabel = $resolved.Label
+    $detail = if ($lookupError) { $lookupError } else { "GitHub reported no releases for $repo" }
+    throw (
+        "could not find a GitHub release to install ($detail). " +
+        "Check your network connection, or install from a manual clone instead: " +
+        "git clone https://github.com/$repo.git; cd mnemo; .\install.ps1"
+    )
+}
 
 $tmp = Join-Path ([System.IO.Path]::GetTempPath()) ("mnemo-src-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tmp | Out-Null
@@ -83,6 +91,14 @@ $code = 0
 $global:LASTEXITCODE = 0
 
 try {
+    # Resolved INSIDE this try, not before it -- Resolve-MnemoArchiveUrl can
+    # now throw (no release found), and this is the one catch block whose
+    # exit handling already knows how to fail without closing the caller's
+    # shell when run via `irm | iex` (see the $PSCommandPath check below).
+    $resolved = Resolve-MnemoArchiveUrl
+    $url = $resolved.Url
+    $refLabel = $resolved.Label
+
     Write-Host "get.ps1: downloading mnemo ($refLabel)..."
     Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
 
@@ -112,6 +128,22 @@ try {
     # slot left to land in and the whole call fails. So -Model can only be
     # ADDED as a separate literal token in the call itself, never merged
     # into a rebuilt copy of $args.
+    # GitHub's archive carries no .git directory (confirmed: engine_update.py's
+    # own stage_release() docstring notes the same fact), so install.ps1's
+    # own git-based version detection can never see a tag here -- without
+    # this, every get.ps1 install would report itself as "local" forever and
+    # nag to "update" to the very release it just installed (the same class
+    # of "current lies about what is actually running" bug this session's
+    # other fixes closed elsewhere). get.ps1 already knows the exact tag it
+    # resolved -- pass it through rather than making install.ps1 re-derive
+    # it from nothing. Only set for a CONFIRMED release ($resolved.Tag);
+    # left unset for a custom archive or an explicit $env:MNEMO_GET_REF
+    # override -- neither names an installable version, so "local" remains
+    # the correct, honest answer for them.
+    if ($resolved.Tag) {
+        $env:MNEMO_INSTALL_TAG = $resolved.Tag
+    }
+
     Write-Host "get.ps1: installing..."
     if ($args -match '^-(No)?Model$') {
         & $installScript @args

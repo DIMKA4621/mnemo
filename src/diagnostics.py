@@ -114,7 +114,7 @@ def _self_update_fact() -> dict[str, Any]:
             }
 
     return {
-        "current_tag": state.get("current"),
+        "current_tag": engine_update.effective_current_tag(state),
         "last_check_at": last_check.get("at"),
         "update_available": bool(last_check.get("update_available")),
         "latest_tag": last_check.get("latest_tag"),

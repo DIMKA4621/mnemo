@@ -37,10 +37,13 @@ def ok(name: str) -> None:
     print(f"PASS  {name}")
 
 
-def run(command: list[str], *, env: dict | None = None, timeout: int = 120) -> subprocess.CompletedProcess[str]:
+def run(
+    command: list[str], *, env: dict | None = None, cwd: Path | None = None, timeout: int = 120
+) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         command,
         env=env,
+        cwd=cwd,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -250,6 +253,119 @@ def test_get_ps1_resolves_release_tag(work: Path) -> None:
         server_thread.join(timeout=5)
 
 
+def test_get_local_checkout_version_tag_scheme() -> None:
+    """install.ps1's Get-LocalCheckoutVersionTag, exercised directly against
+    a throwaway git repo -- user-decided scheme (2026-08-22): a clean tree
+    exactly on a tag reports that tag verbatim; anything else reachable
+    (commits on top, or uncommitted changes) reports the nearest tag with a
+    lowercase "l" appended; no reachable tag at all reports nothing (the
+    caller falls back to "local").
+
+    Regression coverage for a real bug caught live before ever shipping
+    this: install.ps1 sets $ErrorActionPreference = "Stop" at file scope,
+    under which `git describe --tags --exact-match` failing (the ENTIRELY
+    expected outcome for a clean checkout that is simply not on a tag)
+    threw instead of just setting a nonzero exit code -- silently skipping
+    the --abbrev=0 fallback for exactly the case this function exists for.
+    The "clean, one commit past a tag" case below is what caught it.
+    """
+    if os.name != "nt":
+        print("SKIP  Get-LocalCheckoutVersionTag test (Windows-only)")
+        return
+    if run(["git", "--version"]).returncode != 0:
+        print("SKIP  Get-LocalCheckoutVersionTag test (no git on PATH)")
+        return
+
+    with tempfile.TemporaryDirectory(prefix="mnemo checkout-tag ") as raw:
+        repo = Path(raw)
+        git = lambda *a: run(["git", *a], cwd=repo)  # noqa: E731
+        git("init", "-q")
+        git("config", "user.email", "t@t.local")
+        git("config", "user.name", "T")
+        (repo / "f.txt").write_text("one\n", encoding="utf-8")
+        git("add", "f.txt")
+        git("commit", "-q", "-m", "c1")
+        git("tag", "v1.0.0")
+
+        def resolve(repo_path: Path) -> str:
+            script = (
+                f". '{INSTALLER_PS1}'; "
+                f"$t = Get-LocalCheckoutVersionTag -RepoRoot '{repo_path}'; "
+                "if ($null -eq $t) { '' } else { $t }"
+            )
+            result = run(["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", script])
+            return result.stdout.strip()
+
+        assert resolve(repo) == "v1.0.0", resolve(repo)
+        ok("clean tree, HEAD exactly on a tag -> that tag verbatim")
+
+        (repo / "f.txt").write_text("one\ntwo\n", encoding="utf-8")
+        git("add", "f.txt")
+        git("commit", "-q", "-m", "c2 after tag")
+        assert resolve(repo) == "v1.0.0l", resolve(repo)
+        ok("clean tree, one commit past the tag -> nearest tag + lowercase l")
+
+        (repo / "f.txt").write_text("one\ntwo\ndirty\n", encoding="utf-8")
+        assert resolve(repo) == "v1.0.0l", resolve(repo)
+        ok("dirty tree on top of that same commit -> still nearest tag + l")
+
+        git("checkout", "-q", "--", "f.txt")  # clean again, back on the tagged commit's descendant
+        with tempfile.TemporaryDirectory(prefix="mnemo no-tags ") as raw2:
+            bare = Path(raw2)
+            git2 = lambda *a: run(["git", *a], cwd=bare)  # noqa: E731
+            git2("init", "-q")
+            git2("config", "user.email", "t@t.local")
+            git2("config", "user.name", "T")
+            (bare / "f.txt").write_text("one\n", encoding="utf-8")
+            git2("add", "f.txt")
+            git2("commit", "-q", "-m", "c1, no tags anywhere")
+            assert resolve(bare) == "", resolve(bare)
+            ok("no reachable tag at all -> nothing (caller falls back to \"local\")")
+
+
+def test_get_ps1_errors_when_no_release_found() -> None:
+    """2026-08-22 (second decision): a failed/empty release lookup is a
+    HARD installation error now, not a silent fallback to `master` -- a
+    one-liner that silently hands someone unreleased `master` when it
+    meant to hand them the latest release would make the version someone
+    ends up running depend on which GitHub API call happened to work that
+    day. Must exit nonzero, print a message pointing at the manual-clone
+    fallback, and never attempt a download at all.
+    """
+    if os.name != "nt":
+        print("SKIP  get.ps1 no-release-error test (Windows-only)")
+        return
+
+    import http.server
+    import threading as th
+
+    handler = _json_handler(b"{}")  # no tag_name -- same shape as "no releases yet"
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_address[1]
+    server_thread = th.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+    env = {
+        **os.environ,
+        "MNEMO_GET_RELEASE_API_URL": f"http://127.0.0.1:{port}/releases/latest",
+    }
+
+    try:
+        result = run(
+            ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(GET_PS1)],
+            env=env, timeout=30,
+        )
+        assert result.returncode != 0, "must fail, not silently install master"
+        ok("get.ps1 exits nonzero when no release can be resolved")
+        assert "downloading mnemo" not in result.stdout, result.stdout
+        ok("get.ps1 never attempts a download when no release was found")
+        combined = result.stdout + result.stderr
+        assert "clone" in combined.lower(), combined
+        ok("get.ps1's error message points at the manual-clone fallback")
+    finally:
+        httpd.shutdown()
+        server_thread.join(timeout=5)
+
+
 def test_get_ps1_windows(work: Path) -> None:
     if os.name != "nt":
         print("SKIP  get.ps1 bootstrap test (Windows-only)")
@@ -341,6 +457,8 @@ def main() -> int:
         work = Path(raw)
         test_get_ps1_default_model_flag(work)
         test_get_ps1_resolves_release_tag(work)
+        test_get_ps1_errors_when_no_release_found()
+        test_get_local_checkout_version_tag_scheme()
         test_get_ps1_windows(work)
         test_get_sh_syntax()
 

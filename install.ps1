@@ -65,16 +65,46 @@ function Invoke-CheckedWithHeartbeat {
     <#
         Same contract as Invoke-Checked, for the two steps long enough that
         silence alone reads as a hang: installing python deps and
-        downloading the embedding model. Runs the command as a background
-        job purely so a dot can be printed roughly once a second while it's
-        alive -- not for real concurrency. Deliberately NOT Start-Process
-        with -ArgumentList: that joins an array into one string without
-        quoting elements that contain spaces (an -InstallHome under
-        "C:\Program Files\..." would silently mis-split), where a job's own
-        `& $fp @fargs` call operator splats exactly like Invoke-Checked
-        already does everywhere else in this file. Captured output is
-        discarded on success and dumped on failure, so a clean run stays
-        exactly as quiet as Invoke-Checked's, just not motionless.
+        downloading the embedding model. Prints a dot roughly once a second
+        while the command runs -- not for real concurrency.
+
+        Deliberately NOT Start-Process with -ArgumentList: that joins an
+        array into one string without quoting elements that contain spaces
+        (an -InstallHome under "C:\Program Files\..." would silently
+        mis-split).
+
+        Deliberately NOT Start-Job either (found live, 2026-08-22): a
+        classic background job spawns its OWN hosting powershell.exe
+        process through PowerShell's job engine -- entirely outside this
+        script's control and outside mnemo's own CREATE_NO_WINDOW spawning
+        discipline (service_ctl.py's, which only covers mnemo's own
+        subprocess/Popen calls). When the caller of install.ps1 itself has
+        no console -- exactly the case when self-update's stage_release()
+        dot-sources a downloaded release's install.ps1 from a
+        `subprocess.run` -- Windows gives that job host a brand-new,
+        VISIBLE console, which shows nothing (a job writes to a pipe, not a
+        screen) and stays open for as long as the step takes. Confirmed:
+        this showed up both on a fresh install and during a live
+        self-update, since both funnel through this one shared function.
+
+        The fix is a directly-controlled System.Diagnostics.Process with
+        CreateNoWindow=$true, UseShellExecute=$false -- the same explicit
+        creation-flags discipline service_ctl.py already applies to every
+        Python-side spawn, just expressed in .NET here instead of
+        Win32 flags. Arguments are quoted by hand and joined into
+        `.Arguments` (a single string, re-split by the OS the same way any
+        Win32 command line is) rather than `.ArgumentList` -- confirmed
+        live on this machine's PowerShell/.NET that `ArgumentList` comes
+        back $null (not a pre-populated empty collection, and not a
+        "property not found" error either), so `.Add()` on it throws.
+        Quoting only elements that contain whitespace/quotes is the exact
+        fix for the bug `-ArgumentList` had (naive space-join, no quoting
+        at all) without depending on a property this runtime doesn't
+        support. Output is captured asynchronously
+        (OutputDataReceived/ErrorDataReceived) rather than read
+        synchronously after the fact -- a synchronous read of both streams
+        in sequence can deadlock if the child fills the OS pipe buffer on
+        the other one first.
     #>
     param(
         [string]$FilePath,
@@ -84,27 +114,53 @@ function Invoke-CheckedWithHeartbeat {
     )
     Write-Host -NoNewline "install.ps1: $Label"
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    $job = Start-Job -ScriptBlock {
-        param($fp, $fargs)
-        & $fp @fargs *>&1
-        $LASTEXITCODE
-    } -ArgumentList $FilePath, $Arguments
 
-    while ($job.State -eq "Running") {
-        Start-Sleep -Milliseconds 700
-        Write-Host -NoNewline "."
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = $FilePath
+    $psi.Arguments = (($Arguments | ForEach-Object {
+        if ($_ -match '[\s"]') { '"' + ($_ -replace '"', '\"') + '"' } else { $_ }
+    }) -join ' ')
+    $psi.UseShellExecute = $false
+    $psi.CreateNoWindow = $true
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+
+    # A thread-safe sink both event handlers append into; order between
+    # stdout/stderr lines is not preserved, same as the old *>&1 merge did
+    # not guarantee it either -- only "everything that was printed" matters
+    # for the failure dump below, not interleaving. ArrayList (not
+    # List[string], which has no Synchronized wrapper) is what actually
+    # provides one here.
+    $captured = [System.Collections.ArrayList]::Synchronized((New-Object System.Collections.ArrayList))
+    $onData = {
+        if ($null -ne $EventArgs.Data) { [void]$Event.MessageData.Add($EventArgs.Data) }
     }
-    $output = @(Receive-Job -Job $job -ErrorAction SilentlyContinue)
-    $jobFailed = $job.State -ne "Completed"
-    Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+
+    $proc = New-Object System.Diagnostics.Process
+    $proc.StartInfo = $psi
+    $stdOutSub = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $onData -MessageData $captured
+    $stdErrSub = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $onData -MessageData $captured
+    try {
+        [void]$proc.Start()
+        $proc.BeginOutputReadLine()
+        $proc.BeginErrorReadLine()
+
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds 700
+            Write-Host -NoNewline "."
+        }
+        $proc.WaitForExit()
+    } finally {
+        Unregister-Event -SourceIdentifier $stdOutSub.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $stdErrSub.Name -ErrorAction SilentlyContinue
+        Remove-Job -Job $stdOutSub -Force -ErrorAction SilentlyContinue
+        Remove-Job -Job $stdErrSub -Force -ErrorAction SilentlyContinue
+    }
     Write-Host (" done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
 
-    $exitCode = if ($output.Count -gt 0) { $output[-1] } else { 1 }
-    if ($jobFailed -or $exitCode -ne 0) {
-        if ($output.Count -gt 1) {
-            $output | Select-Object -SkipLast 1 | ForEach-Object { Write-Host "install.ps1:   $_" }
-        }
-        throw "$FailureMessage (exit $exitCode)"
+    if ($proc.ExitCode -ne 0) {
+        $captured | ForEach-Object { Write-Host "install.ps1:   $_" }
+        throw "$FailureMessage (exit $($proc.ExitCode))"
     }
 }
 
@@ -751,6 +807,89 @@ function Register-PowerShellProfile {
     Write-Status "PowerShell profile: mnemo registered ($profilePath)"
 }
 
+function Get-LocalCheckoutVersionTag {
+    <#
+        A display-worthy version derived from this checkout's own git
+        history, or $null if nothing reachable at all (no git, not a repo,
+        no tags in history).
+
+        Two outcomes, user-decided scheme (2026-08-22):
+        - Clean tree, HEAD exactly on a tag -> that tag verbatim
+          ("v3.0.1") -- this genuinely IS the release.
+        - Anything else that still has a reachable tag (commits on top of
+          the last tag, uncommitted changes, or both) -> the nearest
+          ancestor tag with a lowercase "l" appended ("v3.0.1l") -- a real
+          base version instead of the uninformative bare "local", with a
+          visible marker that this is NOT the official release itself
+          (matches how alpha/beta suffixes are conventionally lowercase).
+          A checkout at v3.0.1 with local edits on top is not actually
+          v3.0.1 -- reporting it as plain "v3.0.1" would make self-update
+          think "already have it, nothing to do" while running modified
+          code, the class of "current lies about what is actually running"
+          bug this session spent itself fixing elsewhere
+          (engine_update.py's effective_current_tag).
+
+        No git / not a repo / no tag anywhere in history all return $null
+        the same way -- callers fall back to the fixed "local" sentinel.
+
+        **Found live, real machine, before ever shipping this** (2026-08-22):
+        install.ps1 sets $ErrorActionPreference = "Stop" at file scope, and
+        under that setting a failing native command's stderr becomes a
+        TERMINATING error even when redirected with `2>$null` -- confirmed
+        directly (a plain, expected "fatal: no tag exactly matches" from
+        `git describe --tags --exact-match` on a clean checkout that is NOT
+        on a tag threw instead of just setting a nonzero $LASTEXITCODE).
+        That silently skipped the --abbrev=0 fallback entirely for exactly
+        the case this whole function exists for (a clean checkout ahead of
+        the last tag), collapsing straight to $null/"local" instead of
+        "<tag>l". The original exact-match-only Get-LocalCheckoutTag never
+        hit this because a dirty tree short-circuited before ever reaching
+        that call; reorganizing the exact-match to run only when clean is
+        what newly exposed it. Fixed by shadowing
+        $ErrorActionPreference to "SilentlyContinue" for the lifetime of
+        THIS function only (a plain local assignment; PowerShell scoping
+        means the caller's "Stop" is restored the moment this function
+        returns) -- every $LASTEXITCODE check below already assumed exactly
+        this non-throwing behaviour and needed no other change once it had it.
+    #>
+    param([string]$RepoRoot)
+    $ErrorActionPreference = "SilentlyContinue"
+
+    if ($null -eq (Get-Command "git.exe" -ErrorAction SilentlyContinue)) {
+        return $null
+    }
+    try {
+        Push-Location -LiteralPath $RepoRoot
+        try {
+            $inside = & git rev-parse --is-inside-work-tree 2>$null
+            if ($LASTEXITCODE -ne 0 -or $inside -ne "true") { return $null }
+
+            $status = & git status --porcelain 2>$null
+            $clean = ($LASTEXITCODE -eq 0 -and [string]::IsNullOrEmpty(($status -join "")))
+
+            if ($clean) {
+                $exact = & git describe --tags --exact-match HEAD 2>$null
+                if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($exact)) {
+                    return ([string]$exact).Trim()
+                }
+            }
+
+            # --abbrev=0 gives just the nearest ancestor tag's name, no
+            # "-N-gHASH" commit-count suffix -- exactly the base version
+            # this scheme wants to append "l" to.
+            $nearest = & git describe --tags --abbrev=0 HEAD 2>$null
+            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($nearest)) { return $null }
+            return (([string]$nearest).Trim() + "l")
+        }
+        finally {
+            Pop-Location
+        }
+    }
+    catch {
+        return $null
+    }
+}
+
 function Invoke-Install {
     $repoRoot = $PSScriptRoot
     $usingDefaultHome = [string]::IsNullOrWhiteSpace($InstallHome)
@@ -782,14 +921,32 @@ function Invoke-Install {
     # versions/<tag>/, and `current` is the stable alias a switch repoints.
     # state/ and model-cache/ stay siblings of `versions`/`current`, exactly
     # where they always were -- shared across every version, never touched
-    # by anything below. A plain from-source install (this script; no
-    # GitHub release involved) always targets the fixed tag "local" -- real
-    # release tags ("v3.1.0", ...) are what the self-update apply handler
-    # (step 7, service-dev) stages under versions/ instead. Repeated runs of
-    # this script therefore refresh the SAME versions\local\ in place,
-    # exactly as idempotent as the old flat layout was.
+    # by anything below. The version tag is resolved in priority order so
+    # `mnemo doctor`/the console report the correct version instead of a
+    # permanent "local" that then nags to "update" back to the very tag
+    # already running:
+    #   1. $env:MNEMO_INSTALL_TAG -- set by get.ps1 when it downloaded a
+    #      CONFIRMED GitHub release (its own archive carries no .git
+    #      directory, so this is the only way this script can know). Used
+    #      verbatim -- get.ps1 only sets this when the checkout genuinely
+    #      IS that exact release.
+    #   2. Get-LocalCheckoutVersionTag -- a manual git-based run: the exact
+    #      tag if HEAD sits on one with a clean tree, else the nearest
+    #      ancestor tag + a lowercase "l" (e.g. "v3.0.1l") to mark it as a
+    #      local build rather than the official release.
+    #   3. The fixed tag "local" -- the original, still-safe default when
+    #      neither of the above can answer (mid-development with no git
+    #      history reachable, no git at all, or get.ps1's custom-archive/
+    #      explicit-ref override paths, none of which name a version).
+    # Repeated runs of this script therefore refresh the SAME
+    # versions\<tag>\ in place, exactly as idempotent as the old flat
+    # layout was.
     $versionsDir = Join-Path $engineHome "versions"
-    $versionTag = "local"
+    $versionTag = $env:MNEMO_INSTALL_TAG
+    if ([string]::IsNullOrWhiteSpace($versionTag)) {
+        $versionTag = Get-LocalCheckoutVersionTag -RepoRoot $repoRoot
+    }
+    if ([string]::IsNullOrWhiteSpace($versionTag)) { $versionTag = "local" }
     $versionDir = Join-Path $versionsDir $versionTag
     $currentLink = Join-Path $engineHome "current"
 

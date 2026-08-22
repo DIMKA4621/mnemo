@@ -116,6 +116,11 @@
 }
 .sb-foot .sep { color: var(--line); }
 .sb-foot .ver { margin-left: auto; }
+/* Own build, not the official release it's based on ("v3.0.1l") --
+   install.ps1/install.sh's own marker, see shell.js's LOCAL_BUILD_VERSION_RE.
+   Reuses --warn-fg (the same amber already used for "indexing"/in-progress
+   states) rather than a new color: this is "worth noticing", not an error. */
+.sb-foot .ver.is-local-build { color: var(--warn-fg); }
 .is-collapsed .sb-foot { justify-content: center; padding: 8px 4px; }
 .is-collapsed .sb-foot .txt, .is-collapsed .sb-foot .sep, .is-collapsed .sb-foot .ver { display: none; }
 
