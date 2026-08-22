@@ -295,22 +295,10 @@ def main() -> int:
         assert "isolated home:" in dry.stdout, dry.stdout
         assert launcher.is_file(), "a dry run deleted the engine"
         survey = uninstall_report(dry.stdout)
-        # NOTE (step 12 consolidated review): uninstall.sh's own survey line
-        # still tests `[ -f "$MNEMO_HOME/src/cli.py" ]` -- the pre-bug-C flat
-        # path. Since install.sh (bug C, fixed) now builds src/ under
-        # versions/local/ instead, that file never exists at the flat path
-        # any more, so this survey line always prints "MISSING" today, even
-        # right after a real install -- unlike uninstall.ps1's Windows
-        # counterpart, whose survey block was already updated to read
-        # `current`/`versions`. This assertion is left checking the CORRECT
-        # (post-fix) value rather than the currently-wrong one on purpose:
-        # softening it would hide the gap instead of surfacing it. It will
-        # fail on a real POSIX run until uninstall.sh's survey block gets the
-        # same versions/current-aware fix install.sh's build logic already
-        # has -- flagged, not fixed here (uninstall.sh is out of this task's
-        # scope). The actual removal logic is unaffected: it walks
-        # $MNEMO_HOME's children generically and does not depend on this path.
-        assert survey["engine code"] == "src/, launcher, requirements", survey
+        # uninstall.sh's survey line now checks `current/src/cli.py` (fixed
+        # in e74fcb0 to match uninstall.ps1's own current/versions-aware
+        # text), so it reports this suffixed form right after a real install.
+        assert survey["engine code"] == "src/, launcher, requirements (versions/, current)", survey
         assert survey["service"] == "not running", survey
         # An isolated home must not even *offer* to remove the machine-level
         # registrations: listing them would be a promise the removal step
