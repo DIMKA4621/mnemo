@@ -43,6 +43,12 @@ for every subagent (they do not inherit this file). `docs/Memory-design-v2.md`
 and `-v1.md` are historical only; `docs/Setup-design.md` covers the
 install model and is mid-transition (see its header).
 
+`.claude/rules/jira-tracking.md` carries the cross-agent policy for the
+project's MN Jira board — who touches a ticket and when (only the lead
+writes; subagents produce plan/report/verdict text back to it). The
+`mn-jira-workflow` skill covers the mechanics (statuses, transitions,
+description/comment convention, browser fallback).
+
 Project decision history, research and rationale live in **this repo's own
 bank**: `.claude/memory/` (`MEMORY.md` index, `logs/`, `topics/`), served by
 the `mnemo-memory` MCP server in `.mcp.json`. **Search it with the `search` tool
