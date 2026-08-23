@@ -2001,9 +2001,12 @@ async function submitRemoval() {
   // not leave behind. The reload that follows is the correction, not the
   // mechanism.
   state.banks = state.banks.filter((b) => b.id !== bank.id);
-  if (state.selectedBankId === bank.id) state.selectedBankId = null;
   state.progress.delete(bank.id);
   state.notes.delete(bank.id);
+  // Through selectBank(), not a direct field clear: it is also what repaints
+  // the tree/file panel, which must not keep showing a bank that no longer
+  // exists.
+  if (state.selectedBankId === bank.id) selectBank(null);
   renderBanks();
   loadBanks().catch(() => {});
 }

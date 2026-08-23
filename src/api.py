@@ -1814,9 +1814,13 @@ def api_tree(
                     entry["headings"].append(row["heading"])
 
     patterns = _compile_excludes(b.exclude)
-    files = dirs = 0
+    files = 0
     tree: dict[str, Any] = {"name": "", "type": "dir", "path": "", "children": []}
     nodes: dict[str, dict] = {"": tree}
+    # A dir whose descent was cut short by `depth` (not by excludes) may hold
+    # real .md files the walk never reached — pruning must not mistake
+    # "not looked at" for "empty" and delete it.
+    truncated: set[str] = set()
 
     for dirpath, dirnames, filenames in os.walk(root):
         here = Path(dirpath)
@@ -1831,6 +1835,8 @@ def api_tree(
             )
         )
         if depth and level >= depth:
+            if dirnames:
+                truncated.add(rel_dir)
             dirnames[:] = []
         parent = nodes.get(rel_dir)
         if parent is None:
@@ -1842,7 +1848,6 @@ def api_tree(
             }
             nodes[rel] = child
             parent["children"].append(child)
-            dirs += 1
         for name in sorted(filenames):
             if not name.endswith(".md"):
                 continue
@@ -1868,6 +1873,12 @@ def api_tree(
     for node in nodes.values():
         node["children"].sort(key=lambda c: (c["type"] != "dir", c["name"]))
 
+    # Bottom-up: a dir's own file count isn't known until its subtree is
+    # walked, so pruning empty branches has to happen after the os.walk
+    # build, not during it.
+    _prune_empty_dirs(tree, truncated)
+    dirs = _count_dirs(tree)
+
     return {
         "bank_id": b.id,
         "root": root.as_posix(),
@@ -1875,6 +1886,31 @@ def api_tree(
         "dirs": dirs,
         "tree": tree,
     }
+
+
+def _prune_empty_dirs(node: dict, truncated: set[str]) -> bool:
+    """Drop dir children with no ``.md`` anywhere in their subtree. Returns
+    whether ``node`` itself should be kept.
+
+    A dir in ``truncated`` had its own descent cut short by the ``depth``
+    limit rather than by excludes, so an empty ``children`` there means
+    "not looked at", not "empty" — always kept.
+    """
+    if node["type"] != "dir":
+        return True
+    if node["path"] in truncated:
+        return True
+    kept = [
+        child for child in node["children"] if _prune_empty_dirs(child, truncated)
+    ]
+    node["children"] = kept
+    return bool(kept)
+
+
+def _count_dirs(node: dict) -> int:
+    return sum(
+        1 + _count_dirs(child) for child in node["children"] if child["type"] == "dir"
+    )
 
 
 _MD_LINK = re.compile(r"\[[^\]]*\]\(([^)\s]+\.md)[^)]*\)")

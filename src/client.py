@@ -175,10 +175,13 @@ class Client:
     # ------------------------------------------------------------ plumbing
 
     def _headers(self) -> dict[str, str]:
-        return {
-            "Authorization": f"Bearer {self.token}",
-            "Content-Type": "application/json",
-        }
+        headers = {"Content-Type": "application/json"}
+        # `/api` is open by default (no token configured) — an empty Bearer
+        # value is not "no credential", it is a malformed one, and httpx
+        # rejects it client-side before the request is even sent.
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        return headers
 
     def _send(self, method: str, path: str, **kw: Any):
         # Popped rather than passed through: `timeout` is already given

@@ -197,6 +197,11 @@ function chooseSettingsSection(id) {
   settings.autoUpdateSaveNote = null;
   settings.autoUpdateSaveError = null;
   settings.updateCheckError = null;
+  // Same rule as the save verdicts above: an update-check result describes
+  // an attempt made in the section being left, not a fact about the tab
+  // coming next.
+  settings.updateCheckResult = null;
+  settings.updateCheckAvailable = false;
   settings.maintenanceError = null;
   settings.cleanupConfirming = false;
   settings.cleanupNote = null;
@@ -276,6 +281,18 @@ function settingsOnLeave() {
   settings.autostartWant = null;
   settings.cleanupConfirming = false;
   settings.cleanupNote = null;
+  // Same rule as chooseSettingsSection(): a save/action verdict describes
+  // an attempt made in the section being left, and leaving it to reappear
+  // on the way back would report a stale outcome as a current one.
+  settings.embedNote = null;
+  settings.embedError = null;
+  settings.autostartSaveNote = null;
+  settings.autostartSaveError = null;
+  settings.autoUpdateSaveNote = null;
+  settings.autoUpdateSaveError = null;
+  settings.updateCheckError = null;
+  settings.updateCheckResult = null;
+  settings.updateCheckAvailable = false;
   stopDownloadPolling();
 }
 
@@ -823,6 +840,24 @@ function renderEmbedMemory(body) {
   body.appendChild(el('div', { className: 'set-field' }, field));
 }
 
+/**
+ * Auto-expire a `settings.<field>` verdict 5s after it was set — same
+ * mechanism as `app.js::setNote()` for bank cards. Leaving the section (or
+ * the page) already clears these; this is the second line so the note also
+ * disappears on its own if the user just stays put and reads it. The
+ * staleness check (field still holds the exact value we scheduled for)
+ * guards against erasing a newer note a second click produced in the
+ * meantime.
+ */
+function scheduleSettingsNoteClear(field, value) {
+  setTimeout(() => {
+    if (settings[field] === value) {
+      settings[field] = null;
+      renderSettings();
+    }
+  }, 5000);
+}
+
 async function embedAction(what) {
   settings.embedBusy = true;
   settings.embedError = null;
@@ -839,6 +874,7 @@ async function embedAction(what) {
     } else {
       settings.embedNote = 'Бекенд відповів — модель у памʼяті.';
     }
+    scheduleSettingsNoteClear('embedNote', settings.embedNote);
   } catch (err) {
     if (isAuthError(err)) { openGate('rejected'); return; }
     // The console's own wording for the one error this button realistically
@@ -1233,6 +1269,19 @@ async function runUpdateCheck() {
           ? 'Доступна нова версія ' + result.latest_tag
           : 'Актуальна версія.');
     if (result.error) settings.updateCheckError = result.error;
+    // `updateCheckAvailable` has no text of its own to compare against on
+    // expiry, so its clear rides along with its paired `updateCheckResult`
+    // — the field that actually carries the note shown on screen.
+    if (settings.updateCheckResult) {
+      const resultAtSchedule = settings.updateCheckResult;
+      setTimeout(() => {
+        if (settings.updateCheckResult === resultAtSchedule) {
+          settings.updateCheckResult = null;
+          settings.updateCheckAvailable = false;
+          renderSettings();
+        }
+      }, 5000);
+    }
   } catch (err) {
     if (isAuthError(err)) { openGate('rejected'); return; }
     settings.updateCheckError = err.message;
@@ -1289,6 +1338,7 @@ async function submitGeneral() {
         settings.autostartSaveNote = settings.autostart.enabled
           ? 'Автозапуск: служба підніматиметься при вході в систему.'
           : 'Автозапуск: вимкнено, службу доведеться піднімати самому.';
+        scheduleSettingsNoteClear('autostartSaveNote', settings.autostartSaveNote);
       } catch (err) {
         if (isAuthError(err)) { openGate('rejected'); return; }
         settings.autostartSaveError = err.message;
@@ -1302,6 +1352,7 @@ async function submitGeneral() {
         });
         settings.autoUpdateWant = null;
         settings.autoUpdateSaveNote = autoUpdateWant ? 'Автооновлення: увімкнено.' : 'Автооновлення: вимкнено.';
+        scheduleSettingsNoteClear('autoUpdateSaveNote', settings.autoUpdateSaveNote);
       } catch (err) {
         if (isAuthError(err)) { openGate('rejected'); return; }
         settings.autoUpdateSaveError = err.message;
