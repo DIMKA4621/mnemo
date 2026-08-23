@@ -1,0 +1,4 @@
+# Normalize line endings to LF in the repository regardless of platform or
+# a contributor's core.autocrlf setting. Git's own text/binary heuristic
+# decides what "text" applies to, so real binaries are left alone.
+* text=auto eol=lf

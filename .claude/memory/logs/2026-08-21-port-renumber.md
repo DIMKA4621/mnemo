@@ -1,165 +1,65 @@
 # 2026-08-21 — default ports, idle-timeout, and the engine home renumbered/moved
 
-Three related decisions made in one sitting, all about mnemo's machine-level
-defaults. Commit: `feat(config): renumber default ports, flip idle-timeout,
-move engine home off .claude`.
+Three related decisions made in one sitting, all about mnemo's machine-level defaults.
+Commit: `feat(config): renumber default ports, flip idle-timeout, move engine home off .claude`.
 
 ## Ports: 8917/8918 → 4645/4646
 
-Motivation: user wanted memorable, collision-unlikely defaults instead of
-generic 4-digit dev-server ports. `MNEMO_EMBED_PORT` (internal embed
-resident) → `4645`; `MNEMO_API_PORT` (backend/cabinet/MCP) → `4646`.
+Motivation: user wanted memorable, collision-unlikely defaults instead of generic 4-digit dev-server ports.
+`MNEMO_EMBED_PORT` (internal embed resident) → `4645`; `MNEMO_API_PORT` (backend/cabinet/MCP) → `4646`.
 
-Changed: `src/config.py` (the one real default), plus every place that
-duplicates it as a fallback (`src/api.py`, `src/client.py`,
-`src/scaffold.py`, `src/cli.py` help text, `src/mcp_server.py` docstring),
-dev-only fixtures (`src/webui/devserver.py`,
-`src/webui/fixtures/files.json`), the four v3 docs, `CLAUDE.md`, and every
-test that asserts against the real default (`test_mcp.py`, `test_platform.py`
-~9 spots, `test_hygiene_reap.py`).
+Changed: `src/config.py` (the one real default), plus every place that duplicates it as a fallback (`src/api.py`, `src/client.py`, `src/scaffold.py`, `src/cli.py` help text, `src/mcp_server.py` docstring), dev-only fixtures (`src/webui/devserver.py`, `src/webui/fixtures/files.json`), the four v3 docs, `CLAUDE.md`, and every test that asserts against the real default (`test_mcp.py`, `test_platform.py` ~9 spots, `test_hygiene_reap.py`).
 
-**Deliberately left untouched:** `tests/test_platform.py`'s legacy-hook and
-legacy-stdio-MCP fixtures (`~/.claude/mnemo/bin/mnemo hook-postedit` etc.,
-`"${HOME}/.claude/mnemo/bin/mnemo"` stdio shapes) — these simulate *real,
-historical* pre-v3 wiring for `--migrate` detection tests, not fresh output;
-changing the path in them tests nothing more and stops representing what an
-old real installation actually had on disk. Same reasoning kept
-`tests/fixtures/mcp-setup-v1.sh` and `docs/Memory-design-v2.md` /
-`docs/containers/README.md` (already marked SUPERSEDED) untouched.
+**Deliberately left untouched:** `tests/test_platform.py`'s legacy-hook and legacy-stdio-MCP fixtures (`~/.claude/mnemo/bin/mnemo hook-postedit` etc., `"${HOME}/.claude/mnemo/bin/mnemo"` stdio shapes) — these simulate *real, historical* pre-v3 wiring for `--migrate` detection tests, not fresh output; changing the path in them tests nothing more and stops representing what an old real installation actually had on disk.
+Same reasoning kept `tests/fixtures/mcp-setup-v1.sh` and `docs/Memory-design-v2.md` / `docs/containers/README.md` (already marked SUPERSEDED) untouched.
 
-`test_hygiene_reap.py`'s port-collision check used to hardcode the literal
-`8917`. Rewritten to compare against `config.EMBED_PORT` instead, so a future
-renumber can't silently make the assertion pass while testing nothing.
+`test_hygiene_reap.py`'s port-collision check used to hardcode the literal `8917`.
+Rewritten to compare against `config.EMBED_PORT` instead, so a future renumber can't silently make the assertion pass while testing nothing.
 
 ## `EMBED_IDLE_TIMEOUT`: 0 → 10800 (3h), now the shipped default
 
-Previously `0` (never auto-exit, see `logs/2026-08-16-embed-memory.md`) was
-the deliberate, documented default — freeing the resident cost ~9s on the
-next search, which was judged not worth it against FR-3 ("search is
-instant"). The user had set `10800` as a *personal* override in their own
-`mnemo.env` (`topics/provider-settings.md`, entry now corrected — see below).
+Previously `0` (never auto-exit, see `logs/2026-08-16-embed-memory.md`) was the deliberate, documented default — freeing the resident cost ~9s on the next search, which was judged not worth it against FR-3 ("search is instant").
+The user had set `10800` as a *personal* override in their own `mnemo.env` (`topics/provider-settings.md`, entry now corrected — see below).
 
-Revisited by the user this session: 3h is long enough to essentially never
-fire mid-session, but still frees ~1.6GB during a genuine multi-hour idle
-stretch, without needing the manual `mnemo embed unload`. This is now the
-**shipped default in `config.py`**, not a personal deviation — the earlier
-topics/provider-settings.md note claiming "not a change to config.py's
-default" is now wrong and was corrected in place.
+Revisited by the user this session: 3h is long enough to essentially never fire mid-session, but still frees ~1.6GB during a genuine multi-hour idle stretch, without needing the manual `mnemo embed unload`.
+This is now the **shipped default in `config.py`**, not a personal deviation — the earlier topics/provider-settings.md note claiming "not a change to config.py's default" is now wrong and was corrected in place.
 
-Comment in `config.py` and the equivalent explanation in
-`docs/Memory-contracts-v3.md` §6.6.4 and `docs/Memory-design-v3.md` §4
-rewritten to match — the old prose specifically argued FOR `0` ("the timer
-lost"); flipped to explain why `10800` beats both `0` and the pre-v3 `1800`
-default without deleting the measured `~9s` reload-cost data point, which is
-still true and still the reason `0` remains available via
-`MNEMO_EMBED_IDLE_TIMEOUT=0`.
+Comment in `config.py` and the equivalent explanation in `docs/Memory-contracts-v3.md` §6.6.4 and `docs/Memory-design-v3.md` §4 rewritten to match — the old prose specifically argued FOR `0` ("the timer lost"); flipped to explain why `10800` beats both `0` and the pre-v3 `1800` default without deleting the measured `~9s` reload-cost data point, which is still true and still the reason `0` remains available via `MNEMO_EMBED_IDLE_TIMEOUT=0`.
 
 ## `mnemo.env` stub, generated by the installer
 
-New: `install.ps1` / `install.sh` now create `state/mnemo.env` as an empty,
-comment-only stub on first install, if and only if it doesn't already exist
-— never overwrites a machine's real overrides. Placed at the same point
-`state/`, `model-cache/`, `bin/` etc. are first provisioned, unconditionally
-(runs for `-InstallHome` too, unlike the user-scope-only block further down —
-this isn't user-scope state, it's per-engine-home state like everything else
-under `state/`).
+New: `install.ps1` / `install.sh` now create `state/mnemo.env` as an empty, comment-only stub on first install, if and only if it doesn't already exist — never overwrites a machine's real overrides.
+Placed at the same point `state/`, `model-cache/`, `bin/` etc. are first provisioned, unconditionally (runs for `-InstallHome` too, unlike the user-scope-only block further down — this isn't user-scope state, it's per-engine-home state like everything else under `state/`).
 
-Decided during this session's back-and-forth about config layering: the
-answer to "why do we need mnemo.env if config.py works the same for
-everyone on this machine" is that committing a change to `config.py` makes
-it the new default for *everyone who updates*, while `mnemo.env` is the one
-place a single machine's deliberate deviation survives every future
-`install.ps1` re-mirror without risking a `git pull`/`stash`/`reset` silently
-wiping an uncommitted local edit.
+Decided during this session's back-and-forth about config layering: the answer to "why do we need mnemo.env if config.py works the same for everyone on this machine" is that committing a change to `config.py` makes it the new default for *everyone who updates*, while `mnemo.env` is the one place a single machine's deliberate deviation survives every future `install.ps1` re-mirror without risking a `git pull`/`stash`/`reset` silently wiping an uncommitted local edit.
 
 ## Engine home: `~/.claude/mnemo` → `~/.mnemo`
 
-Decision: the engine is not Claude-Code-specific plumbing — it's a
-standalone service any MCP client can talk to — so nesting it inside
-another tool's dotfolder implied a coupling that doesn't exist. Landed in
-two passes the same session: first to a bare `~/mnemo` (no leading dot),
-then corrected to `~/.mnemo` once the user pointed out that's not what they
-asked for — a hidden dotfolder directly under `$HOME`, the same convention
-`~/.ollama`, `~/.npm`, `~/.cargo`, `~/.docker` already use, not a visible
-folder sitting next to Documents/Desktop. `src/config.py`'s `USER_HOME`
-default is the one real value; ~24 files referenced the old path in some
-form (docs, install/uninstall scripts, scaffold.py, api.py, tests, skill
-files) and needed the same correction both times.
+Decision: the engine is not Claude-Code-specific plumbing — it's a standalone service any MCP client can talk to — so nesting it inside another tool's dotfolder implied a coupling that doesn't exist.
+Landed in two passes the same session: first to a bare `~/mnemo` (no leading dot), then corrected to `~/.mnemo` once the user pointed out that's not what they asked for — a hidden dotfolder directly under `$HOME`, the same convention `~/.ollama`, `~/.npm`, `~/.cargo`, `~/.docker` already use, not a visible folder sitting next to Documents/Desktop.
+`src/config.py`'s `USER_HOME` default is the one real value; ~24 files referenced the old path in some form (docs, install/uninstall scripts, scaffold.py, api.py, tests, skill files) and needed the same correction both times.
 
-**Real logic, not just a string, lived in `src/registry.py`:**
-`default_name()` (used only when a bank has no explicit name) had a special
-case treating a folder literally named `mnemo` as "wiring" (skip it when
-computing a bank's display name) *only* when its parent was `.claude` — so
-that the engine's own folder wouldn't get treated as a bank root, while a
-*project* genuinely named `mnemo` (this repository) kept its own name
-instead of inheriting its grandparent's. That collision precondition no
-longer exists once the engine lives at `~/.mnemo` (no `.claude` segment in
-its path at all) — and better still, the generic "skip anything starting
-with a dot" rule already in the same loop now covers the engine's folder on
-its own, since `.mnemo` itself starts with a dot. So the special case is
-dead code twice over and was removed outright — left in, it would have
-described a location that no longer exists. `default_name`'s only caller is
-bank registration (cosmetic display name, not bank identity — that's a hash
-of the resolved root), so this carried no data-safety risk either way.
+**Real logic, not just a string, lived in `src/registry.py`:** `default_name()` (used only when a bank has no explicit name) had a special case treating a folder literally named `mnemo` as "wiring" (skip it when computing a bank's display name) *only* when its parent was `.claude` — so that the engine's own folder wouldn't get treated as a bank root, while a *project* genuinely named `mnemo` (this repository) kept its own name instead of inheriting its grandparent's.
+That collision precondition no longer exists once the engine lives at `~/.mnemo` (no `.claude` segment in its path at all) — and better still, the generic "skip anything starting with a dot" rule already in the same loop now covers the engine's folder on its own, since `.mnemo` itself starts with a dot.
+So the special case is dead code twice over and was removed outright — left in, it would have described a location that no longer exists.
+`default_name`'s only caller is bank registration (cosmetic display name, not bank identity — that's a hash of the resolved root), so this carried no data-safety risk either way.
 
-**Windows integration self-heals on `install.ps1` re-run, verified live:**
-the PowerShell profile's `mnemo` function and the Task Scheduler autostart
-task both embed the launcher's literal resolved path at registration time,
-but `install.ps1` unconditionally re-registers both on every run
-(`Register-PowerShellProfile` diffs and rewrites the fenced block;
-`autostart enable` uses `schtasks /Create ... /F`), so relocating the home
-and rerunning the installer was enough — no separate un/re-registration
-step was needed. Confirmed: profile function and the scheduled task's
-`Execute` path both now read `C:\Users\dima\.mnemo\...`.
+**Windows integration self-heals on `install.ps1` re-run, verified live:** the PowerShell profile's `mnemo` function and the Task Scheduler autostart task both embed the launcher's literal resolved path at registration time, but `install.ps1` unconditionally re-registers both on every run (`Register-PowerShellProfile` diffs and rewrites the fenced block; `autostart enable` uses `schtasks /Create ... /F`), so relocating the home and rerunning the installer was enough — no separate un/re-registration step was needed.
+Confirmed: profile function and the scheduled task's `Execute` path both now read `C:\Users\dima\.mnemo\...`.
 
-**Downstream project wiring (`.mcp.json`/`.mcp.env` in the 4 adopted
-projects) needed NO changes for this** — unlike the port renumber, which
-did require updating all 4 — because those files address the service by
-`host:port` + token, never by the engine's install path.
+**Downstream project wiring (`.mcp.json`/`.mcp.env` in the 4 adopted projects) needed NO changes for this** — unlike the port renumber, which did require updating all 4 — because those files address the service by `host:port` + token, never by the engine's install path.
 
-**Live migration sequence used** (real state, not a fixture): stopped the
-service, copied `state/` (registry, tokens, all 4 banks' `.db` files) from
-the old home to the new one, deliberately did **not** copy `model-cache/`
-(user wanted a clean chance to exercise the cabinet's "Завантажити модель"
-download button instead), then ran `install.ps1` fresh at the new default.
-Old `~/.claude/mnemo` (2.59 GB) was deleted once the new home was confirmed
-healthy via `doctor` — the user's explicit call, not automatic.
+**Live migration sequence used** (real state, not a fixture): stopped the service, copied `state/` (registry, tokens, all 4 banks' `.db` files) from the old home to the new one, deliberately did **not** copy `model-cache/` (user wanted a clean chance to exercise the cabinet's "Завантажити модель" download button instead), then ran `install.ps1` fresh at the new default.
+Old `~/.claude/mnemo` (2.59 GB) was deleted once the new home was confirmed healthy via `doctor` — the user's explicit call, not automatic.
 
-Then, once the bare-vs-dotted mixup above was caught, the same live move
-happened a second time, this time trivial: stopped the service, plain
-`Move-Item` from `~/mnemo` to `~/.mnemo` (everything already inside one
-tree, no selective state/model-cache split needed this round), reran
-`install.ps1`. Confirmed after: profile function and the scheduled task's
-`Execute` both read `C:\Users\dima\.mnemo\...`.
+Then, once the bare-vs-dotted mixup above was caught, the same live move happened a second time, this time trivial: stopped the service, plain `Move-Item` from `~/mnemo` to `~/.mnemo` (everything already inside one tree, no selective state/model-cache split needed this round), reran `install.ps1`.
+Confirmed after: profile function and the scheduled task's `Execute` both read `C:\Users\dima\.mnemo\...`.
 
-**Gotcha hit during the copy, self-caused and caught before acting on it:**
-a stray `model-cache\` (2.25GB, complete-looking) had already appeared at
-the not-yet-dotted `C:\Users\dima\mnemo\` *before* the deliberate copy step
-— timestamped within a minute of running `tests/test_platform.py`, strongly
-implicating one of its "complete model cache is warmed" fixtures as leaking
-a real copy into the new default location (its source resolution likely
-used `config.USER_HOME`, already flipped to the new default by the time
-that suite ran). Not confirmed by
-reading the test itself, only inferred from timing — worth checking later
-whether that suite genuinely writes under the *real* default location
-instead of a redirected temp one, which would be a live-state-leak bug in
-the test suite independent of this session. Resolved by deleting the stray
-copy rather than trusting or merging it, since the old `~/.claude/mnemo`
-copy (2026-08-10, repeatedly confirmed healthy by `doctor` all session) was
-the only source with a known-good provenance.
+**Gotcha hit during the copy, self-caused and caught before acting on it:** a stray `model-cache\` (2.25GB, complete-looking) had already appeared at the not-yet-dotted `C:\Users\dima\mnemo\` *before* the deliberate copy step — timestamped within a minute of running `tests/test_platform.py`, strongly implicating one of its "complete model cache is warmed" fixtures as leaking a real copy into the new default location (its source resolution likely used `config.USER_HOME`, already flipped to the new default by the time that suite ran).
+Not confirmed by reading the test itself, only inferred from timing — worth checking later whether that suite genuinely writes under the *real* default location instead of a redirected temp one, which would be a live-state-leak bug in the test suite independent of this session.
+Resolved by deleting the stray copy rather than trusting or merging it, since the old `~/.claude/mnemo` copy (2026-08-10, repeatedly confirmed healthy by `doctor` all session) was the only source with a known-good provenance.
 
-**Post-move rough edge, worth remembering:** after the fresh `install.ps1`
-run, the watcher queued a full reindex of all 4 banks (queue depth 136)
-while the resident was still unreachable and no model was cached yet at the
-new location. Every one of those reindex attempts failed, and failing
-partway through a reindex left each bank's chunk/file counts at `0` (rows
-cleared before re-embedding, which then never happened) while `db_bytes`
-stayed large (SQLite doesn't shrink the file on row deletion) — so the
-cabinet kept showing "ПОРОЖНЬО" + a stale `last_error` about the missing
-model **even after** the user downloaded the model via the cabinet
-afterward, because nothing re-triggered a reindex once the resident came
-up. Fixed with an explicit `mnemo reindex --bank <name> --full` per bank.
-Open question, not yet investigated: should a bank whose reindex failed
-for `provider_error`-shaped reasons auto-retry once the provider becomes
-reachable again, instead of sitting silently failed until someone notices
-and forces it by hand?
+**Post-move rough edge, worth remembering:** after the fresh `install.ps1` run, the watcher queued a full reindex of all 4 banks (queue depth 136) while the resident was still unreachable and no model was cached yet at the new location.
+Every one of those reindex attempts failed, and failing partway through a reindex left each bank's chunk/file counts at `0` (rows cleared before re-embedding, which then never happened) while `db_bytes` stayed large (SQLite doesn't shrink the file on row deletion) — so the cabinet kept showing "ПОРОЖНЬО" + a stale `last_error` about the missing model **even after** the user downloaded the model via the cabinet afterward, because nothing re-triggered a reindex once the resident came up.
+Fixed with an explicit `mnemo reindex --bank <name> --full` per bank.
+Open question, not yet investigated: should a bank whose reindex failed for `provider_error`-shaped reasons auto-retry once the provider becomes reachable again, instead of sitting silently failed until someone notices and forces it by hand?
