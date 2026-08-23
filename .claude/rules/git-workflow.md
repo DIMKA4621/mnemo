@@ -4,6 +4,12 @@ Binding for the team lead.
 Defines what three specific instructions mean in this repo.
 This is on top of the global git rule (ask before every commit/push, Conventional Commits, never add attribution) — it doesn't replace it.
 
+## Language: everything here is English
+
+Commit messages, PR titles, PR bodies, and release notes are always **English** — same as commit messages under the global git rule.
+Ukrainian is for Jira only (`.claude/rules/jira-tracking.md`, `mn-jira-workflow` skill) — tickets, comments, descriptions.
+GitHub-facing text never switches to Ukrainian just because the surrounding conversation is in Ukrainian.
+
 ## Starting new work — always a fresh branch off the latest master
 
 Never commit new work directly on `master`, and never branch off whatever is currently checked out without checking it first.
