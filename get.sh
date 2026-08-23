@@ -76,8 +76,42 @@ fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/mnemo-src-XXXXXX")"
 trap 'rm -rf "$tmp"' EXIT
 
-echo "get.sh: downloading mnemo ($REF_LABEL)..."
-curl -fsSL "$ARCHIVE_URL" | tar xz -C "$tmp"
+# Same in-place spinner (backspace-redraw, | / - \) as install.sh's own
+# run_with_heartbeat -- but this script cannot source that function yet:
+# install.sh lives INSIDE the archive being downloaded here, so only the
+# pattern is reused (background the command, poll its PID, redraw a
+# spinner), not a shared function. Backgrounding the whole curl | tar
+# pipeline (rather than just curl) is what lets the spinner keep ticking
+# through the extraction too, not just the network transfer.
+printf 'get.sh: downloading mnemo (%s) ' "$REF_LABEL"
+(curl -fsSL "$ARCHIVE_URL" | tar xz -C "$tmp") &
+dl_pid=$!
+spin='|/-\'
+tick=0
+printed=0
+while kill -0 "$dl_pid" 2>/dev/null; do
+	sleep 1
+	[ "$printed" -eq 1 ] && printf '\b'
+	printf '%s' "${spin:$((tick % 4)):1}"
+	printed=1
+	tick=$((tick + 1))
+done
+# `wait` as a bare statement propagates a nonzero exit straight through
+# `set -e`, aborting the shell right here -- before $? is ever read, so the
+# "download failed" message and controlled `exit 1` below would never run,
+# same bug fixed in install.sh's run_with_heartbeat (2026-08-23). The `||`
+# puts `wait` in a conditional context, which `set -e` exempts.
+dl_code=0
+wait "$dl_pid" || dl_code=$?
+# Same zero-tick guard as install.sh's run_with_heartbeat: a download that
+# finishes before the loop above ever sleeps once would otherwise eat a
+# character off the label instead of a spinner frame it never drew.
+[ "$printed" -eq 1 ] && printf '\b'
+printf 'done\n'
+if [ "$dl_code" -ne 0 ]; then
+	echo "get.sh: download failed" >&2
+	exit 1
+fi
 
 # GitHub's archive always has exactly one top-level "<repo>-<ref>" dir --
 # never hardcode the name, slashes in $REF get dashed by GitHub itself.

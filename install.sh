@@ -46,25 +46,47 @@ say_hl() {
 }
 
 run_with_heartbeat() {
-	# Runs a command with a background dot-per-second heartbeat, so a slow
-	# step (installing deps, downloading the model) never reads as a hang.
-	# Output is captured to a temp log and only shown on failure -- a
-	# successful run stays exactly as quiet as calling the command
-	# directly, just not motionless. $1 is the label; the rest is the
+	# Runs a command with a background spinner (| / - \) that rotates in
+	# place via backspace-redraw, so a slow step (creating the venv,
+	# installing deps, downloading the model) never reads as a hang. Output
+	# is captured to a temp log and only shown on failure -- a successful
+	# run stays exactly as quiet as calling the command directly, just not
+	# motionless. Not tty-detected: it always prints, redirected output
+	# included (2026-08-23 decision). $1 is the label; the rest is the
 	# command to run. Exit code is returned like any other command, so
 	# callers under `set -e` behave exactly as an unwrapped call would.
 	label="$1"; shift
 	heartbeat_log="$(mktemp "${TMPDIR:-/tmp}/mnemo-install-XXXXXX.log")"
-	printf 'install.sh: %s' "$label"
+	printf 'install.sh: %s ' "$label"
 	"$@" >"$heartbeat_log" 2>&1 &
 	heartbeat_pid=$!
+	spin='|/-\'
+	tick=0
+	printed=0
 	while kill -0 "$heartbeat_pid" 2>/dev/null; do
 		sleep 1
-		printf '.'
+		# Not fractional (e.g. 0.15) on purpose: older BSD/macOS `sleep`
+		# only guarantees whole-second granularity, and this file already
+		# avoids GNU-only tools elsewhere (human()'s numfmt avoidance) for
+		# the same portability reason.
+		[ "$printed" -eq 1 ] && printf '\b'
+		printf '%s' "${spin:$((tick % 4)):1}"
+		printed=1
+		tick=$((tick + 1))
 	done
-	wait "$heartbeat_pid"
-	heartbeat_code=$?
-	printf ' done\n'
+	# `wait` as a bare statement propagates a nonzero exit straight through
+	# `set -e`, aborting the shell right here -- before $? is ever read, so
+	# the failure dump/cleanup below is dead code on every real failure.
+	# The `||` puts `wait` in a conditional context, which `set -e` exempts.
+	heartbeat_code=0
+	wait "$heartbeat_pid" || heartbeat_code=$?
+	# A command that exits before the loop's first `kill -0` check ever
+	# runs (fast op, e.g. everything already cached) prints zero spinner
+	# frames -- an unconditional backspace here would eat a character off
+	# the label instead of a frame it never drew, mirroring
+	# install.ps1's own $spinnerPrinted guard.
+	[ "$printed" -eq 1 ] && printf '\b'
+	printf 'done\n'
 	if [ "$heartbeat_code" -ne 0 ]; then
 		cat "$heartbeat_log" >&2
 	fi
@@ -130,6 +152,17 @@ get_local_checkout_version_tag() {
 		[ -n "$nearest" ] && printf '%sl\n' "$nearest"
 	) || true
 }
+
+# Dot-sourcing (`. ./install.sh` / `source ./install.sh`) loads the functions
+# above without installing -- mirrors install.ps1's own
+# `$MyInvocation.InvocationName -eq "."` guard, and exists for the same
+# reason: so tests can exercise functions like run_with_heartbeat in
+# isolation without running a real install. Placed right after the function
+# definitions, before flag parsing, so a sourcing caller gets the functions
+# and nothing past this point runs.
+if [ "${BASH_SOURCE[0]}" != "${0}" ]; then
+	return 0
+fi
 
 # --- resolve the engine home and parse flags ---------------------------
 DEFAULT_HOME="$HOME/.mnemo"
@@ -351,8 +384,8 @@ if [ "$DEPS_ONLY" -eq 1 ]; then
 		|| { echo "install.sh: run from the mnemo repo (requirements.txt not found)" >&2; exit 1; }
 	say "engine home: $MNEMO_HOME"
 	cp "$SRC_REPO/requirements.txt" "$CURRENT_LINK/requirements.txt"
-	"$PY_BIN" -m pip install --quiet --upgrade pip
-	run_with_heartbeat "installing python dependencies" "$PY_BIN" -m pip install --quiet -r "$CURRENT_LINK/requirements.txt"
+	run_with_heartbeat "upgrading pip" "$PY_BIN" -m pip install --quiet --upgrade pip
+	run_with_heartbeat "installing python dependencies" "$PY_BIN" -m pip install -r "$CURRENT_LINK/requirements.txt"
 	say "python deps installed (deps-only: engine code untouched)"
 	exit 0
 fi
@@ -457,14 +490,14 @@ say "engine code refreshed ($VERSION_DIR)"
 
 VERSION_PY_BIN="$VERSION_DIR/.venv/bin/python"
 if [ ! -x "$VERSION_PY_BIN" ]; then
-	python3 -m venv "$VERSION_DIR/.venv"
+	run_with_heartbeat "creating the virtual environment" python3 -m venv "$VERSION_DIR/.venv"
 	say "virtualenv created"
 else
 	say "virtualenv reused"
 fi
 
-"$VERSION_PY_BIN" -m pip install --quiet --upgrade pip
-run_with_heartbeat "installing python dependencies" "$VERSION_PY_BIN" -m pip install --quiet -r "$VERSION_DIR/requirements.txt"
+run_with_heartbeat "upgrading pip" "$VERSION_PY_BIN" -m pip install --quiet --upgrade pip
+run_with_heartbeat "installing python dependencies" "$VERSION_PY_BIN" -m pip install -r "$VERSION_DIR/requirements.txt"
 say "python deps installed"
 
 # Fail here rather than at the user's first search. Everything below this
