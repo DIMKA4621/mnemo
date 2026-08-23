@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -115,6 +116,93 @@ def user_scope() -> tuple[str, ...]:
     )
 
 
+def test_heartbeat_spinner() -> None:
+    """`run_with_heartbeat`'s spinner (2026-08-23): the old dot-per-second
+    indicator that only ever grew rightward is gone, replaced by an
+    in-place spinner (| / - \\) that redraws itself with a backspace byte
+    -- and a near-instant command must not have that backspace eat a
+    character off the label itself. Isolated via the new source-guard
+    (`[ "${BASH_SOURCE[0]}" != "${0}" ] && return`, added alongside the
+    spinner specifically so this is testable without a real install), the
+    same isolation technique `check_script_encoding`'s dot-sourcing already
+    uses on the Windows side.
+    """
+    slow = run(["bash", "-c", f"source {shlex.quote(str(INSTALLER))}; run_with_heartbeat 'slow label' sleep 2"])
+    assert "\x08" in slow.stdout, (
+        "no backspace byte in heartbeat output -- still the old growing-dots indicator?"
+    )
+    ok("the spinner redraws in place via a backspace byte, not growing dots")
+
+    # `true` is as close to instant as a real child process gets on POSIX --
+    # close enough to stand in for the "zero frames printed" edge case
+    # install.ps1's own $spinnerPrinted guard exists for. Either way (zero
+    # frames, or one frame the matching backspace correctly erases), the
+    # label text itself must survive completely intact.
+    instant = run(["bash", "-c", f"source {shlex.quote(str(INSTALLER))}; run_with_heartbeat 'instant label' true"])
+    assert "install.sh: instant label" in instant.stdout, instant.stdout
+    assert "done" in instant.stdout, instant.stdout
+    ok("a near-instant command does not corrupt the label with a stray backspace")
+
+
+def test_heartbeat_failure_path() -> None:
+    """`run_with_heartbeat`'s failure path (2026-08-23, found by the tester
+    and reproduced independently): `wait "$heartbeat_pid"; heartbeat_code=$?`
+    as a bare statement under `set -euo pipefail` aborts the whole shell AT
+    `wait` the instant the backgrounded child exits nonzero -- before
+    `heartbeat_code=$?` is ever read. That made the entire failure path
+    (the " done" print, the `cat "$heartbeat_log" >&2` dump, the `rm -f`
+    cleanup) dead code on every real failure, silently swallowing exactly
+    the output the ticket dropped `--quiet` to preserve. Fixed with
+    `heartbeat_code=0; wait "$heartbeat_pid" || heartbeat_code=$?`, which
+    puts `wait` in a conditional context `set -e` exempts.
+    """
+    failing = run(
+        [
+            "bash", "-c",
+            f"set -euo pipefail; source {shlex.quote(str(INSTALLER))}; "
+            "echo BEFORE; "
+            "run_with_heartbeat 'FAILLABEL' bash -c 'echo oops-marker >&2; exit 7'; "
+            "echo AFTER",
+        ],
+        expect=7,
+    )
+    assert "BEFORE" in failing.stdout, failing.stdout
+    assert "install.sh: FAILLABEL" in failing.stdout, failing.stdout
+    assert " done" in failing.stdout, (
+        "run_with_heartbeat's own failure path never ran -- still aborting at `wait`?",
+        failing.stdout,
+    )
+    assert "oops-marker" in failing.stderr, (
+        "the failure-log dump (cat \"$heartbeat_log\" >&2) never ran",
+        failing.stderr,
+    )
+    ok("run_with_heartbeat prints its failure dump instead of dying silently at `wait`")
+
+    # `set -e` still (correctly) aborts the CALLER right after
+    # run_with_heartbeat returns 7 as a bare statement, same as an
+    # unwrapped failing command in that position would -- the fix restores
+    # the documented contract ("callers under set -e behave exactly as an
+    # unwrapped call would"), it does not swallow the failure.
+    assert "AFTER" not in failing.stdout, failing.stdout
+    ok("set -e still aborts the caller after run_with_heartbeat returns its real exit code")
+
+
+def check_no_quiet_on_requirements_install() -> None:
+    """`--quiet` dropped from both pip-install-requirements call sites
+    (2026-08-23, mirroring install.ps1's own 2026-08-22 fix) so a failure
+    dump is actually useful -- confirmed nothing parses this output
+    programmatically here, unlike install.ps1's -ProgressFile mechanism.
+    """
+    text = INSTALLER.read_text(encoding="utf-8")
+    offenders = [
+        line.strip()
+        for line in text.splitlines()
+        if "requirements.txt" in line and "--quiet" in line
+    ]
+    assert not offenders, f"--quiet still present on a requirements.txt pip install: {offenders}"
+    ok("install.sh drops --quiet from both requirements.txt pip installs")
+
+
 def main() -> int:
     if os.name == "nt":
         print("SKIP  POSIX installer test")
@@ -128,6 +216,10 @@ def main() -> int:
     for script in (INSTALLER, UNINSTALLER):
         assert os.access(script, os.X_OK), f"{script.name} is not executable"
         ok(f"{script.name} carries the executable bit")
+
+    test_heartbeat_spinner()
+    test_heartbeat_failure_path()
+    check_no_quiet_on_requirements_install()
 
     help_text = run([str(INSTALLER), "--help"])
     for flag in ("--check", "--deps-only", "--no-model", "--home DIR"):
@@ -164,6 +256,12 @@ def main() -> int:
         assert os.access(launcher, os.X_OK), "the launcher is not executable"
         assert venv_python.exists(), venv_python
         ok("fresh install into a path with spaces and Cyrillic")
+
+        # The venv-creation step (2026-08-23) used to be silent; it must now
+        # have gone through run_with_heartbeat with its own Label, not just
+        # exist as a function nothing calls.
+        assert "install.sh: creating the virtual environment" in first.stdout, first.stdout
+        ok("venv creation went through the heartbeat wrapper")
 
         # A default install warms the model, starts the service and runs
         # doctor. An isolated --home must do NONE of that: it is a manual or

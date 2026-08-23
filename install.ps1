@@ -63,10 +63,13 @@ function Invoke-Checked {
 
 function Invoke-CheckedWithHeartbeat {
     <#
-        Same contract as Invoke-Checked, for the two steps long enough that
-        silence alone reads as a hang: installing python deps and
-        downloading the embedding model. Prints a dot roughly once a second
-        while the command runs -- not for real concurrency.
+        Same contract as Invoke-Checked, for every step long enough that
+        silence alone reads as a hang: creating the venv, installing python
+        deps, installing the launcher package, downloading the embedding
+        model. Prints a spinner (| / - \) that rotates in place via
+        backspace-redraw, roughly every 130ms while the command runs -- not
+        for real concurrency, and not a tty-detected feature: it always
+        prints, redirected output included (2026-08-23 decision).
 
         Deliberately NOT Start-Process with -ArgumentList: that joins an
         array into one string without quoting elements that contain spaces
@@ -164,6 +167,12 @@ function Invoke-CheckedWithHeartbeat {
     $stdOutSub = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $onData -MessageData $captured
     $stdErrSub = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $onData -MessageData $captured
     $stalled = $false
+    # Set only once the loop below has actually printed a frame. A child that
+    # exits before the loop's first iteration ever runs (fast op, e.g.
+    # everything already cached/installed) prints zero spinner frames --an
+    # unconditional backspace before " done"/" stalled" would then eat a
+    # character off $Label itself instead of a spinner frame it never drew.
+    $spinnerPrinted = $false
     try {
         [void]$proc.Start()
         $proc.BeginOutputReadLine()
@@ -173,10 +182,15 @@ function Invoke-CheckedWithHeartbeat {
         $lastActivity = [System.Diagnostics.Stopwatch]::StartNew()
         $pkgCount = 0
         $phase = 'starting'
+        $spinFrames = @('|', '/', '-', '\')
+        $spinIndex = 0
 
         while (-not $proc.HasExited) {
-            Start-Sleep -Milliseconds 700
-            Write-Host -NoNewline "."
+            Start-Sleep -Milliseconds 130
+            if ($spinnerPrinted) { Write-Host -NoNewline "`b" }
+            Write-Host -NoNewline $spinFrames[$spinIndex % $spinFrames.Length]
+            $spinIndex++
+            $spinnerPrinted = $true
 
             $currentCount = $captured.Count
             if ($currentCount -gt $lastCapturedCount) {
@@ -240,11 +254,13 @@ function Invoke-CheckedWithHeartbeat {
     }
 
     if ($stalled) {
+        if ($spinnerPrinted) { Write-Host -NoNewline "`b" }
         Write-Host (" stalled ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
         $captured | ForEach-Object { Write-Host "install.ps1:   $_" }
         throw "$FailureMessage (no output for ${StallTimeoutSec}s -- looks stalled, not just slow)"
     }
 
+    if ($spinnerPrinted) { Write-Host -NoNewline "`b" }
     Write-Host (" done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
 
     if ($proc.ExitCode -ne 0) {
@@ -630,14 +646,14 @@ function Build-EngineVersion {
     if (-not (Test-Path -LiteralPath $venvPython -PathType Leaf)) {
         $exe = [string]$PythonCommand.Exe
         $prefix = @($PythonCommand.Prefix)
-        Invoke-Checked $exe ($prefix + @("-m", "venv", $venvDir)) "Failed to create the virtual environment"
+        Invoke-CheckedWithHeartbeat $exe ($prefix + @("-m", "venv", $venvDir)) "creating the virtual environment" "Failed to create the virtual environment"
         Write-Status "virtualenv created ($VersionDir)"
     }
     else {
         Write-Status "virtualenv reused (Python $($venvCommand.Version), $($venvCommand.Bits)-bit)"
     }
 
-    Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
+    Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "upgrading pip" "Failed to upgrade pip"
     Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "-r", (Join-Path $VersionDir "requirements.txt")) "installing python dependencies" "Failed to install Python dependencies" -StallTimeoutSec 120 -ProgressFile $ProgressFile
     Write-Status "python deps installed"
 
@@ -655,10 +671,10 @@ function Build-EngineVersion {
     # Which venv built them no longer matters at run time (mnemo_bootstrap
     # dispatches through `current` via sys.argv[0], never sys.prefix -- see
     # the design topic) -- this step only has to succeed once, here.
-    Invoke-Checked $venvPython @(
+    Invoke-CheckedWithHeartbeat $venvPython @(
         "-m", "pip", "install", "--quiet", "--no-deps",
         "--force-reinstall", $VersionDir
-    ) "Failed to install the mnemo launcher"
+    ) "installing the mnemo launcher" "Failed to install the mnemo launcher"
 
     foreach ($name in @("mnemo.exe", "mnemow.exe")) {
         $generated = Join-Path $venvDir ("Scripts\" + $name)
@@ -1072,7 +1088,7 @@ function Invoke-Install {
             Copy-Item -LiteralPath (Join-Path $repoRoot $file) `
                 -Destination (Join-Path $currentLink $file) -Force
         }
-        Invoke-Checked $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "Failed to upgrade pip"
+        Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "--quiet", "--upgrade", "pip") "upgrading pip" "Failed to upgrade pip"
         Invoke-CheckedWithHeartbeat $venvPython @("-m", "pip", "install", "-r", (Join-Path $currentLink "requirements.txt")) "installing python dependencies" "Failed to install Python dependencies" -StallTimeoutSec 120
         # Refresh the launcher package's declared dependencies (they are read
         # from requirements.txt at build time) so `pip check` stays honest.
@@ -1081,10 +1097,10 @@ function Invoke-Install {
         # by an absolute path baked into the venv it happened to be built
         # from -- so which venv rebuilt this package's metadata does not
         # matter to it at all.
-        Invoke-Checked $venvPython @(
+        Invoke-CheckedWithHeartbeat $venvPython @(
             "-m", "pip", "install", "--quiet", "--no-deps",
             "--force-reinstall", $currentLink
-        ) "Failed to refresh the launcher package metadata"
+        ) "installing the mnemo launcher" "Failed to refresh the launcher package metadata"
         Write-Status "python deps installed (deps-only: engine code and launcher untouched)"
         return
     }

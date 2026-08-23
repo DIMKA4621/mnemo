@@ -126,6 +126,15 @@ def test_heartbeat_stall_detection() -> None:
         assert "MNEMO_TEST_TRICKLE_OK" in trickle_result.stdout
         ok("a slow-but-alive child (output every 0.5s) is never treated as stalled")
 
+        # The old indicator (a dot appended once a second, never erased) is
+        # gone; the new one is an in-place spinner (| / - \) that redraws
+        # itself with a backspace byte. A ~2s run at a ~130ms tick prints
+        # several frames, so the byte must show up in the captured output.
+        assert "\x08" in trickle_result.stdout, (
+            "no backspace byte in heartbeat output -- still the old growing-dots indicator?"
+        )
+        ok("the spinner redraws in place via a backspace byte, not growing dots")
+
         stall_cmd = (
             f". '{INSTALLER}'; "
             f"Invoke-CheckedWithHeartbeat '{sys.executable}' @('{stall}') "
@@ -145,6 +154,36 @@ def test_heartbeat_stall_detection() -> None:
         ok("the stalled child is killed promptly, not waited out to its own 30s sleep")
 
 
+def test_heartbeat_zero_tick_edge_case() -> None:
+    """A child that exits before the heartbeat loop's `while (-not
+    $proc.HasExited)` is ever first evaluated (an instant command) must
+    print zero spinner frames -- and the unconditional backspace that used
+    to precede " done" would then eat a character off the LABEL itself
+    instead of a spinner frame it never drew. Found live on a real
+    self-update with a warm pip cache (2026-08-22); `$spinnerPrinted` is
+    the guard. `python -c "pass"` is as close to instant as a real child
+    process gets -- close enough that this is also a reasonable proxy for
+    the "zero frames" case even where interpreter startup itself takes a
+    tick or two: either way, the label and " done (" must survive intact.
+    """
+    label = "MNEMO_TEST_ZEROTICK_LABEL"
+    cmd = (
+        f". '{INSTALLER}'; "
+        f"Invoke-CheckedWithHeartbeat '{sys.executable}' @('-c', 'pass') "
+        f"'{label}' 'zerotick failed'"
+    )
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    # A corrupted label (one character eaten by a stray backspace) would no
+    # longer match this substring at all -- this is not a cosmetic check.
+    assert f"install.ps1: {label}" in result.stdout, result.stdout
+    assert "done (" in result.stdout, result.stdout
+    ok("a near-instant child does not corrupt the label with a stray backspace")
+
+
 def main() -> int:
     if os.name != "nt":
         print("SKIP  native Windows installer test")
@@ -153,6 +192,7 @@ def main() -> int:
     check_script_encoding(INSTALLER)
     check_script_encoding(UNINSTALLER)
     test_heartbeat_stall_detection()
+    test_heartbeat_zero_tick_edge_case()
 
     with tempfile.TemporaryDirectory(prefix="mnemo install ") as raw:
         mismatched_env = {
@@ -203,6 +243,19 @@ def main() -> int:
         venv_python = engine / "current" / ".venv" / "Scripts" / "python.exe"
         assert launcher.is_file(), launcher
         assert venv_python.is_file(), venv_python
+        # Build-EngineVersion runs unconditionally, even for an isolated
+        # -InstallHome (the early return for "isolated" comes after it) --
+        # so these new heartbeat call sites (2026-08-23: venv creation, pip
+        # upgrade, launcher install all used to be silent) must have gone
+        # through Invoke-CheckedWithHeartbeat with their own Label, not just
+        # exist as functions nothing calls.
+        for label in (
+            "creating the virtual environment",
+            "upgrading pip",
+            "installing the mnemo launcher",
+        ):
+            assert f"install.ps1: {label}" in first.stdout, (label, first.stdout)
+        ok("venv creation, pip upgrade and launcher install all went through the heartbeat wrapper")
         # A default install now warms the model, starts the service and runs
         # doctor — one command takes a clean machine all the way. An isolated
         # -InstallHome must do NONE of that: it is a manual or test copy, and

@@ -46,6 +46,67 @@ $ErrorActionPreference = "Stop"
 
 $repo = "DIMKA4621/mnemo"
 
+function Get-FileWithSpinner {
+    <#
+        Downloads $Uri to $OutFile behind the same in-place spinner
+        (backspace-redraw, | / - \) as install.ps1's own
+        Invoke-CheckedWithHeartbeat -- but this script cannot dot-source
+        that function yet: install.ps1 lives INSIDE the very archive being
+        downloaded here, so nothing is reachable to reuse except the
+        pattern itself (Register-ObjectEvent + a polling loop), applied to
+        System.Net.WebClient's async download instead of a
+        System.Diagnostics.Process. Deliberately NOT a Start-Job around a
+        blocking Invoke-WebRequest: same console-popping risk documented
+        on Invoke-CheckedWithHeartbeat applies to any PowerShell background
+        job, and WebClient's own async methods need no job/process/thread
+        of this script's own at all.
+    #>
+    param([string]$Uri, [string]$OutFile, [string]$Label)
+
+    Write-Host -NoNewline "get.ps1: $Label"
+    $sw = [System.Diagnostics.Stopwatch]::StartNew()
+
+    $client = New-Object System.Net.WebClient
+    $client.Headers.Add("User-Agent", "mnemo-bootstrap")
+    # A plain object (reference type) so the event handler's mutations are
+    # visible on this side once the download finishes -- the handler runs
+    # on its own thread and cannot write back through a local variable.
+    $state = [pscustomobject]@{ Done = $false; Error = $null }
+    $onDone = {
+        $Event.MessageData.Done = $true
+        if ($EventArgs.Error) { $Event.MessageData.Error = $EventArgs.Error }
+    }
+    $sub = Register-ObjectEvent -InputObject $client -EventName DownloadFileCompleted -Action $onDone -MessageData $state
+    $spinnerPrinted = $false
+    try {
+        $client.DownloadFileAsync([uri]$Uri, $OutFile)
+        $spinFrames = @('|', '/', '-', '\')
+        $spinIndex = 0
+        while (-not $state.Done) {
+            Start-Sleep -Milliseconds 130
+            if ($spinnerPrinted) { Write-Host -NoNewline "`b" }
+            Write-Host -NoNewline $spinFrames[$spinIndex % $spinFrames.Length]
+            $spinIndex++
+            $spinnerPrinted = $true
+        }
+    }
+    finally {
+        Unregister-Event -SourceIdentifier $sub.Name -ErrorAction SilentlyContinue
+        Remove-Job -Job $sub -Force -ErrorAction SilentlyContinue
+        $client.Dispose()
+    }
+
+    # Same zero-tick guard as Invoke-CheckedWithHeartbeat: a download that
+    # completes before the loop above ever sleeps once would otherwise eat
+    # a character off $Label instead of a spinner frame it never drew.
+    if ($spinnerPrinted) { Write-Host -NoNewline "`b" }
+    if ($state.Error) {
+        Write-Host (" failed ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+        throw $state.Error
+    }
+    Write-Host (" done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+}
+
 function Resolve-MnemoArchiveUrl {
     if ($env:MNEMO_GET_ARCHIVE_URL) {
         return @{ Url = $env:MNEMO_GET_ARCHIVE_URL; Label = "custom archive"; Tag = $null }
@@ -99,8 +160,7 @@ try {
     $url = $resolved.Url
     $refLabel = $resolved.Label
 
-    Write-Host "get.ps1: downloading mnemo ($refLabel)..."
-    Invoke-WebRequest -Uri $url -OutFile $zipPath -UseBasicParsing
+    Get-FileWithSpinner -Uri $url -OutFile $zipPath -Label "downloading mnemo ($refLabel)"
 
     Write-Host "get.ps1: extracting..."
     Expand-Archive -LiteralPath $zipPath -DestinationPath $tmp -Force

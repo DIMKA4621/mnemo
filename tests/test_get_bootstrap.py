@@ -411,6 +411,16 @@ def test_get_ps1_windows(work: Path) -> None:
         assert result.returncode == 0, result.stdout
         ok("get.ps1 downloads, extracts and installs via a local archive")
 
+        # Get-FileWithSpinner's Label (2026-08-23: the old three-dots
+        # "downloading mnemo (...)..." line is gone) must still name the
+        # download step and finish cleanly -- not a backspace-byte
+        # assertion here, since a local loopback download is fast enough
+        # to legitimately print zero spinner frames (the same
+        # zero-frame edge case the $spinnerPrinted guard exists for).
+        assert "get.ps1: downloading mnemo" in result.stdout, result.stdout
+        assert "done (" in result.stdout, result.stdout
+        ok("the download step's own label survives the spinner intact")
+
         launcher = engine / "bin" / "mnemo.exe"
         venv_python = engine / "current" / ".venv" / "Scripts" / "python.exe"
         assert launcher.is_file(), launcher
@@ -452,6 +462,61 @@ def test_get_sh_syntax() -> None:
     ok("get.sh passes `bash -n` syntax check")
 
 
+def test_get_sh_failure_path() -> None:
+    """get.sh's download block had the same `wait "$pid"; code=$?` bug as
+    install.sh's run_with_heartbeat (2026-08-23, tester-found, reproduced
+    independently): under `set -euo pipefail`, a nonzero exit from the
+    backgrounded `curl | tar` pipeline aborted the script AT `wait`, before
+    `dl_code=$?` was ever read -- so the friendly "get.sh: download failed"
+    message and the controlled `exit 1` never ran. Fixed with
+    `dl_code=0; wait "$dl_pid" || dl_code=$?`.
+
+    Exercises the REAL script end to end (not a copied snippet) via a
+    guaranteed-failing MNEMO_GET_ARCHIVE_URL (a 404 on a local loopback
+    server, same technique test_get_ps1_windows already uses for get.ps1)
+    -- safe to run unattended because a failed download makes get.sh exit
+    before it ever reaches the "extract and hand off to install.sh" step,
+    so it can never reach a real install regardless of platform. Still
+    gated to POSIX, matching this file's stated policy that the real
+    download+extract+forward pipeline is exercised only there (see
+    test_get_sh_syntax's own docstring).
+    """
+    if os.name == "nt":
+        print("SKIP  get.sh failure-path test (POSIX-only)")
+        return
+
+    import functools
+    import http.server
+    import threading as th
+
+    handler = functools.partial(http.server.SimpleHTTPRequestHandler, directory=tempfile.gettempdir())
+    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    port = httpd.server_address[1]
+    server_thread = th.Thread(target=httpd.serve_forever, daemon=True)
+    server_thread.start()
+
+    try:
+        env = {
+            **os.environ,
+            "MNEMO_GET_ARCHIVE_URL": f"http://127.0.0.1:{port}/does-not-exist.tar.gz",
+        }
+        failed = run(["bash", str(GET_SH)], env=env, timeout=60)
+        assert failed.returncode != 0, failed.stdout
+        assert "get.sh: downloading mnemo" in failed.stdout, failed.stdout
+        assert " done" in failed.stdout, (
+            "the spinner block's own \" done\" never printed -- still aborting at `wait`?",
+            failed.stdout,
+        )
+        assert "get.sh: download failed" in failed.stderr, (
+            "the friendly failure message never ran -- still aborting at `wait`?",
+            failed.stderr,
+        )
+        ok("get.sh prints its own failure message instead of dying silently at `wait`")
+    finally:
+        httpd.shutdown()
+        server_thread.join(timeout=5)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mnemo get-bootstrap ") as raw:
         work = Path(raw)
@@ -461,6 +526,7 @@ def main() -> int:
         test_get_local_checkout_version_tag_scheme()
         test_get_ps1_windows(work)
         test_get_sh_syntax()
+        test_get_sh_failure_path()
 
     print(f"\n{_passed} passed, 0 failed")
     return 0
