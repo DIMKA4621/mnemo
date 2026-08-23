@@ -928,11 +928,11 @@ function renderGeneralSection(body) {
   renderTheme(body);
   renderAutostart(body);
   renderAutoUpdate(body);
-  renderProjectLink(body);
 
   const svc = state.service;
   if (!svc) {
     body.appendChild(el('p', { className: 'empty-hint', text: 'Стан служби ще не отримано.' }));
+    renderProjectLink(body);
     renderSettingsMessages(body);
     return;
   }
@@ -953,12 +953,13 @@ function renderGeneralSection(body) {
   ]);
   body.appendChild(setField('Стан', box, null));
 
+  renderProjectLink(body);
   renderSettingsMessages(body);
 }
 
-/** A link to the project's own repository — not machine state, so it sits
- *  above the service-status block and renders regardless of whether that
- *  has loaded yet. */
+/** A link to the project's own repository — not machine state, so it
+ *  renders after the service-status block (or its not-yet-loaded
+ *  placeholder) regardless of whether that data has loaded. */
 function renderProjectLink(body) {
   body.appendChild(el('div', { className: 'set-divider' }));
   body.appendChild(setField('Про проект', el('a', {
