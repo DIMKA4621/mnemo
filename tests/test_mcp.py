@@ -34,6 +34,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -51,6 +52,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 BASE = os.environ.get("MNEMO_TEST_BASE_URL", "http://127.0.0.1:4646")
 _token_file = Path.home() / ".mnemo" / "state" / "api.token"
+_STATUS_HEAD_RE = re.compile(r"^\[mnemo v?\d+\.\d+\.\d+")
 
 _passed = _failed = 0
 
@@ -265,13 +267,22 @@ async def main() -> int:
             # still a failure here; the text has to start with the tool's own
             # header, not with `[mnemo] TypeError`.
             for name, args, head in (
-                ("status", {}, "[mnemo 3."),
+                # The version segment is a self-update tag ("v3.0.9") against
+                # a real install, or the bare fallback literal ("3.0.0")
+                # outside the versioned layout (api.py::_detect_service_
+                # version) — a fixed prefix would go stale on the next tag.
+                ("status", {}, _STATUS_HEAD_RE),
                 ("logs", {"kind": "index", "n": 3}, "[mnemo · index ·"),
                 ("logs", {"kind": "query", "n": 3}, "[mnemo · query ·"),
             ):
                 out = _text(await session.call_tool(name, args))
+                matches = (
+                    head.match(out) is not None
+                    if isinstance(head, re.Pattern)
+                    else out.startswith(head)
+                )
                 check(f"admin `{name}` {args} answers cleanly",
-                      out.startswith(head), detail=out[:160])
+                      matches, detail=out[:160])
 
             # `bank_state` round-trips on a real bank: freeze it, read the
             # state back out of `banks`, then put it back. Freezing is the
