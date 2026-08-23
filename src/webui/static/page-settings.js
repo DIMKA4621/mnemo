@@ -445,7 +445,7 @@ function renderEmbedSection(body) {
   const providerOverride = overrideNote('provider');
   if (providerOverride) body.appendChild(providerOverride);
 
-  if (!backend) { renderSettingsMessages(); return; }
+  if (!backend) { renderSettingsMessages(body); return; }
 
   // -- local needs nothing ------------------------------------------------
   if (backend.provider === 'local') {
@@ -470,7 +470,7 @@ function renderEmbedSection(body) {
     // early — without this the one backend that needs no configuration was
     // also the one whose «Збережено» never appeared, so the click read as
     // ignored while the file on disk had already changed.
-    renderSettingsMessages();
+    renderSettingsMessages(body);
     return;
   }
 
@@ -600,7 +600,7 @@ function renderEmbedSection(body) {
     renderEmbedMemory(body);
   }
 
-  renderSettingsMessages();
+  renderSettingsMessages(body);
 }
 
 // -------------------------------------------------------- backend memory
@@ -932,7 +932,7 @@ function renderGeneralSection(body) {
   const svc = state.service;
   if (!svc) {
     body.appendChild(el('p', { className: 'empty-hint', text: 'Стан служби ще не отримано.' }));
-    renderSettingsMessages();
+    renderSettingsMessages(body);
     return;
   }
 
@@ -952,7 +952,7 @@ function renderGeneralSection(body) {
   ]);
   body.appendChild(setField('Стан', box, null));
 
-  renderSettingsMessages();
+  renderSettingsMessages(body);
 }
 
 /**
@@ -1505,13 +1505,20 @@ async function submitOrphanCleanup(ids) {
 }
 
 /** The last save's verdict. Called from every branch of `renderSettings`,
- *  because a backend that renders fewer fields still gets saved. */
-function renderSettingsMessages() {
+ *  because a backend that renders fewer fields still gets saved.
+ *
+ *  Appends into `container` — the same `.set-form` div every section
+ *  renderer already received as its own `body` parameter — not into
+ *  `settings.body`. `settings.body` holds `.set-form` as its only child,
+ *  so appending there instead used to land the note as a SIBLING of the
+ *  whole form: after every field, at the very bottom of the tab, and
+ *  outside the form's 640px-constrained column. */
+function renderSettingsMessages(container) {
   if (settings.note) {
-    settings.body.appendChild(el('p', { className: 'tok-ok', text: settings.note }));
+    container.appendChild(el('p', { className: 'tok-ok', text: settings.note }));
   }
   if (settings.errorText) {
-    settings.body.appendChild(
+    container.appendChild(
       el('p', { className: 'modal-error', text: settings.errorText }));
   }
 }
