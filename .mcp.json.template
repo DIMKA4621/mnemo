@@ -3,6 +3,10 @@
     "mnemo-memory": {
       "type": "http",
       "url": "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp?token={{MNEMO_TOKEN}}"
+    },
+    "atlassian": {
+      "type": "http",
+      "url": "https://mcp.atlassian.com/v1/mcp/authv2"
     }
   }
 }

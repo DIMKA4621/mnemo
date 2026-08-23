@@ -1,0 +1,12 @@
+# Normalize line endings to LF in the repository regardless of platform or
+# a contributor's core.autocrlf setting. Git's own text/binary heuristic
+# decides what "text" applies to, so real binaries are left alone.
+* text=auto eol=lf
+
+# Already covered by the rule above -- listed explicitly so a narrower
+# override added later can't undo it by accident. A CRLF shebang line
+# breaks a shell script on Linux/macOS ("bad interpreter: /bin/bash^M").
+*.sh text eol=lf
+
+# The repo's one real binary: never text-diffed, never eol-converted.
+*.png binary
