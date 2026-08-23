@@ -38,6 +38,9 @@ Judgment call, exception: a change small enough that spinning up an agent costs 
 - **reviewer** — produces the verdict: approve (→ **Done**) or send back with reasons (→ **In Clarification** or **In Progress**, per its own read of what the diff needs).
   The lead performs the transition the verdict implies.
 
+**The user accepting a pull request is that approval, immediately.** When the user says a PR is merged/accepted, that's the review passing — no separate `reviewer` pass is needed on top of a human merging it.
+The lead transitions every ticket carried by that PR to **Done** right away, with a closing comment naming the PR/commit, rather than leaving them sitting in In Review for a signal that already happened.
+
 ## Scope judgment
 
 Not everything is a ticket.

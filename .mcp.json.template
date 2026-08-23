@@ -7,6 +7,17 @@
     "atlassian": {
       "type": "http",
       "url": "https://mcp.atlassian.com/v1/mcp/authv2"
+    },
+    "chrome-devtools-mnemo": {
+      "type": "stdio",
+      "command": "npx",
+      "args": [
+        "-y",
+        "chrome-devtools-mcp@1.4.0",
+        "--browserUrl",
+        "http://127.0.0.1:9946"
+      ],
+      "env": {}
     }
   }
 }
