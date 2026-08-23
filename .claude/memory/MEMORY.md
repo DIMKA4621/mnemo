@@ -68,6 +68,11 @@ This file is an **index**: links + quick facts only; detail lives in `topics/`, 
 
 ## Logs
 
+- [2026-08-24 (MN-11)](logs/2026-08-24-mn-11-graceful-stop-and-rebuild-retry.md) — `service stop` на Windows тепер graceful: `POST /api/shutdown` (нове, флипає uvicorn `should_exit` через `call_soon`, той самий прапорець що й SIGTERM на POSIX) перед `taskkill /F`-фолбеком, у межах наявного `SERVICE_STOP_TIMEOUT`; `should_yield()` тепер yield-ить і на `_stop.is_set()`, обмежуючи вікно одним батчем.
+  Watcher отримав другий, короткий (30с, `MNEMO_RETRY_INTERVAL_S`) цикл поруч із наявним 900с rescan — ретраїть лише банки з активним `EmbeddingUnavailable`-стріком, до стелі `MNEMO_RETRY_MAX_ATTEMPTS` (5); детерміновані помилки в стрік не потрапляють.
+  **Реальний баг, знайдений рев'ю:** фіксоване вікно сканування стріку (`_RETRY_SCAN_LIMIT=50`) не було прив'язане до конфігурованої стелі — стеля вище 50 робила ретрай нескінченним; полагоджено (`_retry_scan_limit() = max(50, cap+10)`).
+  Live-підтверджено: rebuild перерваний точно в chunks=0 (після `reset_index()`, до реembed) самозцілюється після рестарту без ручного `--full`.
+  Побічно знайдено: `~/.mnemo/versions/v3.0.10/.venv` недобудований (лише `pythonw.exe`) — потребує окремого розслідування.
 - [2026-08-21 (шосте)](logs/2026-08-21-api-open-by-default.md) — `/api` (консоль+CLI) типово **відкритий, без токена** (рішення #34, `Memory-design-v3.md` §13) — виняток із «все за токеном»; `/mcp`, `/mcp-admin`, `/mcp-tools` незмінно за токеном.
   `api_token()` більше не мінтиться жадібно при старті (`lifespan()`) — лінивий мінт лише на перше реальне звернення до admin/tools; новий `_configured_token()` peek-хелпер це й перевіряє, не мінтячи сам.
   `mnemo ui` друкує голе посилання без `?token=`, коли жодного не налаштовано.

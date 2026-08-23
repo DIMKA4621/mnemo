@@ -578,6 +578,15 @@ def _run_file(task: Task, bank: registry.Bank, running: _Running) -> None:
 
         def should_yield() -> bool:
             nonlocal yielded
+            # A stop request (MN-11) wins regardless of priority: it is what
+            # bounds the graceful-shutdown window to one in-flight batch
+            # (~16 chunks) instead of however long the rest of the file
+            # takes, which is what makes SERVICE_STOP_TIMEOUT realistic even
+            # on a large file. The batch already yielded here resumes
+            # correctly through the existing start_batch mechanism below.
+            if _stop.is_set():
+                yielded = True
+                return True
             if not priority_enabled() or task.priority != Priority.LOW:
                 return False
             if not _high_waiting():

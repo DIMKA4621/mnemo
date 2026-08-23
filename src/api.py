@@ -2046,6 +2046,33 @@ def api_status() -> dict:
     }
 
 
+@app.post("/api/shutdown", include_in_schema=False)
+async def api_shutdown() -> dict:
+    """Ask the running server to stop gracefully (MN-11).
+
+    Windows has no signal uvicorn's own SIGTERM handler can catch, so
+    ``service stop`` reaches this over loopback HTTP instead. Setting
+    ``should_exit`` here is exactly what that handler does on POSIX — the
+    existing ``lifespan`` teardown (``_shutdown()``: watcher, queue, journal)
+    already runs correctly whenever the flag flips, so nothing about that
+    path changes.
+
+    Scheduled via ``call_soon`` rather than set synchronously: the response
+    must reach the caller before uvicorn starts tearing the server down, or
+    the caller (``service_ctl``) would see the connection drop instead of a
+    reply.
+    """
+    server = getattr(app.state, "uvicorn_server", None)
+    if server is None:
+        raise ApiError(
+            "internal",
+            "no uvicorn server registered for graceful shutdown "
+            "(run() was not used to start this process)",
+        )
+    asyncio.get_running_loop().call_soon(setattr, server, "should_exit", True)
+    return {"ok": True}
+
+
 @app.get("/api/doctor", include_in_schema=False)
 def api_doctor() -> dict:
     """Structured machine diagnostics — the same facts `mnemo doctor` prints.
@@ -3137,15 +3164,25 @@ if _build_mcp is not None:
 
 
 def run(host: str | None = None, port: int | None = None) -> None:
-    """Serve. ``mnemo service start`` (phase 5) calls this in a child."""
+    """Serve. ``mnemo service start`` (phase 5) calls this in a child.
+
+    ``uvicorn.Config`` + ``uvicorn.Server`` instead of the ``uvicorn.run()``
+    shortcut only so the server instance can be reached from a request
+    handler (``app.state.uvicorn_server``, read by ``POST /api/shutdown`` —
+    MN-11). Behaviourally identical to ``uvicorn.run()`` otherwise: same
+    host/port/log-level, same call to ``server.run()``.
+    """
     import uvicorn
 
-    uvicorn.run(
+    config = uvicorn.Config(
         app,
         host=host or API_HOST,
         port=port or API_PORT,
         log_level=os.environ.get("MNEMO_LOG_LEVEL", "info"),
     )
+    server = uvicorn.Server(config)
+    app.state.uvicorn_server = server
+    server.run()
 
 
 if __name__ == "__main__":
