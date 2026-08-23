@@ -52,6 +52,23 @@ def run(
     )
 
 
+def render(text: str) -> str:
+    """Collapse backspace bytes the way a real terminal would (mirrors the
+    identical helper in test_install_posix.py -- the spinner's separator
+    space sits before the frame character, not before "done", so raw
+    captured bytes read `LABEL |\x08done`, not `LABEL done`, even though a
+    terminal renders both the same once the backspace overwrites the frame).
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch == "\x08":
+            if out:
+                out.pop()
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def check_script_encoding(script: Path) -> None:
     """Same guard as test_install_windows.py: a BOM-less .ps1 is decoded as
     the system ANSI codepage on Windows PowerShell 5.1, so any non-ASCII
@@ -503,7 +520,7 @@ def test_get_sh_failure_path() -> None:
         failed = run(["bash", str(GET_SH)], env=env, timeout=60)
         assert failed.returncode != 0, failed.stdout
         assert "get.sh: downloading mnemo" in failed.stdout, failed.stdout
-        assert " done" in failed.stdout, (
+        assert " done" in render(failed.stdout), (
             "the spinner block's own \" done\" never printed -- still aborting at `wait`?",
             failed.stdout,
         )

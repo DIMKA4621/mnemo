@@ -70,6 +70,26 @@ def run(
     return result
 
 
+def render(text: str) -> str:
+    """Collapse backspace bytes the way a real terminal would.
+
+    The spinner's separator space sits before the frame character, not
+    before "done"/"stalled" -- so on a real failure the raw captured bytes
+    read `LABEL |\x08done`, not `LABEL done`, even though a terminal renders
+    both identically once the backspace overwrites the frame. Assertions
+    about what the run actually displays render first; raw substring checks
+    on text with no backspace in it (labels, error markers) don't need this.
+    """
+    out: list[str] = []
+    for ch in text:
+        if ch == "\x08":
+            if out:
+                out.pop()
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def report(text: str, prefix: str, width: int) -> dict[str, str]:
     """The installers' aligned report lines, as {label: value}.
 
@@ -168,7 +188,7 @@ def test_heartbeat_failure_path() -> None:
     )
     assert "BEFORE" in failing.stdout, failing.stdout
     assert "install.sh: FAILLABEL" in failing.stdout, failing.stdout
-    assert " done" in failing.stdout, (
+    assert " done" in render(failing.stdout), (
         "run_with_heartbeat's own failure path never ran -- still aborting at `wait`?",
         failing.stdout,
     )
