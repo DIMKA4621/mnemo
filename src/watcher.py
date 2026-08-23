@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -38,7 +39,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEvent, FileSystemEventHandler
 from watchdog.observers import Observer
 
-from . import config, index, registry, store, workqueue
+from . import config, index, registry, servicelog, store, workqueue
 from .workqueue import Priority
 
 log = logging.getLogger("mnemo.watcher")
@@ -65,6 +66,44 @@ def rescan_interval_s() -> float:
     return max(0.0, float(configured))
 
 
+def retry_interval_s() -> float:
+    """MN-11 fast-retry tick. 0 disables it."""
+    configured = getattr(config, "RETRY_INTERVAL_S", None)
+    if configured is None:
+        try:
+            configured = float(os.environ.get("MNEMO_RETRY_INTERVAL_S", "30"))
+        except ValueError:
+            configured = 30.0
+    return max(0.0, float(configured))
+
+
+def retry_max_attempts() -> int:
+    """Ceiling on the consecutive-`EmbeddingUnavailable` streak this retries."""
+    configured = getattr(config, "RETRY_MAX_ATTEMPTS", None)
+    if configured is None:
+        try:
+            configured = int(os.environ.get("MNEMO_RETRY_MAX_ATTEMPTS", "5"))
+        except ValueError:
+            configured = 5
+    return max(0, int(configured))
+
+
+# `workqueue._execute()` stores an `EmbeddingUnavailable`'s message bare
+# (`error=str(exc)`), but every other exception's message prefixed with its
+# own class name (`error=f"{type(exc).__name__}: {exc}"`). `index_events` has
+# no column recording which branch produced a row, so this is the one signal
+# that survives into `service.db` distinguishing the two — checked against
+# every `raise EmbeddingUnavailable(...)` call site in `src/providers/`, none
+# of which starts with an identifier immediately followed by `": "`.
+_GENERIC_ERROR_PREFIX = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*: ")
+
+
+def _is_embedding_unavailable_error(error: str | None) -> bool:
+    if not error:
+        return False
+    return not _GENERIC_ERROR_PREFIX.match(error)
+
+
 # How often the flush thread wakes. Small enough that the debounce window is
 # what actually decides latency, not the tick.
 _TICK_S = 0.1
@@ -80,6 +119,24 @@ _pending: dict[tuple[str, str], float] = {}
 # the service runs.
 _watches: dict[str, object] = {}
 _last_rescan = 0.0
+_last_retry_check = 0.0
+# Floor for how many recent `file`-kind index_events to inspect per bank when
+# looking for an unclosed EmbeddingUnavailable streak — comfortably above
+# RETRY_MAX_ATTEMPTS's shipped default (5) without scanning the whole log.
+_RETRY_SCAN_LIMIT_FLOOR = 50
+# The scan window must exceed the CONFIGURED cap, not just the floor above,
+# or a streak can never be observed past this window: with a fixed window a
+# `MNEMO_RETRY_MAX_ATTEMPTS` set above it would see `streak` permanently capped
+# at the window size, `streak < max_attempts` would stay true forever, and the
+# fast-retry cycle would fire every RETRY_INTERVAL_S forever for a genuinely
+# broken bank — exactly what this cap exists to prevent. The margin gives a
+# little headroom past the cap itself so equality (`streak == max_attempts`)
+# is reached, not merely approached.
+_RETRY_SCAN_MARGIN = 10
+
+
+def _retry_scan_limit() -> int:
+    return max(_RETRY_SCAN_LIMIT_FLOOR, retry_max_attempts() + _RETRY_SCAN_MARGIN)
 
 
 class _Handler(FileSystemEventHandler):
@@ -137,6 +194,48 @@ def _rescan_bank(bank_id: str, *, trigger: str) -> None:
         workqueue.enqueue_bulk(bank_id, trigger=trigger)
     except Exception:  # noqa: BLE001 - a watcher must never die on a queue error
         log.exception("cannot enqueue bulk for bank %s", bank_id)
+
+
+def _embedding_unavailable_streak(bank_id: str) -> int:
+    """Consecutive `EmbeddingUnavailable` failures since this bank's last
+    completion, newest event first.
+
+    Scoped to `kind == "file"`: that is the only task kind whose worker
+    thread can raise `EmbeddingUnavailable` synchronously inside
+    `workqueue._execute()` (a `bulk`/`rebuild` scan only walks and hashes —
+    no provider call — and its own failures are always the generic,
+    deterministic kind). A success or a non-`EmbeddingUnavailable` failure
+    both end the streak: the former because the provider is plainly working
+    again, the latter because retrying a deterministic error is the one
+    thing this mechanism must never do.
+    """
+    try:
+        events = servicelog.read_index(
+            bank_id=bank_id, kind="file", limit=_retry_scan_limit()
+        )
+    except Exception:  # noqa: BLE001 - a watcher must never die on a log read
+        return 0
+    streak = 0
+    for event in events:
+        if event.get("result") != "error":
+            break
+        if not _is_embedding_unavailable_error(event.get("error")):
+            break
+        streak += 1
+    return streak
+
+
+def _retry_failed_banks() -> None:
+    """MN-11: a bounded, cheap fast retry for banks stuck on a reachability
+    error, on top of (and never replacing) the slower full rescan below.
+    """
+    max_attempts = retry_max_attempts()
+    for bank in registry.load():
+        if not (bank.watched and bank.exists):
+            continue
+        streak = _embedding_unavailable_streak(bank.id)
+        if 0 < streak < max_attempts:
+            _rescan_bank(bank.id, trigger="watcher")
 
 
 # --------------------------------------------------------------- flushing
@@ -237,8 +336,9 @@ def _sync_watches() -> None:
 
 
 def _loop() -> None:
-    global _last_rescan
+    global _last_rescan, _last_retry_check
     _last_rescan = time.monotonic()
+    _last_retry_check = time.monotonic()
     while not _stop.wait(_TICK_S):
         try:
             _flush_due()
@@ -249,6 +349,13 @@ def _loop() -> None:
                 for bank in registry.load():
                     if bank.watched and bank.exists:
                         _rescan_bank(bank.id, trigger="watcher")
+            retry_interval = retry_interval_s()
+            if (
+                retry_interval
+                and time.monotonic() - _last_retry_check >= retry_interval
+            ):
+                _last_retry_check = time.monotonic()
+                _retry_failed_banks()
         except Exception:  # noqa: BLE001 - the loop outlives any one failure
             log.exception("watcher tick failed")
 

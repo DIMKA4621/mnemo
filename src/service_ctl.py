@@ -996,6 +996,69 @@ def start(
         return EXIT_UNHEALTHY
 
 
+def _graceful_shutdown_windows(pid: int, fingerprint: str, timeout: float) -> bool:
+    """POST /api/shutdown and wait for the process to actually exit.
+
+    Windows-only counterpart to POSIX's SIGTERM: ``_terminate_tree`` there
+    sends SIGTERM, which reaches uvicorn's graceful shutdown; Windows has no
+    signal uvicorn listens for the same way, so ``taskkill /F`` never gave
+    the backend a chance to run that path at all -- including finishing an
+    in-flight bulk/rebuild task before it is killed mid-``store.
+    reset_index()`` and leaves a bank at 0 chunks. This reaches the same
+    shutdown path over the loopback API instead.
+
+    Any failure -- connection refused, timeout, non-2xx, an older backend
+    with no ``/api/shutdown`` route yet, an unhealthy one -- is not an error
+    here, just a "no" that sends the caller straight to the existing
+    force-kill path, unchanged. The poll below shares ``timeout`` with the
+    whole of ``stop()`` on purpose (explicit user decision, no second knob):
+    a backend that accepts the POST but never actually exits still leaves
+    ``stop()`` bounded by the one timeout it was given, never hanging on a
+    graceful shutdown that is not happening.
+    """
+    info = read_service_info() or {}
+    host, port = info.get("host"), info.get("port")
+    if not host or not port:
+        return False
+
+    import httpx
+
+    from .client import default_token
+
+    token = default_token()
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    try:
+        reply = httpx.post(
+            f"http://{host}:{port}/api/shutdown",
+            headers=headers,
+            timeout=2.0,
+        )
+    except httpx.HTTPError:
+        return False
+    if reply.status_code // 100 != 2:
+        return False
+
+    # Wait for the published backend PID too, not just the one we spawned --
+    # same reasoning as stop()'s own post-terminate wait below: the venv's
+    # pythonw.exe redirector can exit (or was never the process serving the
+    # port at all) while the real interpreter is still finishing its
+    # shutdown, and returning on the stub alone would report "stopped"
+    # while the port is still held.
+    info_pid = info.get("pid")
+    waiting = [pid]
+    if isinstance(info_pid, int) and info_pid != pid:
+        waiting.append(info_pid)
+
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        _reap(pid)
+        ours_gone = _pid_state(pid) != ALIVE or process_fingerprint(pid) != fingerprint
+        if ours_gone and all(_pid_state(other) != ALIVE for other in waiting):
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def stop(*, timeout: float = SERVICE_STOP_TIMEOUT) -> int:
     """Stop the service we started, and verify the process is really gone.
 
@@ -1031,6 +1094,10 @@ def stop(*, timeout: float = SERVICE_STOP_TIMEOUT) -> int:
         return EXIT_DOWN
 
     pid, fingerprint = owned
+    if os.name == "nt" and _graceful_shutdown_windows(pid, fingerprint, timeout):
+        _clear_identity()
+        print(f"mnemo service: stopped (pid {pid})")
+        return EXIT_OK
     _terminate_tree(pid)
 
     # Wait for the published backend PID too, not just the one we spawned:

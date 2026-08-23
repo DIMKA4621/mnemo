@@ -498,6 +498,21 @@ RECONCILE_ON_START: bool = os.environ.get("MNEMO_RECONCILE_ON_START", "1") != "0
 RESCAN_INTERVAL_S: float = float(
     os.environ.get("MNEMO_RESCAN_INTERVAL_S", "900")
 )
+# A second, much shorter safety net (MN-11), scoped only to banks currently
+# failing on `EmbeddingUnavailable` — an unreachable resident or endpoint
+# that came back should not have to wait out the full rescan interval. A
+# deterministic failure (e.g. a dimension mismatch) never counts toward this
+# and is never retried by it (`watcher.py`).
+RETRY_INTERVAL_S: float = float(
+    os.environ.get("MNEMO_RETRY_INTERVAL_S", "30")
+)
+# Ceiling on consecutive `EmbeddingUnavailable` failures this fast retry will
+# re-enqueue for one bank before giving up on it until the next full rescan —
+# an unfixably broken provider must not retry forever every 30s. An explicit
+# trigger (api/cli/mcp/ui) always bypasses this cap.
+RETRY_MAX_ATTEMPTS: int = int(
+    os.environ.get("MNEMO_RETRY_MAX_ATTEMPTS", "5")
+)
 
 
 # --- service log & retention (I) ----------------  service-dev

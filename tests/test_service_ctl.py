@@ -895,6 +895,238 @@ def test_real_backend() -> None:
     check("the listening port was released by stop", released)
 
 
+def _start_healthy_backend() -> tuple[int, bool]:
+    """Start a real backend on a fresh port; return (port, healthy).
+
+    Shared setup for the graceful-shutdown tests below -- same shape as
+    test_real_backend()'s own startup, factored out so each test only has to
+    say what it tampers with, not how a backend comes up.
+    """
+    port = free_port()
+    os.environ["MNEMO_API_PORT"] = str(port)
+    target = [
+        service_ctl.windowless_python(),
+        "-m", "src.cli", "serve", "--port", str(port),
+    ]
+    if service_ctl.start(target=target) != service_ctl.EXIT_OK:
+        return port, False
+
+    import httpx
+
+    deadline = time.monotonic() + 30.0
+    healthy = False
+    while time.monotonic() < deadline:
+        try:
+            if httpx.get(f"http://127.0.0.1:{port}/health", timeout=2.0).status_code == 200:
+                healthy = True
+                break
+        except httpx.HTTPError:
+            pass
+        time.sleep(0.25)
+    return port, healthy
+
+
+def test_graceful_shutdown_stops_without_force_kill(work: Path) -> None:
+    """The happy path (MN-11): /api/shutdown succeeds, `_terminate_tree` is
+    never called at all -- the graceful path is the whole point of the
+    feature, not a fallback that happens to also work.
+    """
+    if os.name != "nt":
+        print("SKIP  graceful shutdown is Windows-only")
+        return
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        print("SKIP  graceful shutdown success path (httpx missing)")
+        return
+
+    port, healthy = _start_healthy_backend()
+    if not healthy:
+        check("backend for the graceful-shutdown success test came up healthy", False)
+        service_ctl.stop()
+        return
+
+    from unittest.mock import patch
+
+    calls: list[int] = []
+    original = service_ctl._terminate_tree
+
+    def spy(pid: int, **kwargs):
+        calls.append(pid)
+        return original(pid, **kwargs)
+
+    with patch.object(service_ctl, "_terminate_tree", spy):
+        rc = service_ctl.stop()
+
+    check("graceful stop() returns OK", rc == service_ctl.EXIT_OK, detail=f"rc={rc}")
+    check("graceful stop() never fell back to _terminate_tree",
+          calls == [], detail=str(calls))
+    check("status after a graceful stop is DOWN",
+          service_ctl.status() == service_ctl.EXIT_DOWN)
+
+    import socket
+
+    released = False
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                released = True
+                break
+            except OSError:
+                time.sleep(0.25)
+    check("the listening port was released by the graceful stop", released)
+
+
+def test_graceful_shutdown_falls_back_to_force_kill(work: Path) -> None:
+    """/api/shutdown unreachable -> stop() must still fall through to
+    `_terminate_tree` and actually kill the process, exactly the fallback
+    the Windows branch was written for.
+
+    Only the published *port* is tampered with, not the pid: the fallback's
+    own post-terminate wait re-reads the same service.json for the
+    redirector's published pid, so corrupting that field too would test a
+    different (and already-covered, see test_never_kills_bystanders)
+    failure mode instead of this one.
+    """
+    if os.name != "nt":
+        print("SKIP  graceful shutdown is Windows-only")
+        return
+    try:
+        import httpx  # noqa: F401
+    except ImportError:
+        print("SKIP  graceful shutdown fallback path (httpx missing)")
+        return
+
+    port, healthy = _start_healthy_backend()
+    if not healthy:
+        check("backend for the graceful-shutdown fallback test came up healthy", False)
+        service_ctl.stop()
+        return
+
+    info = service_ctl.read_service_info() or {}
+    dead_port = free_port()  # freed immediately after -- nothing listens there
+    info["port"] = dead_port
+    service_ctl.service_info_file().write_text(json.dumps(info), encoding="utf-8")
+
+    from unittest.mock import patch
+
+    calls: list[int] = []
+    original = service_ctl._terminate_tree
+
+    def spy(pid: int, **kwargs):
+        calls.append(pid)
+        return original(pid, **kwargs)
+
+    with patch.object(service_ctl, "_terminate_tree", spy):
+        rc = service_ctl.stop()
+
+    check("fallback stop() still returns OK", rc == service_ctl.EXIT_OK, detail=f"rc={rc}")
+    check("an unreachable /api/shutdown falls through to _terminate_tree",
+          calls != [], detail=str(calls))
+    check("status after the fallback stop is DOWN",
+          service_ctl.status() == service_ctl.EXIT_DOWN)
+
+    import socket
+
+    released = False
+    deadline = time.monotonic() + 10.0
+    while time.monotonic() < deadline:
+        with socket.socket() as sock:
+            try:
+                sock.bind(("127.0.0.1", port))
+                released = True
+                break
+            except OSError:
+                time.sleep(0.25)
+    check("the real backend's original port was released by the force kill",
+          released)
+
+
+def test_graceful_shutdown_waits_for_both_redirector_pids() -> None:
+    """`_graceful_shutdown_windows` must wait out BOTH the spawned pid and
+    the backend's own published pid before declaring success.
+
+    This is the exact bug caught during manual verification: briefed to
+    reuse only the spawned-pid polling logic, real testing showed the
+    redirector case (spawned pid != the pid actually serving) needed both
+    watched, or a live backend still finishing its shutdown could be
+    reported "stopped" the moment the launcher stub exited. No real second
+    process here -- `_pid_state` is faked to report each of the two PIDs
+    ALIVE for a few polls before going GONE on its own schedule, so the two
+    can be shown to be tracked independently rather than the second one
+    being ignored.
+    """
+    if os.name != "nt":
+        print("SKIP  graceful shutdown is Windows-only")
+        return
+
+    from unittest.mock import patch
+
+    spawned_pid, info_pid, fingerprint = 11111, 22222, "fp-redirector"
+    calls: dict[int, int] = {}
+    # The spawned pid reports ALIVE for its first 2 checks then GONE forever;
+    # the published pid outlives it (ALIVE for its first 4). A correct wait
+    # keeps polling past the point where the spawned pid alone looks stopped.
+    alive_until = {spawned_pid: 2, info_pid: 4}
+
+    def fake_pid_state(pid: int) -> str:
+        calls[pid] = calls.get(pid, 0) + 1
+        return service_ctl.ALIVE if calls[pid] <= alive_until.get(pid, 0) else service_ctl.GONE
+
+    class _Reply:
+        status_code = 200
+
+    with patch.object(service_ctl, "read_service_info",
+                       lambda: {"host": "127.0.0.1", "port": 4646, "pid": info_pid}), \
+         patch("httpx.post", lambda *a, **k: _Reply()), \
+         patch.object(service_ctl, "_pid_state", fake_pid_state), \
+         patch.object(service_ctl, "process_fingerprint", lambda pid: fingerprint):
+        result = service_ctl._graceful_shutdown_windows(spawned_pid, fingerprint, timeout=10.0)
+
+    check("graceful shutdown reports success only once BOTH pids are gone",
+          result is True, detail=f"calls={calls}")
+    check("the spawned pid alone going quiet was not treated as done",
+          calls.get(spawned_pid, 0) > alive_until[spawned_pid] + 1, detail=str(calls))
+    check("the published (redirector-served) pid was actually polled and waited on",
+          calls.get(info_pid, 0) > alive_until[info_pid], detail=str(calls))
+
+
+def test_graceful_shutdown_respects_timeout_budget() -> None:
+    """A backend that accepts the shutdown POST but never actually exits
+    must not hang `stop()` -- the graceful attempt is bounded by the same
+    `timeout` `stop()` was given, not a separate, unbounded knob.
+    """
+    if os.name != "nt":
+        print("SKIP  graceful shutdown is Windows-only")
+        return
+
+    from unittest.mock import patch
+
+    pid, fingerprint = 33333, "fp-timeout"
+    injected_timeout = 0.6  # small on purpose -- this is a timing assertion
+
+    class _Reply:
+        status_code = 200
+
+    with patch.object(service_ctl, "read_service_info",
+                       lambda: {"host": "127.0.0.1", "port": 4646, "pid": pid}), \
+         patch("httpx.post", lambda *a, **k: _Reply()), \
+         patch.object(service_ctl, "_pid_state", lambda p: service_ctl.ALIVE), \
+         patch.object(service_ctl, "process_fingerprint", lambda p: fingerprint):
+        started = time.monotonic()
+        result = service_ctl._graceful_shutdown_windows(pid, fingerprint, timeout=injected_timeout)
+        elapsed = time.monotonic() - started
+
+    check("a backend that never actually exits is reported as NOT gracefully stopped",
+          result is False, detail=str(result))
+    check("the graceful attempt is bounded by its own timeout, not left to hang",
+          elapsed < injected_timeout + 2.0, detail=f"elapsed={elapsed:.2f}s")
+    check("the graceful attempt actually waited close to the injected timeout",
+          elapsed >= injected_timeout, detail=f"elapsed={elapsed:.2f}s")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mnemo svc ") as raw:
         work = Path(raw)
@@ -916,6 +1148,10 @@ def main() -> int:
         test_stop_reaps_the_resident(work)
         try:
             test_real_backend()
+            test_graceful_shutdown_stops_without_force_kill(work)
+            test_graceful_shutdown_falls_back_to_force_kill(work)
+            test_graceful_shutdown_waits_for_both_redirector_pids()
+            test_graceful_shutdown_respects_timeout_budget()
         finally:
             # The backend indexes on start, which spawns a resident on the
             # real port. With idle exit off it would outlive the suite.
