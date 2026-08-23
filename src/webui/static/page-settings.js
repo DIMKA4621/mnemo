@@ -44,9 +44,21 @@ const settings = {
   autostart: null,     // GET /api/autostart — its own request, its own failure
   autostartWant: null, // the selected state, null when it matches the machine
   autostartError: null,
+  // POST /api/autostart's own save verdict — shown right under the
+  // autostart control (renderAutostart), NOT through settings.note/
+  // renderSettingsMessages(): same reasoning as embedNote below, this is
+  // one of two independent controls sharing a single "Зберегти" button, and
+  // a merged message read as glued to whichever field happened to be last.
+  autostartSaveNote: null,
+  autostartSaveError: null,
   autoUpdateWant: null,  // pending edit for the "auto_update" setting, same
                          // idiom as autostartWant — null when it matches
                          // what GET /api/settings last reported
+  // PUT /api/settings's own save verdict for auto_update specifically —
+  // shown right under the auto-update control (renderAutoUpdate), same
+  // reasoning as autostartSaveNote above.
+  autoUpdateSaveNote: null,
+  autoUpdateSaveError: null,
   updateCheckBusy: false,  // POST /api/update/check in flight
   updateCheckError: null,
   updateCheckResult: null,  // last check's outcome, worded for display
@@ -179,7 +191,11 @@ function chooseSettingsSection(id) {
   // survived the trip would show the control on «Вимкнено» for a machine
   // whose autostart is on — the same lie as an unsaved edit that looks stored.
   settings.autostartWant = null;
+  settings.autostartSaveNote = null;
+  settings.autostartSaveError = null;
   settings.autoUpdateWant = null;
+  settings.autoUpdateSaveNote = null;
+  settings.autoUpdateSaveError = null;
   settings.updateCheckError = null;
   settings.maintenanceError = null;
   settings.cleanupConfirming = false;
@@ -445,7 +461,7 @@ function renderEmbedSection(body) {
   const providerOverride = overrideNote('provider');
   if (providerOverride) body.appendChild(providerOverride);
 
-  if (!backend) { renderSettingsMessages(); return; }
+  if (!backend) { renderSettingsMessages(body); return; }
 
   // -- local needs nothing ------------------------------------------------
   if (backend.provider === 'local') {
@@ -470,7 +486,7 @@ function renderEmbedSection(body) {
     // early — without this the one backend that needs no configuration was
     // also the one whose «Збережено» never appeared, so the click read as
     // ignored while the file on disk had already changed.
-    renderSettingsMessages();
+    renderSettingsMessages(body);
     return;
   }
 
@@ -600,7 +616,7 @@ function renderEmbedSection(body) {
     renderEmbedMemory(body);
   }
 
-  renderSettingsMessages();
+  renderSettingsMessages(body);
 }
 
 // -------------------------------------------------------- backend memory
@@ -928,11 +944,17 @@ function renderGeneralSection(body) {
   renderTheme(body);
   renderAutostart(body);
   renderAutoUpdate(body);
+  // The one message this can still produce that isn't already handled right
+  // under its own field: "Нічого не змінено." (Save clicked with no pending
+  // edit to either control above). Placed here, immediately after both
+  // Save-gated fields and before the unrelated Про-проект/Стан blocks below
+  // -- never after them, or it would read as a verdict on those instead.
+  renderSettingsMessages(body);
 
   const svc = state.service;
   if (!svc) {
     body.appendChild(el('p', { className: 'empty-hint', text: 'Стан служби ще не отримано.' }));
-    renderSettingsMessages();
+    renderProjectLink(body);
     return;
   }
 
@@ -952,7 +974,23 @@ function renderGeneralSection(body) {
   ]);
   body.appendChild(setField('Стан', box, null));
 
-  renderSettingsMessages();
+  renderProjectLink(body);
+}
+
+/** A link to the project's own repository — not machine state, so it
+ *  renders after the service-status block (or its not-yet-loaded
+ *  placeholder) regardless of whether that data has loaded. */
+function renderProjectLink(body) {
+  body.appendChild(el('div', { className: 'set-divider' }));
+  body.appendChild(setField('Про проект', el('a', {
+    className: 'set-link',
+    text: 'GitHub',
+    attrs: {
+      href: 'https://github.com/DIMKA4621/mnemo',
+      target: '_blank',
+      rel: 'noopener noreferrer',
+    },
+  }), null));
 }
 
 /**
@@ -1038,6 +1076,15 @@ function renderAutostart(body) {
             '; натисніть «Зберегти», щоб застосувати',
     }));
   }
+
+  // The save verdict for THIS control, right under it — not the shared
+  // settings.note/renderSettingsMessages() at the bottom of the tab, which
+  // would land it after «Про проект»/«Стан», nowhere near what changed.
+  if (settings.autostartSaveError) {
+    body.appendChild(el('p', { className: 'modal-error', text: settings.autostartSaveError }));
+  } else if (settings.autostartSaveNote) {
+    body.appendChild(el('p', { className: 'tok-ok', text: settings.autostartSaveNote }));
+  }
 }
 
 /** The autostart state the form is showing: the edit if there is one, else
@@ -1115,6 +1162,16 @@ function renderAutoUpdate(body) {
       text: 'не збережено — зараз ' + (autoUpdateStoredValue() ? 'увімкнено' : 'вимкнено') +
             '; натисніть «Зберегти», щоб застосувати',
     }));
+  }
+
+  // The save verdict for THIS control, right under it -- same reasoning as
+  // renderAutostart's own block above. Placed before the "Перевірити
+  // оновлення" button below: that button is a separate, unrelated feature
+  // (checking for a new release) sharing this field only visually.
+  if (settings.autoUpdateSaveError) {
+    body.appendChild(el('p', { className: 'modal-error', text: settings.autoUpdateSaveError }));
+  } else if (settings.autoUpdateSaveNote) {
+    body.appendChild(el('p', { className: 'tok-ok', text: settings.autoUpdateSaveNote }));
   }
 
   body.appendChild(el('div', { className: 'maint-head' }, [
@@ -1195,6 +1252,13 @@ async function runUpdateCheck() {
  * setting the server rejected, leaves its control showing the machine
  * instead of showing an intention as a fact. One request failing does not
  * stop the other from being tried.
+ *
+ * Each field's own verdict is kept separate (`autostartSaveNote`/
+ * `autoUpdateSaveNote`, rendered right under that field by
+ * `renderAutostart`/`renderAutoUpdate`) rather than joined into one
+ * `settings.note` — one save can touch either field alone or both, and a
+ * merged sentence at the bottom of the tab read as belonging to whichever
+ * field happened to be rendered last.
  */
 async function submitGeneral() {
   const autostartWant = settings.autostartWant;
@@ -1209,9 +1273,12 @@ async function submitGeneral() {
   settings.save.disabled = true;
   settings.errorText = null;
   settings.note = null;
+  settings.autostartSaveNote = null;
+  settings.autostartSaveError = null;
+  settings.autoUpdateSaveNote = null;
+  settings.autoUpdateSaveError = null;
   renderSettings();
 
-  const notes = [];
   try {
     if (autostartWant != null) {
       try {
@@ -1219,12 +1286,12 @@ async function submitGeneral() {
           method: 'POST', body: { enabled: autostartWant },
         });
         settings.autostartWant = null;
-        notes.push(settings.autostart.enabled
+        settings.autostartSaveNote = settings.autostart.enabled
           ? 'Автозапуск: служба підніматиметься при вході в систему.'
-          : 'Автозапуск: вимкнено, службу доведеться піднімати самому.');
+          : 'Автозапуск: вимкнено, службу доведеться піднімати самому.';
       } catch (err) {
         if (isAuthError(err)) { openGate('rejected'); return; }
-        settings.errorText = err.message;
+        settings.autostartSaveError = err.message;
       }
     }
 
@@ -1234,14 +1301,12 @@ async function submitGeneral() {
           method: 'PUT', body: { auto_update: autoUpdateWant },
         });
         settings.autoUpdateWant = null;
-        notes.push(autoUpdateWant ? 'Автооновлення: увімкнено.' : 'Автооновлення: вимкнено.');
+        settings.autoUpdateSaveNote = autoUpdateWant ? 'Автооновлення: увімкнено.' : 'Автооновлення: вимкнено.';
       } catch (err) {
         if (isAuthError(err)) { openGate('rejected'); return; }
-        settings.errorText = settings.errorText ? settings.errorText + ' ' + err.message : err.message;
+        settings.autoUpdateSaveError = err.message;
       }
     }
-
-    if (notes.length) settings.note = notes.join(' ');
   } finally {
     settings.busy = false;
     settings.save.disabled = false;
@@ -1505,13 +1570,20 @@ async function submitOrphanCleanup(ids) {
 }
 
 /** The last save's verdict. Called from every branch of `renderSettings`,
- *  because a backend that renders fewer fields still gets saved. */
-function renderSettingsMessages() {
+ *  because a backend that renders fewer fields still gets saved.
+ *
+ *  Appends into `container` — the same `.set-form` div every section
+ *  renderer already received as its own `body` parameter — not into
+ *  `settings.body`. `settings.body` holds `.set-form` as its only child,
+ *  so appending there instead used to land the note as a SIBLING of the
+ *  whole form: after every field, at the very bottom of the tab, and
+ *  outside the form's 640px-constrained column. */
+function renderSettingsMessages(container) {
   if (settings.note) {
-    settings.body.appendChild(el('p', { className: 'tok-ok', text: settings.note }));
+    container.appendChild(el('p', { className: 'tok-ok', text: settings.note }));
   }
   if (settings.errorText) {
-    settings.body.appendChild(
+    container.appendChild(
       el('p', { className: 'modal-error', text: settings.errorText }));
   }
 }

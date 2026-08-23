@@ -11,6 +11,13 @@ A subagent's job is to produce the *content* (a plan, a test report, a review ve
 
 When the lead delegates work that's tied to a ticket, it passes the ticket key (e.g. `MN-12`) in the prompt so the subagent's report can reference it — but not every delegated task has to trace to a ticket; use judgment (see below).
 
+## Implementation is delegated, not solo
+
+The lead's own hands stay on Jira reads/writes, scoping, and orchestration — not on writing the code.
+When a ticket reaches **In Progress**, the actual implementation goes to the matching specialist (`engine-dev`, `service-dev`, `ui-dev`, `platform-dev`, `docs-keeper`), verification goes to `tester`, review goes to `reviewer` — via the `Agent` tool, the same as any other delegated work.
+The lead implementing a ticket itself, end to end, defeats the point of having those roles: no second pair of eyes on the code, no independent test pass, everything shaped by one context's blind spots.
+Judgment call, exception: a change small enough that spinning up an agent costs more than it saves (a one-line fix, a single obvious constant) — but default to delegating, not to solo.
+
 ## Who does what
 
 - **Team lead (you)** — owns intake and every write:

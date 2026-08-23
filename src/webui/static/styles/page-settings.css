@@ -59,6 +59,23 @@
   line-height: 1.5;
 }
 
+.set-link {
+  color: var(--accent);
+  text-decoration: none;
+  width: fit-content;
+}
+.set-link:hover { text-decoration: underline; }
+
+/* `.set-form` is a flex column, which by default stretches every block
+   child to its own 640px width -- fine for a field, wrong for a short
+   save-verdict line. `.tok-ok`/`.modal-error` (overlays.css) are also used
+   full-width inside modals, so the fix is scoped to this page rather than
+   changing those classes everywhere. */
+.set-form > .tok-ok,
+.set-form > .modal-error {
+  align-self: flex-start;
+}
+
 /* The "Перевірити оновлення" button's own result -- a live outcome, not
    descriptive page text, so it gets a small bordered chip instead of
    .set-note's muted color. Warm for "something's new" (matches the sidebar
