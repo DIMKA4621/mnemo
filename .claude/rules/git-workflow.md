@@ -29,7 +29,14 @@ This means: the work lives on its own branch, not on `master`.
 
 1. Commit on that feature branch — propose the message, get confirmation, same as every commit (global rule).
 2. Push the branch.
-3. Open the PR with `gh pr create` (title + summary + test plan, the usual shape).
+3. Open the PR with `gh pr create`, in this shape:
+   - Title: one short line naming what the PR does — the gist, nothing fancier.
+   - Body opens with a few plain sentences: what changed and why.
+   - Then `**✨ Updates:**` (new behavior) and `**🔧 Fixes:**` (bug fixes), in that order — one line per real, distinct change under each.
+     The label itself is what tells the reader which kind of change it is, so keep it even when only one of the two sections applies; omit a section only when it's genuinely empty for this PR.
+   - No test-plan section, no checkboxes.
+     An optional closing sentence or two only if something genuinely needs flagging that doesn't fit above.
+
    **Never merge it.** The user reviews and accepts pull requests themselves — this project's git-safety-protocol default (no unrequested destructive or shared-state actions) extends to PR merges specifically: opening one is additive and reversible, merging one is not mine to decide.
 
 ## "Створи реліз" / "створи драфт релізу" / "create a release"
@@ -39,3 +46,24 @@ This means: the work lives on its own branch, not on `master`.
 - **Always cut from `master`, never from a feature branch.** A release reflects what the relevant PR looks like *after* merge, not the branch's state before it.
 - **If the relevant branch/PR isn't merged into `master` yet when asked for a release, stop and say so** — ask the user to accept the PR first, then create the draft release once `master` actually contains it.
   Don't create the release from the unmerged branch as a stand-in.
+- **Release name is just the tag** (e.g. `v3.0.6`) — GitHub's "name" field carries no separate title.
+- **Body shape:** a `## ` header line (one short sentence — what this release is about), then a few plain sentences of context only if they add real information, then `**✨ Updates:**` (new behavior) and `**🔧 Fixes:**` (bug fixes), in that order.
+  The label itself says which kind of change it is, so keep it even when only one of the two sections applies; omit a section only when it's genuinely empty for this release.
+  One line per change under each.
+  An optional closing sentence or two only if something genuinely needs flagging.
+  No test-plan checklists, no links out to internal memory logs.
+  Template (placeholder text on purpose — never copy real release content into this rule file):
+
+  ```
+  ## <one-line header — what this release is about>
+
+  <optional: a sentence or two of context, only if it adds real information>
+
+  **✨ Updates:**
+  - Point one.
+  - Point two.
+
+  **🔧 Fixes:**
+  - Point one.
+  - Point two.
+  ```
