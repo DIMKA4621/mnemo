@@ -252,9 +252,12 @@ function closeSocket() {
 }
 
 function connectSocket() {
-  // Without a token the handshake can only be refused, and a refused socket
-  // would reconnect forever behind the gate.
-  if (state.gated || !token) return;
+  // `/api` (and `/ws` with it, 2026-08-21) is open by default: with no token
+  // configured, the server accepts the handshake with none presented. An
+  // empty `token` here is the normal case for a fresh install, not a reason
+  // to skip connecting — only an active gate (a real 401 happened) means the
+  // socket would be refused.
+  if (state.gated) return;
 
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = scheme + '//' + window.location.host + '/ws' +
