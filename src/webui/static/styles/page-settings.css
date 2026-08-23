@@ -59,6 +59,13 @@
   line-height: 1.5;
 }
 
+.set-link {
+  color: var(--accent);
+  text-decoration: none;
+  width: fit-content;
+}
+.set-link:hover { text-decoration: underline; }
+
 /* `.set-form` is a flex column, which by default stretches every block
    child to its own 640px width -- fine for a field, wrong for a short
    save-verdict line. `.tok-ok`/`.modal-error` (overlays.css) are also used

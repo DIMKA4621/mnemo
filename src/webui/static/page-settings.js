@@ -928,6 +928,7 @@ function renderGeneralSection(body) {
   renderTheme(body);
   renderAutostart(body);
   renderAutoUpdate(body);
+  renderProjectLink(body);
 
   const svc = state.service;
   if (!svc) {
@@ -953,6 +954,22 @@ function renderGeneralSection(body) {
   body.appendChild(setField('Стан', box, null));
 
   renderSettingsMessages(body);
+}
+
+/** A link to the project's own repository — not machine state, so it sits
+ *  above the service-status block and renders regardless of whether that
+ *  has loaded yet. */
+function renderProjectLink(body) {
+  body.appendChild(el('div', { className: 'set-divider' }));
+  body.appendChild(setField('Про проект', el('a', {
+    className: 'set-link',
+    text: 'GitHub',
+    attrs: {
+      href: 'https://github.com/DIMKA4621/mnemo',
+      target: '_blank',
+      rel: 'noopener noreferrer',
+    },
+  }), null));
 }
 
 /**
