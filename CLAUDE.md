@@ -513,6 +513,10 @@ machine starts one that never was.
   of pushing through.
 - **Conventional Commits.** Ask before committing/pushing.
 - **Never** add `Co-Authored-By` or any attribution line.
+- `.claude/rules/git-workflow.md` carries the branch/PR/release procedure —
+  new work starts on a fresh branch off the latest `master`, "prepare a pull
+  request" pushes the branch and opens a PR (never merges it), and a release
+  is always a draft cut from `master` after the PR is merged.
 - Comments and commit messages in English.
 - Subagents do NOT inherit this file — any rule a subagent must follow
   belongs in its own agent file (see `templates/agents/`).
