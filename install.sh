@@ -57,7 +57,7 @@ run_with_heartbeat() {
 	# callers under `set -e` behave exactly as an unwrapped call would.
 	label="$1"; shift
 	heartbeat_log="$(mktemp "${TMPDIR:-/tmp}/mnemo-install-XXXXXX.log")"
-	printf 'install.sh: %s' "$label"
+	printf 'install.sh: %s ' "$label"
 	"$@" >"$heartbeat_log" 2>&1 &
 	heartbeat_pid=$!
 	spin='|/-\'
@@ -86,7 +86,7 @@ run_with_heartbeat() {
 	# the label instead of a frame it never drew, mirroring
 	# install.ps1's own $spinnerPrinted guard.
 	[ "$printed" -eq 1 ] && printf '\b'
-	printf ' done\n'
+	printf 'done\n'
 	if [ "$heartbeat_code" -ne 0 ]; then
 		cat "$heartbeat_log" >&2
 	fi

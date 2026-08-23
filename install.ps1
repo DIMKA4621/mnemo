@@ -138,7 +138,7 @@ function Invoke-CheckedWithHeartbeat {
         [int]$StallTimeoutSec = 0,
         [string]$ProgressFile = ''
     )
-    Write-Host -NoNewline "install.ps1: $Label"
+    Write-Host -NoNewline "install.ps1: $Label "
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
     $psi = New-Object System.Diagnostics.ProcessStartInfo
@@ -255,13 +255,13 @@ function Invoke-CheckedWithHeartbeat {
 
     if ($stalled) {
         if ($spinnerPrinted) { Write-Host -NoNewline "`b" }
-        Write-Host (" stalled ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+        Write-Host ("stalled ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
         $captured | ForEach-Object { Write-Host "install.ps1:   $_" }
         throw "$FailureMessage (no output for ${StallTimeoutSec}s -- looks stalled, not just slow)"
     }
 
     if ($spinnerPrinted) { Write-Host -NoNewline "`b" }
-    Write-Host (" done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+    Write-Host ("done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
 
     if ($proc.ExitCode -ne 0) {
         $captured | ForEach-Object { Write-Host "install.ps1:   $_" }

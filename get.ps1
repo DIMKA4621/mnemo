@@ -63,7 +63,7 @@ function Get-FileWithSpinner {
     #>
     param([string]$Uri, [string]$OutFile, [string]$Label)
 
-    Write-Host -NoNewline "get.ps1: $Label"
+    Write-Host -NoNewline "get.ps1: $Label "
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
 
     $client = New-Object System.Net.WebClient
@@ -101,10 +101,10 @@ function Get-FileWithSpinner {
     # a character off $Label instead of a spinner frame it never drew.
     if ($spinnerPrinted) { Write-Host -NoNewline "`b" }
     if ($state.Error) {
-        Write-Host (" failed ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+        Write-Host ("failed ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
         throw $state.Error
     }
-    Write-Host (" done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
+    Write-Host ("done ({0:N0}s)" -f $sw.Elapsed.TotalSeconds)
 }
 
 function Resolve-MnemoArchiveUrl {

@@ -83,7 +83,7 @@ trap 'rm -rf "$tmp"' EXIT
 # spinner), not a shared function. Backgrounding the whole curl | tar
 # pipeline (rather than just curl) is what lets the spinner keep ticking
 # through the extraction too, not just the network transfer.
-printf 'get.sh: downloading mnemo (%s)' "$REF_LABEL"
+printf 'get.sh: downloading mnemo (%s) ' "$REF_LABEL"
 (curl -fsSL "$ARCHIVE_URL" | tar xz -C "$tmp") &
 dl_pid=$!
 spin='|/-\'
@@ -107,7 +107,7 @@ wait "$dl_pid" || dl_code=$?
 # finishes before the loop above ever sleeps once would otherwise eat a
 # character off the label instead of a spinner frame it never drew.
 [ "$printed" -eq 1 ] && printf '\b'
-printf ' done\n'
+printf 'done\n'
 if [ "$dl_code" -ne 0 ]; then
 	echo "get.sh: download failed" >&2
 	exit 1
