@@ -1224,6 +1224,14 @@ function Invoke-Install {
     & $launcher doctor
 
     Write-Status "done."
+    # `mnemo ui` only builds and prints the URL -- no network call -- so it is
+    # safe to invoke unconditionally here. Green, distinct from the yellow
+    # "open a new terminal" line below: this one is just a pointer, not the
+    # one required next action.
+    $cabinetUrl = & $launcher ui
+    if ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($cabinetUrl)) {
+        Write-Host "install.ps1: Cabinet: $cabinetUrl" -ForegroundColor Green
+    }
     # Highlighted because it's the one line the user actually needs to act
     # on. A new terminal, not this one: the profile function just written by
     # Register-PowerShellProfile only loads when a shell starts, so THIS

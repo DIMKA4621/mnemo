@@ -33,10 +33,13 @@ say() { printf 'install.sh: %s\n' "$1"; }
 # Same as say(), highlighted -- for the one line the user actually needs to
 # act on. Guarded on a real terminal: raw ANSI codes have nowhere to go once
 # stdout is redirected (a log file, `curl | bash` with no tty) and would just
-# show up as garbage text there.
+# show up as garbage text there. $2 is an ANSI color code, default 33
+# (yellow) -- the one existing call site relies on that default and needs no
+# change.
 say_hl() {
+	color="${2:-33}"
 	if [ -t 1 ]; then
-		printf 'install.sh: \033[33m%s\033[0m\n' "$1"
+		printf 'install.sh: \033[%sm%s\033[0m\n' "$color" "$1"
 	else
 		printf 'install.sh: %s\n' "$1"
 	fi
@@ -663,6 +666,12 @@ say "verifying --"
 "$LAUNCHER" doctor || true
 
 say "done."
+# `mnemo ui` only builds and prints the URL -- no network call -- so it is
+# safe to invoke unconditionally here. Green, distinct from the yellow
+# "open a new terminal" line below: this one is just a pointer, not the one
+# required next action.
+cabinet_url="$("$LAUNCHER" ui 2>/dev/null || true)"
+[ -n "$cabinet_url" ] && say_hl "Cabinet: $cabinet_url" 32
 # A new terminal, not this one: the profile function just registered above
 # only loads when a shell starts, so THIS shell still needs the full path --
 # the fallback below.
