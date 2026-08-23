@@ -2,7 +2,8 @@
 
 ### Your markdown files are a universal real-time memory for all your agents.
 
-You write `.md` — within a second, any agent, in any session, already sees the change. Nothing needs to be re-read — it's just already there.
+You write `.md` — within a second, any agent, in any session, already sees the change.
+Nothing needs to be re-read — it's just already there.
 
 <img src="docs/console.png" width="820" alt="The mnemo console: banks, a file tree, and a document with its chunk boundaries drawn in">
 
@@ -28,16 +29,22 @@ flowchart LR
 
 - **Markdown is the single source of truth.** Memory is edited the same way as any other file — there's no separate write tool.
 - **The index can always be rebuilt from scratch.** It's only a one-way derivative of the `.md` files, so it never drifts out of sync with them.
-- **One service serves every project.** No lock files, no separate model loaded per console — just a lightweight network request to a service that's already running. A new project costs one registry entry, not another process in memory.
-- **Works with any number of sessions and any MCP client.** Not just Claude Code — anything that uses MCP, or plain `curl`. Every session is just another client of the same server: someone saves a file, and everyone sees it within seconds.
+- **One service serves every project.** No lock files, no separate model loaded per console — just a lightweight network request to a service that's already running.
+  A new project costs one registry entry, not another process in memory.
+- **Works with any number of sessions and any MCP client.** Not just Claude Code — anything that uses MCP, or plain `curl`.
+  Every session is just another client of the same server: someone saves a file, and everyone sees it within seconds.
 - **A local model computes the embeddings — nothing leaves the machine.** A remote provider can be plugged in instead, if you want one.
 - **One-command install.** No deep domain knowledge needed to get the system running.
 
 ## Use cases
 
-- **A single project.** One memory bank for the whole project, shared by every agent and session working on it — in parallel or not. One agent changes something, and everyone else already sees it in search. You can have as many banks as you like, one per project, each with its own isolated memory.
-- **Team development.** `.md` is the single source of truth and travels in git alongside the code. Everyone writes to their own local memory; after a `git pull`, teammates' new files get indexed automatically, and you're immediately working off a shared, up-to-date memory, with no need to recreate sessions or agents.
-- **A standalone knowledge base for an agent, outside any project.** A bank can be any folder of `.md` — it doesn't have to be a project's `.claude/memory/`. Set one up anywhere, edit it like ordinary files, and a personal AI assistant searches it the same way.
+- **A single project.** One memory bank for the whole project, shared by every agent and session working on it — in parallel or not.
+  One agent changes something, and everyone else already sees it in search.
+  You can have as many banks as you like, one per project, each with its own isolated memory.
+- **Team development.** `.md` is the single source of truth and travels in git alongside the code.
+  Everyone writes to their own local memory; after a `git pull`, teammates' new files get indexed automatically, and you're immediately working off a shared, up-to-date memory, with no need to recreate sessions or agents.
+- **A standalone knowledge base for an agent, outside any project.** A bank can be any folder of `.md` — it doesn't have to be a project's `.claude/memory/`.
+  Set one up anywhere, edit it like ordinary files, and a personal AI assistant searches it the same way.
 
 ---
 
@@ -45,7 +52,8 @@ flowchart LR
 
 ### Memory banks
 
-**A bank** is a directory holding any nested `.md` files. For a project, that's `<project>/.claude/memory/`.
+**A bank** is a directory holding any nested `.md` files.
+For a project, that's `<project>/.claude/memory/`.
 
 If you need isolation, just set up another bank — separate notes for a different project or agent, for example.
 
@@ -99,9 +107,13 @@ git clone https://github.com/DIMKA4621/mnemo.git
 cd mnemo; .\install.ps1
 ```
 
-Both ways take the same two flags. Leave them alone unless you specifically know you want something other than the default:
+Both ways take the same two flags.
+Leave them alone unless you specifically know you want something other than the default:
 
-- `--no-model`/`-NoModel` — skip the ~2 GB embedding model download. **Default: it downloads.** The one-liner downloads it right away; a manual `install.sh`/`install.ps1` run asks first (or skips quietly if there's no one to ask). Skipped it? Fetch it anytime with `mnemo warmup`, or from the console's Settings page.
+- `--no-model`/`-NoModel` — skip the ~2 GB embedding model download.
+  **Default: it downloads.** The one-liner downloads it right away; a manual `install.sh`/`install.ps1` run asks first (or skips quietly if there's no one to ask).
+  Skipped it?
+  Fetch it anytime with `mnemo warmup`, or from the console's Settings page.
 - `--home DIR`/`-InstallHome DIR` — install somewhere other than the default `~/.mnemo`.
 
 Passing a flag through the one-liner needs each shell's own idiom for arguments after a pipe: `curl ... | bash -s -- --no-model`, and on PowerShell `iex "& { $(irm ...) } -NoModel"`.
@@ -175,10 +187,13 @@ Removes everything the installer put on this machine — the service, the model 
 
 > **Your projects and their `.md` files are never touched.**
 
-Both ways take the same flags. Leave them alone unless you specifically know you want something other than the default:
+Both ways take the same flags.
+Leave them alone unless you specifically know you want something other than the default:
 
-- `--dry-run`/`-DryRun` — show what would be removed and change nothing. **Default: it removes.**
-- `--yes`/`-y`/`-Yes` — don't ask for confirmation. **Default: it asks.**
+- `--dry-run`/`-DryRun` — show what would be removed and change nothing.
+  **Default: it removes.**
+- `--yes`/`-y`/`-Yes` — don't ask for confirmation.
+  **Default: it asks.**
 - `--keep-model`/`-KeepModel` — skip re-downloading the ~2.2 GB embedding model on your next install.
 - `--keep-state`/`-KeepState` — skip rebuilding every bank's index from scratch on your next install.
 
