@@ -84,6 +84,7 @@ const state = {
   queue: null,
   progress: new Map(),          // bank_id -> live index_progress snapshot
   notes: new Map(),             // bank_id -> transient one-line note
+  pendingFiles: new Map(),      // bank_id -> Set<relpath> queued/in-flight (MN-15)
   logKind: 'query',
   logBank: '',                  // '' = every bank
   logPeriod: '24h',             // '1h' | '24h' | '7d' | '30d'
@@ -555,6 +556,26 @@ function clearProgress(bankId, taskId) {
   if (!live) return;
   if (taskId && live.task_id && live.task_id !== taskId) return;
   state.progress.delete(bankId);
+}
+
+/** The live pending-relpaths set for one bank, created empty on first use. */
+function pendingSetFor(bankId) {
+  let set = state.pendingFiles.get(bankId);
+  if (!set) {
+    set = new Set();
+    state.pendingFiles.set(bankId, set);
+  }
+  return set;
+}
+
+/** Clear-signal for MN-15's tree highlight: either `index_done` or
+ *  `index_error` arriving with a truthy `path` means that file is no longer
+ *  queued or in flight, regardless of which one fired. */
+function clearPendingPath(bankId, path) {
+  if (!path) return;
+  const set = state.pendingFiles.get(bankId);
+  if (!set || !set.delete(path)) return;
+  if (bankId === state.selectedBankId) renderTree();
 }
 
 /**
@@ -1898,6 +1919,13 @@ function closeBankMenu() {
 const removal = {
   root: null, box: null, body: null, submit: null,
   bank: null, dropIndex: true, typed: '', busy: false, errorText: null,
+  // MCP-wiring checkbox (MN-13, contract: GET /api/banks/{id}/mcp-wiring).
+  // `projectRoot` is the cheap local check (mirrors `_project_root_from_bank`
+  // in api.py — bank.root must end in .claude/memory); `wiring` holds the
+  // backend's `{has_wiring, uses_template, project_root}` once resolved, or
+  // stays null for a bank that isn't project-shaped at all (no round trip
+  // needed, no checkbox to show).
+  projectRoot: null, wiring: null, stripMcp: false,
 };
 
 function buildRemoval() {
@@ -1941,12 +1969,33 @@ function buildRemoval() {
   });
 }
 
-function openRemoval(bank) {
+async function openRemoval(bank) {
   removal.bank = bank;
   removal.dropIndex = true;
   removal.typed = '';
   removal.busy = false;
   removal.errorText = null;
+  removal.stripMcp = false;
+  removal.wiring = null;
+  removal.projectRoot = projectRootForBankPath(bank.root);
+  if (removal.projectRoot) {
+    // Resolved before the dialog is shown, not after: the checkbox's
+    // enabled/disabled state has to be correct the moment it becomes
+    // visible, never flash from one to the other once the user can see it.
+    try {
+      removal.wiring = await api('/api/banks/' + encodeURIComponent(bank.id) + '/mcp-wiring');
+    } catch (err) {
+      // A lookup that failed is treated the same as "no wiring found" —
+      // the checkbox stays disabled rather than offer to strip something
+      // that was never confirmed to exist.
+      removal.wiring = { has_wiring: false, uses_template: false,
+                          project_root: removal.projectRoot };
+    }
+    // The menu may have opened a different bank (or the dialog may have
+    // been closed) while this was in flight; a stale response must not
+    // repaint over whatever is current now.
+    if (removal.bank !== bank) return;
+  }
   removal.root.hidden = false;
   renderRemoval();
 }
@@ -1999,6 +2048,30 @@ function renderRemoval() {
     }),
   ]));
 
+  if (removal.projectRoot) {
+    const hasWiring = !!(removal.wiring && removal.wiring.has_wiring);
+    const mcpBox = el('input', {
+      attrs: { type: 'checkbox', id: 'rm-strip-mcp' },
+      on: { change: (ev) => { removal.stripMcp = ev.target.checked; } },
+    });
+    mcpBox.checked = removal.stripMcp;
+    mcpBox.disabled = removal.busy || !hasWiring;
+    removal.body.appendChild(el('label', { className: 'rm-check', attrs: { for: 'rm-strip-mcp' } }, [
+      mcpBox,
+      el('span', null, [
+        document.createTextNode('видалити MCP-підключення ('),
+        el('code', { text: removal.projectRoot }),
+        document.createTextNode(')'),
+      ]),
+    ]));
+    if (!hasWiring) {
+      removal.body.appendChild(el('p', {
+        className: 'fs-hint fs-warn',
+        text: 'у корені проєкту немає .mcp.json',
+      }));
+    }
+  }
+
   const confirm = el('input', {
     className: 'fs-input',
     attrs: {
@@ -2041,12 +2114,15 @@ function removalReady() {
 async function submitRemoval() {
   if (!removalReady()) return;
   const bank = removal.bank;
+  const stripMcp = removal.stripMcp;
   removal.busy = true;
   removal.errorText = null;
   renderRemoval();
+  let result;
   try {
-    await api('/api/banks/' + encodeURIComponent(bank.id) +
-              '?drop_index=' + (removal.dropIndex ? 'true' : 'false'),
+    result = await api('/api/banks/' + encodeURIComponent(bank.id) +
+              '?drop_index=' + (removal.dropIndex ? 'true' : 'false') +
+              (stripMcp ? '&strip_mcp=true' : ''),
               { method: 'DELETE' });
   } catch (err) {
     removal.busy = false;
@@ -2063,6 +2139,12 @@ async function submitRemoval() {
   removal.bank = null;
   removal.typed = '';
   hideBanner();
+  // No toast mechanism exists for a removal that just closed its own dialog
+  // and dropped the card — same quiet-success weight as the rest of this
+  // flow, just recorded for anyone checking what actually got touched.
+  if (stripMcp && result && result.mcp_stripped) {
+    console.info('mnemo: MCP wiring stripped from', result.mcp_stripped.join(', ') || '(nothing to strip)');
+  }
   // Drop it from the local model immediately rather than waiting for the
   // `bank_removed` event to come back: the socket may be down, and a card
   // that outlives the bank it describes is the one thing this dialog must

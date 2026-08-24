@@ -1524,9 +1524,62 @@ def api_regenerate_bank_token(bank_id: str) -> dict:
     return _token_json(bank, token)
 
 
-@app.delete("/api/banks/{bank_id}", include_in_schema=False)
-def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
+# ----------------------------------------------------------- MCP wiring (MN-13)
+#
+# Scoped to exactly this bank's own project — `_project_root_from_bank`,
+# never a machine-wide scan (`scaffold.adopted_projects()` is the broader,
+# unrelated mechanism `doctor`/`init --migrate` use). The remove-bank dialog
+# needs one answer: is *this* bank's project wired, so it can offer to strip
+# it in the same action.
+
+
+def _mcp_wiring_info(bank: Bank) -> dict:
+    project_root = _project_root_from_bank(bank.root)
+    if project_root is None:
+        return {"has_wiring": False, "uses_template": False, "project_root": None}
+    from . import scaffold
+    status = scaffold.project_mcp_wiring(project_root)
+    return {
+        "has_wiring": status["has_wiring"],
+        "uses_template": status["uses_template"],
+        "project_root": str(project_root),
+    }
+
+
+@app.get("/api/banks/{bank_id}/mcp-wiring", include_in_schema=False)
+def api_bank_mcp_wiring(bank_id: str) -> dict:
     bank = _resolve_bank(bank_id, require_enabled=False)
+    return _mcp_wiring_info(bank)
+
+
+@app.delete("/api/banks/{bank_id}", include_in_schema=False)
+def api_remove_bank(bank_id: str, drop_index: bool = True,
+                    strip_mcp: bool = False) -> dict:
+    bank = _resolve_bank(bank_id, require_enabled=False)
+
+    # `strip_mcp`'s project root is resolved up front — a caller error (root
+    # not project-shaped) is cheap to catch before touching anything, and
+    # failing late here would be a confusing way to reject a bad request.
+    # The actual strip, though, runs LAST, after the bank is provably gone
+    # (see the comment below) — reusing "cannot half-succeed" reasoning for
+    # the strip's own ordering would be backwards: unlike an unlink, a
+    # successful strip cannot be undone, so running it BEFORE a step that can
+    # still fail (`index_locked`) risked leaving a project's wiring stripped
+    # for a bank that in fact still exists. Deferring it to last means the
+    # only way to observe a half-done state is "bank is gone, wiring wasn't
+    # stripped yet" — reported plainly via `mcp_strip_failed`, and recoverable
+    # by re-running `mnemo init` — never "bank is still here but its wiring
+    # already isn't."
+    project_root: Path | None = None
+    if strip_mcp:
+        project_root = _project_root_from_bank(bank.root)
+        if project_root is None:
+            raise ApiError(
+                "bad_request",
+                f"bank {bank.name!r} root does not end in .claude/memory — "
+                f"no project wiring to strip",
+                bank_id=bank.id,
+            )
 
     # Order matters, and this is the order that cannot half-succeed.
     #
@@ -1577,7 +1630,28 @@ def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
     if q is not None:
         q.resume_bank(bank.id)
     hub.publish("bank_removed", {"bank_id": bank.id}, bank.id)
-    return {"ok": True, "index_removed": bool(drop_index)}
+
+    result = {"ok": True, "index_removed": bool(drop_index)}
+    if strip_mcp:
+        # The bank is unregistered and its index is gone by now — this can
+        # still raise, but nothing about the bank's own removal is undone by
+        # that. `mcp_strip_failed` reports it plainly rather than silently
+        # leaving a dead token behind.
+        from . import scaffold
+        assert project_root is not None
+        try:
+            stripped = scaffold.strip_mcp_wiring(project_root)
+        except OSError as exc:
+            raise ApiError(
+                "mcp_strip_failed",
+                f"bank {bank.name!r} was removed, but could not update MCP "
+                f"wiring under {project_root}: {exc}",
+                bank_id=bank.id,
+            ) from exc
+        result["mcp_stripped"] = stripped["touched"]
+        log.info("stripped MCP wiring for bank %s under %s (%s)",
+                 bank.name, project_root, ", ".join(stripped["touched"]) or "nothing found")
+    return result
 
 
 def _unlink_index(bank: Bank) -> tuple[int, list[Path]]:

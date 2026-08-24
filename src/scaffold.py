@@ -1773,6 +1773,96 @@ def adopted_projects(roots: Iterable[Path] | None = None) -> list[AdoptedProject
     return out
 
 
+# --------------------------------------- MCP wiring detection/removal (MN-13)
+#
+# Scoped to exactly one project: the one whose root the caller already
+# resolved from a *bank's* registered root (`api._project_root_from_bank`).
+# This is deliberately narrower than `adopted_projects()` above, which scans
+# every project Claude Code knows about — that is a machine-wide diagnostic
+# for `doctor`/`init --migrate`, not what the remove-bank dialog asks. The
+# dialog asks one question about one project: is *this* bank's own project
+# wired, and would removing the bank leave that wiring dangling.
+
+
+def project_mcp_wiring(project_root: Path) -> dict:
+    """Whether `project_root` carries an mnemo-authored MCP entry.
+
+    Reuses `_mnemo_servers`' own "is this ours" test rather than a second
+    one — `.mcp.json` is the direct form, `.mcp.json.template` is the
+    template-layer form (`.mcp-setup.sh`/`.ps1` regenerate `.mcp.json` from
+    it), and a project may have either, both, or neither.
+    """
+    direct = _mnemo_servers(project_root / ".mcp.json")
+    template = _mnemo_servers(project_root / ".mcp.json.template")
+    return {"has_wiring": bool(direct or template), "uses_template": bool(template)}
+
+
+def strip_mcp_wiring(project_root: Path) -> dict:
+    """Remove mnemo's own MCP entry from `project_root`'s wiring files.
+
+    Removes only the key(s) mnemo itself authored (`_INSTANCE`/
+    `_LEGACY_INSTANCE`, matched by the same HTTP/legacy-stdio test `init`
+    uses to decide whether an entry is its own to rewrite) from `.mcp.json`
+    and `.mcp.json.template` — every other server and key in `mcpServers`,
+    and the rest of each file, is left untouched. Also drops the token
+    variable (`{PREFIX}_TOKEN`) from `.mcp.env`, if present; `HOST`/`PORT`
+    are left, since a second bank's entry in the same project may share them.
+
+    Best-effort per file: a missing or unreadable file is skipped rather than
+    treated as a failure. A write failure (e.g. permission denied) is not
+    caught here — it propagates, so the caller can decide whether removing
+    the bank should proceed past a wiring-strip that did not actually happen.
+    """
+    touched: list[str] = []
+
+    def _is_ours(entry: object) -> bool:
+        return _is_mnemo_http(entry) or _is_legacy_mcp(entry) is not None
+
+    def _strip_servers(path: Path) -> None:
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            return
+        changed = False
+        for key in (_INSTANCE, _LEGACY_INSTANCE):
+            entry = servers.get(key)
+            if entry is not None and _is_ours(entry):
+                del servers[key]
+                changed = True
+        if changed:
+            data["mcpServers"] = servers
+            _write(path, _dump_json(data))
+            touched.append(path.name)
+
+    _strip_servers(project_root / ".mcp.json")
+    _strip_servers(project_root / ".mcp.json.template")
+
+    env = project_root / ".mcp.env"
+    original = _read_text(env)
+    if original:
+        token_key = f"{_var_prefix(_VAR_INSTANCE)}_TOKEN"
+        eol = _newline(original)
+        kept, changed = [], False
+        for line in original.splitlines():
+            name, sep, _ = line.partition("=")
+            if sep and name.strip() == token_key:
+                changed = True
+                continue
+            kept.append(line)
+        if changed:
+            _write(env, eol.join(kept) + eol if kept else "")
+            touched.append(env.name)
+
+    return {"touched": touched}
+
+
 # `bank_name_for` used to live here: it worked out which name to put in the
 # URL, and had to guess it before the bank was registered. Nothing needs a
 # bank name in a file any more — the token is the address — so it went with
