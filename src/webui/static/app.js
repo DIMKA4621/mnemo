@@ -1981,6 +1981,10 @@ async function openRemoval(bank) {
     // been closed) while this was in flight; a stale response must not
     // repaint over whatever is current now.
     if (removal.bank !== bank) return;
+    // Same default posture as "видалити також індекс": when wiring is
+    // actually found, offer to take it out too rather than leave a dead
+    // .mcp.json pointed at a bank that no longer exists.
+    removal.stripMcp = removal.wiring.has_wiring;
   }
   removal.root.hidden = false;
   renderRemoval();
