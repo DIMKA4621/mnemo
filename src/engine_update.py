@@ -38,6 +38,7 @@ import subprocess
 import tarfile
 import threading
 from contextlib import suppress
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable
@@ -731,6 +732,94 @@ def _emit_progress(
 # --------------------------------------------------------------- staging
 
 
+@dataclass(frozen=True)
+class DiskSpaceCheck:
+    """One free-space snapshot for ``target``, against ``required_bytes``.
+
+    A plain value object rather than a bare bool so a caller (``diagnostics``,
+    the failure message below) can report *how much* is short, not just that
+    it is.
+    """
+
+    target: Path
+    required_bytes: int
+    available_bytes: int
+
+    @property
+    def ok(self) -> bool:
+        return self.available_bytes >= self.required_bytes
+
+
+class InsufficientDiskSpace(RuntimeError):
+    """Not enough free space for the download about to start.
+
+    Shared between staging a release (:func:`stage_release`) and downloading
+    the embedding model (``cli._cmd_warmup``) — the message names no
+    particular caller, just the target directory and the shortfall.
+    """
+
+    def __init__(self, check: DiskSpaceCheck) -> None:
+        from .diagnostics import human_bytes
+
+        self.check = check
+        super().__init__(
+            f"not enough disk space at {check.target}: "
+            f"need {human_bytes(check.required_bytes)}, "
+            f"have {human_bytes(check.available_bytes)} free"
+        )
+
+
+def check_disk_space(
+    *,
+    model_cached: bool | None = None,
+    include_version_size: bool = True,
+    target: Path | None = None,
+) -> DiskSpaceCheck:
+    """Free space at ``target`` vs. what the caller's download will need.
+
+    Two shapes share this one function:
+
+    * **Staging a release** (the default: ``target=None`` ->
+      ``versions/``, ``include_version_size=True``) — a built engine tree
+      plus a buffer, plus the model download if it is not already cached.
+      This is what :func:`stage_release` calls with no arguments.
+    * **Downloading the model alone** (``cli._cmd_warmup``: ``target=
+      config.MODEL_CACHE``, ``include_version_size=False``) — no new engine
+      version is built, so its size never enters the budget; only the model
+      download plus the buffer, checked against ``model-cache/`` instead of
+      ``versions/``.
+
+    ``model_cached=None`` (the staging default) looks it up itself via
+    ``embedder.is_model_cached``. A caller that already computed it this same
+    tick — ``diagnostics.collect`` fills its own ``report["model"]`` from the
+    same check — passes it through instead, so the (cheap but not free) cache
+    probe does not run twice for one ``doctor`` report. ``cli._cmd_warmup``
+    passes ``model_cached=False`` unconditionally: warmup exists to (re)fetch
+    the model, so the download always counts, ``--force`` included.
+
+    The model download only counts toward ``required_bytes`` when it is not
+    already cached: an already-warmed-up machine's self-update never touches
+    ``model-cache/`` at all.
+    """
+    if model_cached is None:
+        from .embedder import is_model_cached
+
+        model_cached = is_model_cached()
+
+    if target is None:
+        target = service_ctl.versions_dir()
+
+    required = config.INSTALL_DISK_BUFFER_BYTES
+    if include_version_size:
+        required += config.ENGINE_VERSION_SIZE_BYTES
+    if not model_cached:
+        required += config.MODEL_DOWNLOAD_SIZE_BYTES
+
+    target.mkdir(parents=True, exist_ok=True)
+    available = shutil.disk_usage(target).free
+    return DiskSpaceCheck(target=target, required_bytes=required, available_bytes=available)
+
+
 def _tarball_url(tag: str) -> str:
     """GitHub's source archive for a tag — no API call needed to derive it.
 
@@ -1063,6 +1152,10 @@ def stage_release(
 
     built = False
     try:
+        space = check_disk_space()
+        if not space.ok:
+            raise InsufficientDiskSpace(space)
+
         _emit_progress(tag, "download", detail=url)
         _download(url, archive, timeout=download_timeout)
 

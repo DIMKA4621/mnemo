@@ -664,3 +664,17 @@ UPDATE_CHECK_TIMEOUT_S: float = float(
 UPDATE_TARBALL_URL_TEMPLATE: str | None = os.environ.get(
     "MNEMO_UPDATE_TARBALL_URL_TEMPLATE"
 )
+
+# Disk-space budget checked before staging a release (engine_update.stage_release):
+# a built `versions/<tag>/` tree (~234 MiB measured, rounded up with margin),
+# plus a flat safety buffer, plus the embedding model download when it is not
+# already cached (mnemo warmup never ran, or a fresh install) -- staging would
+# otherwise download a multi-hundred-MB tarball and start a pip install only
+# to run out of space partway through. Three independent constants, not one
+# combined total, so each can be reasoned about on its own. Plain literals,
+# not env-overridable: the same numbers are duplicated in install.sh/
+# install.ps1 (bash/PowerShell have no way to share this module's constants),
+# so a per-machine override here would silently disagree with those.
+ENGINE_VERSION_SIZE_BYTES: int = 300_000_000
+MODEL_DOWNLOAD_SIZE_BYTES: int = 2_200_000_000
+INSTALL_DISK_BUFFER_BYTES: int = 500_000_000

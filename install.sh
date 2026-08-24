@@ -112,6 +112,60 @@ human() {
 	}'
 }
 
+# --- disk space preflight (called after flag parsing, before layout) ----
+# Sized for a first install: one version tree (~234 MiB measured, rounded
+# up to 300 MB) plus the embedding model (~2.2 GB, skipped when --no-model
+# is set or the cache already looks populated), plus a safety buffer.
+ENGINE_VERSION_BYTES=300000000
+MODEL_BYTES=2200000000
+DISK_BUFFER_BYTES=500000000
+
+# required_disk_bytes <engine-home> — the number alone, so a test can call
+# it directly without touching the filesystem beyond a model-cache check.
+required_disk_bytes() {
+	required=$((ENGINE_VERSION_BYTES + DISK_BUFFER_BYTES))
+	if [ "$NO_MODEL" -eq 0 ]; then
+		model_dir="$1/model-cache"
+		# Same cheap existence check --check uses below: fastembed is not
+		# importable yet (no venv exists at this point), so this is a
+		# heuristic, not the real is_model_cached() the actual warmup step
+		# asks later.
+		if [ ! -d "$model_dir" ] \
+			|| ! find "$model_dir" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+			required=$((required + MODEL_BYTES))
+		fi
+	fi
+	printf '%s' "$required"
+}
+
+# available_disk_bytes <path> — free bytes on the filesystem that would
+# hold <path>, walking up to the nearest existing ancestor since the
+# engine home does not exist yet on a first install.
+available_disk_bytes() {
+	target="$1"
+	while [ ! -d "$target" ]; do
+		target="$(dirname "$target")"
+	done
+	df -Pk "$target" | awk 'NR==2 { print $4 * 1024 }'
+}
+
+# check_disk_space <engine-home> — the decision + the printed report.
+# Split from the two functions above so a test can stub available_disk_bytes
+# with a fake number instead of needing an actually-full disk.
+check_disk_space() {
+	target_dir="$1"
+	required="$(required_disk_bytes "$target_dir")"
+	available="$(available_disk_bytes "$target_dir")"
+	if [ "$available" -ge "$required" ]; then
+		return 0
+	fi
+	say_hl "not enough free disk space" 31
+	say_hl "  required:  $(human "$required")" 31
+	say_hl "  available: $(human "$available")" 31
+	say_hl "  free up space, then re-run." 31
+	return 1
+}
+
 # --- locate the repo (this script's own directory) ---------------------
 SRC_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -400,6 +454,8 @@ fi
 [ -f "$SRC_REPO/src/cli.py" ] \
 	|| { echo "install.sh: run from the mnemo repo (src/cli.py not found)" >&2; exit 1; }
 
+check_disk_space "$MNEMO_HOME" || exit 1
+
 # --- 1. layout (state/ and model-cache/ are never deleted) -------------
 mkdir -p \
 	"$MNEMO_HOME/state" \
@@ -598,8 +654,27 @@ fi
 
 # A fenced block, so a re-run rewrites exactly this and nothing else. No
 # PATH mutation: `mnemo` becomes a function pointing at the full path.
-PROFILE_FILE="$HOME/.profile"
-[ -f "$PROFILE_FILE" ] || PROFILE_FILE="$HOME/.bashrc"
+#
+# Written to every rc file the user's actual shell reads, not just one --
+# `~/.profile` alone is a login-shell-only file, so a plain new terminal
+# (GNOME Terminal, VS Code, ...) opening a non-login bash never sourced it,
+# and zsh (macOS default) never read a bash file at all. `$SHELL` is the
+# user's registered login shell, which is what a new terminal actually
+# launches, so it -- not the shell currently running this installer -- is
+# what decides the target files.
+case "$(basename "${SHELL:-}")" in
+	zsh)
+		# `.zshrc` alone already covers every new interactive shell; `.zprofile`
+		# is added on top for login shells. zsh never reads `.profile` (only
+		# `.zshenv`/`.zprofile`/`.zshrc`/`.zlogin`), so falling back to it here
+		# would silently write a file the shell never sources -- create
+		# `.zprofile` outright instead, there is nothing to clobber.
+		PROFILE_FILES=("$HOME/.zshrc" "$HOME/.zprofile")
+		;;
+	*)
+		PROFILE_FILES=("$HOME/.bashrc" "$HOME/.profile")
+		;;
+esac
 BEGIN_MARK="# >>> mnemo >>>"
 END_MARK="# <<< mnemo <<<"
 
@@ -619,21 +694,23 @@ END_MARK="# <<< mnemo <<<"
 	printf '%s\n' "$END_MARK"
 } > "$MNEMO_HOME/state/.profile-block"
 
-touch "$PROFILE_FILE"
-if grep -qF "$BEGIN_MARK" "$PROFILE_FILE" 2>/dev/null; then
-	# Replace the fenced block in place, leave everything else untouched.
-	awk -v begin="$BEGIN_MARK" -v end="$END_MARK" -v block="$MNEMO_HOME/state/.profile-block" '
-		$0 == begin { skip = 1; while ((getline line < block) > 0) print line; close(block); next }
-		$0 == end { skip = 0; next }
-		!skip { print }
-	' "$PROFILE_FILE" > "$PROFILE_FILE.mnemo-tmp"
-	mv "$PROFILE_FILE.mnemo-tmp" "$PROFILE_FILE"
-	say "shell profile: mnemo block refreshed ($PROFILE_FILE)"
-else
-	printf '\n' >> "$PROFILE_FILE"
-	cat "$MNEMO_HOME/state/.profile-block" >> "$PROFILE_FILE"
-	say "shell profile: mnemo registered ($PROFILE_FILE)"
-fi
+for PROFILE_FILE in "${PROFILE_FILES[@]}"; do
+	touch "$PROFILE_FILE"
+	if grep -qF "$BEGIN_MARK" "$PROFILE_FILE" 2>/dev/null; then
+		# Replace the fenced block in place, leave everything else untouched.
+		awk -v begin="$BEGIN_MARK" -v end="$END_MARK" -v block="$MNEMO_HOME/state/.profile-block" '
+			$0 == begin { skip = 1; while ((getline line < block) > 0) print line; close(block); next }
+			$0 == end { skip = 0; next }
+			!skip { print }
+		' "$PROFILE_FILE" > "$PROFILE_FILE.mnemo-tmp"
+		mv "$PROFILE_FILE.mnemo-tmp" "$PROFILE_FILE"
+		say "shell profile: mnemo block refreshed ($PROFILE_FILE)"
+	else
+		printf '\n' >> "$PROFILE_FILE"
+		cat "$MNEMO_HOME/state/.profile-block" >> "$PROFILE_FILE"
+		say "shell profile: mnemo registered ($PROFILE_FILE)"
+	fi
+done
 rm -f "$MNEMO_HOME/state/.profile-block"
 
 # --- 7. autostart (systemd --user + linger) ----------------------------

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -184,6 +185,119 @@ def test_heartbeat_zero_tick_edge_case() -> None:
     ok("a near-instant child does not corrupt the label with a stray backspace")
 
 
+def _run_ps(command: str, *, timeout: int = 30) -> subprocess.CompletedProcess[str]:
+    """Bare `powershell.exe -Command`, no returncode assertion -- the two
+    disk-space checks below need to inspect a thrown exception's message
+    themselves, unlike `run()` above which always expects a clean exit.
+    """
+    return subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command],
+        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout,
+    )
+
+
+def test_disk_space_check() -> None:
+    """Get-RequiredDiskBytes / Get-AvailableDiskBytes / Test-DiskSpace
+    (MN-21, 2026-08-24): isolated dot-source harness, same pattern
+    `check_script_encoding` and `test_heartbeat_stall_detection` already use
+    for exercising this file's functions without a full install. Split into
+    a "get the number" half and a "decide + throw" half specifically so
+    Get-AvailableDiskBytes can be stubbed here instead of requiring an
+    actually-full disk.
+    """
+    with tempfile.TemporaryDirectory(prefix="mnemo disk ") as raw:
+        target = Path(raw) / "engine-home"
+        target.mkdir()
+
+        no_cache = _run_ps(f". '{INSTALLER}'; Write-Output (Get-RequiredDiskBytes '{target}' $false)")
+        assert no_cache.returncode == 0, no_cache.stdout + no_cache.stderr
+        assert no_cache.stdout.strip() == str(300_000_000 + 2_200_000_000 + 500_000_000), no_cache.stdout
+        ok("Get-RequiredDiskBytes counts the model when the cache is empty")
+
+        no_model = _run_ps(f". '{INSTALLER}'; Write-Output (Get-RequiredDiskBytes '{target}' $true)")
+        assert no_model.returncode == 0, no_model.stdout + no_model.stderr
+        assert no_model.stdout.strip() == str(300_000_000 + 500_000_000), no_model.stdout
+        ok("Get-RequiredDiskBytes drops the model when SkipModel is set")
+
+        model_cache = target / "model-cache"
+        model_cache.mkdir()
+        (model_cache / "file.bin").write_bytes(b"x")
+        cached = _run_ps(f". '{INSTALLER}'; Write-Output (Get-RequiredDiskBytes '{target}' $false)")
+        assert cached.returncode == 0, cached.stdout + cached.stderr
+        assert cached.stdout.strip() == str(300_000_000 + 500_000_000), cached.stdout
+        ok("Get-RequiredDiskBytes drops the model when the cache already looks populated")
+
+        low = _run_ps(
+            f". '{INSTALLER}'; "
+            "function Get-AvailableDiskBytes { param([string]$EngineHome) return [long]1000 }; "
+            "try { Test-DiskSpace 'C:\\nonexistent\\target'; Write-Output 'DID_NOT_THROW' } "
+            "catch { Write-Output ('THREW:' + $_.Exception.Message) }"
+        )
+        assert low.returncode == 0, low.stdout + low.stderr
+        assert "DID_NOT_THROW" not in low.stdout, low.stdout
+        assert "not enough free disk space" in low.stdout, low.stdout
+        assert "required:" in low.stdout, low.stdout
+        assert "available:" in low.stdout, low.stdout
+        assert "free up space, then re-run." in low.stdout, low.stdout
+        ok("Test-DiskSpace throws with the disk-space report when available < required")
+
+        high = _run_ps(
+            f". '{INSTALLER}'; "
+            "function Get-AvailableDiskBytes { param([string]$EngineHome) return [long]99999999999 }; "
+            "try { Test-DiskSpace 'C:\\nonexistent\\target'; Write-Output 'DID_NOT_THROW' } "
+            "catch { Write-Output ('THREW:' + $_.Exception.Message) }"
+        )
+        assert high.returncode == 0, high.stdout + high.stderr
+        assert "DID_NOT_THROW" in high.stdout, high.stdout
+        ok("Test-DiskSpace does not throw when available >= required")
+
+
+def check_disk_space_constants_agree() -> None:
+    """The three disk-space budget numbers are hard-coded independently in
+    install.sh, install.ps1 and src/config.py -- bash/PowerShell cannot
+    import a Python module's constants, so each carries its own literal
+    (see config.py's own comment on ENGINE_VERSION_SIZE_BYTES). This is what
+    keeps the three from silently drifting apart. Duplicated in
+    test_install_posix.py rather than shared, so this coverage does not
+    depend on which OS's CI happens to run -- both installer suites already
+    self-skip on the other platform.
+    """
+    sh_text = (REPO / "install.sh").read_text(encoding="utf-8")
+    ps1_text = INSTALLER.read_text(encoding="utf-8")
+    py_text = (REPO / "src" / "config.py").read_text(encoding="utf-8")
+
+    def grab(pattern: str, text: str) -> int:
+        match = re.search(pattern, text)
+        assert match, f"pattern not found: {pattern}"
+        return int(match.group(1).replace("_", ""))
+
+    triples = [
+        (
+            "engine version size",
+            grab(r"ENGINE_VERSION_BYTES=(\d+)", sh_text),
+            grab(r"\$EngineVersionBytes = (\d+)", ps1_text),
+            grab(r"ENGINE_VERSION_SIZE_BYTES: int = ([\d_]+)", py_text),
+        ),
+        (
+            "model download size",
+            grab(r"MODEL_BYTES=(\d+)", sh_text),
+            grab(r"\$ModelBytes = (\d+)", ps1_text),
+            grab(r"MODEL_DOWNLOAD_SIZE_BYTES: int = ([\d_]+)", py_text),
+        ),
+        (
+            "disk buffer",
+            grab(r"DISK_BUFFER_BYTES=(\d+)", sh_text),
+            grab(r"\$DiskBufferBytes = (\d+)", ps1_text),
+            grab(r"INSTALL_DISK_BUFFER_BYTES: int = ([\d_]+)", py_text),
+        ),
+    ]
+    for name, sh_val, ps1_val, py_val in triples:
+        assert sh_val == ps1_val == py_val, (
+            f"{name} disagrees: install.sh={sh_val} install.ps1={ps1_val} config.py={py_val}"
+        )
+    ok("disk-space budget constants agree across install.sh, install.ps1 and config.py")
+
+
 def main() -> int:
     if os.name != "nt":
         print("SKIP  native Windows installer test")
@@ -193,6 +307,8 @@ def main() -> int:
     check_script_encoding(UNINSTALLER)
     test_heartbeat_stall_detection()
     test_heartbeat_zero_tick_edge_case()
+    test_disk_space_check()
+    check_disk_space_constants_agree()
 
     with tempfile.TemporaryDirectory(prefix="mnemo install ") as raw:
         mismatched_env = {

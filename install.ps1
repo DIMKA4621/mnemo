@@ -36,6 +36,14 @@ $VecProbe = "import sqlite3, sqlite_vec; " +
     "conn.enable_load_extension(True); " +
     "sqlite_vec.load(conn)"
 
+# Disk-space preflight (Test-DiskSpace below): sized for a first install --
+# one version tree (~234 MiB measured, rounded up to 300 MB) plus the
+# embedding model (~2.2 GB, skipped with -NoModel or an already-populated
+# cache), plus a safety buffer.
+$EngineVersionBytes = 300000000
+$ModelBytes = 2200000000
+$DiskBufferBytes = 500000000
+
 function Write-Status {
     param([string]$Message)
     Write-Host "install.ps1: $Message"
@@ -499,6 +507,87 @@ function Format-Bytes {
         }
     }
     return ("{0:0.#} PiB" -f ($value / 1024.0))
+}
+
+function Get-RequiredDiskBytes {
+    <#
+        The number alone -- required bytes for a first install at
+        $EngineHome -- so a test can call this directly without touching the
+        filesystem beyond a model-cache existence check.
+    #>
+    param([string]$EngineHome, [bool]$SkipModel)
+
+    $required = $EngineVersionBytes + $DiskBufferBytes
+    if (-not $SkipModel) {
+        # Same cheap existence check Show-CheckReport's model-cache line
+        # relies on: fastembed is not importable yet (no venv exists at this
+        # point), so this is a heuristic, not the real is_model_cached() the
+        # actual warmup step asks later.
+        $modelDir = Join-Path $EngineHome "model-cache"
+        $hasModelFiles = $false
+        if (Test-Path -LiteralPath $modelDir -PathType Container) {
+            $hasModelFiles = $null -ne (Get-ChildItem -LiteralPath $modelDir -Force -ErrorAction SilentlyContinue | Select-Object -First 1)
+        }
+        if (-not $hasModelFiles) {
+            $required += $ModelBytes
+        }
+    }
+    return [long]$required
+}
+
+function Get-AvailableDiskBytes {
+    <#
+        Free bytes on the drive that would hold $EngineHome, walking up to
+        the nearest existing ancestor -- the engine home does not exist yet
+        on a first install.
+    #>
+    param([string]$EngineHome)
+
+    $target = $EngineHome
+    while (-not (Test-Path -LiteralPath $target -PathType Container)) {
+        $parent = Split-Path -Parent $target
+        if ([string]::IsNullOrEmpty($parent) -or $parent -eq $target) { break }
+        $target = $parent
+    }
+    return [long](Get-Item -LiteralPath $target).PSDrive.Free
+}
+
+function Test-DiskSpace {
+    <#
+        The decision + the report, split from the two functions above so a
+        test can stub Get-AvailableDiskBytes with a fake number instead of
+        needing an actually-full disk.
+
+        Throws rather than printing + returning $false + letting the caller
+        `exit`: every other Invoke-Install failure (the mismatched-HOME
+        check, the sqlite-vec load check, ...) throws, and Invoke-Install's
+        caller catches it centrally:
+
+            try { Invoke-Install }
+            catch {
+                [Console]::Error.WriteLine("install.ps1: ERROR: $($_.Exception.Message)")
+                if ($PSCommandPath) { exit 1 }
+            }
+
+        That $PSCommandPath guard exists specifically so a bare `exit` is
+        never reached when this script's TEXT was run via `iex`/`& { ... }`
+        rather than as a real file -- `exit` with no real file behind the
+        execution terminates the whole calling PowerShell process, not just
+        this script (see that catch block's own comment). A disk-space
+        `exit 1` here would bypass that guard entirely, so this throws and
+        lets the same guarded path handle it like everything else.
+    #>
+    param([string]$EngineHome)
+
+    $required = Get-RequiredDiskBytes $EngineHome $script:NoModel
+    $available = Get-AvailableDiskBytes $EngineHome
+    if ($available -ge $required) {
+        return
+    }
+    throw ("not enough free disk space`n" +
+        "install.ps1:   required:  $(Format-Bytes $required)`n" +
+        "install.ps1:   available: $(Format-Bytes $available)`n" +
+        "install.ps1:   free up space, then re-run.")
 }
 
 function Get-LegacyEngineState {
@@ -1121,6 +1210,8 @@ function Invoke-Install {
 
     $pythonCommand = Resolve-PythonCommand $Python
     Write-Status "python: $($pythonCommand.Interpreter) ($($pythonCommand.Version), $($pythonCommand.Bits)-bit)"
+
+    Test-DiskSpace $engineHome
 
     foreach ($directory in @(
         $engineHome,
