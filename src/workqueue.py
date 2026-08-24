@@ -268,6 +268,28 @@ def depth(bank_id: str | None = None) -> int:
         return sum(1 for t in _waiting.values() if t.bank_id == bank_id)
 
 
+def pending_paths(bank_id: str) -> set[str]:
+    """Relpaths of this bank that are queued or in flight right now.
+
+    Only `file`/`prune` tasks contribute: a `bulk`/`rebuild` task has no
+    single path to report, so it cannot highlight one file in a tree.
+    """
+    with _lock:
+        paths = {
+            t.path
+            for t in _waiting.values()
+            if t.bank_id == bank_id and t.path and t.kind in ("file", "prune")
+        }
+        paths.update(
+            r.task.path
+            for r in _running.values()
+            if r.task.bank_id == bank_id
+            and r.task.path
+            and r.task.kind in ("file", "prune")
+        )
+        return paths
+
+
 def busy(bank_id: str | None = None) -> bool:
     """Is work for this bank in flight?
 
@@ -367,6 +389,13 @@ def enqueue(task: Task) -> str:
             _by_file[key] = task.id
         heapq.heappush(_heap, (int(priority), task.seq, task.id))
         _cv.notify()
+    if key is not None:
+        # One path-level signal for a tree to highlight live, without waiting
+        # for the aggregate `queue` event or polling `pending_paths`. The
+        # matching "cleared" signal is the existing `index_done`/`index_error`
+        # event for this path — no new event needed on that side, both
+        # already carry `path` for kind='file'/'prune'.
+        _emit("file_queued", task.bank_id, path=task.path)
     _emit_queue()
     return task.id
 

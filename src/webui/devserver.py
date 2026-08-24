@@ -978,6 +978,27 @@ def mark_indexed(bank_id: str, rel: str) -> int:
         return count
 
 
+# MN-15: relpaths queued or in flight right now, per bank. Fixture-only
+# mirror of `workqueue.pending_paths()` — this mock has no real queue, so
+# `simulate_task` below is the one place that adds to and removes from it,
+# same as it is the one place that already fabricates `index_start`/
+# `index_progress`/`index_done` for a reindex.
+_PENDING: dict[str, set[str]] = {}
+
+
+def _tree_response(bank_id: str) -> dict:
+    """`/api/tree`'s fixture, with the live `pending` field merged in.
+
+    `TREES[bank_id]` is the static fixture loaded once at startup; `pending`
+    is the one field on it that changes while the server runs, so it is
+    computed here rather than mutated onto the shared fixture dict.
+    """
+    data = dict(TREES[bank_id])
+    with _lock:
+        data["pending"] = sorted(_PENDING.get(bank_id, ()))
+    return data
+
+
 def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> None:
     """Walk one reindex through the WS event sequence of contract 9.7."""
     bank_id = bank["id"]
@@ -987,6 +1008,15 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
     # the transition the tree has to keep up with.
     targets = [path] if path else list(files)
     started = time.time()
+
+    # MN-15: a real bulk scan enqueues every file up front, then a worker
+    # pulls them one at a time — mirrored here so `file_queued` (and the
+    # `pending` field `_tree_response` serves meanwhile) both show every
+    # target highlighted from the start, not just the one being processed.
+    with _lock:
+        _PENDING.setdefault(bank_id, set()).update(targets)
+    for rel in targets:
+        broadcast("file_queued", bank_id, {"path": rel})
 
     with _lock:
         bank["status"] = "indexing"
@@ -1038,6 +1068,8 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
 
         chunk_total = mark_indexed(bank_id, rel) or chunk_total
         total_chunks += chunk_total
+        with _lock:
+            _PENDING.get(bank_id, set()).discard(rel)
         took = (time.time() - started) * 1000.0
         broadcast("index_done", bank_id,
                   {"task_id": task_id, "kind": "file", "path": rel,
@@ -1578,7 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(404, "bank_not_found", "no bank matches",
                           {"ref": (query.get("bank") or [""])[0]})
                 return
-            self.json_out(200, TREES[bank["id"]])
+            self.json_out(200, _tree_response(bank["id"]))
             return
 
         if path == "/api/file":

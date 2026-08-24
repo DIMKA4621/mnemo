@@ -378,6 +378,16 @@ def _busy(bank_id: str | None = None) -> bool:
         return False
 
 
+def _pending_paths(bank_id: str) -> list[str]:
+    q = _queue()
+    if q is None:
+        return []
+    try:
+        return sorted(q.pending_paths(bank_id))
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _require_queue() -> Any:
     q = _queue()
     if q is None:
@@ -2004,6 +2014,10 @@ def api_tree(
         "files": files,
         "dirs": dirs,
         "tree": tree,
+        # Relpaths queued or in flight right now (kind='file'/'prune') — a
+        # page opened mid-index highlights these without waiting for the
+        # first `file_queued`/`index_done` WS event to arrive.
+        "pending": _pending_paths(b.id),
     }
 
 

@@ -474,6 +474,10 @@ async function loadTree(opts) {
   // for the previous bank must not overwrite the current one's tree.
   if (bank.id !== state.selectedBankId) return;
   state.tree = data;
+  // REST is authoritative for this bank's pending set (contract: `api_tree`'s
+  // `pending` field) — replaces rather than merges, so a file cleared or
+  // queued while the tree pane was closed is picked up correctly on reopen.
+  state.pendingFiles.set(bank.id, new Set(data.pending || []));
   if (opts && opts.expandAll) {
     // Open every directory by default — v1 banks are small and hiding files
     // defeats the "видно, багато файлів чи ні" goal of design §7.
@@ -555,6 +559,11 @@ function renderNode(node, depth, out) {
   const classes = ['tree-node', 'is-file'];
   if (node.path === state.filePath) classes.push('is-selected');
   if (!node.indexed) classes.push('not-indexed');
+  // Keyed on the selected bank alone — a set for a different bank simply
+  // isn't looked up here, so switching banks can never leak one bank's
+  // highlights onto another's tree.
+  const pending = state.pendingFiles.get(state.selectedBankId);
+  if (pending && pending.has(node.path)) classes.push('is-pending');
 
   const row = el('div', {
     className: classes.join(' '),
