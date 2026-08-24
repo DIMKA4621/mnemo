@@ -219,6 +219,17 @@ body {
 
 button, input, select { font: inherit; color: inherit; }
 button { cursor: pointer; }
+
+/* Native checkboxes render their own OS/browser accent by default — on the
+   dark palette that made a disabled box read almost the same as a checked
+   one, since the UA's disabled dimming barely touches it. `accent-color`
+   pins the checked fill to the app palette instead of the OS default. */
+input[type="checkbox"] { accent-color: var(--accent); }
+/* Dimming lives on the row/label wrapper (`.fs-init-row:has()`, `.rm-check:has()`
+   in overlays.css) so the checkbox and its text fade together by the same
+   amount — `accent-color` here only keeps a disabled-but-checked box (mid-submit
+   in the remove-bank dialog) from rendering in the same blue as an active one. */
+input[type="checkbox"]:disabled { accent-color: var(--fg-mute); cursor: default; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
 /* One rule instead of a `[hidden]` override on every overlay component: the

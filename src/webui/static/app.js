@@ -782,7 +782,6 @@ function buildPicker() {
     }),
   ]);
   picker.initHint = el('p', { className: 'fs-hint' });
-  picker.initBox = el('p', { className: 'fs-init-result', attrs: { hidden: '' } });
   picker.error = el('p', { className: 'modal-error', attrs: { hidden: '' } });
   picker.submit = el('button', {
     className: 'btn btn-primary',
@@ -826,7 +825,6 @@ function buildPicker() {
       picker.initRow,
       picker.initHint,
       picker.error,
-      picker.initBox,
     ]),
     el('div', { className: 'modal-foot' }, [
       el('button', { className: 'btn', text: 'Скасувати', on: { click: () => closePicker() } }),
@@ -849,7 +847,6 @@ function buildPicker() {
 function openPicker() {
   picker.root.hidden = false;
   picker.error.hidden = true;
-  picker.initBox.hidden = true;
   picker.name.value = '';
   picker.createCheckbox.checked = false;
   picker.createEvaluatedPath = null;
@@ -1064,27 +1061,17 @@ function renderPicker() {
   pickerUpdateEligibility();
 }
 
-/** Renders `info.init` (contract: `{ok, log}` on an attempt, `{ok:false,
- *  skipped:true, reason}` when the bank root was not `<project>/.claude/
- *  memory`) into the picker's own result area. A failed or skipped init is
- *  never presented as the add-bank action failing — the bank is already
- *  registered by the time this runs — so this appends to the dialog rather
- *  than routing through `pickerError()`. */
-function renderInitResult(initInfo) {
-  clear(picker.initBox);
-  picker.initBox.hidden = false;
-  if (initInfo.skipped) {
-    picker.initBox.appendChild(el('strong', { text: 'MCP не підключено: ' }));
-    picker.initBox.appendChild(document.createTextNode(initInfo.reason || '—'));
-    return;
-  }
-  picker.initBox.appendChild(el('strong', {
-    text: initInfo.ok ? 'Проєкт підключено (MCP):' : 'Підключення MCP:',
-  }));
-  for (const line of initInfo.log || []) {
-    picker.initBox.appendChild(el('br'));
-    picker.initBox.appendChild(document.createTextNode(line));
-  }
+/** One-line summary of `info.init` (contract: `{ok, log}` on an attempt,
+ *  `{ok:false, skipped:true, reason}` when the bank root was not
+ *  `<project>/.claude/memory`) for the post-add `setNote()` — the full log
+ *  stays available via `mnemo doctor` / the service log, not worth a second
+ *  dialog for. A failed or skipped init is never presented as the add-bank
+ *  action failing, since the bank is already registered by the time this
+ *  runs. */
+function initNoteSuffix(initInfo) {
+  if (!initInfo) return '';
+  if (initInfo.skipped) return ' · MCP не підключено' + (initInfo.reason ? ': ' + initInfo.reason : '');
+  return initInfo.ok ? ' · MCP підключено' : ' · підключення MCP не вдалося';
 }
 
 async function pickerSubmit() {
@@ -1097,7 +1084,6 @@ async function pickerSubmit() {
     init: !!(picker.initCheckbox && picker.initCheckbox.checked),
   };
   picker.busy = true;
-  picker.initBox.hidden = true;
   renderPicker();
   try {
     const info = await api('/api/banks', { method: 'POST', body: body });
@@ -1105,14 +1091,14 @@ async function pickerSubmit() {
     state.banks = state.banks.concat([info]);
     renderBanks();
     // The bank was registered *and* queued in one call, so say both — and open
-    // it, so the first build is visible instead of happening off-screen.
-    setNote(info.id, 'банк додано · індексація стала в чергу');
+    // it, so the first build is visible instead of happening off-screen. The
+    // dialog closes right away regardless of `info.init`: leaving it open
+    // invited a second click on "Додати цю теку", which the bank already
+    // being registered would only turn into an error.
+    setNote(info.id, 'банк додано · індексація стала в чергу' + initNoteSuffix(info.init));
     selectBank(info.id);
     loadBanks().catch(() => {});
-    // Only the `init` outcome keeps the dialog open — a plain add (no
-    // checkbox, or not eligible) closes exactly as it always did.
-    if (info.init) renderInitResult(info.init);
-    else closePicker();
+    closePicker();
   } catch (err) {
     if (isAuthError(err)) { closePicker(); reportError(err); return; }
     // `root_not_found` and `bank_exists` are both fixable right here, so the
@@ -1995,6 +1981,10 @@ async function openRemoval(bank) {
     // been closed) while this was in flight; a stale response must not
     // repaint over whatever is current now.
     if (removal.bank !== bank) return;
+    // Same default posture as "видалити також індекс": when wiring is
+    // actually found, offer to take it out too rather than leave a dead
+    // .mcp.json pointed at a bank that no longer exists.
+    removal.stripMcp = removal.wiring.has_wiring;
   }
   removal.root.hidden = false;
   renderRemoval();
