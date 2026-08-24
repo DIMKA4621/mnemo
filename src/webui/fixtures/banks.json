@@ -22,7 +22,7 @@
     {
       "id": "42c3326ed6e1a1b7",
       "name": "notes",
-      "root": "E:/notes",
+      "root": "E:/notes/.claude/memory",
       "provider": null,
       "index_provider_key": "api:bge-m3:1024",
       "state": "enabled",
@@ -41,7 +41,7 @@
     {
       "id": "09b7d876d501c789",
       "name": "archive",
-      "root": "D:/archive/memory",
+      "root": "D:/archive/.claude/memory",
       "provider": "local",
       "index_provider_key": "api:bge-m3:1024",
       "state": "frozen",

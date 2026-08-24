@@ -101,6 +101,29 @@ def find_bank(ref: str) -> dict | None:
         return best
 
 
+def _project_root_for_bank(bank: dict) -> str | None:
+    """`<project>/.claude/memory` -> `<project>`, else None.
+
+    Fixture-only mirror of `_project_root_from_bank` in api.py (MN-13,
+    contract: GET /api/banks/{id}/mcp-wiring) — same suffix rule the console's
+    own `projectRootForBankPath()` in app.js applies before it ever calls
+    this endpoint, so a bank that fails it here never gets asked twice.
+    """
+    root = (bank.get("root") or "").replace("\\", "/").rstrip("/")
+    suffix = "/.claude/memory"
+    if not root.endswith(suffix):
+        return None
+    return root[: -len(suffix)] or None
+
+
+# Fixture-only: which fixture banks have MCP wiring in their project root.
+# The real endpoint checks the filesystem; this mock has none to check, so
+# it just answers per bank id. Absent from this map == no wiring found.
+_MCP_WIRING: dict[str, dict] = {
+    "42c3326ed6e1a1b7": {"has_wiring": True, "uses_template": False},
+}
+
+
 # --------------------------------------------------------------------------
 # fixture filesystem, for the bank picker (contract 9.5 GET /api/fs/dirs)
 # --------------------------------------------------------------------------
@@ -955,6 +978,27 @@ def mark_indexed(bank_id: str, rel: str) -> int:
         return count
 
 
+# MN-15: relpaths queued or in flight right now, per bank. Fixture-only
+# mirror of `workqueue.pending_paths()` — this mock has no real queue, so
+# `simulate_task` below is the one place that adds to and removes from it,
+# same as it is the one place that already fabricates `index_start`/
+# `index_progress`/`index_done` for a reindex.
+_PENDING: dict[str, set[str]] = {}
+
+
+def _tree_response(bank_id: str) -> dict:
+    """`/api/tree`'s fixture, with the live `pending` field merged in.
+
+    `TREES[bank_id]` is the static fixture loaded once at startup; `pending`
+    is the one field on it that changes while the server runs, so it is
+    computed here rather than mutated onto the shared fixture dict.
+    """
+    data = dict(TREES[bank_id])
+    with _lock:
+        data["pending"] = sorted(_PENDING.get(bank_id, ()))
+    return data
+
+
 def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> None:
     """Walk one reindex through the WS event sequence of contract 9.7."""
     bank_id = bank["id"]
@@ -964,6 +1008,15 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
     # the transition the tree has to keep up with.
     targets = [path] if path else list(files)
     started = time.time()
+
+    # MN-15: a real bulk scan enqueues every file up front, then a worker
+    # pulls them one at a time — mirrored here so `file_queued` (and the
+    # `pending` field `_tree_response` serves meanwhile) both show every
+    # target highlighted from the start, not just the one being processed.
+    with _lock:
+        _PENDING.setdefault(bank_id, set()).update(targets)
+    for rel in targets:
+        broadcast("file_queued", bank_id, {"path": rel})
 
     with _lock:
         bank["status"] = "indexing"
@@ -1015,6 +1068,8 @@ def simulate_task(bank: dict, *, kind: str, path: str | None, batch_ms: int) -> 
 
         chunk_total = mark_indexed(bank_id, rel) or chunk_total
         total_chunks += chunk_total
+        with _lock:
+            _PENDING.get(bank_id, set()).discard(rel)
         took = (time.time() - started) * 1000.0
         broadcast("index_done", bank_id,
                   {"task_id": task_id, "kind": "file", "path": rel,
@@ -1139,6 +1194,7 @@ class Handler(BaseHTTPRequestHandler):
         # `drop_index` defaults to true, exactly as the real endpoint does.
         query = parse_qs(parsed.query)
         drop = (query.get("drop_index", ["true"])[0] or "true").lower() != "false"
+        strip_mcp = (query.get("strip_mcp", ["false"])[0] or "false").lower() == "true"
 
         # The one failure the dialog has to render in place. A fixture cannot
         # hold a real file lock, so a bank still indexing stands in for it —
@@ -1150,10 +1206,33 @@ class Handler(BaseHTTPRequestHandler):
                       f"try again in a moment", {"bank_id": bank["id"]})
             return
 
+        # `mcp_stripped` only ever appears in the response when `strip_mcp`
+        # was actually requested (MN-13 contract) — the UI never sends it
+        # unless the checkbox was offered *and* checked, so the 400 here
+        # stands in for a request made by hand against a non-project bank.
+        mcp_stripped: list[str] | None = None
+        if strip_mcp:
+            project_root = _project_root_for_bank(bank)
+            if project_root is None:
+                self.fail(400, "bad_request",
+                          "bank root does not resolve to a project — nothing to strip",
+                          {"bank_id": bank["id"]})
+                return
+            info = _MCP_WIRING.get(bank["id"], {"has_wiring": False, "uses_template": False})
+            if info["uses_template"]:
+                mcp_stripped = [".mcp.json.template", ".mcp.env"]
+            elif info["has_wiring"]:
+                mcp_stripped = [".mcp.json"]
+            else:
+                mcp_stripped = []
+
         with _lock:
             BANKS[:] = [b for b in BANKS if b["id"] != bank["id"]]
         broadcast("bank_removed", bank["id"], {"bank_id": bank["id"]})
-        self.json_out(200, {"ok": True, "index_removed": drop})
+        response: dict = {"ok": True, "index_removed": drop}
+        if strip_mcp:
+            response["mcp_stripped"] = mcp_stripped
+        self.json_out(200, response)
 
     def do_PATCH(self) -> None:  # noqa: N802 - stdlib name
         parsed = urlparse(self.path)
@@ -1460,12 +1539,16 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if path.startswith("/api/banks/"):
-            # `/token` first: the generic bank lookup below would otherwise try
-            # to resolve "<id>/token" as a bank reference and 404.
+            # `/token` and `/mcp-wiring` first: the generic bank lookup below
+            # would otherwise try to resolve "<id>/token" (or "<id>/mcp-wiring")
+            # as a bank reference and 404.
             ref = path[len("/api/banks/"):]
             wants_token = ref.endswith("/token")
+            wants_wiring = ref.endswith("/mcp-wiring")
             if wants_token:
                 ref = ref[: -len("/token")]
+            elif wants_wiring:
+                ref = ref[: -len("/mcp-wiring")]
             bank = find_bank(unquote(ref))
             if not bank:
                 self.fail(404, "bank_not_found", "no bank matches", {"ref": ref})
@@ -1473,6 +1556,17 @@ class Handler(BaseHTTPRequestHandler):
             if wants_token:
                 self.json_out(200, {"bank_id": bank["id"], "name": bank["name"],
                                     "token": bank_token(bank["id"])})
+                return
+            if wants_wiring:
+                project_root = _project_root_for_bank(bank)
+                if project_root is None:
+                    self.json_out(200, {"has_wiring": False, "uses_template": False,
+                                        "project_root": None})
+                    return
+                info = _MCP_WIRING.get(bank["id"], {"has_wiring": False, "uses_template": False})
+                self.json_out(200, {"has_wiring": info["has_wiring"],
+                                    "uses_template": info["uses_template"],
+                                    "project_root": project_root})
                 return
             self.json_out(200, bank_info(bank))
             return
@@ -1516,7 +1610,7 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(404, "bank_not_found", "no bank matches",
                           {"ref": (query.get("bank") or [""])[0]})
                 return
-            self.json_out(200, TREES[bank["id"]])
+            self.json_out(200, _tree_response(bank["id"]))
             return
 
         if path == "/api/file":

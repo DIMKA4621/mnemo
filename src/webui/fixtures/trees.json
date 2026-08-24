@@ -78,7 +78,7 @@
   },
   "42c3326ed6e1a1b7": {
     "bank_id": "42c3326ed6e1a1b7",
-    "root": "E:/notes",
+    "root": "E:/notes/.claude/memory",
     "files": 0,
     "dirs": 0,
     "tree": {
@@ -90,7 +90,7 @@
   },
   "09b7d876d501c789": {
     "bank_id": "09b7d876d501c789",
-    "root": "D:/archive/memory",
+    "root": "D:/archive/.claude/memory",
     "files": 0,
     "dirs": 0,
     "tree": {

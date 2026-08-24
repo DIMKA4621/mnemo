@@ -246,6 +246,15 @@
    point of a monospace list. Any third signal here has to be metric-neutral. */
 .tree-node.not-indexed .tree-label { color: var(--fg-mute); }
 
+/* MN-15: queued or in-flight right now — same tint as `.note-live` and the
+   live progress line, so a file's row reads as part of that same live group
+   until the matching `index_done`/`index_error` clears it. Only the name
+   itself carries the signal (busy tint, or the default/selected colour once
+   cleared) — the secondary info beside it (chunk count / "не в індексі")
+   stays `.tree-chunks`'s own muted grey regardless of pending state, so the
+   row doesn't turn into two overlapping colour signals at once. */
+.tree-node.is-pending .tree-label { color: var(--busy); }
+
 /* ---- file view -------------------------------------------------------------- */
 
 /* Two lines: the path (what used to sit in the column header, in the mono

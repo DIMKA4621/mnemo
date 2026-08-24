@@ -45,6 +45,19 @@ This means: the work lives on its own branch, not on `master`.
 
    **Never merge it.** The user reviews and accepts pull requests themselves — this project's git-safety-protocol default (no unrequested destructive or shared-state actions) extends to PR merges specifically: opening one is additive and reversible, merging one is not mine to decide.
 
+## After the user accepts a PR — the finishing procedure
+
+When the user says a PR is accepted/merged (their merge, not mine — see above), this runs automatically, without being asked each time:
+
+1. Verify the merge for real (`gh pr view <n> --json state,mergedAt,mergeCommit`) before acting on it — don't take "прийняв"/"accepted" as proof by itself, confirm it landed.
+2. Jira: post a closing comment naming the PR and merge commit, transition every ticket the PR carries to **Done** (`jira-tracking.md`'s "user's merge = immediate approval" rule — no separate reviewer pass needed on top of it).
+3. `git fetch origin`, `git checkout master`, `git pull --ff-only origin master` — land on the up-to-date `master`, the same fast-forward-only stance as starting new work.
+4. `git branch -d <feature-branch>` — delete the local feature branch now that it's merged into `master` (plain `-d`, not `-D`: it refuses on its own if the branch actually isn't fully merged, which is the safety net here).
+5. Check whether the remote branch still exists (`git ls-remote --heads origin <branch>`) and delete it if so (`git push origin --delete <branch>`) — GitHub often auto-deletes on merge (repo setting), in which case there's nothing left to do; don't treat an already-gone remote branch as an error.
+
+This is routine cleanup on branches this session created and already has push access to — same standing as the rest of this file's branch/PR mechanics, not a fresh destructive-action confirmation each time.
+It only fires after a *verified* merge, and only touches the branch/ticket(s) that PR actually carried.
+
 ## "Створи реліз" / "створи драфт релізу" / "create a release"
 
 - **Always a draft, never a direct/published release.** `gh release create <tag> --draft ...` — the `--draft` flag is not optional, regardless of how the request is phrased.

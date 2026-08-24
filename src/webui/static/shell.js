@@ -356,6 +356,7 @@ function handleEvent(envelope) {
 
     case 'index_done':
       clearProgress(bankId, data.task_id);
+      clearPendingPath(bankId, data.path);
       setNote(bankId, 'готово: ' + (data.path || data.kind) + ' · ' +
                       (data.chunks_indexed || 0) + ' чанків · ' + fmtMs(data.took_ms));
       scheduleBanksReload();
@@ -371,8 +372,21 @@ function handleEvent(envelope) {
 
     case 'index_error':
       clearProgress(bankId, data.task_id);
+      clearPendingPath(bankId, data.path);
       setNote(bankId, 'помилка: ' + (data.path || data.kind) + ' — ' + data.error);
       scheduleBanksReload();
+      break;
+
+    // MN-15: a file/prune task was (re-)queued (a watcher edit, or a
+    // re-queue after `index_yield` preemption). `index_yield` itself is
+    // ignored on purpose — the task re-enters the queue and gets a fresh
+    // `file_queued` moments later, so clearing early here would flash the
+    // highlight off incorrectly.
+    case 'file_queued':
+      if (data.path) {
+        pendingSetFor(bankId).add(data.path);
+        if (bankId === state.selectedBankId) renderTree();
+      }
       break;
 
     case 'prune':

@@ -378,6 +378,16 @@ def _busy(bank_id: str | None = None) -> bool:
         return False
 
 
+def _pending_paths(bank_id: str) -> list[str]:
+    q = _queue()
+    if q is None:
+        return []
+    try:
+        return sorted(q.pending_paths(bank_id))
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _require_queue() -> Any:
     q = _queue()
     if q is None:
@@ -1524,9 +1534,62 @@ def api_regenerate_bank_token(bank_id: str) -> dict:
     return _token_json(bank, token)
 
 
-@app.delete("/api/banks/{bank_id}", include_in_schema=False)
-def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
+# ----------------------------------------------------------- MCP wiring (MN-13)
+#
+# Scoped to exactly this bank's own project — `_project_root_from_bank`,
+# never a machine-wide scan (`scaffold.adopted_projects()` is the broader,
+# unrelated mechanism `doctor`/`init --migrate` use). The remove-bank dialog
+# needs one answer: is *this* bank's project wired, so it can offer to strip
+# it in the same action.
+
+
+def _mcp_wiring_info(bank: Bank) -> dict:
+    project_root = _project_root_from_bank(bank.root)
+    if project_root is None:
+        return {"has_wiring": False, "uses_template": False, "project_root": None}
+    from . import scaffold
+    status = scaffold.project_mcp_wiring(project_root)
+    return {
+        "has_wiring": status["has_wiring"],
+        "uses_template": status["uses_template"],
+        "project_root": str(project_root),
+    }
+
+
+@app.get("/api/banks/{bank_id}/mcp-wiring", include_in_schema=False)
+def api_bank_mcp_wiring(bank_id: str) -> dict:
     bank = _resolve_bank(bank_id, require_enabled=False)
+    return _mcp_wiring_info(bank)
+
+
+@app.delete("/api/banks/{bank_id}", include_in_schema=False)
+def api_remove_bank(bank_id: str, drop_index: bool = True,
+                    strip_mcp: bool = False) -> dict:
+    bank = _resolve_bank(bank_id, require_enabled=False)
+
+    # `strip_mcp`'s project root is resolved up front — a caller error (root
+    # not project-shaped) is cheap to catch before touching anything, and
+    # failing late here would be a confusing way to reject a bad request.
+    # The actual strip, though, runs LAST, after the bank is provably gone
+    # (see the comment below) — reusing "cannot half-succeed" reasoning for
+    # the strip's own ordering would be backwards: unlike an unlink, a
+    # successful strip cannot be undone, so running it BEFORE a step that can
+    # still fail (`index_locked`) risked leaving a project's wiring stripped
+    # for a bank that in fact still exists. Deferring it to last means the
+    # only way to observe a half-done state is "bank is gone, wiring wasn't
+    # stripped yet" — reported plainly via `mcp_strip_failed`, and recoverable
+    # by re-running `mnemo init` — never "bank is still here but its wiring
+    # already isn't."
+    project_root: Path | None = None
+    if strip_mcp:
+        project_root = _project_root_from_bank(bank.root)
+        if project_root is None:
+            raise ApiError(
+                "bad_request",
+                f"bank {bank.name!r} root does not end in .claude/memory — "
+                f"no project wiring to strip",
+                bank_id=bank.id,
+            )
 
     # Order matters, and this is the order that cannot half-succeed.
     #
@@ -1577,7 +1640,28 @@ def api_remove_bank(bank_id: str, drop_index: bool = True) -> dict:
     if q is not None:
         q.resume_bank(bank.id)
     hub.publish("bank_removed", {"bank_id": bank.id}, bank.id)
-    return {"ok": True, "index_removed": bool(drop_index)}
+
+    result = {"ok": True, "index_removed": bool(drop_index)}
+    if strip_mcp:
+        # The bank is unregistered and its index is gone by now — this can
+        # still raise, but nothing about the bank's own removal is undone by
+        # that. `mcp_strip_failed` reports it plainly rather than silently
+        # leaving a dead token behind.
+        from . import scaffold
+        assert project_root is not None
+        try:
+            stripped = scaffold.strip_mcp_wiring(project_root)
+        except OSError as exc:
+            raise ApiError(
+                "mcp_strip_failed",
+                f"bank {bank.name!r} was removed, but could not update MCP "
+                f"wiring under {project_root}: {exc}",
+                bank_id=bank.id,
+            ) from exc
+        result["mcp_stripped"] = stripped["touched"]
+        log.info("stripped MCP wiring for bank %s under %s (%s)",
+                 bank.name, project_root, ", ".join(stripped["touched"]) or "nothing found")
+    return result
 
 
 def _unlink_index(bank: Bank) -> tuple[int, list[Path]]:
@@ -1930,6 +2014,10 @@ def api_tree(
         "files": files,
         "dirs": dirs,
         "tree": tree,
+        # Relpaths queued or in flight right now (kind='file'/'prune') — a
+        # page opened mid-index highlights these without waiting for the
+        # first `file_queued`/`index_done` WS event to arrive.
+        "pending": _pending_paths(b.id),
     }
 
 
@@ -2344,34 +2432,44 @@ def api_embed_download() -> dict:
     return {"started": True}
 
 
-def _embed_action(action) -> dict:
-    """Shared shell for unload/load: refuse while the queue is working."""
+def _embed_action(action, *, guard_queue: bool) -> dict:
+    """Shared shell for unload/load.
+
+    `guard_queue` gates the busy-queue refusal, not the action itself: `load`
+    is a probe through `embed_server.py`'s own `_QUERY_LANE`, isolated from
+    the worker's `_BATCH_LANE` there, so it never actually queues behind a
+    bulk embed and has nothing to be refused over (MN-20). `unload` still
+    goes through the same backend the worker embeds through, so pulling the
+    model out from under it remains genuinely unsafe — that guard is unchanged.
+    """
     from . import embedctl
 
-    snapshot = _queue_snapshot_json()
-    depth = int(snapshot.get("depth") or 0)
-    current = snapshot.get("current")
-    if depth or current:
-        # Refused, not queued behind the work. The worker embeds through the
-        # same backend, so pulling the model out from under it raises
-        # `EmbeddingUnavailable` mid-file and leaves the bank half-indexed —
-        # a cost paid later, by someone who will not connect it to a button
-        # pressed now.
-        #
-        # `depth` alone undercounts: it is the QUEUED backlog and does not
-        # include the one file actively in flight, so `current` truthy with
-        # `depth == 0` is the common case, not an edge one — a message that
-        # only ever cited `depth` read as "0 pending" while also claiming
-        # "still working", which is exactly the contradiction a caller like
-        # the console would otherwise have to explain away on its own.
-        if current and not depth:
-            detail = ("a file is being embedded through this backend right "
-                       "now — wait for it to finish")
-        else:
-            detail = (f"the queue is still working ({depth} task(s) pending) — "
-                       f"the worker embeds through this backend, so wait for "
-                       f"it to drain")
-        raise ApiError("embed_busy", detail, depth=depth)
+    if guard_queue:
+        snapshot = _queue_snapshot_json()
+        depth = int(snapshot.get("depth") or 0)
+        current = snapshot.get("current")
+        if depth or current:
+            # Refused, not queued behind the work. The worker embeds through
+            # the same backend, so pulling the model out from under it raises
+            # `EmbeddingUnavailable` mid-file and leaves the bank half-indexed
+            # — a cost paid later, by someone who will not connect it to a
+            # button pressed now.
+            #
+            # `depth` alone undercounts: it is the QUEUED backlog and does
+            # not include the one file actively in flight, so `current`
+            # truthy with `depth == 0` is the common case, not an edge one —
+            # a message that only ever cited `depth` read as "0 pending"
+            # while also claiming "still working", which is exactly the
+            # contradiction a caller like the console would otherwise have
+            # to explain away on its own.
+            if current and not depth:
+                detail = ("a file is being embedded through this backend "
+                           "right now — wait for it to finish")
+            else:
+                detail = (f"the queue is still working ({depth} task(s) "
+                           f"pending) — the worker embeds through this "
+                           f"backend, so wait for it to drain")
+            raise ApiError("embed_busy", detail, depth=depth)
     try:
         return action()
     except embedctl.EmbedControlUnavailable as exc:
@@ -2384,16 +2482,20 @@ def api_embed_unload() -> dict:
     the next search or indexed file brings the model back, paying ~7-8 s."""
     from . import embedctl
 
-    return _embed_action(embedctl.unload)
+    return _embed_action(embedctl.unload, guard_queue=True)
 
 
 @app.post("/api/embed/load", include_in_schema=False)
 def api_embed_load() -> dict:
     """Bring the model back with a probe embedding, which also proves the
-    backend answers and at what width."""
+    backend answers and at what width.
+
+    Never refused for a busy queue (MN-20): the probe runs on its own query
+    lane in `embed_server.py`, isolated from the worker's bulk-embed lane.
+    """
     from . import embedctl
 
-    return _embed_action(embedctl.load)
+    return _embed_action(embedctl.load, guard_queue=False)
 
 
 @app.get("/api/autostart", include_in_schema=False)
