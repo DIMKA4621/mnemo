@@ -1595,6 +1595,19 @@ def _seed_tree(claude: Path, log: list[str]) -> None:
             )
 
 
+def ensure_memory_structure(claude_dir: Path) -> list[str]:
+    """Seed the bare memory tree under `claude_dir` (a project's `.claude`).
+
+    A thin public wrapper around `_seed_tree` for callers outside this
+    module — e.g. the webui's "create structure" checkbox — that only want
+    the tree, not the full `init_project()` MCP-wiring pass. Idempotent,
+    same as `_seed_tree` underneath.
+    """
+    log: list[str] = []
+    _seed_tree(claude_dir, log)
+    return log
+
+
 class AdoptedProject:
     """A project on this machine that carries mnemo wiring.
 

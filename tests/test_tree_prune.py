@@ -21,8 +21,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # `config` reads the environment at import time, so the redirect has to
 # happen before anything imports it — same reasoning as test_pipeline.py.
-_STATE = tempfile.TemporaryDirectory(prefix="mnemo tree-prune state ")
-os.environ["MNEMO_STATE_DIR"] = _STATE.name
+#
+# `mkdtemp`, not `TemporaryDirectory`: MN-25's `test_api_add_bank_create_
+# structure` calls `api.api_add_bank`, which opens `service.db` through
+# `servicelog` — that module caches a per-thread READER connection
+# `servicelog.close()` does not close, so a `TemporaryDirectory`'s exit-time
+# auto-cleanup races that still-open handle and Windows refuses the unlink.
+# Same convention as test_watcher.py / test_service_ctl.py /
+# test_service_recovery.py.
+_STATE = tempfile.mkdtemp(prefix="mnemo tree-prune state ")
+os.environ["MNEMO_STATE_DIR"] = _STATE
 
 from src import api, registry  # noqa: E402
 
@@ -190,9 +198,102 @@ def test_depth_truncation_not_mistaken_for_empty() -> None:
               node["children"] == [])
 
 
+# -------------------------------------------- api_fs_dirs has_claude_memory
+
+
+def test_api_fs_dirs_has_claude_memory() -> None:
+    """MN-25: the add-bank dialog's "create structure" checkbox gates on
+    this field — a bare folder must report `False`, one that already holds
+    `.claude/memory` must report `True`."""
+    with tempfile.TemporaryDirectory(prefix="mnemo fs-dirs bank ") as tmp:
+        root = Path(tmp)
+
+        bare = api.api_fs_dirs(str(root))
+        check("bare folder reports has_claude_memory=False",
+              bare["has_claude_memory"] is False, detail=str(bare))
+
+        (root / ".claude" / "memory").mkdir(parents=True)
+        seeded = api.api_fs_dirs(str(root))
+        check("folder with .claude/memory reports has_claude_memory=True",
+              seeded["has_claude_memory"] is True, detail=str(seeded))
+
+
+def test_memory_dir_for_three_shapes() -> None:
+    """MN-25 review: `_memory_dir_for`'s three cases, through `api_fs_dirs`'s
+    `memory_dir` field — an ordinary folder, a bare `.claude` picked directly
+    (the doubling bug the user caught live), and an already-`.claude/memory`
+    path."""
+    with tempfile.TemporaryDirectory(prefix="mnemo memory-dir bank ") as tmp:
+        root = Path(tmp)
+        (root / ".claude" / "memory").mkdir(parents=True)
+
+        ordinary = api.api_fs_dirs(str(root))
+        check("ordinary folder: memory_dir appends .claude/memory",
+              ordinary["memory_dir"] == (root / ".claude" / "memory").as_posix(),
+              detail=str(ordinary))
+
+        bare_claude = api.api_fs_dirs(str(root / ".claude"))
+        check("bare .claude: memory_dir appends only memory (no doubling)",
+              bare_claude["memory_dir"] == (root / ".claude" / "memory").as_posix(),
+              detail=str(bare_claude))
+        check("bare .claude: has_claude_memory true (memory/ already exists)",
+              bare_claude["has_claude_memory"] is True, detail=str(bare_claude))
+
+        already = api.api_fs_dirs(str(root / ".claude" / "memory"))
+        check("already .claude/memory: memory_dir equals the path itself",
+              already["memory_dir"] == (root / ".claude" / "memory").as_posix(),
+              detail=str(already))
+        check("already .claude/memory: has_claude_memory false (irrelevant here)",
+              already["has_claude_memory"] is False, detail=str(already))
+
+
+def test_api_add_bank_create_structure() -> None:
+    """MN-25 review: exercise `api_add_bank`'s `create_structure` branch
+    directly — happy path, and the two rejection cases (not a
+    `.claude/memory`-shaped path, not absolute)."""
+    with tempfile.TemporaryDirectory(prefix="mnemo add-bank bank ") as tmp:
+        root = Path(tmp)
+        memory_dir = root / ".claude" / "memory"
+
+        req = api.AddBankRequest(
+            root=str(memory_dir), name="mn25-create-structure",
+            create_structure=True,
+        )
+        info = api.api_add_bank(req)
+        check("bank got registered", info.get("name") == "mn25-create-structure",
+              detail=str(info))
+        check(".claude/memory got created", memory_dir.is_dir())
+        check(".claude/rules got created", (root / ".claude" / "rules").is_dir())
+        check("MEMORY.md got created", (memory_dir / "MEMORY.md").is_file())
+
+        bad_shape = api.AddBankRequest(
+            root=str(root / "not-memory"), create_structure=True,
+        )
+        try:
+            api.api_add_bank(bad_shape)
+            check("non-.claude/memory shape is rejected", False,
+                  detail="did not raise")
+        except api.ApiError as exc:
+            check("non-.claude/memory shape is rejected",
+                  exc.code == "bad_request", detail=exc.code)
+
+        relative = api.AddBankRequest(
+            root=".claude/memory", create_structure=True,
+        )
+        try:
+            api.api_add_bank(relative)
+            check("relative root is rejected", False, detail="did not raise")
+        except api.ApiError as exc:
+            check("relative root is rejected", exc.code == "bad_request",
+                  detail=exc.code)
+
+
 if __name__ == "__main__":
     test_prune_pure()
     test_api_tree()
     test_depth_truncation_not_mistaken_for_empty()
+    test_api_fs_dirs_has_claude_memory()
+    test_memory_dir_for_three_shapes()
+    test_api_add_bank_create_structure()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)

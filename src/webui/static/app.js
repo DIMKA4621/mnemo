@@ -738,6 +738,18 @@ function buildPicker() {
       },
     },
   });
+  picker.createCheckbox = el('input', {
+    attrs: { type: 'checkbox', id: 'fs-init-create' },
+    on: { change: () => pickerUpdateEligibility() },
+  });
+  picker.createRow = el('div', { className: 'fs-init-row' }, [
+    picker.createCheckbox,
+    el('label', {
+      text: 'Створити структуру пам’яті тут (.claude/memory)',
+      attrs: { for: 'fs-init-create' },
+    }),
+  ]);
+  picker.createHint = el('p', { className: 'fs-hint' });
   picker.initCheckbox = el('input', {
     attrs: { type: 'checkbox', id: 'fs-init-mcp' },
   });
@@ -788,6 +800,8 @@ function buildPicker() {
         attrs: { for: 'fs-bank-name' },
       }),
       picker.name,
+      picker.createRow,
+      picker.createHint,
       picker.initRow,
       picker.initHint,
       picker.error,
@@ -816,7 +830,9 @@ function openPicker() {
   picker.error.hidden = true;
   picker.initBox.hidden = true;
   picker.name.value = '';
-  picker.initEvaluatedPath = null;
+  picker.createCheckbox.checked = false;
+  picker.createEvaluatedPath = null;
+  picker.initEvaluatedKey = null;
   // Resume where the last look around ended — adding two banks from one folder
   // should not mean walking down from home twice.
   pickerGo(sessionStorage.getItem(LAST_DIR_KEY) || null);
@@ -836,23 +852,73 @@ function projectRootForBankPath(path) {
   return root || null;
 }
 
-/** Recomputed on every `renderPicker()`, i.e. whenever `picker.path`
- *  changes. Only resets the checkbox to its default when the *path* itself
- *  changed — a `pickerGo()` re-render for the same path (e.g. the busy
- *  toggle around its fetch) must not fight a manual uncheck. */
-function pickerUpdateInitEligibility() {
-  const root = projectRootForBankPath(picker.path);
-  const eligible = root !== null;
-  picker.initCheckbox.disabled = !eligible;
-  if (picker.path !== picker.initEvaluatedPath) {
-    picker.initEvaluatedPath = picker.path;
-    picker.initCheckbox.checked = eligible;
+/** The root a bank gets registered at once checkbox A is checked — the
+ *  server's own `memory_dir` for the currently-loaded `picker.data`
+ *  (`_memory_dir_for` in api.py), never naive string concatenation here:
+ *  a picked path that already ends in `.claude` needs only `memory`
+ *  appended, not another `.claude/memory` on top of it. Falls back to plain
+ *  concatenation only if `picker.data` hasn't loaded yet, which the caller
+ *  never actually hits since checkbox A can't be checked before it has. */
+function effectiveBankRoot(path, createStructure) {
+  if (!createStructure) return path;
+  if (picker.data && picker.data.memory_dir) return picker.data.memory_dir;
+  return path.replace(/\/+$/, '') + '/.claude/memory';
+}
+
+/** Recomputed on every `renderPicker()` (i.e. whenever `picker.path`
+ *  changes) and on every toggle of `picker.createCheckbox`, since checkbox
+ *  A's state gates checkbox B's eligibility.
+ *
+ *  Checkbox A resets to unchecked only when the *path* itself changed — a
+ *  `pickerGo()` re-render for the same path (e.g. the busy toggle around its
+ *  fetch) must not fight a manual toggle.
+ *
+ *  Checkbox B's default-checked state is re-decided whenever *either* the
+ *  path or its own eligibility changes (tracked as one key) — so checking
+ *  checkbox A flips B from disabled+unchecked to enabled+checked, while a
+ *  re-render that changes neither leaves a manual uncheck of B alone. */
+function pickerUpdateEligibility() {
+  const projectRoot = projectRootForBankPath(picker.path);
+  const alreadyBank = projectRoot !== null;
+  const hasNestedMemory = !!(picker.data && picker.data.has_claude_memory);
+  const canCreate = picker.path !== null && !alreadyBank && !hasNestedMemory;
+
+  picker.createCheckbox.disabled = !canCreate;
+  if (picker.path !== picker.createEvaluatedPath) {
+    picker.createEvaluatedPath = picker.path;
+    picker.createCheckbox.checked = false;
   }
-  if (!eligible) picker.initCheckbox.checked = false;
-  picker.initHint.textContent = eligible
-    ? 'Проєкт: ' + root
+  if (!canCreate) picker.createCheckbox.checked = false;
+
+  picker.createHint.textContent = !picker.path
+    ? ''
+    : alreadyBank
+      ? 'тека вже є банком пам’яті'
+      : hasNestedMemory
+        ? 'тека вже має структуру .claude/memory'
+        : picker.createCheckbox.checked
+          ? 'Банком стане: ' + effectiveBankRoot(picker.path, true)
+          : '';
+  // Amber both for "can't create here" and for the checked preview: the
+  // latter is not an error, but it does say the bank root differs from the
+  // folder that was picked, which deserves the same visual weight.
+  picker.createHint.classList.toggle(
+    'fs-warn',
+    (!canCreate && !!picker.path) || picker.createCheckbox.checked
+  );
+
+  const mcpEligible = alreadyBank || picker.createCheckbox.checked;
+  const mcpKey = picker.path + '::' + mcpEligible;
+  picker.initCheckbox.disabled = !mcpEligible;
+  if (mcpKey !== picker.initEvaluatedKey) {
+    picker.initEvaluatedKey = mcpKey;
+    picker.initCheckbox.checked = mcpEligible;
+  }
+  if (!mcpEligible) picker.initCheckbox.checked = false;
+  picker.initHint.textContent = mcpEligible
+    ? (alreadyBank ? 'Проєкт: ' + projectRoot : 'Буде підключено після створення структури')
     : 'доступно лише для банку в «<проєкт>/.claude/memory»';
-  picker.initHint.classList.toggle('fs-warn', !eligible);
+  picker.initHint.classList.toggle('fs-warn', !mcpEligible);
 }
 
 function closePicker() {
@@ -974,7 +1040,7 @@ function renderPicker() {
   picker.submit.disabled = picker.busy || !data || !!data.registered;
   picker.submit.textContent = picker.busy ? 'читаю…' : 'Додати цю теку';
 
-  pickerUpdateInitEligibility();
+  pickerUpdateEligibility();
 }
 
 /** Renders `info.init` (contract: `{ok, log}` on an attempt, `{ok:false,
@@ -1002,9 +1068,11 @@ function renderInitResult(initInfo) {
 
 async function pickerSubmit() {
   if (!picker.path || picker.busy) return;
+  const createStructure = !!(picker.createCheckbox && picker.createCheckbox.checked);
   const body = {
-    root: picker.path,
+    root: effectiveBankRoot(picker.path, createStructure),
     name: picker.name.value.trim() || null,
+    create_structure: createStructure,
     init: !!(picker.initCheckbox && picker.initCheckbox.checked),
   };
   picker.busy = true;
