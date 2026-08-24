@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -207,6 +208,114 @@ def test_heartbeat_failure_path() -> None:
     ok("set -e still aborts the caller after run_with_heartbeat returns its real exit code")
 
 
+def test_disk_space_check() -> None:
+    """`required_disk_bytes` / `available_disk_bytes` / `check_disk_space`
+    (MN-21, 2026-08-24): isolated dot-source harness, same pattern as
+    `test_heartbeat_spinner` -- exercises the disk-space preflight without a
+    real install and without needing an actually-full disk. Split into a
+    "get the number" half and a "decide + print" half specifically so
+    `available_disk_bytes` can be stubbed here instead of requiring one.
+    """
+    with tempfile.TemporaryDirectory(prefix="mnemo disk ") as raw:
+        target = Path(raw) / "engine-home"
+        target.mkdir()
+
+        no_cache = run([
+            "bash", "-c",
+            f"source {shlex.quote(str(INSTALLER))}; "
+            f"NO_MODEL=0; required_disk_bytes {shlex.quote(str(target))}",
+        ]).stdout.strip()
+        assert no_cache == str(300_000_000 + 2_200_000_000 + 500_000_000), no_cache
+        ok("required_disk_bytes counts the model when the cache is empty")
+
+        no_model_flag = run([
+            "bash", "-c",
+            f"source {shlex.quote(str(INSTALLER))}; "
+            f"NO_MODEL=1; required_disk_bytes {shlex.quote(str(target))}",
+        ]).stdout.strip()
+        assert no_model_flag == str(300_000_000 + 500_000_000), no_model_flag
+        ok("required_disk_bytes drops the model under --no-model")
+
+        model_cache = target / "model-cache"
+        model_cache.mkdir()
+        (model_cache / "file.bin").write_bytes(b"x")
+        cached = run([
+            "bash", "-c",
+            f"source {shlex.quote(str(INSTALLER))}; "
+            f"NO_MODEL=0; required_disk_bytes {shlex.quote(str(target))}",
+        ]).stdout.strip()
+        assert cached == str(300_000_000 + 500_000_000), cached
+        ok("required_disk_bytes drops the model when the cache already looks populated")
+
+        low = run(
+            [
+                "bash", "-c",
+                f"source {shlex.quote(str(INSTALLER))}; "
+                "NO_MODEL=0; available_disk_bytes() { printf '1000'; }; "
+                f"check_disk_space {shlex.quote(str(target))}",
+            ],
+            expect=1,
+        )
+        assert "not enough free disk space" in low.stdout, low.stdout
+        assert "required:" in low.stdout, low.stdout
+        assert "available:" in low.stdout, low.stdout
+        assert "free up space, then re-run." in low.stdout, low.stdout
+        ok("check_disk_space reports and fails (exit 1) when available < required")
+
+        high = run([
+            "bash", "-c",
+            f"source {shlex.quote(str(INSTALLER))}; "
+            "NO_MODEL=0; available_disk_bytes() { printf '999999999999'; }; "
+            f"check_disk_space {shlex.quote(str(target))} && echo CHECK_PASSED",
+        ])
+        assert "CHECK_PASSED" in high.stdout, high.stdout
+        assert "not enough" not in high.stdout, high.stdout
+        ok("check_disk_space succeeds silently when available >= required")
+
+
+def check_disk_space_constants_agree() -> None:
+    """The three disk-space budget numbers are hard-coded independently in
+    install.sh, install.ps1 and src/config.py -- bash/PowerShell cannot
+    import a Python module's constants, so each carries its own literal
+    (see config.py's own comment on ENGINE_VERSION_SIZE_BYTES). This is what
+    keeps the three from silently drifting apart.
+    """
+    sh_text = INSTALLER.read_text(encoding="utf-8")
+    ps1_text = (REPO / "install.ps1").read_text(encoding="utf-8")
+    py_text = (REPO / "src" / "config.py").read_text(encoding="utf-8")
+
+    def grab(pattern: str, text: str) -> int:
+        match = re.search(pattern, text)
+        assert match, f"pattern not found: {pattern}"
+        return int(match.group(1).replace("_", ""))
+
+    triples = [
+        (
+            "engine version size",
+            grab(r"ENGINE_VERSION_BYTES=(\d+)", sh_text),
+            grab(r"\$EngineVersionBytes = (\d+)", ps1_text),
+            grab(r"ENGINE_VERSION_SIZE_BYTES: int = ([\d_]+)", py_text),
+        ),
+        (
+            "model download size",
+            grab(r"MODEL_BYTES=(\d+)", sh_text),
+            grab(r"\$ModelBytes = (\d+)", ps1_text),
+            grab(r"MODEL_DOWNLOAD_SIZE_BYTES: int = ([\d_]+)", py_text),
+        ),
+        (
+            "disk buffer",
+            grab(r"DISK_BUFFER_BYTES=(\d+)", sh_text),
+            grab(r"\$DiskBufferBytes = (\d+)", ps1_text),
+            grab(r"INSTALL_DISK_BUFFER_BYTES: int = ([\d_]+)", py_text),
+        ),
+    ]
+    for name, sh_val, ps1_val, py_val in triples:
+        assert sh_val == ps1_val == py_val, (
+            f"{name} disagrees: install.sh={sh_val} install.ps1={ps1_val} config.py={py_val}"
+        )
+    ok("disk-space budget constants agree across install.sh, install.ps1 and config.py")
+
+
 def check_no_quiet_on_requirements_install() -> None:
     """`--quiet` dropped from both pip-install-requirements call sites
     (2026-08-23, mirroring install.ps1's own 2026-08-22 fix) so a failure
@@ -239,6 +348,8 @@ def main() -> int:
 
     test_heartbeat_spinner()
     test_heartbeat_failure_path()
+    test_disk_space_check()
+    check_disk_space_constants_agree()
     check_no_quiet_on_requirements_install()
 
     help_text = run([str(INSTALLER), "--help"])

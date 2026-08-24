@@ -112,6 +112,60 @@ human() {
 	}'
 }
 
+# --- disk space preflight (called after flag parsing, before layout) ----
+# Sized for a first install: one version tree (~234 MiB measured, rounded
+# up to 300 MB) plus the embedding model (~2.2 GB, skipped when --no-model
+# is set or the cache already looks populated), plus a safety buffer.
+ENGINE_VERSION_BYTES=300000000
+MODEL_BYTES=2200000000
+DISK_BUFFER_BYTES=500000000
+
+# required_disk_bytes <engine-home> — the number alone, so a test can call
+# it directly without touching the filesystem beyond a model-cache check.
+required_disk_bytes() {
+	required=$((ENGINE_VERSION_BYTES + DISK_BUFFER_BYTES))
+	if [ "$NO_MODEL" -eq 0 ]; then
+		model_dir="$1/model-cache"
+		# Same cheap existence check --check uses below: fastembed is not
+		# importable yet (no venv exists at this point), so this is a
+		# heuristic, not the real is_model_cached() the actual warmup step
+		# asks later.
+		if [ ! -d "$model_dir" ] \
+			|| ! find "$model_dir" -mindepth 1 -print -quit 2>/dev/null | grep -q .; then
+			required=$((required + MODEL_BYTES))
+		fi
+	fi
+	printf '%s' "$required"
+}
+
+# available_disk_bytes <path> — free bytes on the filesystem that would
+# hold <path>, walking up to the nearest existing ancestor since the
+# engine home does not exist yet on a first install.
+available_disk_bytes() {
+	target="$1"
+	while [ ! -d "$target" ]; do
+		target="$(dirname "$target")"
+	done
+	df -Pk "$target" | awk 'NR==2 { print $4 * 1024 }'
+}
+
+# check_disk_space <engine-home> — the decision + the printed report.
+# Split from the two functions above so a test can stub available_disk_bytes
+# with a fake number instead of needing an actually-full disk.
+check_disk_space() {
+	target_dir="$1"
+	required="$(required_disk_bytes "$target_dir")"
+	available="$(available_disk_bytes "$target_dir")"
+	if [ "$available" -ge "$required" ]; then
+		return 0
+	fi
+	say_hl "not enough free disk space" 31
+	say_hl "  required:  $(human "$required")" 31
+	say_hl "  available: $(human "$available")" 31
+	say_hl "  free up space, then re-run." 31
+	return 1
+}
+
 # --- locate the repo (this script's own directory) ---------------------
 SRC_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -399,6 +453,8 @@ if [ "$(python3 -c 'import sys; print(1 if sys.version_info[:2] >= (3, 10) else 
 fi
 [ -f "$SRC_REPO/src/cli.py" ] \
 	|| { echo "install.sh: run from the mnemo repo (src/cli.py not found)" >&2; exit 1; }
+
+check_disk_space "$MNEMO_HOME" || exit 1
 
 # --- 1. layout (state/ and model-cache/ are never deleted) -------------
 mkdir -p \

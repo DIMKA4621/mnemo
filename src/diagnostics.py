@@ -273,6 +273,7 @@ def collect(
     """
     from .embed_server import server_is_up
     from .embedder import is_model_cached
+    from .engine_update import check_disk_space
     from .store import vector_support
 
     registry_error: str | None = None
@@ -286,6 +287,7 @@ def collect(
     local_in_use = "local" in {machine, *overrides}
     model_cached = is_model_cached()
     unsupported = vector_support()
+    disk = check_disk_space(model_cached=model_cached)
 
     if registry_error is None:
         try:
@@ -335,6 +337,12 @@ def collect(
             "local_in_use": local_in_use,
         },
         "model": {"cached": model_cached, "needed": local_in_use},
+        "disk": {
+            "target": disk.target.as_posix(),
+            "available_bytes": disk.available_bytes,
+            "required_bytes": disk.required_bytes,
+            "ok": disk.ok,
+        },
         "sqlite_vec": {"ok": unsupported is None, "error": unsupported},
         "resident": resident,
         "endpoint": _endpoint_fact(machine, overrides),
@@ -418,6 +426,13 @@ def render_text(report: dict[str, Any]) -> str:
         lines.append(f"model cached     {cached}")
     else:
         lines.append(f"model cached     {cached} — not needed under `{machine}`")
+
+    disk = report["disk"]
+    lines.append(
+        f"disk space       {human_bytes(disk['available_bytes'])} free at "
+        f"{_abbreviate(disk['target'])}, need {human_bytes(disk['required_bytes'])} "
+        "for a staged update"
+    )
 
     vec = report["sqlite_vec"]
     lines.append(f"sqlite-vec       {'ok' if vec.get('ok') else 'UNAVAILABLE'}")

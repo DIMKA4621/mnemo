@@ -16,6 +16,7 @@ rest of the suite still runs offline.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import shutil
@@ -35,7 +36,7 @@ sys.path.insert(0, str(REPO))
 _STATE = Path(tempfile.mkdtemp(prefix="mnemo engine-update "))
 os.environ["MNEMO_STATE_DIR"] = str(_STATE)
 
-from src import config, engine_update, service_ctl  # noqa: E402
+from src import config, embedder, engine_update, service_ctl  # noqa: E402
 
 _passed = _failed = 0
 
@@ -936,6 +937,153 @@ def test_stage_release_failure_leaves_nothing_behind(work: Path) -> None:
           any(p["step"] == "failed" for p in progress), detail=str(progress))
 
 
+class _FakeDiskUsage:
+    """Just enough of ``shutil.disk_usage``'s return shape -- ``check_disk_space``
+    only ever reads ``.free``."""
+
+    def __init__(self, free: int) -> None:
+        self.free = free
+
+
+def test_check_disk_space_arithmetic(work: Path) -> None:
+    """required_bytes is the three config constants, minus the model download
+    when it is already cached -- and model_cached=None looks that up itself."""
+    versions_dir = work / "disk-versions"
+    required_no_model = config.ENGINE_VERSION_SIZE_BYTES + config.INSTALL_DISK_BUFFER_BYTES
+    required_with_model = required_no_model + config.MODEL_DOWNLOAD_SIZE_BYTES
+
+    with patch.object(config, "VERSIONS_DIR", versions_dir):
+        with patch.object(shutil, "disk_usage", return_value=_FakeDiskUsage(required_no_model)):
+            result = engine_update.check_disk_space(model_cached=True)
+            check("model cached: required excludes the model download",
+                  result.required_bytes == required_no_model, detail=str(result))
+            check("model cached: exactly-enough free space reads as ok",
+                  result.ok, detail=str(result))
+
+        with patch.object(shutil, "disk_usage", return_value=_FakeDiskUsage(required_no_model)):
+            result = engine_update.check_disk_space(model_cached=False)
+            check("model NOT cached: required includes the model download",
+                  result.required_bytes == required_with_model, detail=str(result))
+            check("model NOT cached: the same free space is now short by the model size",
+                  not result.ok, detail=str(result))
+
+        with patch.object(shutil, "disk_usage", return_value=_FakeDiskUsage(required_with_model - 1)):
+            result = engine_update.check_disk_space(model_cached=False)
+            check("one byte short of required reads as not ok", not result.ok, detail=str(result))
+
+        with patch.object(shutil, "disk_usage", return_value=_FakeDiskUsage(required_with_model)), \
+             patch.object(embedder, "is_model_cached", return_value=False):
+            result = engine_update.check_disk_space()
+            check("model_cached=None looks it up itself via embedder.is_model_cached",
+                  result.required_bytes == required_with_model, detail=str(result))
+
+    check("versions_dir is created if it did not already exist", versions_dir.is_dir())
+
+
+def test_check_disk_space_target_and_version_size_overrides(work: Path) -> None:
+    """The warmup-only shape: a caller-supplied target (model-cache/, not
+    versions/) and include_version_size=False dropping the engine-version
+    budget entirely -- only the model download plus the flat buffer."""
+    model_cache_dir = work / "override-model-cache"
+    required_warmup_shape = config.MODEL_DOWNLOAD_SIZE_BYTES + config.INSTALL_DISK_BUFFER_BYTES
+
+    with patch.object(shutil, "disk_usage", return_value=_FakeDiskUsage(required_warmup_shape)):
+        result = engine_update.check_disk_space(
+            model_cached=False, include_version_size=False, target=model_cache_dir
+        )
+
+    check("target is the caller-supplied directory, not versions_dir()",
+          result.target == model_cache_dir, detail=str(result))
+    check("required_bytes excludes ENGINE_VERSION_SIZE_BYTES",
+          result.required_bytes == required_warmup_shape, detail=str(result))
+    check("exactly-enough free space at the caller's target reads as ok",
+          result.ok, detail=str(result))
+    check("the caller-supplied target is created if it did not already exist",
+          model_cache_dir.is_dir())
+
+
+def test_cmd_warmup_refuses_to_download_when_disk_full(work: Path) -> None:
+    """cli._cmd_warmup must check disk space -- against model-cache/, with no
+    engine-version budget -- before ever calling embedder.warmup()."""
+    from src import cli
+
+    model_cache_dir = work / "warmup-model-cache"
+    calls: list[dict] = []
+
+    def _fake_check(**kwargs):
+        calls.append(kwargs)
+        return engine_update.DiskSpaceCheck(
+            target=kwargs.get("target"), required_bytes=999, available_bytes=0
+        )
+
+    with patch.object(cli, "_banks_quietly", return_value=[]), \
+         patch.object(config, "MODEL_CACHE", model_cache_dir), \
+         patch.object(engine_update, "check_disk_space", side_effect=_fake_check), \
+         patch("src.embedder.warmup") as warmup_spy:
+        rc = cli._cmd_warmup(argparse.Namespace(force=False))
+
+    check("_cmd_warmup returns EXIT_ERROR when the disk is full",
+          rc == cli.EXIT_ERROR, detail=str(rc))
+    check("warmup() was never called", not warmup_spy.called)
+    check("checked model_cached=False unconditionally (warmup always downloads)",
+          calls and calls[0].get("model_cached") is False, detail=str(calls))
+    check("checked include_version_size=False (no engine-version budget here)",
+          calls and calls[0].get("include_version_size") is False, detail=str(calls))
+    check("checked against config.MODEL_CACHE, not versions_dir()",
+          calls and calls[0].get("target") == model_cache_dir, detail=str(calls))
+
+
+def test_cmd_warmup_proceeds_when_disk_has_room(work: Path) -> None:
+    """The mirror case: plenty of free space -> warmup() actually runs."""
+    from src import cli
+
+    plenty = engine_update.DiskSpaceCheck(target=work, required_bytes=1, available_bytes=10**12)
+
+    with patch.object(cli, "_banks_quietly", return_value=[]), \
+         patch.object(engine_update, "check_disk_space", return_value=plenty), \
+         patch("src.embedder.warmup", return_value=1024) as warmup_spy:
+        rc = cli._cmd_warmup(argparse.Namespace(force=False))
+
+    check("_cmd_warmup succeeds when there is enough room", rc == cli.EXIT_OK, detail=str(rc))
+    check("warmup() was called exactly once", warmup_spy.call_count == 1)
+
+
+def test_stage_release_raises_before_download_when_disk_full(work: Path) -> None:
+    """check_disk_space is the first thing inside stage_release's try -- a
+    full disk must raise InsufficientDiskSpace before any download or pip
+    install is attempted."""
+    versions_dir = work / "space-versions"
+    state_dir = work / "space-state"
+    versions_dir.mkdir()
+    state_dir.mkdir()
+    tag = "v9.9.9"
+    progress: list[dict] = []
+
+    with patch.object(config, "VERSIONS_DIR", versions_dir), \
+         patch.object(config, "STATE_DIR", state_dir), \
+         patch.object(shutil, "disk_usage", return_value=_FakeDiskUsage(0)), \
+         patch.object(engine_update, "_emit_progress",
+                      lambda t, step, detail=None, error=None:
+                          progress.append({"step": step, "error": error})), \
+         patch.object(engine_update, "_download") as download_spy:
+        try:
+            engine_update.stage_release(tag, tarball_url="https://example.invalid/x.tar.gz")
+            check("stage_release raises InsufficientDiskSpace when the disk is full", False)
+        except engine_update.InsufficientDiskSpace as exc:
+            check("stage_release raises InsufficientDiskSpace when the disk is full", True,
+                  detail=str(exc))
+        except Exception as exc:  # noqa: BLE001
+            check("stage_release raises InsufficientDiskSpace when the disk is full", False,
+                  detail=f"wrong exception type raised: {exc!r}")
+
+    check("_download was never called", not download_spy.called)
+    check("no version dir was created for the tag", not (versions_dir / tag).exists())
+    check("the staging temp dir was cleaned up",
+          not (state_dir / "tmp" / f"update-{tag}").exists())
+    check("a failed progress event was emitted",
+          any(p["step"] == "failed" for p in progress), detail=str(progress))
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mnemo eu ") as raw:
         work = Path(raw)
@@ -967,6 +1115,11 @@ def main() -> int:
 
         test_safe_members_rejects_path_traversal(work)
         test_watch_pip_progress(work)
+        test_check_disk_space_arithmetic(work)
+        test_check_disk_space_target_and_version_size_overrides(work)
+        test_cmd_warmup_refuses_to_download_when_disk_full(work)
+        test_cmd_warmup_proceeds_when_disk_has_room(work)
+        test_stage_release_raises_before_download_when_disk_full(work)
         test_stage_release_real_pipeline(work)
         test_stage_release_failure_leaves_nothing_behind(work)
 

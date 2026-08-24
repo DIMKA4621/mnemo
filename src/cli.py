@@ -118,6 +118,15 @@ def _cmd_warmup(args: argparse.Namespace) -> int:
               "switching back to `local`).")
         return EXIT_OK
 
+    from . import config, engine_update
+
+    space = engine_update.check_disk_space(
+        model_cached=False, include_version_size=False, target=config.MODEL_CACHE
+    )
+    if not space.ok:
+        print(f"mnemo: {engine_update.InsufficientDiskSpace(space)}", file=sys.stderr)
+        return EXIT_ERROR
+
     from .embedder import warmup
 
     print("Downloading / loading model (one-time, ~2.2 GB) ...")
