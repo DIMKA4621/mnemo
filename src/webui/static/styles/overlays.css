@@ -395,20 +395,6 @@
 }
 .fs-init-row label { font-size: 12.5px; }
 
-.fs-init-result {
-  margin: 0;
-  padding: 8px 10px;
-  background: var(--bg-sunken);
-  border: 1px solid var(--line);
-  border-radius: var(--radius);
-  color: var(--fg-dim);
-  font-size: 11.5px;
-  font-family: var(--mono);
-  line-height: 1.6;
-  overflow-wrap: anywhere;
-}
-.fs-init-result strong { color: var(--fg); font-family: inherit; }
-
 /* ---- bank token panel inside the modal ------------------------------------- */
 
 /* Nothing in this panel absorbs slack — the body scrolls instead. Without
