@@ -2344,34 +2344,44 @@ def api_embed_download() -> dict:
     return {"started": True}
 
 
-def _embed_action(action) -> dict:
-    """Shared shell for unload/load: refuse while the queue is working."""
+def _embed_action(action, *, guard_queue: bool) -> dict:
+    """Shared shell for unload/load.
+
+    `guard_queue` gates the busy-queue refusal, not the action itself: `load`
+    is a probe through `embed_server.py`'s own `_QUERY_LANE`, isolated from
+    the worker's `_BATCH_LANE` there, so it never actually queues behind a
+    bulk embed and has nothing to be refused over (MN-20). `unload` still
+    goes through the same backend the worker embeds through, so pulling the
+    model out from under it remains genuinely unsafe — that guard is unchanged.
+    """
     from . import embedctl
 
-    snapshot = _queue_snapshot_json()
-    depth = int(snapshot.get("depth") or 0)
-    current = snapshot.get("current")
-    if depth or current:
-        # Refused, not queued behind the work. The worker embeds through the
-        # same backend, so pulling the model out from under it raises
-        # `EmbeddingUnavailable` mid-file and leaves the bank half-indexed —
-        # a cost paid later, by someone who will not connect it to a button
-        # pressed now.
-        #
-        # `depth` alone undercounts: it is the QUEUED backlog and does not
-        # include the one file actively in flight, so `current` truthy with
-        # `depth == 0` is the common case, not an edge one — a message that
-        # only ever cited `depth` read as "0 pending" while also claiming
-        # "still working", which is exactly the contradiction a caller like
-        # the console would otherwise have to explain away on its own.
-        if current and not depth:
-            detail = ("a file is being embedded through this backend right "
-                       "now — wait for it to finish")
-        else:
-            detail = (f"the queue is still working ({depth} task(s) pending) — "
-                       f"the worker embeds through this backend, so wait for "
-                       f"it to drain")
-        raise ApiError("embed_busy", detail, depth=depth)
+    if guard_queue:
+        snapshot = _queue_snapshot_json()
+        depth = int(snapshot.get("depth") or 0)
+        current = snapshot.get("current")
+        if depth or current:
+            # Refused, not queued behind the work. The worker embeds through
+            # the same backend, so pulling the model out from under it raises
+            # `EmbeddingUnavailable` mid-file and leaves the bank half-indexed
+            # — a cost paid later, by someone who will not connect it to a
+            # button pressed now.
+            #
+            # `depth` alone undercounts: it is the QUEUED backlog and does
+            # not include the one file actively in flight, so `current`
+            # truthy with `depth == 0` is the common case, not an edge one —
+            # a message that only ever cited `depth` read as "0 pending"
+            # while also claiming "still working", which is exactly the
+            # contradiction a caller like the console would otherwise have
+            # to explain away on its own.
+            if current and not depth:
+                detail = ("a file is being embedded through this backend "
+                           "right now — wait for it to finish")
+            else:
+                detail = (f"the queue is still working ({depth} task(s) "
+                           f"pending) — the worker embeds through this "
+                           f"backend, so wait for it to drain")
+            raise ApiError("embed_busy", detail, depth=depth)
     try:
         return action()
     except embedctl.EmbedControlUnavailable as exc:
@@ -2384,16 +2394,20 @@ def api_embed_unload() -> dict:
     the next search or indexed file brings the model back, paying ~7-8 s."""
     from . import embedctl
 
-    return _embed_action(embedctl.unload)
+    return _embed_action(embedctl.unload, guard_queue=True)
 
 
 @app.post("/api/embed/load", include_in_schema=False)
 def api_embed_load() -> dict:
     """Bring the model back with a probe embedding, which also proves the
-    backend answers and at what width."""
+    backend answers and at what width.
+
+    Never refused for a busy queue (MN-20): the probe runs on its own query
+    lane in `embed_server.py`, isolated from the worker's bulk-embed lane.
+    """
     from . import embedctl
 
-    return _embed_action(embedctl.load)
+    return _embed_action(embedctl.load, guard_queue=False)
 
 
 @app.get("/api/autostart", include_in_schema=False)
