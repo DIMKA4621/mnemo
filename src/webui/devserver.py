@@ -699,6 +699,16 @@ def regenerate_bank_token(bank_id: str) -> str:
         return token
 
 
+def _memory_dir_for(target: str) -> str:
+    """Mirrors `api._memory_dir_for`: never doubles a `.claude` already
+    picked. `target` already has no trailing slash here."""
+    if target.endswith("/.claude/memory"):
+        return target
+    if target.endswith("/.claude") or target == ".claude":
+        return target + "/memory"
+    return target + "/.claude/memory"
+
+
 def fs_listing(path: str | None) -> dict | None:
     """One directory listing, or ``None`` when the fixture has no such path."""
     target = (path or "").strip().replace("\\", "/") or FS_HOME
@@ -715,6 +725,7 @@ def fs_listing(path: str | None) -> dict | None:
          "registered": registered.get(target.rstrip("/") + "/" + name)}
         for name in sorted(FS_FIXTURE[target], key=str.lower)
     ]
+    memory_dir = _memory_dir_for(target)
     return {
         "path": target,
         "display": target,
@@ -726,6 +737,10 @@ def fs_listing(path: str | None) -> dict | None:
         "md_capped": False,
         "entries": entries,
         "truncated": False,
+        # MN-25: where "create structure here" would land, and whether it's
+        # already there — mirrors `api._memory_dir_for`/`api_fs_dirs`.
+        "memory_dir": memory_dir,
+        "has_claude_memory": memory_dir != target and memory_dir in FS_FIXTURE,
     }
 
 

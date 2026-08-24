@@ -1018,6 +1018,36 @@ def test_memory_rule_refresh() -> None:
               matched == expected, f"{matched}/{expected}")
 
 
+def test_ensure_memory_structure() -> None:
+    """`scaffold.ensure_memory_structure` — the webui "create structure"
+    checkbox's entry point. A thin wrapper over `_seed_tree`, so this only
+    has to prove it creates the expected tree and is idempotent — the
+    refresh/edited-file nuances are `test_memory_rule_refresh`'s job.
+    """
+    print("\n=== ensure_memory_structure ===")
+
+    with tempfile.TemporaryDirectory(prefix="mnemo ensure-structure ") as tmp:
+        claude = Path(tmp) / "proj" / ".claude"
+
+        log = scaffold.ensure_memory_structure(claude)
+        check("memory dir created", (claude / "memory").is_dir())
+        check("rules dir created", (claude / "rules").is_dir())
+        check("MEMORY.md created", (claude / "memory" / "MEMORY.md").is_file())
+        check("mnemo-memory.md created",
+              (claude / "rules" / "mnemo-memory.md").is_file())
+        check("log reports the created paths", len(log) >= 4, detail=str(log))
+
+        # Hand-edit MEMORY.md the way a real user would, then run again.
+        index = claude / "memory" / "MEMORY.md"
+        index.write_text("# my curated notes\n", encoding="utf-8")
+
+        scaffold.ensure_memory_structure(claude)
+        check("second call does not error and does not stomp MEMORY.md",
+              index.read_text(encoding="utf-8") == "# my curated notes\n")
+        check("second call keeps the rule file present",
+              (claude / "rules" / "mnemo-memory.md").is_file())
+
+
 def test_adopted_project_discovery() -> None:
     """Finding the projects a v2→v3 upgrade leaves stranded.
 
@@ -2750,6 +2780,7 @@ def main() -> int:
     test_scaffold_hand_edited_sed_line()
     test_scaffold_renames_the_legacy_key()
     test_memory_rule_refresh()
+    test_ensure_memory_structure()
     test_adopted_project_discovery()
     test_removal_lifts_the_queue_cancellation()
     test_setup_scripts_agree()

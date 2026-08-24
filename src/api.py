@@ -1184,6 +1184,10 @@ class AddBankRequest(BaseModel):
     # `mnemo init` against the project the bank root implies, right after
     # registration.
     init: bool = False
+    # "create structure here (.claude/memory)" checkbox in the add-bank
+    # dialog — seeds the bare memory tree at `root` before registration, so
+    # a bare folder with no `.claude` yet can become a bank in one step.
+    create_structure: bool = False
 
 
 class ReindexRequest(BaseModel):
@@ -1409,6 +1413,24 @@ def _run_init_for_bank(bank: Bank) -> dict:
 
 @app.post("/api/banks", status_code=201, include_in_schema=False)
 def api_add_bank(req: AddBankRequest) -> dict:
+    if req.create_structure:
+        # Resolve before trusting anything about the shape, same as
+        # `api_fs_dirs`/`registry.add` do with a client-supplied path — an
+        # unresolved relative `root` would otherwise get seeded against this
+        # process's own cwd rather than wherever the caller meant.
+        raw = Path(req.root)
+        if not raw.is_absolute():
+            raise ApiError("bad_request", "потрібен абсолютний шлях",
+                          root=req.root)
+        root = raw.expanduser().resolve()
+        if root.name.lower() != "memory" or root.parent.name.lower() != ".claude":
+            raise ApiError(
+                "bad_request",
+                "create_structure expects a <project>/.claude/memory path",
+                root=req.root,
+            )
+        from . import scaffold
+        scaffold.ensure_memory_structure(root.parent)
     try:
         bank = registry.add(req.root, name=req.name, provider=req.provider)
     except NotADirectoryError as exc:
@@ -1679,6 +1701,23 @@ def _registered_roots() -> dict[str, str]:
     return out
 
 
+def _memory_dir_for(target: Path) -> Path:
+    """Where the "create structure" checkbox's `.claude/memory` would land
+    for `target`, without doubling a `.claude` the user already picked.
+
+    Three shapes reach here: `target` already IS `<x>/.claude/memory` (the
+    checkbox is irrelevant then — the caller's own eligibility check handles
+    that), `target` already IS `<x>/.claude` (one level short — only
+    `memory` is missing), or `target` is an ordinary folder (both `.claude`
+    and `memory` are missing).
+    """
+    if target.name.lower() == "memory" and target.parent.name.lower() == ".claude":
+        return target
+    if target.name.lower() == ".claude":
+        return target / "memory"
+    return target / ".claude" / "memory"
+
+
 @app.get("/api/fs/dirs", include_in_schema=False)
 def api_fs_dirs(path: str | None = None) -> dict:
     """Sub-directories of one directory (§9.5). Defaults to the user's home."""
@@ -1734,6 +1773,7 @@ def api_fs_dirs(path: str | None = None) -> dict:
     entries.sort(key=lambda e: e["name"].lower())
     md, md_capped = _count_md_tree(target)
     parent = target.parent
+    memory_dir = _memory_dir_for(target)
     return {
         "path": target.as_posix(),
         "display": str(target),
@@ -1746,6 +1786,11 @@ def api_fs_dirs(path: str | None = None) -> dict:
         "md_capped": md_capped,
         "entries": entries,
         "truncated": truncated,
+        # Where the "create structure" checkbox would put `.claude/memory`
+        # for this exact `target` (never doubles a `.claude` already picked
+        # — `_memory_dir_for`), and whether it's already there.
+        "memory_dir": memory_dir.as_posix(),
+        "has_claude_memory": memory_dir != target and memory_dir.is_dir(),
     }
 
 
