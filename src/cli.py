@@ -35,18 +35,18 @@ EXIT_SERVICE_DOWN = 3
 # --------------------------------------------------------------- helpers
 
 
-def _client(timeout: float = 10.0):
+def _client(timeout: float = 10.0, *, autostart: bool = True):
     from .client import Client
 
-    return Client(timeout=timeout)
+    return Client(timeout=timeout, autostart=autostart)
 
 
-def _run_api(fn) -> int:
+def _run_api(fn, *, autostart: bool = True) -> int:
     """Call the backend, turning its two failure modes into exit codes."""
     from .client import ApiFailure, ServiceDown
 
     try:
-        fn(_client())
+        fn(_client(autostart=autostart))
     except ServiceDown as exc:
         print(f"mnemo: {exc}\n"
               f"       start it with `mnemo service start`.", file=sys.stderr)
@@ -578,7 +578,10 @@ def _cmd_status() -> int:
                   f"{_short_key(b.get('index_provider_key')):<32} "
                   f"{b['status']:<9} {b['chunks']:>7}{flag}")
 
-    return _run_api(call)
+    # `status` reports what is, it does not bring the service up to answer —
+    # unlike every other command here, which brings up a backend the user
+    # should never have to know exists.
+    return _run_api(call, autostart=False)
 
 
 _HOLD_SAID = {
