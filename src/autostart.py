@@ -241,7 +241,11 @@ def _linux_enable() -> int:
     (unit_dir / SYSTEMD_UNIT).write_text(systemd_unit(launcher), encoding="utf-8")
 
     _run(["systemctl", "--user", "daemon-reload"])
-    enabled = _run(["systemctl", "--user", "enable", "--now", SYSTEMD_UNIT])
+    # `enable` only, never `enable --now`: `--now` also starts/stops the unit
+    # immediately, and this unit is the same one a live backend already runs
+    # under. Registering autostart must not touch a process that is already
+    # running — `mnemo service start/stop` (service_ctl.py) owns that.
+    enabled = _run(["systemctl", "--user", "enable", SYSTEMD_UNIT])
     if enabled.returncode != 0:
         print(f"mnemo autostart: systemctl failed: {enabled.stderr.strip()}")
         return EXIT_FAILED
@@ -264,7 +268,10 @@ def _linux_disable() -> int:
     if not unit.is_file():
         print("mnemo autostart: disabled (no unit)")
         return EXIT_ABSENT
-    _run(["systemctl", "--user", "disable", "--now", SYSTEMD_UNIT])
+    # Same reasoning as enable(): `disable` only, never `disable --now` — the
+    # unit is the same one a live backend may be running under, and removing
+    # the logon registration must not kill it.
+    _run(["systemctl", "--user", "disable", SYSTEMD_UNIT])
     unit.unlink(missing_ok=True)
     _run(["systemctl", "--user", "daemon-reload"])
     # Lingering is deliberately left alone: the user may well have enabled it
