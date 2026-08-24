@@ -68,6 +68,12 @@ This file is an **index**: links + quick facts only; detail lives in `topics/`, 
 
 ## Logs
 
+- [2026-08-24 (MN-24/23/22/21)](logs/2026-08-24-mn24-mn23-mn22-mn21-batch-bugfixes.md) — batch of 4 tickets on one shared `fix` branch (not per-ticket branches, deliberate).
+  MN-24: `mnemo status` no longer autostarts a stopped service (`_client()`/`_run_api()` gained `autostart` kwarg).
+  MN-23: Linux autostart enable/disable dropped `--now` — was killing the live backend (same systemd unit), read as "service restarted".
+  MN-22: `install.sh` now writes the `mnemo` wrapper into every rc file the detected `$SHELL` (bash/zsh) actually reads, not just `.profile`/`.bashrc` — covers Linux + macOS non-login shells.
+  MN-21 (new feature): disk-space check before install/self-update/model-download — three independent native implementations (bash/PowerShell/Python, same pattern as `human()`/`Format-Bytes`/`human_bytes()`), constants synced by test.
+  Two real bugs caught by review and fixed: install.ps1's disk-check used bare `exit 1` (bypassed the `$PSCommandPath` iex-safety guard, fixed to `throw`), and the ticket's own "sync covered by a test" AC wasn't met until added.
 - [2026-08-24 (MN-11)](logs/2026-08-24-mn-11-graceful-stop-and-rebuild-retry.md) — `service stop` на Windows тепер graceful: `POST /api/shutdown` (нове, флипає uvicorn `should_exit` через `call_soon`, той самий прапорець що й SIGTERM на POSIX) перед `taskkill /F`-фолбеком, у межах наявного `SERVICE_STOP_TIMEOUT`; `should_yield()` тепер yield-ить і на `_stop.is_set()`, обмежуючи вікно одним батчем.
   Watcher отримав другий, короткий (30с, `MNEMO_RETRY_INTERVAL_S`) цикл поруч із наявним 900с rescan — ретраїть лише банки з активним `EmbeddingUnavailable`-стріком, до стелі `MNEMO_RETRY_MAX_ATTEMPTS` (5); детерміновані помилки в стрік не потрапляють.
   **Реальний баг, знайдений рев'ю:** фіксоване вікно сканування стріку (`_RETRY_SCAN_LIMIT=50`) не було прив'язане до конфігурованої стелі — стеля вище 50 робила ретрай нескінченним; полагоджено (`_retry_scan_limit() = max(50, cap+10)`).
