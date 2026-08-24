@@ -300,6 +300,12 @@
 
 .rm-check input { margin: 2px 0 0; flex: 0 0 auto; }
 
+/* Dims the label text along with its checkbox, not just the box — text-only
+   dimming (or none at all) left a disabled row reading almost like an
+   active one. Opacity, not a lighter color: it fades the checkbox and text
+   by the same amount without touching font-size. */
+.rm-check:has(input:disabled) { opacity: .6; }
+
 /* ---- folder browser inside the modal --------------------------------------- */
 
 .fs-label {
@@ -394,6 +400,9 @@
   gap: 7px;
 }
 .fs-init-row label { font-size: 12.5px; }
+/* Same reasoning as `.rm-check:has()` above: fade the label with its
+   checkbox, same amount, font-size untouched. */
+.fs-init-row:has(input:disabled) { opacity: .6; }
 
 /* ---- bank token panel inside the modal ------------------------------------- */
 
