@@ -436,6 +436,20 @@ function overrideNote(key) {
   });
 }
 
+/**
+ * Загальні only: is there a Save-gated edit actually waiting?
+ *
+ * Theme and language do not count — they apply on their own click and were
+ * never part of what Save sends. Deliberately mirrors submitGeneral()'s own
+ * early-return condition, since the button being clickable and the submit
+ * having something to do are the same fact told twice.
+ */
+function generalHasPendingChange() {
+  return settings.autostartWant != null ||
+    settings.autoUpdateWant != null ||
+    settings.requireLoginWant != null;
+}
+
 function renderSettings() {
   const body = settings.body;
   clear(body);
@@ -446,6 +460,15 @@ function renderSettings() {
   // rather than disabled: a permanently greyed-out control reads as something
   // that ought to work and does not.
   settings.save.hidden = !section.submit;
+  // Загальні is the one section with an exact, cheap answer to "is there
+  // anything Save would do right now" — so, unlike Embedding model below
+  // (a multi-field form, including a write-only key input a saved value can
+  // never be diffed against), it gets a Save button that stays dark until a
+  // real edit is pending, rather than always clickable. Left untouched while
+  // busy: a mid-submit disable must not be overwritten by this recompute.
+  if (!settings.busy) {
+    settings.save.disabled = section.id === 'general' ? !generalHasPendingChange() : false;
+  }
 
   if (settings.busy && !settings.data) {
     body.appendChild(el('p', { className: 'empty-hint', text: t('settings.loading') }));
