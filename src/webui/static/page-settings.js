@@ -450,6 +450,21 @@ function generalHasPendingChange() {
     settings.requireLoginWant != null;
 }
 
+/**
+ * Модель ембедингу: is the browsed backend tab actually different from the
+ * saved one?
+ *
+ * Deliberately narrower than a full form diff — url/model/dim/timeout/key
+ * edits made *within* the currently-saved backend do not light the button,
+ * only switching to a different backend tab does. A full diff would also
+ * need to cover the write-only key field, which a saved value can never be
+ * compared against; the user asked specifically for the backend-switch case,
+ * so that is the one this answers, not "any field touched."
+ */
+function embedHasPendingChange() {
+  return !!settings.data && settings.backendId !== backendForSettings();
+}
+
 function renderSettings() {
   const body = settings.body;
   clear(body);
@@ -460,14 +475,16 @@ function renderSettings() {
   // rather than disabled: a permanently greyed-out control reads as something
   // that ought to work and does not.
   settings.save.hidden = !section.submit;
-  // Загальні is the one section with an exact, cheap answer to "is there
-  // anything Save would do right now" — so, unlike Embedding model below
-  // (a multi-field form, including a write-only key input a saved value can
-  // never be diffed against), it gets a Save button that stays dark until a
-  // real edit is pending, rather than always clickable. Left untouched while
-  // busy: a mid-submit disable must not be overwritten by this recompute.
+  // Both Загальні and Модель ембедингу have a cheap, exact answer to "is
+  // there anything Save would do right now" — a Save-gated want-field for
+  // one, the browsed-vs-saved backend id for the other — so both get a
+  // button that stays dark until that answer is yes, rather than always
+  // clickable. Left untouched while busy: a mid-submit disable must not be
+  // overwritten by this recompute.
   if (!settings.busy) {
-    settings.save.disabled = section.id === 'general' ? !generalHasPendingChange() : false;
+    settings.save.disabled = section.id === 'general' ? !generalHasPendingChange()
+      : section.id === 'embed' ? !embedHasPendingChange()
+      : false;
   }
 
   if (settings.busy && !settings.data) {
