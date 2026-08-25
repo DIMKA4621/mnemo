@@ -225,4 +225,51 @@ window.MNEMO_I18N.en = {
   // -- settings: static footer markup (index.html) --------------------------
 
   'settings.btn.save': 'Save',
+
+  // -- update: self-update banner + modal (update.js) -----------------------
+
+  'update.modal.title': 'mnemo update',
+  'update.steps.download': 'Downloading from GitHub',
+  'update.steps.venv': 'Installing packages',
+  'update.steps.switching': 'Switching version and restarting',
+
+  'update.confirm.currentLabel': 'Current version: ',
+  'update.confirm.newLabel': 'New version: ',
+  'update.confirm.warning': 'The mnemo service will be stopped and restarted on the new ' +
+    'version. Search and indexing are unavailable while this happens. Once you press "OK" ' +
+    'the action cannot be cancelled — progress is shown until it finishes.',
+  'update.confirm.okBtn': 'OK',
+  'update.confirm.staleTarget': 'The version shown is stale (current: {tag}). Close this ' +
+    'window and try again.',
+
+  'update.autoPending.leadPrefix': 'Automatic update to ',
+  'update.autoPending.leadMiddle': ' starts in ',
+  'update.autoPending.leadSuffix': ' s.',
+  'update.autoPending.note': 'If nothing is clicked, the update applies automatically. ' +
+    '"Cancel" only postpones it — the same version may be offered again on the next check.',
+
+  'update.progress.title': 'Updating to {tag}…',
+  'update.progress.switchingNote': 'The service is restarting — the page will lose its ' +
+    'connection for a few seconds. This is expected: the result becomes known as soon as ' +
+    'the connection recovers.',
+
+  'update.timeout.text': "Couldn't learn the update's outcome within the allotted time. " +
+    "The service may still be restarting, or the console can't reach it right now. Check " +
+    'manually (mnemo doctor) or try again.',
+  'update.timeout.retryBtn': 'Try again',
+
+  'update.terminal.done': 'Updated to {tag}.',
+  'update.terminal.rolledBack': 'A problem occurred updating to {tag} — rolled back to {current}.',
+  'update.terminal.errorSuffix': ' ({error})',
+  'update.terminal.failedBase': 'Update failed',
+  'update.terminal.failedWithError': ': {error}',
+  'update.terminal.failedNoError': '.',
+  'update.terminal.unknownState': ' Service state may be undefined — check mnemo doctor.',
+  'update.terminal.unchanged': ' The current version was not changed.',
+  'update.terminal.autoClosePrefix': 'Closes automatically in ',
+  'update.terminal.autoCloseSuffix': ' s.',
+
+  'update.banner.busy': 'mnemo update in progress…',
+  'update.banner.autoPending': 'Auto-update to {tag} awaiting confirmation',
+  'update.banner.available': 'New version {tag} available',
 };

@@ -219,4 +219,52 @@ window.MNEMO_I18N.uk = {
   // -- settings: static footer markup (index.html) --------------------------
 
   'settings.btn.save': 'Зберегти',
+
+  // -- update: self-update banner + modal (update.js) -----------------------
+
+  'update.modal.title': 'Оновлення mnemo',
+  'update.steps.download': 'Завантаження з GitHub',
+  'update.steps.venv': 'Встановлення пакетів',
+  'update.steps.switching': 'Перемикання версії та перезапуск',
+
+  'update.confirm.currentLabel': 'Поточна версія: ',
+  'update.confirm.newLabel': 'Нова версія: ',
+  'update.confirm.warning': 'Службу mnemo буде зупинено й перезапущено на новій версії. На ' +
+    'цей час пошук та індексація недоступні. Після «OK» дію не можна скасувати — прогрес ' +
+    'показуватиметься до завершення.',
+  'update.confirm.okBtn': 'OK',
+  'update.confirm.staleTarget': 'Показана версія застаріла (актуальна: {tag}). Закрийте ' +
+    'вікно й спробуйте ще раз.',
+
+  'update.autoPending.leadPrefix': 'Автоматичне оновлення до ',
+  'update.autoPending.leadMiddle': ' почнеться через ',
+  'update.autoPending.leadSuffix': ' с.',
+  'update.autoPending.note': 'Якщо нічого не натиснути, оновлення застосується автоматично. ' +
+    '«Скасувати» лише відкладає його — ту саму версію може бути запропоновано знову під час ' +
+    'наступної перевірки.',
+
+  'update.progress.title': 'Оновлення до {tag}…',
+  'update.progress.switchingNote': 'Служба перезапускається — сторінка на кілька секунд ' +
+    'втратить з’єднання. Це очікувано: результат стане відомий одразу після відновлення ' +
+    'зв’язку.',
+
+  'update.timeout.text': 'Не вдалося дізнатися результат оновлення за відведений час. Служба ' +
+    'могла ще перезапускатися, або консоль тимчасово не звʼязується з нею. Перевірте вручну ' +
+    '(mnemo doctor) або спробуйте ще раз.',
+  'update.timeout.retryBtn': 'Спробувати ще',
+
+  'update.terminal.done': 'Оновлено до {tag}.',
+  'update.terminal.rolledBack': 'Проблема під час оновлення до {tag} — відкотили назад на {current}.',
+  'update.terminal.errorSuffix': ' ({error})',
+  'update.terminal.failedBase': 'Оновлення не вдалося',
+  'update.terminal.failedWithError': ': {error}',
+  'update.terminal.failedNoError': '.',
+  'update.terminal.unknownState': ' Стан служби може бути невизначеним — перевірте mnemo doctor.',
+  'update.terminal.unchanged': ' Поточна версія не змінювалась.',
+  'update.terminal.autoClosePrefix': 'Закриється автоматично через ',
+  'update.terminal.autoCloseSuffix': ' с.',
+
+  'update.banner.busy': 'Оновлення mnemo триває…',
+  'update.banner.autoPending': 'Автооновлення до {tag} очікує підтвердження',
+  'update.banner.available': 'Доступна нова версія {tag}',
 };

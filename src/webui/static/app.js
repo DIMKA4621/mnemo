@@ -204,6 +204,11 @@ function refreshAllViews() {
   if (picker.root && !picker.root.hidden) renderPicker();
   if (bankToken.root && !bankToken.root.hidden) renderTokenPanel();
   if (removal.root && !removal.root.hidden) renderRemoval();
+  // update.js: static modal chrome first, then either the open modal's
+  // current phase or (nothing open) just the sidebar banner text.
+  applyUpdateStaticI18n();
+  if (updateModal.root && !updateModal.root.hidden) renderUpdateModal();
+  else renderSidebarUpdateBanner();
 }
 
 // ---------------------------------------------------------------------------
