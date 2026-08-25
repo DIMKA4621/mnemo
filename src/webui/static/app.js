@@ -194,6 +194,7 @@ function refreshAllViews() {
     renderTree();
     renderFile();
     renderJournal();
+    renderSettings();
   }
   // Transient popovers: closing on a language switch matches the existing
   // "scroll/resize closes the menu" posture rather than repainting one that

@@ -326,6 +326,221 @@ window.MNEMO_I18N.uk = {
 
   'settings.btn.save': 'Зберегти',
 
+  // -- settings: Settings page — header, tabs, ledes (page-settings.js) -----
+
+  'settings.header.title': 'Налаштування',
+  'settings.header.sub': 'стосується цієї машини, не окремого банку',
+
+  'settings.tabs.general': 'Загальні',
+  'settings.tabs.embed': 'Модель ембедингу',
+  'settings.tabs.maint': 'Обслуговування',
+
+  'settings.lede.general': 'Те, що стосується самої консолі й машини в цілому — не окремого ' +
+    'банку і не бекенда ембедингу.',
+  'settings.lede.embed': 'Який бекенд рахує вектори для пошуку в банках і скільки оперативної ' +
+    'памʼяті він для цього займає.',
+  'settings.lede.maint': 'Той самий структурований doctor report, який CLI показує текстом. ' +
+    'Перевірки запускаються лише при відкритті цього розділу.',
+
+  'settings.loading': 'Завантаження…',
+  'settings.messages.nothingChanged': 'Нічого не змінено.',
+  'settings.overrideNote': 'перекрито змінною {var} — збережене тут не подіє, доки вона виставлена',
+  'settings.notSavedToggle': 'не збережено — зараз {state}; натисніть «Зберегти», щоб застосувати',
+  'settings.state.on': 'увімкнено',
+  'settings.state.off': 'вимкнено',
+  'settings.toggle.on': 'Увімкнено',
+  'settings.toggle.off': 'Вимкнено',
+
+  // -- settings.general: theme, language, autostart, auto-update, require-login, status --
+
+  'settings.general.theme.label': 'Тема консолі',
+  'settings.general.theme.note': 'Вибір цього браузера — тому застосовується одразу й не чекає «Зберегти».',
+  'settings.general.theme.dark': 'Темна',
+  'settings.general.theme.light': 'Світла',
+
+  'settings.general.language.label': 'Мова',
+  'settings.general.language.note': 'Вибір цього браузера — тому застосовується одразу й не чекає «Зберегти».',
+
+  'settings.general.autostart.label': 'Запускати службу при вході в систему',
+  'settings.general.autostart.note': 'Реєструється як {mechanism}{named}. Діє з наступного входу; ' +
+    'те, що працює зараз, не зачіпає.',
+  'settings.general.autostart.namedSuffix': ' — «{name}»',
+  'settings.general.autostart.notFetched': 'стан не отримано',
+  'settings.general.autostart.unsupported': 'на цій системі не підтримується',
+  'settings.general.autostart.savedOn': 'Автозапуск: служба підніматиметься при вході в систему.',
+  'settings.general.autostart.savedOff': 'Автозапуск: вимкнено, службу доведеться піднімати самому.',
+
+  'settings.general.autoUpdate.label': 'Автоматичне оновлення',
+  'settings.general.autoUpdate.note': 'Придатний реліз застосовується сам — з коротким відліком і ' +
+    'кнопкою «Скасувати» просто в консолі. Вимкнено — лишається тільки банер і ручне ' +
+    'підтвердження, як і раніше.',
+  'settings.general.autoUpdate.savedOn': 'Автооновлення: увімкнено.',
+  'settings.general.autoUpdate.savedOff': 'Автооновлення: вимкнено.',
+  'settings.general.autoUpdate.checking': 'Перевіряємо…',
+  'settings.general.autoUpdate.checkBtn': 'Перевірити оновлення',
+  'settings.general.autoUpdate.upToDate': 'Актуальна версія.',
+
+  'settings.general.requireLogin.label': 'Вимагати токен для входу в кабінет',
+  'settings.general.requireLogin.noteOff': 'Вимкнено (типово): «/api» (кабінет і CLI) відкритий ' +
+    'на loopback, як зараз, — без токена.',
+  'settings.general.requireLogin.noteOn': 'Увімкнено: кабінету й CLI потрібен сервісний токен ' +
+    'для доступу.',
+  'settings.general.requireLogin.savedOn': 'Вхід у кабінет тепер вимагає токен.',
+  'settings.general.requireLogin.savedOff': 'Кабінет знову відкритий на loopback без токена.',
+  'settings.general.requireLogin.tokenLabel': 'Сервісний токен',
+  'settings.general.requireLogin.tokenNote': 'Показано один раз — GET /api/settings більше його не поверне. ' +
+    'Консоль уже підставила цей токен у поточну сесію, тож входити ' +
+    'заново не потрібно. Якщо він загубиться — той самий файл лежить ' +
+    'на диску (шлях і mnemo doctor покажуть його), або вимкніть цю ' +
+    'опцію ще раз, щоб зняти вимогу токена.',
+
+  'settings.general.serviceNotLoaded': 'Стан служби ще не отримано.',
+  'settings.general.statusLabel': 'Стан',
+  'settings.general.stat.version': 'Версія',
+  'settings.general.stat.pid': 'PID',
+  'settings.general.stat.address': 'Адреса',
+  'settings.general.stat.provider': 'Провайдер',
+  'settings.general.stat.uptime': 'Працює',
+  'settings.general.stat.priorityQueue': 'Черга пріоритетів',
+  'settings.general.stat.priorityOn': 'увімкнена',
+  'settings.general.stat.priorityOff': 'вимкнена',
+  'settings.general.aboutLabel': 'Про проект',
+
+  'settings.uptime.hoursMinutes': '{h} год {m} хв',
+  'settings.uptime.minutesSeconds': '{m} хв {s} с',
+  'settings.uptime.seconds': '{s} с',
+
+  // -- settings.embed: backend, model, endpoint, key, memory ----------------
+
+  'settings.embed.warn.line1': 'Зміна моделі або ширини — це новий ключ перебудови.',
+  'settings.embed.warn.line2': 'Конфігурація діє після збереження налаштувань.',
+  'settings.embed.warn.line3': 'Старі індекси отримають REBUILD PENDING і пошук по них ' +
+    'відмовить, доки їх не перегенерувати.',
+  'settings.embed.backendLabel': 'Бекенд ембедингу',
+  'settings.embed.notSavedBackend': 'не збережено — зараз активний «{active}»; натисніть ' +
+    '«Зберегти», щоб перемкнути на «{target}»',
+  'settings.embed.local.lead': 'Вектори рахує резидент на цій машині — ',
+  'settings.embed.local.dimsSuffix': ' ({dim} вимірів). ',
+  'settings.embed.local.noDimSuffix': '. ',
+  'settings.embed.local.tail': 'Жоден байт памʼяті не залишає машину.',
+  'settings.embed.modelLabel': 'Модель',
+  'settings.embed.model.prefixedNote': 'ця модель тренована з маркерами — mnemo підставить їх сама',
+  'settings.embed.model.notInCatalog': ' (не з довідника)',
+  'settings.embed.urlLabel': 'Адреса',
+  'settings.embed.dimLabel': 'Вимірів',
+  'settings.embed.timeoutLabel': 'Таймаут, с',
+  'settings.embed.dimNote': 'Ширина підставлена з довідника, але останнє слово за самим ' +
+    'ендпоінтом: mnemo звіряє її з першим отриманим вектором і ' +
+    'відмовиться писати індекс, якщо вони розійшлися.',
+  'settings.embed.keyLabel': 'Ключ API',
+  'settings.embed.keyNote': 'Зберігається у settings.json на цій машині. Назад не показується — ' +
+    'сторінка, яка друкує секрет, друкує його і в скриншот.',
+  'settings.embed.key.placeholderStored': 'збережений — введіть новий, щоб замінити',
+
+  'settings.embed.mem.hold.loaded': 'у памʼяті',
+  'settings.embed.mem.hold.unloaded': 'не в памʼяті',
+  'settings.embed.mem.hold.na': 'нічого не тримає',
+  'settings.embed.mem.hold.unknown': 'невідомо',
+  'settings.embed.mem.label': 'Оперативна памʼять',
+  'settings.embed.mem.notFetched': 'Стан ще не отримано.',
+  'settings.embed.mem.introStrong': 'Модель піднімається сама, коли потрібна для пошуку чи індексації',
+  'settings.embed.mem.introRest': ' — «не в памʼяті» це нормальний стан, не помилка. ' +
+    '«Вивантажити» звільняє памʼять одразу, замість тримати модель ' +
+    'постійно завантаженою про запас.',
+  'settings.embed.mem.statusCaption': 'Статус:',
+  'settings.embed.mem.modelCaption': 'Модель:',
+  'settings.embed.mem.idleCaption': 'Автовивантаження:',
+  'settings.embed.mem.unloadBtn': 'Вивантажити',
+  'settings.embed.mem.wakeBtn': 'Підняти в памʼять',
+  'settings.embed.mem.probeEndpointBtn': 'Перевірити ендпоінт',
+  'settings.embed.mem.probeBtn': 'Перевірити',
+  'settings.embed.mem.downloading': 'Завантаження моделі…',
+  'settings.embed.mem.downloadBtn': 'Завантажити модель на диск (2.2 ГБ)',
+  'settings.embed.mem.note.wakeSoon': 'Підніметься назад за кілька секунд.',
+  'settings.embed.mem.note.naHosted': 'Цей ендпоінт не тримає нічого на цій машині — модель живе ' +
+    'на боці постачальника, тож звільняти нічого.',
+  'settings.embed.mem.note.naProbeCost': '«Перевірити ендпоінт» зробить один embedding request. Для ' +
+    'тарифікованого API це може бути платний виклик.',
+  'settings.embed.mem.note.expiresAt': 'Бекенд тримає її до {when}.',
+  'settings.embed.mem.note.othersHeld': 'Там же ще {n} модел(і/ей) — не наші, їх не чіпаємо.',
+  'settings.embed.mem.note.downloadFailed': 'Завантаження не вдалося — спробуйте ще раз.',
+  'settings.embed.mem.unloadedNote': 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.',
+  'settings.embed.mem.probeOkBase': 'Ендпоінт відповів',
+  'settings.embed.mem.probeOkDimSuffix': ' — пробний вектор має {dim} вимірів.',
+  'settings.embed.mem.loadedNote': 'Бекенд відповів — модель у памʼяті.',
+  'settings.embed.mem.busyError': 'Черга ще працює через цей бекенд — почекайте, доки вона ' +
+    'звільниться, і спробуйте ще раз.',
+
+  'settings.embed.errors.missingUrl': 'Вкажіть адресу ендпоінта.',
+  'settings.embed.errors.dimNotPositive': 'Вимірів має бути додатним числом.',
+  'settings.embed.saved.restartRequired': 'Збережено. Набере чинності після перезапуску служби.',
+  'settings.embed.saved.appliedNoPending': 'Збережено й застосовано. Перевірте бекенд кнопкою вище.',
+  'settings.embed.saved.appliedPending': 'Збережено й застосовано. Перевірте бекенд кнопкою вище, ' +
+    'потім перегенеруйте банки з REBUILD PENDING на головному екрані.',
+  'settings.embed.errors.refreshFailed': 'Налаштування збережено, але не всі стани вдалося ' +
+    'перечитати. Оновіть сторінку — повторно зберігати не потрібно.',
+
+  // -- settings.maint: diagnostics + orphan cleanup --------------------------
+
+  'settings.maint.refreshing': 'Оновлюємо…',
+  'settings.maint.refreshBtn': 'Оновити діагностику',
+  'settings.maint.collecting': 'Збираємо діагностику…',
+  'settings.maint.notFetched': 'Звіт ще не отримано.',
+  'settings.maint.engineLabel': 'Рушій',
+  'settings.maint.embedLabel': 'Ембединг',
+  'settings.maint.providerLabel': 'Провайдер',
+  'settings.maint.localModelLabel': 'Локальна модель',
+  'settings.maint.residentLabel': 'Резидент',
+  'settings.maint.serviceLabel': 'Служба',
+  'settings.maint.queueLabel': 'Черга',
+  'settings.maint.registryLabel': 'Реєстр',
+  'settings.maint.unknown': 'невідомо',
+  'settings.maint.unknownTitle': 'Невідомо',
+  'settings.maint.genericError': 'помилка',
+  'settings.maint.model.cachedFull': 'кеш повний',
+  'settings.maint.model.notLoaded': 'НЕ ЗАВАНТАЖЕНА',
+  'settings.maint.model.cachedNotNeeded': 'є, але не потрібна',
+  'settings.maint.model.notNeeded': 'не потрібна',
+  'settings.maint.unavailable': 'НЕДОСТУПНИЙ',
+  'settings.maint.resident.up': 'працює',
+  'settings.maint.resident.down': 'не завантажений',
+  'settings.maint.resident.portSuffix': ' · машинний порт',
+  'settings.maint.resident.na': 'n/a для цього провайдера',
+  'settings.maint.endpoint.dimsUnit': 'вимірів',
+  'settings.maint.endpoint.notConfigured': 'НЕ НАЛАШТОВАНО — {error}',
+  'settings.maint.backend.upSummary': 'працює · pid {pid} · машинний порт',
+  'settings.maint.backend.down': 'НЕ ДОСТУПНИЙ — {error}',
+  'settings.maint.token.notSet': 'не встановлено · /api відкритий на loopback за замовчуванням',
+  'settings.maint.registryUnreadable': 'НЕЧИТАНИЙ — {error}',
+  'settings.maint.registryReadable': 'Реєстр читається.',
+  'settings.maint.registry.noRoot': 'нема кореня',
+  'settings.maint.count.projects': { one: '{n} проєкт', few: '{n} проєкти', many: '{n} проєктів' },
+  'settings.maint.wiring.allCurrent': 'усі актуальні',
+
+  'settings.maint.orphans.unavailableTitle': 'Список недоступний',
+  'settings.maint.orphans.deletionForbidden': 'Видалення заборонене: {reason}',
+  'settings.maint.orphans.registryUncheckable': 'реєстр не можна перевірити',
+  'settings.maint.orphans.noneTitle': 'Сиріт немає',
+  'settings.maint.orphans.noneNote': 'Кожен index належить банку.',
+  'settings.maint.orphans.unreadable': 'не читається — {error}',
+  'settings.maint.orphans.preV3NoRoot': 'pre-v3 index — root не записаний',
+  'settings.maint.orphans.noRoot': 'root не записаний',
+  'settings.maint.orphans.rootStillOnDisk': ' · root досі є на диску',
+  'settings.maint.orphans.unknownFiles': '? файлів',
+  'settings.maint.orphans.sectionLabel': 'Індекси-сироти',
+  'settings.maint.orphans.sectionNote': 'Doctor лише показує. Прибирає тільки окрема підтверджена ' +
+    'дія — ніколи автоматично й ніколи разом із діагностикою.',
+  'settings.maint.orphans.cleanupBtn': 'Прибрати сироти',
+  'settings.maint.orphans.confirmText': 'Буде видалено тільки ці показані derived index id: {ids}. ' +
+    'Перед кожним видаленням реєстр перевіряється знову; .md не чіпаються.',
+  'settings.maint.orphans.cleaning': 'Прибираємо…',
+  'settings.maint.orphans.deleteBtn': 'Видалити {n}',
+  'settings.maint.orphans.result.removed': 'видалено {removed} з {total}',
+  'settings.maint.orphans.result.freed': 'звільнено {bytes}',
+  'settings.maint.orphans.result.skipped': 'пропущено {n}',
+  'settings.maint.orphans.result.locked': 'locked {n}',
+  'settings.maint.orphans.lockedError': 'Не всі файли видалено: {list}',
+
   // -- update: self-update banner + modal (update.js) -----------------------
 
   'update.modal.title': 'Оновлення mnemo',
