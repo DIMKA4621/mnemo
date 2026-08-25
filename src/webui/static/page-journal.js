@@ -129,7 +129,7 @@ function evStatusBadgeClass(ev) {
 }
 
 function evStatusWord(ev) {
-  if (state.logKind === 'query') return STATUS_LABEL[ev.status] || ev.status;
+  if (state.logKind === 'query') return statusLabel(ev.status);
   return ev.result === 'error' ? 'помилка' : ev.result;
 }
 

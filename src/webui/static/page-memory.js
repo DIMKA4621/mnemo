@@ -326,7 +326,7 @@ function bankCard(bank) {
   const badges = [
     el('span', {
       className: 'badge badge-' + bank.status,
-      text: STATUS_LABEL[bank.status] || bank.status,
+      text: statusLabel(bank.status),
       title: statusNote(bank),
     }),
     bank.git

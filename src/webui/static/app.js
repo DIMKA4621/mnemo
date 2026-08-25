@@ -56,14 +56,154 @@ function resolveTheme() {
  * Sets the attribute the CSS keys off and persists the choice.
  *
  * There is no permanent theme control in the shell any more — it moved into
- * Налаштування → Загальні (design decision, `.claude/memory/topics/console-ui.md`)
+ * Settings → General (design decision, `.claude/memory/topics/console-ui.md`)
  * as the one control on that screen that applies on click rather than
- * waiting for «Зберегти». Whatever renders that control is responsible for
- * reflecting the active choice; this function only ever sets it.
+ * waiting for a «Save» button. Whatever renders that control is responsible
+ * for reflecting the active choice; this function only ever sets it.
  */
 function applyTheme(theme) {
   document.documentElement.dataset.theme = theme;
   localStorage.setItem('mnemo_theme', theme);
+}
+
+// ---------------------------------------------------------------------------
+// language (i18n, MN-10)
+// ---------------------------------------------------------------------------
+//
+// `i18n/en.js` and `i18n/uk.js` (loaded before this file, index.html) each
+// assign a flat `key -> string` dictionary onto `window.MNEMO_I18N.<lang>`;
+// a plural entry's value is `{one, other}` (English) or `{one, few, many}`
+// (Ukrainian) instead of a string. The active language is read fresh on
+// every call — no cached state to go stale — same pattern as `resolveTheme()`.
+// Like the theme, the choice lives in `localStorage` and is never sent to the
+// backend: it is a browser/person preference, not a machine one (unlike
+// autostart/auto_update/require_login in src/settings.py).
+
+const DEFAULT_LANG = 'en';
+
+function resolveLang() {
+  return localStorage.getItem('mnemo_lang') === 'uk' ? 'uk' : DEFAULT_LANG;
+}
+
+function i18nDict(lang) {
+  return (window.MNEMO_I18N && window.MNEMO_I18N[lang]) || {};
+}
+
+function interpolate(str, vars) {
+  if (!vars) return str;
+  return str.replace(/\{(\w+)\}/g, (m, name) =>
+    Object.prototype.hasOwnProperty.call(vars, name) ? String(vars[name]) : m);
+}
+
+/**
+ * Look up `key` in the active language, falling back to English, then to the
+ * raw key — so a missing translation degrades to a visible placeholder
+ * rather than `undefined` or a thrown error.
+ */
+function t(key, vars) {
+  const lang = resolveLang();
+  let value = i18nDict(lang)[key];
+  if (value === undefined) value = i18nDict(DEFAULT_LANG)[key];
+  if (value === undefined) {
+    console.warn('mnemo: missing i18n key', key);
+    return key;
+  }
+  return interpolate(value, vars);
+}
+
+// English is a 2-way split (one/other); Ukrainian is the standard Slavic
+// triad also used by `pluralizeUk()` below (kept, for now, for the pages
+// this rule has not reached yet — see that function's own comment).
+const PLURAL_RULES = {
+  en: (n) => (n === 1 ? 'one' : 'other'),
+  uk: (n) => {
+    const mod10 = n % 10;
+    const mod100 = n % 100;
+    if (mod10 === 1 && mod100 !== 11) return 'one';
+    if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return 'few';
+    return 'many';
+  },
+};
+
+/**
+ * Like `t()`, but `key`'s dictionary value is a form object rather than a
+ * string; `{n}` plus any extra `vars` are interpolated into the form the
+ * active language's plural rule selects for `n`.
+ */
+function plural(key, n, vars) {
+  const lang = resolveLang();
+  let forms = i18nDict(lang)[key];
+  if (forms === undefined) forms = i18nDict(DEFAULT_LANG)[key];
+  if (forms === undefined) {
+    console.warn('mnemo: missing i18n key', key);
+    return key;
+  }
+  const rule = PLURAL_RULES[lang] || PLURAL_RULES.en;
+  const form = forms[rule(n)] || forms.other || forms.many || '';
+  return interpolate(form, Object.assign({ n: n }, vars));
+}
+
+/**
+ * Re-apply every static-markup translation from the active dictionary.
+ *
+ * Covers `index.html`'s baked English markup (`data-i18n` for textContent,
+ * `data-i18n-title` for the `title` attribute, `data-i18n-aria` for
+ * `aria-label`, `data-i18n-placeholder` for `placeholder`) and every
+ * build-once dialog node in this file that carries the same attributes —
+ * `querySelectorAll` runs over the whole document regardless of a node's
+ * `hidden` state, so a closed modal's chrome stays correctly translated for
+ * the moment it opens next, with no per-dialog refresh code required.
+ */
+function applyStaticI18n() {
+  for (const node of document.querySelectorAll('[data-i18n]')) {
+    node.textContent = t(node.dataset.i18n);
+  }
+  for (const node of document.querySelectorAll('[data-i18n-title]')) {
+    node.title = t(node.dataset.i18nTitle);
+  }
+  for (const node of document.querySelectorAll('[data-i18n-aria]')) {
+    node.setAttribute('aria-label', t(node.dataset.i18nAria));
+  }
+  for (const node of document.querySelectorAll('[data-i18n-placeholder]')) {
+    node.placeholder = t(node.dataset.i18nPlaceholder);
+  }
+}
+
+/**
+ * Switch the active language and repaint everything that depends on it.
+ *
+ * `refreshAllViews()` is the language equivalent of a full re-render: pages
+ * not yet migrated to `t()` (MN-10 is landing in five steps) simply repaint
+ * their existing hardcoded text, which is harmless now and is what makes
+ * them start responding to the toggle the moment each one's own step lands.
+ */
+function applyLanguage(lang) {
+  document.documentElement.lang = lang;
+  localStorage.setItem('mnemo_lang', lang);
+  refreshAllViews();
+}
+
+function refreshAllViews() {
+  applyStaticI18n();
+  renderHeader();
+  updateToggleLabel();
+  renderService();
+  refreshConnState();
+  if (state.gated) {
+    regate();
+  } else {
+    renderBanks();
+    renderTree();
+    renderFile();
+    renderJournal();
+  }
+  // Transient popovers: closing on a language switch matches the existing
+  // "scroll/resize closes the menu" posture rather than repainting one that
+  // is about to be dismissed anyway.
+  closeBankMenu();
+  if (picker.root && !picker.root.hidden) renderPicker();
+  if (bankToken.root && !bankToken.root.hidden) renderTokenPanel();
+  if (removal.root && !removal.root.hidden) renderRemoval();
 }
 
 // ---------------------------------------------------------------------------
@@ -120,7 +260,7 @@ function clear(node) {
 }
 
 // ---------------------------------------------------------------------------
-// draggable column dividers — shared by Памʼять (two handles) and Журнал
+// draggable column dividers — shared by Memory (two handles) and Journal
 // (one); only the mouse tracking is common, each page owns its own clamping
 // and what the delta actually resizes (an indexed width vs. a single one).
 // ---------------------------------------------------------------------------
@@ -182,7 +322,8 @@ async function api(path, options) {
       body: opts.body === undefined ? undefined : JSON.stringify(opts.body),
     });
   } catch (err) {
-    throw new ApiError('unreachable', 'бекенд недоступний: ' + err.message, null, 0);
+    throw new ApiError('unreachable', t('common.error.unreachable', { message: err.message }),
+                       null, 0);
   }
 
   const text = await response.text();
@@ -191,7 +332,7 @@ async function api(path, options) {
     try {
       payload = JSON.parse(text);
     } catch (err) {
-      throw new ApiError('internal', 'невалідний JSON у відповіді', text.slice(0, 200),
+      throw new ApiError('internal', t('common.error.invalidJson'), text.slice(0, 200),
                          response.status);
     }
   }
@@ -236,28 +377,28 @@ function reportError(err) {
  *
  * The no-token state says nothing about the service. It cannot: it issues no
  * request at all, so it has observed nothing to report — a page that claimed
- * "сервіс працює" from behind zero requests would say exactly the same thing
+ * "service is up" from behind zero requests would say exactly the same thing
  * with the backend down. It asks for a token and shows where to get one.
  *
  * The rejected state may name the service's behaviour, because there it did
  * make a request and did get a 401 back.
  */
-const GATE_COPY = {
-  missing: {
-    title: 'Потрібен токен доступу',
-    text: 'Щоб відкрити консоль, потрібен токен. ' +
-          'Команда друкує посилання з чинним токеном і відкриває його:',
+function gateCopy(variant) {
+  if (variant === 'rejected') {
+    return {
+      title: t('common.gate.rejected.title'),
+      text: t('common.gate.rejected.text'),
+      lead: t('common.gate.rejected.lead'),
+      note: t('common.gate.rejected.note'),
+    };
+  }
+  return {
+    title: t('common.gate.missing.title'),
+    text: t('common.gate.missing.text'),
     lead: null,
     note: null,
-  },
-  rejected: {
-    title: 'Токен не підійшов',
-    text: 'Сервіс відхилив наданий токен (HTTP 401). Найімовірніше він застарілий ' +
-          'або скопійований не повністю — актуальний токен видає сама команда.',
-    lead: 'Команда друкує готове посилання з чинним токеном і відкриває його:',
-    note: 'Токен відхилено сервісом.',
-  },
-};
+  };
+}
 
 function isAuthError(err) {
   return err instanceof ApiError && (err.httpStatus === 401 || err.code === 'unauthorized');
@@ -282,19 +423,23 @@ function buildGate() {
     attrs: {
       id: 'gate-token', name: 'gate-token',
       type: 'text', autocomplete: 'off', spellcheck: 'false',
-      placeholder: '48 шістнадцяткових символів',
+      placeholder: t('common.gate.tokenPlaceholder'),
+      'data-i18n-placeholder': 'common.gate.tokenPlaceholder',
     },
   });
 
   const form = el('form', { className: 'gate-form', on: { submit: submitGate } }, [
     el('label', {
       className: 'gate-label',
-      text: 'Або вставте токен вручну:',
-      attrs: { for: 'gate-token' },
+      text: t('common.gate.manualLabel'),
+      attrs: { for: 'gate-token', 'data-i18n': 'common.gate.manualLabel' },
     }),
     el('div', { className: 'gate-row' }, [
       gate.input,
-      el('button', { className: 'btn', text: 'Увійти', attrs: { type: 'submit' } }),
+      el('button', {
+        className: 'btn', text: t('common.gate.submit'),
+        attrs: { type: 'submit', 'data-i18n': 'common.gate.submit' },
+      }),
     ]),
     gate.note,
   ]);
@@ -324,12 +469,13 @@ function buildGate() {
  * doomed fetches in the console, no 401s in the service log.
  */
 function openGate(variant) {
-  const copy = GATE_COPY[variant] || GATE_COPY.missing;
+  const copy = gateCopy(variant);
+  gate.variant = variant;
   state.gated = true;
   closeSocket();
   syncTicker();          // nothing behind the gate needs a running clock
   hideBanner();
-  setConnState('idle', 'не автентифіковано');
+  setConnState('idle', 'common.gate.idle');
 
   gate.card.classList.toggle('is-error', variant === 'rejected');
   // Without the separate lead line the prose sits directly above the command,
@@ -350,6 +496,12 @@ function closeGate() {
   gateNote(null);
 }
 
+/** Re-run `openGate()` for whatever variant is currently up, so a language
+ *  switch while gated repaints the gate's copy without touching its state. */
+function regate() {
+  if (gate.root && !gate.root.hidden) openGate(gate.variant);
+}
+
 function gateNote(text) {
   gate.note.textContent = text || '';
   gate.note.hidden = !text;
@@ -359,7 +511,7 @@ async function submitGate(event) {
   event.preventDefault();
   const value = gate.input.value.trim();
   if (!value) {
-    gateNote('Введіть токен.');
+    gateNote(t('common.gate.enterToken'));
     return;
   }
   token = value;
@@ -415,7 +567,14 @@ function pluralizeUk(n, forms) {
   return forms[2];
 }
 
-const STATUS_LABEL = { ready: 'готово', indexing: 'індексується', empty: 'порожньо' };
+function statusLabel(status) {
+  switch (status) {
+    case 'ready': return t('common.status.ready');
+    case 'indexing': return t('common.status.indexing');
+    case 'empty': return t('common.status.empty');
+    default: return status;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // banks — shared data fetchers (page-memory.js owns the rendering)
@@ -453,16 +612,20 @@ function bankById(id) {
 // carry no path at all, so they get named rather than left as a blank slot.
 // These read the same as the buttons that queue them — a user watching the
 // progress bar should recognise the thing they just clicked.
-const TASK_KIND_LABEL = {
-  file: 'файл',
-  bulk: 'синхронізація індексу',
-  rebuild: 'повний реіндекс',
-  prune: 'зняття з індексу',
-};
+function taskKindLabel(kind) {
+  switch (kind) {
+    case 'file': return t('common.taskKind.file');
+    case 'bulk': return t('common.taskKind.bulk');
+    case 'rebuild': return t('common.taskKind.rebuild');
+    case 'prune': return t('common.taskKind.prune');
+    default: return kind || t('common.taskKind.default');
+  }
+}
 
 function fmtDuration(seconds) {
-  if (seconds < 60) return seconds + ' с';
-  return Math.floor(seconds / 60) + ' хв ' + String(seconds % 60).padStart(2, '0') + ' с';
+  if (seconds < 60) return seconds + ' ' + t('common.unit.sec');
+  return Math.floor(seconds / 60) + ' ' + t('common.unit.min') + ' ' +
+         String(seconds % 60).padStart(2, '0') + ' ' + t('common.unit.sec');
 }
 
 /**
@@ -484,13 +647,15 @@ function elapsedLabel(live) {
 }
 
 function progressText(live) {
-  const parts = [TASK_KIND_LABEL[live.kind] || live.kind || 'задача'];
+  const parts = [taskKindLabel(live.kind)];
   if (live.path) parts.push(live.path);
-  if (live.batches > 0) parts.push('батч ' + live.batch + '/' + live.batches);
-  if (live.chunks_total) parts.push(live.chunks_done + '/' + live.chunks_total + ' чанків');
+  if (live.batches > 0) parts.push(t('common.progress.batch') + ' ' + live.batch + '/' + live.batches);
+  if (live.chunks_total) {
+    parts.push(live.chunks_done + '/' + live.chunks_total + ' ' + t('common.progress.chunks'));
+  }
   const age = elapsedLabel(live);
   if (age) parts.push(age);
-  if (live.yielded) parts.push('витіснено');
+  if (live.yielded) parts.push(t('common.progress.yielded'));
   return parts.join(' · ');
 }
 
@@ -509,8 +674,8 @@ function progressBlock(live) {
       className: 'progress-text',
       text: progressText(live),
       title: live.approx
-        ? 'час відколи консоль побачила цю задачу — вона почалася раніше'
-        : 'час від початку задачі',
+        ? t('common.progress.approxTitle')
+        : t('common.progress.exactTitle'),
     }),
   ]);
 }
@@ -673,11 +838,10 @@ async function reindex(bank, opts) {
   try {
     const res = await requestReindex(bank, opts);
     hideBanner();
-    const what = opts.path
-      ? opts.path
-      : TASK_KIND_LABEL[opts.full ? 'rebuild' : 'bulk'];
-    setNote(bank.id, 'поставлено: ' + what + ' · у черзі ' + res.queued +
-                     ' · task ' + (res.task_ids || []).join(', '));
+    const what = opts.path ? opts.path : taskKindLabel(opts.full ? 'rebuild' : 'bulk');
+    setNote(bank.id, t('common.reindex.queuedNote', {
+      what: what, n: res.queued, ids: (res.task_ids || []).join(', '),
+    }));
   } catch (err) {
     reportError(err);
   }
@@ -700,8 +864,9 @@ async function setBankState(bank, next) {
     });
     hideBanner();
     applyBank(info);
-    setNote(bank.id, 'стан: ' +
-      (BANK_STATE_LABEL[info.state] || info.state).toLowerCase());
+    setNote(bank.id, t('common.bankMenu.stateNote', {
+      state: (BANK_STATE_LABEL[info.state] || info.state).toLowerCase(),
+    }));
   } catch (err) {
     reportError(err);
   }
@@ -734,7 +899,8 @@ function buildPicker() {
   picker.input = el('input', {
     className: 'fs-input',
     attrs: {
-      type: 'text', spellcheck: 'false', placeholder: 'або вставте шлях',
+      type: 'text', spellcheck: 'false', placeholder: t('common.picker.pathPlaceholder'),
+      'data-i18n-placeholder': 'common.picker.pathPlaceholder',
       id: 'fs-path',
     },
     on: {
@@ -750,7 +916,8 @@ function buildPicker() {
   picker.name = el('input', {
     className: 'fs-input',
     attrs: {
-      type: 'text', spellcheck: 'false', placeholder: 'вгадається з назви теки',
+      type: 'text', spellcheck: 'false', placeholder: t('common.picker.namePlaceholder'),
+      'data-i18n-placeholder': 'common.picker.namePlaceholder',
       id: 'fs-bank-name',
     },
     on: {
@@ -766,8 +933,8 @@ function buildPicker() {
   picker.createRow = el('div', { className: 'fs-init-row' }, [
     picker.createCheckbox,
     el('label', {
-      text: 'Створити структуру пам’яті тут (.claude/memory)',
-      attrs: { for: 'fs-init-create' },
+      text: t('common.picker.createStructure'),
+      attrs: { for: 'fs-init-create', 'data-i18n': 'common.picker.createStructure' },
     }),
   ]);
   picker.createHint = el('p', { className: 'fs-hint' });
@@ -777,38 +944,42 @@ function buildPicker() {
   picker.initRow = el('div', { className: 'fs-init-row' }, [
     picker.initCheckbox,
     el('label', {
-      text: 'Одразу підключити проєкт (MCP)',
-      attrs: { for: 'fs-init-mcp' },
+      text: t('common.picker.connectMcp'),
+      attrs: { for: 'fs-init-mcp', 'data-i18n': 'common.picker.connectMcp' },
     }),
   ]);
   picker.initHint = el('p', { className: 'fs-hint' });
   picker.error = el('p', { className: 'modal-error', attrs: { hidden: '' } });
   picker.submit = el('button', {
     className: 'btn btn-primary',
-    text: 'Додати цю теку',
+    text: t('common.picker.addDir'),
     on: { click: () => pickerSubmit() },
   });
 
   const box = el('div', {
     className: 'modal-box',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Додати банк' },
+    attrs: {
+      role: 'dialog', 'aria-modal': 'true', 'aria-label': t('common.picker.ariaLabel'),
+      'data-i18n-aria': 'common.picker.ariaLabel',
+    },
     // The overlay closes on click; inside it, a click is just a click.
     on: { click: (ev) => ev.stopPropagation() },
   }, [
     el('div', { className: 'modal-head' }, [
-      el('h2', { text: 'Додати банк' }),
+      el('h2', { text: t('common.picker.title'), attrs: { 'data-i18n': 'common.picker.title' } }),
       el('button', {
         className: 'btn btn-ghost',
         text: '✕',
-        title: 'Закрити (Esc)',
+        title: t('common.btn.closeEsc'),
+        attrs: { 'data-i18n-title': 'common.btn.closeEsc' },
         on: { click: () => closePicker() },
       }),
     ]),
     el('div', { className: 'modal-body' }, [
       el('label', {
         className: 'fs-label',
-        text: 'Тека з .md — вона стане коренем банку',
-        attrs: { for: 'fs-path' },
+        text: t('common.picker.pathLabel'),
+        attrs: { for: 'fs-path', 'data-i18n': 'common.picker.pathLabel' },
       }),
       picker.roots,
       picker.input,
@@ -816,8 +987,8 @@ function buildPicker() {
       picker.hint,
       el('label', {
         className: 'fs-label',
-        text: 'Назва банку (необов’язково)',
-        attrs: { for: 'fs-bank-name' },
+        text: t('common.picker.nameLabel'),
+        attrs: { for: 'fs-bank-name', 'data-i18n': 'common.picker.nameLabel' },
       }),
       picker.name,
       picker.createRow,
@@ -827,7 +998,11 @@ function buildPicker() {
       picker.error,
     ]),
     el('div', { className: 'modal-foot' }, [
-      el('button', { className: 'btn', text: 'Скасувати', on: { click: () => closePicker() } }),
+      el('button', {
+        className: 'btn', text: t('common.btn.cancel'),
+        attrs: { 'data-i18n': 'common.btn.cancel' },
+        on: { click: () => closePicker() },
+      }),
       picker.submit,
     ]),
   ]);
@@ -911,11 +1086,11 @@ function pickerUpdateEligibility() {
   picker.createHint.textContent = !picker.path
     ? ''
     : alreadyBank
-      ? 'тека вже є банком пам’яті'
+      ? t('common.picker.hint.alreadyBank')
       : hasNestedMemory
-        ? 'тека вже має структуру .claude/memory'
+        ? t('common.picker.hint.hasNestedMemory')
         : picker.createCheckbox.checked
-          ? 'Банком стане: ' + effectiveBankRoot(picker.path, true)
+          ? t('common.picker.hint.willBecome', { root: effectiveBankRoot(picker.path, true) })
           : '';
   // Amber both for "can't create here" and for the checked preview: the
   // latter is not an error, but it does say the bank root differs from the
@@ -934,8 +1109,10 @@ function pickerUpdateEligibility() {
   }
   if (!mcpEligible) picker.initCheckbox.checked = false;
   picker.initHint.textContent = mcpEligible
-    ? (alreadyBank ? 'Проєкт: ' + projectRoot : 'Буде підключено після створення структури')
-    : 'доступно лише для банку в «<проєкт>/.claude/memory»';
+    ? (alreadyBank
+        ? t('common.picker.hint.project', { root: projectRoot })
+        : t('common.picker.hint.willConnect'))
+    : t('common.picker.hint.projectOnly');
   picker.initHint.classList.toggle('fs-warn', !mcpEligible);
 }
 
@@ -976,7 +1153,7 @@ function renderPicker() {
   if (data) {
     picker.roots.appendChild(el('button', {
       className: 'chip',
-      text: '⌂ дім',
+      text: '⌂ ' + t('common.picker.home'),
       title: data.home,
       on: { click: () => pickerGo(data.home) },
     }));
@@ -995,7 +1172,7 @@ function renderPicker() {
 
   clear(picker.list);
   if (!data) {
-    picker.list.appendChild(el('p', { className: 'muted', text: 'читаю…' }));
+    picker.list.appendChild(el('p', { className: 'muted', text: t('common.picker.reading') }));
   } else {
     if (data.parent) {
       picker.list.appendChild(el('button', {
@@ -1008,22 +1185,24 @@ function renderPicker() {
     for (const entry of data.entries || []) {
       picker.list.appendChild(el('button', {
         className: 'fs-row',
-        title: entry.registered ? 'уже банк: ' + entry.registered : entry.path,
+        title: entry.registered
+          ? t('common.picker.alreadyBankTitle', { name: entry.registered })
+          : entry.path,
         on: { click: () => pickerGo(entry.path) },
       }, [
         el('span', { className: 'fs-name', text: entry.name }),
         entry.registered
-          ? el('span', { className: 'badge badge-git', text: 'банк' })
+          ? el('span', { className: 'badge badge-git', text: t('common.picker.bankBadge') })
           : null,
       ]));
     }
     if (!(data.entries || []).length) {
-      picker.list.appendChild(el('p', { className: 'muted', text: 'жодної підтеки' }));
+      picker.list.appendChild(el('p', { className: 'muted', text: t('common.picker.noSubdirs') }));
     }
     if (data.truncated) {
       picker.list.appendChild(el('p', {
         className: 'muted',
-        text: 'показано перші ' + data.entries.length + ' тек — решту вставте шляхом',
+        text: t('common.picker.truncated', { n: data.entries.length }),
       }));
     }
   }
@@ -1033,30 +1212,29 @@ function renderPicker() {
     // Nothing here is a veto, only a warning: a folder can be registered while
     // still empty, and the watcher will index the .md that appear later.
     const count = data.md_capped ? '≥' + data.md : String(data.md);
-    // "(з підтеками)" is a claim about recursion, so it may only appear when
-    // there are subfolders to recurse into: on a flat folder it reads as a
+    // A claim about recursion, so it may only appear when there are
+    // subfolders to recurse into: on a flat folder it would read as a
     // promise about something that is not there.
-    const nested = (data.entries || []).length ? ' (з підтеками)' : '';
+    const nested = (data.entries || []).length ? ' ' + t('common.picker.withSubdirs') : '';
     picker.hint.appendChild(el('span', {
       className: data.md ? '' : 'fs-warn',
       text: data.md
-        ? 'у цій теці ' + count + ' .md' + nested
-        : 'у цій теці немає .md — індексувати буде нічого',
+        ? t('common.picker.mdCount', { count: count, nested: nested })
+        : t('common.picker.noMd'),
       title: data.md_capped
-        ? 'рахунок обірвано за часом — файлів щонайменше стільки, ' +
-          'індексуватися будуть усі'
-        : 'без .git, .venv, node_modules — так само, як їх пропускає індексатор',
+        ? t('common.picker.countTruncatedTitle')
+        : t('common.picker.excludesTitle'),
     }));
     if (data.registered) {
       picker.hint.appendChild(el('span', {
         className: 'fs-warn',
-        text: ' · уже зареєстрована як «' + data.registered + '»',
+        text: ' · ' + t('common.picker.alreadyRegistered', { name: data.registered }),
       }));
     }
   }
 
   picker.submit.disabled = picker.busy || !data || !!data.registered;
-  picker.submit.textContent = picker.busy ? 'читаю…' : 'Додати цю теку';
+  picker.submit.textContent = picker.busy ? t('common.picker.reading') : t('common.picker.addDir');
 
   pickerUpdateEligibility();
 }
@@ -1070,8 +1248,10 @@ function renderPicker() {
  *  runs. */
 function initNoteSuffix(initInfo) {
   if (!initInfo) return '';
-  if (initInfo.skipped) return ' · MCP не підключено' + (initInfo.reason ? ': ' + initInfo.reason : '');
-  return initInfo.ok ? ' · MCP підключено' : ' · підключення MCP не вдалося';
+  if (initInfo.skipped) {
+    return ' · ' + t('common.picker.mcpSkipped') + (initInfo.reason ? ': ' + initInfo.reason : '');
+  }
+  return ' · ' + (initInfo.ok ? t('common.picker.mcpConnected') : t('common.picker.mcpFailed'));
 }
 
 async function pickerSubmit() {
@@ -1093,9 +1273,9 @@ async function pickerSubmit() {
     // The bank was registered *and* queued in one call, so say both — and open
     // it, so the first build is visible instead of happening off-screen. The
     // dialog closes right away regardless of `info.init`: leaving it open
-    // invited a second click on "Додати цю теку", which the bank already
+    // invited a second click on "Add this directory", which the bank already
     // being registered would only turn into an error.
-    setNote(info.id, 'банк додано · індексація стала в чергу' + initNoteSuffix(info.init));
+    setNote(info.id, t('common.picker.addedNote') + initNoteSuffix(info.init));
     selectBank(info.id);
     loadBanks().catch(() => {});
     closePicker();
@@ -1123,7 +1303,7 @@ async function pickerSubmit() {
  * are the rest of the dialog.
  *
  * The token never reaches the DOM until it is asked for: everything on screen
- * renders through `shownToken()`, which is bullets until «показати» is pressed,
+ * renders through `shownToken()`, which is bullets until «show» is pressed,
  * while the copy buttons build their text from `bankToken.value`. So a masked
  * panel still yields a config that works, and the two never diverge in shape.
  *
@@ -1221,7 +1401,7 @@ async function copyText(text) {
 function copyButton(get, title) {
   const button = el('button', {
     className: 'btn',
-    text: 'копіювати',
+    text: t('common.btn.copy'),
     title: title,
     on: { click: () => copyInto(button, get()) },
   });
@@ -1231,12 +1411,12 @@ function copyButton(get, title) {
 async function copyInto(button, text) {
   if (text == null) return;
   if (!(await copyText(text))) {
-    tokenError('Не вдалося скопіювати — виділіть текст і скопіюйте вручну.');
+    tokenError(t('common.token.copyFailed'));
     renderTokenPanel();
     return;
   }
   const was = button.textContent;
-  button.textContent = 'скопійовано';
+  button.textContent = t('common.btn.copied');
   button.disabled = true;
   // A re-render in the meantime detaches this node; touching it then is a
   // no-op, which is exactly what should happen.
@@ -1353,25 +1533,25 @@ function mcpDocument(url) {
 function tokenSnippets() {
   if (bankToken.scope === 'literal') {
     return [{
-      caption: 'Для .mcp.json проєкту або ~/.claude.json — злити з «mcpServers»',
+      caption: t('common.token.caption.literal'),
       secret: true,
-      build: (t) => mcpDocument('http://' + serviceHost() + ':' + servicePort() +
-                                '/mcp?token=' + t),
+      build: (tok) => mcpDocument('http://' + serviceHost() + ':' + servicePort() +
+                                  '/mcp?token=' + tok),
     }];
   }
   return [
     {
-      caption: 'Для .mcp.json.template — злити з наявним «mcpServers»',
+      caption: t('common.token.caption.template'),
       secret: false,
       build: () => mcpDocument('http://{{MNEMO_HOST}}:{{MNEMO_PORT}}' +
                                '/mcp?token={{' + tokenVar() + '}}'),
     },
     {
-      caption: 'Рядки для .mcp.env',
+      caption: t('common.token.caption.env'),
       secret: true,
-      build: (t) => 'MNEMO_HOST=' + serviceHost() + '\n' +
-                    'MNEMO_PORT=' + servicePort() + '\n' +
-                    tokenVar() + '=' + t,
+      build: (tok) => 'MNEMO_HOST=' + serviceHost() + '\n' +
+                      'MNEMO_PORT=' + servicePort() + '\n' +
+                      tokenVar() + '=' + tok,
     },
   ];
 }
@@ -1388,17 +1568,13 @@ function tokenSnippets() {
  */
 function templateLeadNote() {
   return el('p', { className: 'tok-lead' }, [
-    document.createTextNode('Усі три файли заповнює '),
+    document.createTextNode(t('common.token.templateLead.part1')),
     el('code', { text: 'mnemo init' }),
-    document.createTextNode(' — фрагмент у .mcp.json.template, змінні у ' +
-      '.mcp.env, рядки підстановки в mcp-setup.sh. Сам .mcp.env він не ' +
-      'створює: це файл із секретами, тож спершу '),
+    document.createTextNode(t('common.token.templateLead.part2')),
     el('code', { text: 'cp .mcp.env.example .mcp.env' }),
-    document.createTextNode(', потім init ще раз, і в кінці '),
+    document.createTextNode(t('common.token.templateLead.part3')),
     el('code', { text: 'bash mcp-setup.sh' }),
-    document.createTextNode(' — він і збирає .mcp.json зі значеннями. Нижче — ' +
-      'те саме, що запише init: щоб побачити наперед або вписати руками, якщо ' +
-      'запустити його в цьому проєкті не можна.'),
+    document.createTextNode(t('common.token.templateLead.part4')),
   ]);
 }
 
@@ -1416,13 +1592,11 @@ function manualPasteNote() {
   // worse than a generic one, because it looks specific enough to trust.
   bankToken.sedLine = el('code', { text: sedLineText() });
   return el('p', { className: 'tok-note' }, [
-    document.createTextNode('Якщо вписуєте руками, додайте до виклику '),
+    document.createTextNode(t('common.token.manualPaste.part1')),
     el('code', { text: 'sed' }),
-    document.createTextNode(' у mcp-setup.sh рядок '),
+    document.createTextNode(t('common.token.manualPaste.part2')),
     bankToken.sedLine,
-    document.createTextNode('. Без нього плейсхолдер потрапляє в .mcp.json ' +
-      'дослівно, а скрипт усе одно звітує про успіх — і поломка виявиться аж ' +
-      'тоді, коли сервер мовчки не підключиться.'),
+    document.createTextNode(t('common.token.manualPaste.part3')),
   ]);
 }
 
@@ -1451,12 +1625,9 @@ function refreshSnippets() {
 
 function entryHintText() {
   const own = tokenVar() !== 'MNEMO_TOKEN'
-    ? ' Від неї ж походить ' + tokenVar() + ': токен належить одному банку, ' +
-      'тож другий банк у тому самому проєкті не переписує токен першого. ' +
-      'MNEMO_HOST і MNEMO_PORT спільні — це адреса служби, не банку.'
+    ? t('common.token.entryHint.own', { var: tokenVar() })
     : '';
-  return 'За нею запис видно серед інших mcp-серверів; вона ж стає префіксом ' +
-         'імен інструментів — mcp__' + entryName() + '__search.' + own;
+  return t('common.token.entryHint.base', { entry: entryName() }) + own;
 }
 
 /**
@@ -1472,29 +1643,34 @@ function entryHintText() {
  * `.mcp.env`, or hold them directly? `SCOPE_HINT` below is what answers it,
  * because the console cannot look at the project and see for itself.
  */
-const SCOPE_TABS = [
-  ['literal', 'зі значеннями · .mcp.json або ~/.claude.json'],
-  ['template', 'з плейсхолдерами · .mcp.json.template'],
-];
+function scopeTabs() {
+  return [
+    ['literal', t('common.token.scope.literal')],
+    ['template', t('common.token.scope.template')],
+  ];
+}
 
-const SCOPE_HINT =
-  'Друга — якщо в проєкті є .mcp.json.template і mcp-setup.sh: там значення ' +
-  'підставляються з .mcp.env, а в git їде тільки шаблон. Інакше перша: ' +
-  '.mcp.json тримає значення прямо і лежить у .gitignore.';
+function scopeHint() {
+  return t('common.token.scopeHint');
+}
 
 function buildTokenPanel() {
-  bankToken.title = el('h2', { text: 'Доступ MCP' });
+  bankToken.title = el('h2', { text: t('common.token.title') });
   bankToken.body = el('div', { className: 'modal-body' });
   bankToken.regen = el('button', {
     className: 'btn tok-regen',
-    text: 'Перегенерувати',
-    title: 'Видати банку новий токен; старий одразу перестане діяти',
+    text: t('common.token.regen'),
+    title: t('common.token.regenTitle'),
+    attrs: { 'data-i18n': 'common.token.regen', 'data-i18n-title': 'common.token.regenTitle' },
     on: { click: () => { bankToken.confirming = true; renderTokenPanel(); } },
   });
 
   const box = el('div', {
     className: 'modal-box is-wide',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Доступ MCP до банку' },
+    attrs: {
+      role: 'dialog', 'aria-modal': 'true', 'aria-label': t('common.token.ariaLabel'),
+      'data-i18n-aria': 'common.token.ariaLabel',
+    },
     // The overlay closes on click; inside it, a click is just a click.
     on: { click: (ev) => ev.stopPropagation() },
   }, [
@@ -1503,14 +1679,19 @@ function buildTokenPanel() {
       el('button', {
         className: 'btn btn-ghost',
         text: '✕',
-        title: 'Закрити (Esc)',
+        title: t('common.btn.closeEsc'),
+        attrs: { 'data-i18n-title': 'common.btn.closeEsc' },
         on: { click: () => closeTokenPanel() },
       }),
     ]),
     bankToken.body,
     el('div', { className: 'modal-foot' }, [
       bankToken.regen,
-      el('button', { className: 'btn', text: 'Закрити', on: { click: () => closeTokenPanel() } }),
+      el('button', {
+        className: 'btn', text: t('common.btn.close'),
+        attrs: { 'data-i18n': 'common.btn.close' },
+        on: { click: () => closeTokenPanel() },
+      }),
     ]),
   ]);
 
@@ -1599,8 +1780,7 @@ async function regenerateBankToken() {
     // the new value, so putting it on screen stays a deliberate act.
     bankToken.revealed = false;
     bankToken.confirming = false;
-    bankToken.note = 'Токен перегенеровано. Конфіги зі старим токеном більше не ' +
-                     'підключаться — впишіть у них новий.';
+    bankToken.note = t('common.token.regeneratedNote');
     tokenError(null);
   } catch (err) {
     if (isAuthError(err)) { closeTokenPanel(); reportError(err); return; }
@@ -1621,7 +1801,7 @@ function renderTokenPanel() {
   bankToken.sedLine = null;
   if (!bank) return;
 
-  bankToken.title.textContent = 'Доступ MCP — ' + bank.name;
+  bankToken.title.textContent = t('common.token.titleFor', { name: bank.name });
   bankToken.regen.disabled = bankToken.busy || bankToken.confirming ||
                              bankToken.value == null;
 
@@ -1638,26 +1818,25 @@ function renderTokenPanel() {
 
   body.appendChild(el('label', {
     className: 'fs-label',
-    text: 'Токен банку',
+    text: t('common.token.bankTokenLabel'),
     attrs: { for: 'tok-value' },
   }));
   body.appendChild(el('div', { className: 'tok-row' }, [
     field,
     el('button', {
       className: 'btn',
-      text: bankToken.revealed ? 'сховати' : 'показати',
-      title: bankToken.revealed ? 'Прибрати значення з екрана' : 'Показати значення на екрані',
+      text: bankToken.revealed ? t('common.token.hide') : t('common.token.show'),
+      title: bankToken.revealed ? t('common.token.hideTitle') : t('common.token.showTitle'),
       attrs: { 'aria-pressed': bankToken.revealed ? 'true' : 'false' },
       on: { click: () => { bankToken.revealed = !bankToken.revealed; renderTokenPanel(); } },
     }),
-    copyButton(() => bankToken.value, 'Скопіювати токен, не показуючи його'),
+    copyButton(() => bankToken.value, t('common.token.copyTokenTitle')),
   ]));
   for (const button of body.lastChild.querySelectorAll('button')) button.disabled = !ready;
 
   body.appendChild(el('p', {
     className: 'tok-note',
-    text: 'Відкриває лише банк «' + bank.name + '». Службовий токен, яким ' +
-          'відкрито цю консоль, ширший — у конфіг проєкту він не потрібен.',
+    text: t('common.token.scopeNote', { name: bank.name }),
   }));
 
   // The URL no longer carries the bank, so two mnemo entries side by side
@@ -1687,7 +1866,7 @@ function renderTokenPanel() {
 
   body.appendChild(el('label', {
     className: 'fs-label',
-    text: 'Назва запису в конфігурації',
+    text: t('common.token.entryLabel'),
     attrs: { for: 'tok-entry' },
   }));
   body.appendChild(entry);
@@ -1695,7 +1874,7 @@ function renderTokenPanel() {
   body.appendChild(bankToken.entryHint);
 
   const tabs = el('div', { className: 'segmented tok-tabs' });
-  for (const [scope, label] of SCOPE_TABS) {
+  for (const [scope, label] of scopeTabs()) {
     tabs.appendChild(el('button', {
       className: 'seg' + (bankToken.scope === scope ? ' is-active' : ''),
       text: label,
@@ -1703,12 +1882,12 @@ function renderTokenPanel() {
     }));
   }
   body.appendChild(tabs);
-  body.appendChild(el('p', { className: 'tok-note', text: SCOPE_HINT }));
+  body.appendChild(el('p', { className: 'tok-note', text: scopeHint() }));
 
   if (bankToken.scope === 'template') body.appendChild(templateLeadNote());
 
   for (const spec of tokenSnippets()) {
-    const copy = copyButton(() => spec.build(bankToken.value), 'Скопіювати у буфер');
+    const copy = copyButton(() => spec.build(bankToken.value), t('common.token.copyToClipboard'));
     copy.disabled = spec.secret && !ready;
     const pre = el('pre', { className: 'tok-code', text: spec.build(shownToken()) });
     body.appendChild(el('div', { className: 'tok-caption' }, [
@@ -1722,9 +1901,7 @@ function renderTokenPanel() {
   if (bankToken.scope === 'template') {
     body.appendChild(el('p', {
       className: 'tok-note',
-      text: '.mcp.json — згенерований файл: він у .gitignore, і mcp-setup.sh ' +
-            'переписує його з шаблону. Запис має лежати в .mcp.json.template, ' +
-            'інакше наступний запуск скрипта його зітре.',
+      text: t('common.token.generatedFileNote'),
     }));
     body.appendChild(manualPasteNote());
   }
@@ -1735,20 +1912,17 @@ function renderTokenPanel() {
     const confirm = el('div', { className: 'tok-confirm' }, [
       el('p', {
         className: 'tok-confirm-text',
-        text: 'Перегенерувати токен банку «' + bank.name + '»? Старий перестане ' +
-              'діяти негайно: кожен конфіг, який його вже містить — ~/.claude.json, ' +
-              '.mcp.env інших проєктів — більше не підключиться, доки ви не ' +
-              'впишете туди новий токен.',
+        text: t('common.token.regenConfirm', { name: bank.name }),
       }),
       el('div', { className: 'tok-confirm-row' }, [
         el('button', {
           className: 'btn',
-          text: 'Скасувати',
+          text: t('common.btn.cancel'),
           on: { click: () => { bankToken.confirming = false; renderTokenPanel(); } },
         }),
         el('button', {
           className: 'btn btn-danger',
-          text: 'Так, перегенерувати',
+          text: t('common.token.regenYes'),
           on: { click: () => regenerateBankToken() },
         }),
       ]),
@@ -1784,7 +1958,17 @@ function buildBankMenu() {
     title: opts.title,
     // The state entries are a choice among three, not three commands, so they
     // announce as radios and carry `aria-checked` (set in `openBankMenu`).
-    attrs: { role: opts.role || 'menuitem' },
+    // `key`/`titleKey` are the ones with fixed, variable-free copy — added as
+    // `data-i18n`/`data-i18n-title` so `applyStaticI18n()` keeps this
+    // build-once menu correct after a language switch, same as every other
+    // build-once dialog node in this file. The three state items opt out
+    // (`opts.key` absent): their text comes from page-memory.js's
+    // `BANK_STATE_LABEL`, outside this step's scope.
+    attrs: Object.assign(
+      { role: opts.role || 'menuitem' },
+      opts.key ? { 'data-i18n': opts.key } : null,
+      opts.titleKey ? { 'data-i18n-title': opts.titleKey } : null,
+    ),
     on: {
       click: () => {
         const bank = bankMenu.bank;
@@ -1800,23 +1984,26 @@ function buildBankMenu() {
     on: { click: (ev) => ev.stopPropagation() },
   }, [
     item({
-      text: 'Синхронізація індексу',
-      title: 'Переіндексує лише файли, що змінилися, і знімає з індексу видалені',
+      text: t('common.bankMenu.sync'), key: 'common.bankMenu.sync',
+      title: t('common.bankMenu.syncTitle'), titleKey: 'common.bankMenu.syncTitle',
       run: (bank) => reindex(bank, { full: false }),
     }),
     item({
-      text: 'Повний реіндекс',
-      title: 'Стирає індекс і збирає його заново — довго, пропорційно розміру банку',
+      text: t('common.bankMenu.rebuild'), key: 'common.bankMenu.rebuild',
+      title: t('common.bankMenu.rebuildTitle'), titleKey: 'common.bankMenu.rebuildTitle',
       run: (bank) => reindex(bank, { full: true }),
     }),
     el('div', { className: 'menu-sep' }),
     item({
-      text: 'Доступ MCP',
-      title: 'Токен цього банку і готовий фрагмент конфігурації для проєкту',
+      text: t('common.token.title'), key: 'common.token.title',
+      title: t('common.bankMenu.mcpTitle'), titleKey: 'common.bankMenu.mcpTitle',
       run: (bank) => openTokenPanel(bank),
     }),
     el('div', { className: 'menu-sep' }),
-    el('div', { className: 'menu-label', text: 'Стан' }),
+    el('div', {
+      className: 'menu-label', text: t('common.bankMenu.stateLabel'),
+      attrs: { 'data-i18n': 'common.bankMenu.stateLabel' },
+    }),
     // Not a submenu and not a dialog: three states are few enough to show, and
     // the current one has to be visible at the moment of choosing — otherwise
     // "freeze" on an already-frozen bank looks like it did nothing. The marks
@@ -1833,8 +2020,8 @@ function buildBankMenu() {
     }),
     el('div', { className: 'menu-sep' }),
     item({
-      text: 'Прибрати банк',
-      title: 'Зняти банк з реєстру; .md не чіпаються',
+      text: t('common.bankMenu.remove'), key: 'common.bankMenu.remove',
+      title: t('common.bankMenu.removeTitle'), titleKey: 'common.bankMenu.removeTitle',
       danger: true,
       run: (bank) => openRemoval(bank),
     }),
@@ -1918,27 +2105,37 @@ function buildRemoval() {
   removal.body = el('div', { className: 'modal-body' });
   removal.submit = el('button', {
     className: 'btn btn-danger',
-    text: 'Прибрати',
+    text: t('common.removal.submit'),
     on: { click: () => submitRemoval() },
   });
 
   removal.box = el('div', {
     className: 'modal-box',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Прибрати банк' },
+    attrs: {
+      role: 'dialog', 'aria-modal': 'true', 'aria-label': t('common.removal.ariaLabel'),
+      'data-i18n-aria': 'common.removal.ariaLabel',
+    },
     on: { click: (ev) => ev.stopPropagation() },
   }, [
     el('div', { className: 'modal-head' }, [
-      el('h2', { text: 'Прибрати банк' }),
+      el('h2', {
+        text: t('common.removal.title'), attrs: { 'data-i18n': 'common.removal.title' },
+      }),
       el('button', {
         className: 'btn btn-ghost',
         text: '✕',
-        title: 'Закрити (Esc)',
+        title: t('common.btn.closeEsc'),
+        attrs: { 'data-i18n-title': 'common.btn.closeEsc' },
         on: { click: () => closeRemoval() },
       }),
     ]),
     removal.body,
     el('div', { className: 'modal-foot' }, [
-      el('button', { className: 'btn', text: 'Скасувати', on: { click: () => closeRemoval() } }),
+      el('button', {
+        className: 'btn', text: t('common.btn.cancel'),
+        attrs: { 'data-i18n': 'common.btn.cancel' },
+        on: { click: () => closeRemoval() },
+      }),
       removal.submit,
     ]),
   ]);
@@ -1981,7 +2178,7 @@ async function openRemoval(bank) {
     // been closed) while this was in flight; a stale response must not
     // repaint over whatever is current now.
     if (removal.bank !== bank) return;
-    // Same default posture as "видалити також індекс": when wiring is
+    // Same default posture as "also delete the index": when wiring is
     // actually found, offer to take it out too rather than leave a dead
     // .mcp.json pointed at a bank that no longer exists.
     removal.stripMcp = removal.wiring.has_wiring;
@@ -2003,24 +2200,19 @@ function renderRemoval() {
   clear(removal.body);
 
   removal.body.appendChild(el('p', { className: 'rm-lead' }, [
-    document.createTextNode('Банк '),
+    document.createTextNode(t('common.removal.leadPrefix')),
     el('strong', { text: bank.name }),
-    document.createTextNode(' перестане існувати для цієї машини.'),
+    document.createTextNode(t('common.removal.leadSuffix')),
   ]));
 
   removal.body.appendChild(el('dl', { className: 'rm-effects' }, [
-    el('dt', { className: 'is-loss', text: 'Зникає назавжди' }),
-    el('dd', {
-      text: 'Реєстрація банку та його токен. Токен видається випадково і не ' +
-            'відтворюється: кожен .mcp.json, який ним підключається, ' +
-            'перестане працювати, і повернути той самий токен неможливо.',
-    }),
-    el('dt', { className: 'is-safe', text: 'Лишається недоторканим' }),
+    el('dt', { className: 'is-loss', text: t('common.removal.goneForever') }),
+    el('dd', { text: t('common.removal.goneForeverText') }),
+    el('dt', { className: 'is-safe', text: t('common.removal.untouched') }),
     el('dd', null, [
-      document.createTextNode('Усі .md за шляхом '),
+      document.createTextNode(t('common.removal.untouchedPrefix')),
       el('code', { text: bank.root }),
-      document.createTextNode('. Кабінет не видаляє вміст банку — тільки те, ' +
-                              'що з нього виведено.'),
+      document.createTextNode(t('common.removal.untouchedSuffix')),
     ]),
   ]));
 
@@ -2033,8 +2225,7 @@ function renderRemoval() {
   removal.body.appendChild(el('label', { className: 'rm-check', attrs: { for: 'rm-drop-index' } }, [
     box,
     el('span', {
-      text: 'видалити також індекс (' + fmtBytes(bank.db_bytes) + ') — ' +
-            'відновлюваний повним реіндексом',
+      text: t('common.removal.dropIndex', { bytes: fmtBytes(bank.db_bytes) }),
     }),
   ]));
 
@@ -2049,7 +2240,7 @@ function renderRemoval() {
     removal.body.appendChild(el('label', { className: 'rm-check', attrs: { for: 'rm-strip-mcp' } }, [
       mcpBox,
       el('span', null, [
-        document.createTextNode('видалити MCP-підключення ('),
+        document.createTextNode(t('common.removal.stripMcpPrefix')),
         el('code', { text: removal.projectRoot }),
         document.createTextNode(')'),
       ]),
@@ -2057,7 +2248,7 @@ function renderRemoval() {
     if (!hasWiring) {
       removal.body.appendChild(el('p', {
         className: 'fs-hint fs-warn',
-        text: 'у корені проєкту немає .mcp.json',
+        text: t('common.removal.noMcpJson'),
       }));
     }
   }
@@ -2084,7 +2275,7 @@ function renderRemoval() {
   confirm.disabled = removal.busy;
   removal.body.appendChild(el('label', {
     className: 'fs-label', attrs: { for: 'rm-confirm' },
-    text: 'Введіть назву банку, щоб підтвердити',
+    text: t('common.removal.confirmLabel'),
   }));
   removal.body.appendChild(confirm);
 
@@ -2093,7 +2284,7 @@ function renderRemoval() {
   }
 
   removal.submit.disabled = !removalReady();
-  removal.submit.textContent = removal.busy ? 'Прибираю…' : 'Прибрати';
+  removal.submit.textContent = removal.busy ? t('common.removal.busy') : t('common.removal.submit');
   if (!removal.busy) confirm.focus();
 }
 
@@ -2187,6 +2378,12 @@ async function start() {
 
 async function boot() {
   applyTheme(resolveTheme());
+  // Static markup is baked English; a stored Ukrainian preference is
+  // substituted in as early as possible — before any dialog is built, so
+  // build-once dialog chrome (which reads `t()` at construction time) picks
+  // up the right language from its very first paint.
+  document.documentElement.lang = resolveLang();
+  applyStaticI18n();
   buildGate();
   buildPicker();
   buildTokenPanel();
