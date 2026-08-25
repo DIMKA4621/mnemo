@@ -48,7 +48,7 @@ SETTINGS_VERSION = 1
 
 # Fields this module owns. Anything else in the document is carried through a
 # rewrite untouched — a note somebody added by hand is not ours to drop.
-_KNOWN_KEYS = frozenset({"version", "provider", "api", "auto_update"})
+_KNOWN_KEYS = frozenset({"version", "provider", "api", "auto_update", "require_login"})
 _KNOWN_API_KEYS = frozenset({"url", "model", "dim", "key", "timeout"})
 
 _lock = threading.RLock()
@@ -303,6 +303,20 @@ def auto_update_enabled() -> bool:
     )
 
 
+def require_login() -> bool:
+    """Whether `/api` (and `/ws`) must present a token (MN-19).
+
+    Default ``False``, sibling of ``auto_update`` — a machine-wide behaviour
+    switch, not an endpoint config. Independent of whether a token file
+    happens to exist on disk: that file may have been minted by an unrelated
+    `/mcp-admin`/`/mcp-tools` call, and its mere presence must not silently
+    start gating `/api` for someone who never opted in.
+    """
+    return bool(
+        _as_bool(_resolve("MNEMO_REQUIRE_LOGIN", ("require_login",), False)).value
+    )
+
+
 def effective() -> dict[str, Value]:
     """Every setting with its resolved value AND its origin.
 
@@ -314,6 +328,9 @@ def effective() -> dict[str, Value]:
         "provider": _resolve("MNEMO_PROVIDER", ("provider",), "local"),
         "auto_update": _as_bool(
             _resolve("MNEMO_AUTO_UPDATE_ENABLED", ("auto_update",), True)
+        ),
+        "require_login": _as_bool(
+            _resolve("MNEMO_REQUIRE_LOGIN", ("require_login",), False)
         ),
         "api.url": _resolve("MNEMO_API_EMBED_URL", ("api", "url"), ""),
         "api.model": _resolve("MNEMO_API_EMBED_MODEL", ("api", "model"), ""),

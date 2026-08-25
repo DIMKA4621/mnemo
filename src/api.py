@@ -12,11 +12,13 @@ Shape of the thing:
   minted lazily on first use of one of those three faces). ``/api`` — the
   console and CLI's own channel — is **open by default**: a loopback-only
   local UI gated behind a login token was friction with no real security
-  benefit against local access, so `/api` requires the token only when one
-  has been explicitly configured (``$MNEMO_API_TOKEN``, or a future opt-in
-  "generate" step — see ``_configured_token()``). ``/health`` and the
-  ``/ui`` assets never needed one (``service_ctl`` must be able to ask "are
-  you alive" before it knows where the token lives);
+  benefit against local access, so `/api` requires the token only when
+  deliberately gated (``$MNEMO_API_TOKEN``, or the explicit
+  ``require_login`` machine setting — see ``_api_gated()``), never merely
+  because ``api.token`` happens to exist on disk (MN-19: that file can be
+  minted by an unrelated ``/mcp-admin``/``/mcp-tools`` call). ``/health`` and
+  the ``/ui`` assets never needed one (``service_ctl`` must be able to ask
+  "are you alive" before it knows where the token lives);
 * one error envelope for every failure (§9.2), so a client never has to guess
   whether a 4xx body is a string, a list or a FastAPI ``detail``;
 * search answers with an explicit **state** — ``indexing`` / ``empty`` /
@@ -213,6 +215,21 @@ def _configured_token() -> str | None:
     except OSError:
         existing = ""
     return existing or None
+
+
+def _api_gated() -> bool:
+    """Whether `/api` (and `/ws`) must present a token right now (MN-19).
+
+    Deliberately NOT "does `api.token` exist on disk" — that file may have
+    been minted by an unrelated `/mcp-admin`/`/mcp-tools` call, and its mere
+    presence must not silently start gating `/api` for someone who never
+    opted in. Only two things may gate it: `$MNEMO_API_TOKEN` set (unchanged,
+    pre-dates this toggle) or the explicit `settings.require_login()` switch.
+    """
+    env = os.environ.get("MNEMO_API_TOKEN")
+    if env and env.strip():
+        return True
+    return settings.require_login()
 
 
 # What a caller who reached `/mcp` with the wrong kind of credential needs to
@@ -921,9 +938,10 @@ async def lifespan(app: FastAPI):
     # announce ourselves. The service token is deliberately NOT minted here
     # any more: `api_token()` is now lazy, called only when `/mcp-admin` or
     # `/mcp-tools` are first actually used. Eagerly creating it here would
-    # mean a token always exists by the time anything checks — which would
-    # silently defeat `/api`'s "open unless a token is configured" default
-    # below, since `_configured_token()` would always find one.
+    # mean a token file always exists by the time anything checks — which is
+    # exactly the false signal `/api`'s gate (`_api_gated()`) was built to
+    # ignore (MN-19), but `_configured_token()`'s doctor-only "present"
+    # reporting would still be misleading if a token always existed.
     servicelog.connect()
     servicelog.start_pruner()
     with suppress(Exception):
@@ -1080,17 +1098,19 @@ async def auth_middleware(request: Request, call_next):
         #                 project's own wiring could add and drop banks.
         #   /mcp-tools/*  the service token (it keeps the explicit `bank`
         #                 parameter, so no single bank's token is the key).
-        #   /api/*        the service token — but ONLY if one has been
-        #                 deliberately configured (`_configured_token()`).
-        #                 With none configured (the default), `/api` is open:
-        #                 it is the console's and CLI's own local channel,
-        #                 loopback-only, and a login token bought no real
-        #                 security there while costing every fresh `mnemo ui`
-        #                 open a "paste the token" screen. Set
-        #                 `$MNEMO_API_TOKEN` (or, later, an explicit
-        #                 "generate" step) and this surface locks down like
-        #                 every other one. (2026-08-21 decision — see
-        #                 Memory-design-v3.md §13.)
+        #   /api/*        the service token — but ONLY when `_api_gated()`
+        #                 says so: `$MNEMO_API_TOKEN` set, or the explicit
+        #                 `require_login` toggle (MN-19). NOT "does a token
+        #                 file happen to exist" — `/mcp-admin`/`/mcp-tools`
+        #                 mint one lazily on their own first use, and that
+        #                 must not silently start gating `/api` for someone
+        #                 who never opted in. With neither set (the default),
+        #                 `/api` is open: it is the console's and CLI's own
+        #                 local channel, loopback-only, and a login token
+        #                 bought no real security there while costing every
+        #                 fresh `mnemo ui` open a "paste the token" screen.
+        #                 (2026-08-21 decision — Memory-design-v3.md §13 —
+        #                 refined 2026-08-25 by MN-19.)
         #
         # `/mcp/` is matched with its trailing slash, which the normalisation
         # above guarantees. `/mcp-admin/` and `/mcp-tools/…` start with
@@ -1106,9 +1126,8 @@ async def auth_middleware(request: Request, call_next):
                                     status_code=401)
             request.scope[BANK_SCOPE_KEY] = bank.id
         elif path.startswith("/api"):
-            configured = _configured_token()
-            if configured is not None and not (
-                presented and secrets.compare_digest(presented.strip(), configured)
+            if _api_gated() and not (
+                presented and secrets.compare_digest(presented.strip(), api_token())
             ):
                 return JSONResponse(
                     _envelope("unauthorized", "missing or invalid API token"),
@@ -2256,6 +2275,11 @@ def api_doctor() -> dict:
             "where": token_where,
             "scope": token_scope,
         }
+    # Separate from `present`: a token can exist on disk (minted by an
+    # unrelated `/mcp-admin`/`/mcp-tools` call) without `/api` requiring it
+    # (MN-19) — `present` answers "does a token exist", this answers "does
+    # `/api` actually check for one right now".
+    token["login_required"] = _api_gated()
     return diagnostics.collect(backend=backend, token=token)
 
 
@@ -2326,6 +2350,8 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
         doc["provider"] = chosen
     if "auto_update" in payload:
         doc["auto_update"] = bool(payload["auto_update"])
+    if "require_login" in payload:
+        doc["require_login"] = bool(payload["require_login"])
     api_in = payload.get("api")
     if isinstance(api_in, dict):
         api_doc: dict = dict(settings.load().get("api") or {})
@@ -2350,15 +2376,25 @@ def api_settings_save(payload: dict = Body(...)) -> dict:
                                "timeout must be a number") from None
         doc["api"] = api_doc
     if not doc:
-        raise ApiError("bad_request", "expected 'provider', 'auto_update' and/or 'api'")
+        raise ApiError(
+            "bad_request",
+            "expected 'provider', 'auto_update', 'require_login' and/or 'api'",
+        )
 
     settings.save(doc)
     # A cached provider instance holds the url/model/dim it was built with,
     # so an edit that was meant to replace it would otherwise be invisible
     # until a restart even where a restart is not needed.
     forget_providers()
+    # If this save just turned the gate on, hand back the service token now:
+    # the caller reaching this point was authorized under whatever gate was
+    # in effect BEFORE this save, and the console needs the token in hand to
+    # show the user before the gate closes behind them.
+    extra: dict[str, Any] = {}
+    if settings.require_login():
+        extra["service_token"] = api_token()
     return {"ok": True, "path": str(settings.settings_file()),
-            "restart_required": False, **api_settings()}
+            "restart_required": False, **extra, **api_settings()}
 
 
 # A `warmup --force` we spawned, tracked by PID so a page reload (or a
@@ -3150,14 +3186,15 @@ async def ws_endpoint(
     """Live service events. The token rides in the query string because a
     browser cannot set headers on a WebSocket handshake (§9.1).
 
-    Same default as the rest of `/api` (2026-08-21): with no token
-    configured, this connects with none presented. `_token_ok(token)` alone
-    would reject an empty `token` outright regardless of configuration —
-    it has no notion of "auth is off right now" — so that check only runs
-    once `_configured_token()` says a token actually exists.
+    Same gate as the rest of `/api` (2026-08-21, refined 2026-08-25 by
+    MN-19): with nothing gating `/api` right now, this connects with no
+    token presented. `_token_ok(token)` alone would reject an empty `token`
+    outright regardless of configuration — it has no notion of "auth is off
+    right now" — so that check only runs once `_api_gated()` says a token is
+    actually required. `_token_ok` mints via `api_token()` internally, so no
+    separate mint call is needed here.
     """
-    configured = _configured_token()
-    if configured is not None and not _token_ok(token):
+    if _api_gated() and not _token_ok(token):
         await websocket.close(code=1008)
         return
     await hub.connect(websocket, bank)
