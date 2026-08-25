@@ -417,6 +417,21 @@ window.MNEMO_I18N.uk = {
   'settings.embed.warn.line3': 'Старі індекси отримають REBUILD PENDING і пошук по них ' +
     'відмовить, доки їх не перегенерувати.',
   'settings.embed.backendLabel': 'Бекенд ембедингу',
+  // Дзеркало ключів з en.js — виднен ий текст лишається саме той, що й був
+  // до i18n-виносу (relocated, не переписаний), окрім моделі `local`: її
+  // `note` у `src/presets.py` вже було англійською в оригіналі, тож тут —
+  // переклад, а не дослівне перенесення (немає українського оригіналу,
+  // з якого переносити).
+  'settings.embed.backend.local.label': 'Локальний резидент',
+  'settings.embed.backend.local.note': 'нічого не треба налаштовувати; працює без мережі',
+  'settings.embed.backend.ollama.label': 'Ollama',
+  'settings.embed.backend.ollama.note': 'локальна служба; на GPU перебудова банку помітно швидша, точний виграш залежить від картки',
+  'settings.embed.backend.openai.label': 'OpenAI',
+  'settings.embed.backend.openai.note': 'памʼять банку йде за межі машини — окреме рішення, не дефолт',
+  'settings.embed.model.intfloat/multilingual-e5-large.note': 'постачається разом з mnemo; ~2.2 ГБ, працює на CPU-резиденті',
+  'settings.embed.model.bge-m3.note': 'рекомендована: без префіксів, вікно 8K, швидка на GPU',
+  'settings.embed.model.zylonai/multilingual-e5-large.note': 'та сама модель, що в локального резидента',
+  'settings.embed.model.nomic-embed-text.note': 'теж з префіксами, але своїми — не e5-івськими',
   'settings.embed.notSavedBackend': 'не збережено — зараз активний «{active}»; натисніть ' +
     '«Зберегти», щоб перемкнути на «{target}»',
   'settings.embed.local.lead': 'Вектори рахує резидент на цій машині — ',

@@ -410,6 +410,21 @@ window.MNEMO_I18N.en = {
   'settings.embed.warn.line3': 'Old indexes get REBUILD PENDING and search over them refuses until they are regenerated.',
   'settings.embed.backendLabel': 'Embedding backend',
   'settings.embed.notSavedBackend': 'not saved — currently active is "{active}"; press "Save" to switch to "{target}"',
+  // Backend/model `label`/`note` text is served by `src/presets.py` and
+  // rendered raw when no matching key exists here — keyed by the preset's
+  // stable id/name (see page-settings.js's backendLabel/backendNoteText/
+  // modelNoteText). Model `label` itself stays untranslated everywhere; it
+  // is the technical model name, not descriptive text.
+  'settings.embed.backend.local.label': 'Local resident',
+  'settings.embed.backend.local.note': 'nothing to configure; works offline',
+  'settings.embed.backend.ollama.label': 'Ollama',
+  'settings.embed.backend.ollama.note': 'a local service; on a GPU, rebuilding a bank is noticeably faster — the exact gain depends on the card',
+  'settings.embed.backend.openai.label': 'OpenAI',
+  'settings.embed.backend.openai.note': "the bank's memory leaves the machine — a deliberate choice, not the default",
+  'settings.embed.model.intfloat/multilingual-e5-large.note': 'ships with mnemo; ~2.2 GB, runs on the CPU resident',
+  'settings.embed.model.bge-m3.note': 'recommended: no prefixes, 8K window, fast on a GPU',
+  'settings.embed.model.zylonai/multilingual-e5-large.note': 'the same model as the local resident',
+  'settings.embed.model.nomic-embed-text.note': "also has prefixes, but its own — not e5's",
   'settings.embed.local.lead': 'The resident on this machine computes vectors — ',
   'settings.embed.local.dimsSuffix': ' ({dim} dimensions). ',
   'settings.embed.local.noDimSuffix': '. ',

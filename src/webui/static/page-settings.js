@@ -129,6 +129,29 @@ function modelPreset(backend, name) {
   return (backend.models || []).find((m) => m.name === name) || null;
 }
 
+// The catalogue's `label`/`note` text is Ukrainian, sent by the backend
+// (`src/presets.py`) — the language toggle can't reach it by translating
+// the string in place. These look up a matching i18n key by the preset's
+// stable `id`/`name` instead, and fall back to the raw backend text for
+// anything not (yet) in the dictionary, so a future/unlisted preset still
+// shows something rather than a missing-key warning or blank text.
+// Model `label` is left untranslated everywhere — it's the technical model
+// name itself, not descriptive text.
+function backendLabel(item) {
+  if (!item) return '';
+  return tMaybe(`settings.embed.backend.${item.id}.label`) || item.label;
+}
+
+function backendNoteText(backend) {
+  if (!backend) return null;
+  return tMaybe(`settings.embed.backend.${backend.id}.note`) || backend.note || null;
+}
+
+function modelNoteText(model) {
+  if (!model || !model.note) return model ? model.note : null;
+  return tMaybe(`settings.embed.model.${model.name}.note`) || model.note;
+}
+
 function settingValue(key) {
   const box = settings.data && settings.data.settings;
   return box && box[key] ? box[key] : null;
@@ -469,11 +492,11 @@ function renderEmbedSection(body) {
   for (const item of presetList) {
     tabs.appendChild(el('button', {
       className: 'seg' + (item.id === settings.backendId ? ' is-active' : ''),
-      text: item.label,
+      text: backendLabel(item),
       on: { click: () => chooseBackend(item.id) },
     }));
   }
-  body.appendChild(setField(t('settings.embed.backendLabel'), tabs, backend ? backend.note : null));
+  body.appendChild(setField(t('settings.embed.backendLabel'), tabs, backendNoteText(backend)));
 
   // Same idiom as autostart/auto-update on Загальні: browsing a tab that
   // isn't what's actually stored is a draft, not a change — say so before
@@ -484,8 +507,8 @@ function renderEmbedSection(body) {
     body.appendChild(el('p', {
       className: 'set-override',
       text: t('settings.embed.notSavedBackend', {
-        active: active ? active.label : '—',
-        target: backend ? backend.label : '—',
+        active: active ? backendLabel(active) : '—',
+        target: backend ? backendLabel(backend) : '—',
       }),
     }));
   }
@@ -544,7 +567,7 @@ function renderEmbedSection(body) {
   select.addEventListener('change', (ev) => chooseModel(ev.target.value));
 
   const chosen = modelPreset(backend, settings.form.model);
-  body.appendChild(setField(t('settings.embed.modelLabel'), select, chosen ? chosen.note : null));
+  body.appendChild(setField(t('settings.embed.modelLabel'), select, modelNoteText(chosen)));
   if (chosen && chosen.prefixed) {
     // Said out loud because it is the one property of a model that is
     // invisible in every other way: markers change every vector, and getting

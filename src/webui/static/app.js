@@ -111,6 +111,20 @@ function t(key, vars) {
   return interpolate(value, vars);
 }
 
+/**
+ * Like `t()`, but returns `null` instead of warning and falling back to the
+ * raw key when `key` is absent from both dictionaries — for callers with
+ * their own legitimate raw-text fallback (backend-sent preset text with no
+ * matching translation yet, e.g. an id added later than the dictionary).
+ */
+function tMaybe(key, vars) {
+  const lang = resolveLang();
+  let value = i18nDict(lang)[key];
+  if (value === undefined) value = i18nDict(DEFAULT_LANG)[key];
+  if (value === undefined) return null;
+  return interpolate(value, vars);
+}
+
 // English is a 2-way split (one/other); Ukrainian is the standard Slavic triad.
 const PLURAL_RULES = {
   en: (n) => (n === 1 ? 'one' : 'other'),
