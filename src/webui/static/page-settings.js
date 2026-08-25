@@ -1001,17 +1001,18 @@ function humanUptime(seconds) {
  */
 /**
  * What applies to this machine's console regardless of which bank is open:
- * the browser's own preference first (theme — applies on click, nothing for
- * Save to do with it), then what changes the machine (autostart — needs
- * Save), then what merely reports (process facts, sitting under both since
- * nobody opens this section to read them first).
+ * the browser's own preferences first (language, theme — both apply on
+ * click, nothing for Save to do with either), then what changes the machine
+ * (autostart, requireLogin, autoUpdate — all need Save), then what merely
+ * reports (process facts, sitting under both since nobody opens this section
+ * to read them first).
  */
 function renderGeneralSection(body) {
-  renderTheme(body);
   renderLanguage(body);
+  renderTheme(body);
   renderAutostart(body);
-  renderAutoUpdate(body);
   renderRequireLogin(body);
+  renderAutoUpdate(body);
   // The one message this can still produce that isn't already handled right
   // under its own field: "Нічого не змінено." (Save clicked with no pending
   // edit to either control above). Placed here, immediately after both
