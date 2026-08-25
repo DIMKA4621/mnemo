@@ -1238,6 +1238,11 @@ function chooseAutoUpdate(want) {
 }
 
 function renderAutoUpdate(body) {
+  // Manual divider: `renderRequireLogin` above ends with its two-line
+  // "Off (default).../On:..." note, not a `.set-field`, so the adjacent-
+  // sibling rule that separates every other field here never fires before
+  // this one — same reasoning as the divider before requireLogin itself.
+  body.appendChild(el('div', { className: 'set-divider' }));
   const chosen = autoUpdateWanted();
   const seg = el('div', { className: 'segmented set-toggle' });
   for (const option of [{ on: true, key: 'settings.toggle.on' }, { on: false, key: 'settings.toggle.off' }]) {
@@ -1346,7 +1351,7 @@ function renderRequireLogin(body) {
     }));
   }
 
-  // Manual divider: `renderAutoUpdate` above ends with a check button and
+  // Manual divider: `renderAutostart` above ends with a check button and
   // its result note, neither of them a `.set-field`, so the adjacent-sibling
   // rule that separates every other field here never fires before this one
   // — same reasoning as the divider before the service-status stats box.
