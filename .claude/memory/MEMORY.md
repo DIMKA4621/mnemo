@@ -21,7 +21,9 @@ This file is an **index**: links + quick facts only; detail lives in `topics/`, 
   **Нова оболонка реалізована** у `src/webui/static/` (сайдбар = три маршрути, хедер = сторінка, підвал сайдбару = машина) з `docs/console-design.html` як еталоном; `app.js` розбитий на `shell.js`/`page-{memory,journal,settings}.js`, CSS — на `styles/*.css`.
   Journal snapshot-текст, кнопка завантаження моделі й чекбокс `init` у діалозі банку **зроблені** 2026-08-20 (друге) — `logs/2026-08-20-cabinet-followups.md`.
   Не зроблено: фільтр статусу й повнотекстовий пошук журналу.
-  2026-08-23: `connectSocket()` мав застарілу гвардію `!token`, що взагалі не намагалась відкрити `/ws` на свіжому встановленні без токена (типовий стан, `/api` відкритий за замовчуванням) — WS-запиту не було в Network, жодної помилки в консолі, просто вічно сірий індикатор. Виправлено на `if (state.gated) return;`, симетрично серверній перевірці `_configured_token()`. Деталі й жива репродукція (нова вкладка без `sessionStorage`-токена) — `logs/2026-08-23-ws-connect-guard-fix.md`.
+  2026-08-23: `connectSocket()` мав застарілу гвардію `!token`, що взагалі не намагалась відкрити `/ws` на свіжому встановленні без токена (типовий стан, `/api` відкритий за замовчуванням) — WS-запиту не було в Network, жодної помилки в консолі, просто вічно сірий індикатор.
+  Виправлено на `if (state.gated) return;`, симетрично серверній перевірці `_configured_token()`.
+  Деталі й жива репродукція (нова вкладка без `sessionStorage`-токена) — `logs/2026-08-23-ws-connect-guard-fix.md`.
 - [Native Windows support](topics/windows-native-support.md) — PowerShell 5.1 installer, canonical launcher contract, portable wiring, and verification.
 - [Пропускна здатність ембедингу](topics/embedding-throughput.md) — наш CPU-резидент проти bge-m3 на GPU через Ollama, на однакових 35 571 токені: **8.8× на пакеті, але лише 1.8× на одному запиті**.
   Головна знахідка: **час індексації = паддед-токени / 243** — але це властивість **CPU**- бекенда, на GPU домінує кількість викликів.
@@ -68,6 +70,12 @@ This file is an **index**: links + quick facts only; detail lives in `topics/`, 
 
 ## Logs
 
+- [2026-08-25 (MN-28/MN-29)](logs/2026-08-25-mn28-mn29.md) — MN-28: regenerate-token confirmation already existed, verified live, no code change.
+  MN-29: `docs/console.png` replaced with an all-English shot; the original's demo data was never committed anywhere (confirmed via `git log -S`) and is unrecoverable.
+  Checked-in `devserver.py` fixtures needed temporary (uncommitted) fixes — provider-key mismatch banner, auto-update countdown firing within ~20s of boot, only 4 files in the one openable fixture bank.
+  Briefly registered a demo bank on the **real** service to get more files — caught before screenshotting that this exposed real personal bank names in the sidebar, removed it immediately, rebuilt the richer content as proper `devserver.py` fixtures instead.
+- [2026-08-25 (MN-8/MN-10 branch-first)](logs/2026-08-25-mn8-mn10-branch-first.md) — both tickets started by editing files directly on `master` (branch created "before the commit", not before the first edit) — a repeat pattern the user caught.
+  Recovered without loss (nothing was committed yet); rewrote `.claude/rules/git-workflow.md` so the branch is explicitly step zero, plus guidance for one shared branch when several tasks are handed over together.
 - [2026-08-24 (MN-24/23/22/21)](logs/2026-08-24-mn24-mn23-mn22-mn21-batch-bugfixes.md) — batch of 4 tickets on one shared `fix` branch (not per-ticket branches, deliberate).
   MN-24: `mnemo status` no longer autostarts a stopped service (`_client()`/`_run_api()` gained `autostart` kwarg).
   MN-23: Linux autostart enable/disable dropped `--now` — was killing the live backend (same systemd unit), read as "service restarted".
