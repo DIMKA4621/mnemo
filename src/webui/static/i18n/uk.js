@@ -122,7 +122,7 @@ window.MNEMO_I18N.uk = {
   'common.token.showTitle': 'Показати значення на екрані',
   'common.token.copyTokenTitle': 'Скопіювати токен, не показуючи його',
   'common.token.copyToClipboard': 'Скопіювати у буфер',
-  'common.token.copyFailed': 'Не вдалося скопіювати — виділіть текст і скопіюйте вручну.',
+  'common.token.copyFailed': 'Не вдалося скопіювати — виділіть текст і скопіюйте вручну',
   'common.token.scopeNote': 'Відкриває лише банк «{name}». Службовий токен, яким відкрито цю ' +
     'консоль, ширший — у конфіг проєкту він не потрібен.',
   'common.token.entryLabel': 'Назва запису в конфігурації',
@@ -250,7 +250,7 @@ window.MNEMO_I18N.uk = {
 
   'memory.tree.selectBankHint': 'Оберіть банк ліворуч',
   'memory.tree.loading': 'Завантаження…',
-  'memory.tree.emptyMd': 'У цьому банку немає .md файлів.',
+  'memory.tree.emptyMd': 'У цьому банку немає .md файлів',
 
   'memory.chunk.gap': '· поза чанками ·',
   'memory.chunk.end': { one: 'кінець · {n} символ', few: 'кінець · {n} символи', many: 'кінець · {n} символів' },
@@ -394,7 +394,7 @@ window.MNEMO_I18N.uk = {
     'на диску (шлях і mnemo doctor покажуть його), або вимкніть цю ' +
     'опцію ще раз, щоб зняти вимогу токена.',
 
-  'settings.general.serviceNotLoaded': 'Стан служби ще не отримано.',
+  'settings.general.serviceNotLoaded': 'Стан служби ще не отримано',
   'settings.general.statusLabel': 'Стан',
   'settings.general.stat.version': 'Версія',
   'settings.general.stat.pid': 'PID',
@@ -471,23 +471,23 @@ window.MNEMO_I18N.uk = {
   'settings.embed.mem.probeBtn': 'Перевірити',
   'settings.embed.mem.downloading': 'Завантаження моделі…',
   'settings.embed.mem.downloadBtn': 'Завантажити модель на диск (2.2 ГБ)',
-  'settings.embed.mem.note.wakeSoon': 'Підніметься назад за кілька секунд.',
+  'settings.embed.mem.note.wakeSoon': 'Підніметься назад за кілька секунд',
   'settings.embed.mem.note.naHosted': 'Цей ендпоінт не тримає нічого на цій машині — модель живе ' +
     'на боці постачальника, тож звільняти нічого.',
   'settings.embed.mem.note.naProbeCost': '«Перевірити ендпоінт» зробить один embedding request. Для ' +
     'тарифікованого API це може бути платний виклик.',
-  'settings.embed.mem.note.expiresAt': 'Бекенд тримає її до {when}.',
-  'settings.embed.mem.note.othersHeld': 'Там же ще {n} модел(і/ей) — не наші, їх не чіпаємо.',
-  'settings.embed.mem.note.downloadFailed': 'Завантаження не вдалося — спробуйте ще раз.',
+  'settings.embed.mem.note.expiresAt': 'Бекенд тримає її до {when}',
+  'settings.embed.mem.note.othersHeld': 'Там же ще {n} модел(і/ей) — не наші, їх не чіпаємо',
+  'settings.embed.mem.note.downloadFailed': 'Завантаження не вдалося — спробуйте ще раз',
   'settings.embed.mem.unloadedNote': 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.',
   'settings.embed.mem.probeOkBase': 'Ендпоінт відповів',
-  'settings.embed.mem.probeOkDimSuffix': ' — пробний вектор має {dim} вимірів.',
-  'settings.embed.mem.loadedNote': 'Бекенд відповів — модель у памʼяті.',
+  'settings.embed.mem.probeOkDimSuffix': ' — пробний вектор має {dim} вимірів',
+  'settings.embed.mem.loadedNote': 'Бекенд відповів — модель у памʼяті',
   'settings.embed.mem.busyError': 'Черга ще працює через цей бекенд — почекайте, доки вона ' +
     'звільниться, і спробуйте ще раз.',
 
   'settings.embed.errors.missingUrl': 'Вкажіть адресу ендпоінта',
-  'settings.embed.errors.dimNotPositive': 'Вимірів має бути додатним числом.',
+  'settings.embed.errors.dimNotPositive': 'Вимірів має бути додатним числом',
   'settings.embed.saved.restartRequired': 'Збережено. Набере чинності після перезапуску служби.',
   'settings.embed.saved.appliedNoPending': 'Збережено й застосовано. Перевірте бекенд кнопкою вище.',
   'settings.embed.saved.appliedPending': 'Збережено й застосовано. Перевірте бекенд кнопкою вище, ' +
@@ -536,7 +536,7 @@ window.MNEMO_I18N.uk = {
   'settings.maint.orphans.deletionForbidden': 'Видалення заборонене: {reason}',
   'settings.maint.orphans.registryUncheckable': 'реєстр не можна перевірити',
   'settings.maint.orphans.noneTitle': 'Сиріт немає',
-  'settings.maint.orphans.noneNote': 'Кожен index належить банку.',
+  'settings.maint.orphans.noneNote': 'Кожен index належить банку',
   'settings.maint.orphans.unreadable': 'не читається — {error}',
   'settings.maint.orphans.preV3NoRoot': 'pre-v3 index — root не записаний',
   'settings.maint.orphans.noRoot': 'root не записаний',
@@ -590,13 +590,13 @@ window.MNEMO_I18N.uk = {
   'update.timeout.retryBtn': 'Спробувати ще',
 
   'update.terminal.done': 'Оновлено до {tag}',
-  'update.terminal.rolledBack': 'Проблема під час оновлення до {tag} — відкотили назад на {current}.',
+  'update.terminal.rolledBack': 'Проблема під час оновлення до {tag} — відкотили назад на {current}',
   'update.terminal.errorSuffix': ' ({error})',
   'update.terminal.failedBase': 'Оновлення не вдалося',
   'update.terminal.failedWithError': ': {error}',
   'update.terminal.failedNoError': '.',
-  'update.terminal.unknownState': ' Стан служби може бути невизначеним — перевірте mnemo doctor.',
-  'update.terminal.unchanged': ' Поточна версія не змінювалась.',
+  'update.terminal.unknownState': ' Стан служби може бути невизначеним — перевірте mnemo doctor',
+  'update.terminal.unchanged': ' Поточна версія не змінювалась',
   'update.terminal.autoClosePrefix': 'Закриється автоматично через ',
   'update.terminal.autoCloseSuffix': ' с.',
 
