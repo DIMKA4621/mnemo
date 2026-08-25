@@ -1645,7 +1645,7 @@ function entryHintText() {
  * where the braces were supposed to come from.
  *
  * There is really one question here: does this project substitute values from
- * `.mcp.env`, or hold them directly? `SCOPE_HINT` below is what answers it,
+ * `.mcp.env`, or hold them directly? `scopeHint()` below is what answers it,
  * because the console cannot look at the project and see for itself.
  */
 function scopeTabs() {
