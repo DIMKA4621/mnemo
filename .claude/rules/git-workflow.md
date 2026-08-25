@@ -14,11 +14,17 @@ GitHub-facing text never switches to Ukrainian just because the surrounding conv
 
 Never commit new work directly on `master`, and never branch off whatever is currently checked out without checking it first.
 
-1. `git fetch origin`.
+**The branch is step zero, not a step before the commit.** Create it *before* the first file edit of the task — not retroactively once it's time to commit. Repeated real failure mode (happened twice in a row, 2026-08-25): starting to edit files straight away because the task felt small or was about to grow, telling myself "I'll branch before I commit" — and by the time that moment arrives, several files already carry uncommitted, unbranched changes on `master`, sometimes from more than one task tangled together. Untangling that after the fact (splitting hunks, patch surgery) is real, avoidable work. Branch first, always, even for what looks like a one-line fix — it costs three commands and prevents this.
+
+1. Before opening any editor tool on a task's files: look at the scope of what's being asked (one ticket, or several the user is handing over together — see below), then `git fetch origin`.
 2. Compare local `master` to `origin/master`.
    If they differ, sync local `master` to match `origin/master` — but don't force-reset it without asking if a simple fast-forward isn't possible; a stale or diverged local `master` is worth flagging rather than silently overwriting.
-3. Create the new feature branch from that up-to-date `master`.
+3. Create the new feature branch from that up-to-date `master`, *then* start editing.
    If the working tree has other uncommitted changes in it (e.g. a concurrent session's live edits), don't touch them — use an isolated `git worktree` for the new branch instead of checking it out in the main tree.
+
+### Naming when the user hands over several tasks at once
+
+When the user assigns or groups multiple tasks together in the same request ("do MN-8 then MN-10", a batch of related fixes), one shared branch for all of them is fine — no need for a branch per ticket when the user is already treating them as one unit of work. Name it moderately generic, not over-specific to just the first task in the batch: e.g. `feature/mn-8-mn-10-console-ui-text`, not `fix/mn-8-teka-rename` that then has unrelated MN-10 work grafted on. If it's genuinely unclear whether upcoming tasks belong on the same branch, ask — same as any other branch/PR structure call (see the git-workflow discussion in `.claude/memory/logs/2026-08-25-*.md` for a worked example of exactly this).
 
 ## Continuing existing work — same branch is fine
 
