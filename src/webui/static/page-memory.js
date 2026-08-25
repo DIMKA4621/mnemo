@@ -76,7 +76,7 @@ function memoryHeaderHtml() {
     '<div class="segmented mob-panes" aria-label="Панель">' +
       mob('banks', 'Банки') + mob('tree', 'Файли') + mob('file', 'Вміст') +
     '</div>' +
-    '<button class="btn btn-sm" id="add-bank" title="Зареєструвати нову теку з .md як банк">' +
+    '<button class="btn btn-sm" id="add-bank" title="Зареєструвати нову директорію з .md як банк">' +
       '＋ Додати банк</button>';
 }
 
@@ -299,7 +299,7 @@ function renderBanks() {
   if (!state.banks.length) {
     list.appendChild(el('p', {
       className: 'empty-hint',
-      text: 'Жодного банку не зареєстровано — «＋ Додати банк» у шапці вибирає теку з .md.',
+      text: 'Жодного банку не зареєстровано — «＋ Додати банк» у шапці вибирає директорію з .md.',
     }));
     syncTicker();
     if (state.page === 'memory') renderHeader();
