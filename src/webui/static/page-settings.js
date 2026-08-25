@@ -1014,10 +1014,12 @@ function renderGeneralSection(body) {
   renderRequireLogin(body);
   renderAutoUpdate(body);
   // The one message this can still produce that isn't already handled right
-  // under its own field: "Нічого не змінено." (Save clicked with no pending
-  // edit to either control above). Placed here, immediately after both
-  // Save-gated fields and before the unrelated Про-проект/Стан blocks below
-  // -- never after them, or it would read as a verdict on those instead.
+  // under its own field: "Немає що зберігати" (Save clicked with no pending
+  // edit to any of the three controls above — theme/language don't count,
+  // they apply on their own and were never gated on Save to begin with).
+  // Placed here, immediately after all three Save-gated fields and before
+  // the unrelated Про-проект/Стан blocks below -- never after them, or it
+  // would read as a verdict on those instead.
   renderSettingsMessages(body);
 
   const svc = state.service;

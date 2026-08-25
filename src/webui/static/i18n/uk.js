@@ -18,11 +18,11 @@ window.MNEMO_I18N.uk = {
   'common.gate.rejected.text': 'Сервіс відхилив наданий токен (HTTP 401). Найімовірніше він ' +
     'застарілий або скопійований не повністю — актуальний токен видає сама команда.',
   'common.gate.rejected.lead': 'Команда друкує готове посилання з чинним токеном і відкриває його:',
-  'common.gate.rejected.note': 'Токен відхилено сервісом.',
+  'common.gate.rejected.note': 'Токен відхилено сервісом',
   'common.gate.tokenPlaceholder': '48 шістнадцяткових символів',
   'common.gate.manualLabel': 'Або вставте токен вручну:',
   'common.gate.submit': 'Увійти',
-  'common.gate.enterToken': 'Введіть токен.',
+  'common.gate.enterToken': 'Введіть токен',
   'common.gate.idle': 'не автентифіковано',
 
   'common.error.unreachable': 'бекенд недоступний: {message}',
@@ -198,12 +198,12 @@ window.MNEMO_I18N.uk = {
   'memory.pane.banks': 'Банки',
   'memory.pane.refreshTitle': 'Оновити список',
   'memory.pane.files': 'Файли',
-  'memory.pane.selectBankHint': 'Оберіть банк ліворуч.',
+  'memory.pane.selectBankHint': 'Оберіть банк ліворуч',
   'memory.pane.content': 'Вміст',
   'memory.pane.chunkVizTitle': 'Показати межі чанків так, як вони лежать в індексі',
   'memory.pane.chunkVizLabel': 'Межі чанків',
   'memory.pane.reindexFileBtn': 'Переіндексувати файл',
-  'memory.pane.selectFileHint': 'Оберіть файл у дереві.',
+  'memory.pane.selectFileHint': 'Оберіть файл у дереві',
 
   // -- memory: Памʼять page — banks, tree, file view (page-memory.js) -------
 
@@ -248,7 +248,7 @@ window.MNEMO_I18N.uk = {
   'memory.indexedState.yes': 'в індексі',
   'memory.indexedState.no': 'не в індексі',
 
-  'memory.tree.selectBankHint': 'Оберіть банк ліворуч.',
+  'memory.tree.selectBankHint': 'Оберіть банк ліворуч',
   'memory.tree.loading': 'Завантаження…',
   'memory.tree.emptyMd': 'У цьому банку немає .md файлів.',
 
@@ -288,7 +288,7 @@ window.MNEMO_I18N.uk = {
 
   'journal.list.shownOf': 'Показано {shown} із {total}',
   'journal.list.empty': 'Порожньо',
-  'journal.list.noEvents': 'Подій не знайдено.',
+  'journal.list.noEvents': 'Подій не знайдено',
 
   'journal.event.rebuildTitle': 'Повна перебудова банку',
   'journal.event.pruneTitle': 'Зняття з індексу',
@@ -312,7 +312,7 @@ window.MNEMO_I18N.uk = {
   'journal.detail.trigger': 'тригер',
   'journal.detail.resultsLabel': 'Результати',
   'journal.detail.resultsOrderNote': 'у точному ранговому порядку',
-  'journal.detail.noHits': 'Жодного влучення.',
+  'journal.detail.noHits': 'Жодного влучення',
   'journal.detail.filesIndexed': 'файлів',
   'journal.detail.chunksIndexed': 'чанків',
   'journal.detail.filesPruned': 'знято',
@@ -320,7 +320,7 @@ window.MNEMO_I18N.uk = {
   'journal.detail.errorLabel': 'Помилка',
   'journal.detail.fileSection': 'Файл',
   'journal.detail.currentFileOf': 'поточний файл банку {bank}',
-  'journal.detail.selectHint': 'Оберіть подію ліворуч.',
+  'journal.detail.selectHint': 'Оберіть подію ліворуч',
 
   // -- settings: static footer markup (index.html) --------------------------
 
@@ -343,7 +343,7 @@ window.MNEMO_I18N.uk = {
     'Перевірки запускаються лише при відкритті цього розділу.',
 
   'settings.loading': 'Завантаження…',
-  'settings.messages.nothingChanged': 'Нічого не змінено.',
+  'settings.messages.nothingChanged': 'Немає що зберігати',
   'settings.overrideNote': 'перекрито змінною {var} — збережене тут не подіє, доки вона виставлена',
   'settings.notSavedToggle': 'не збережено — зараз {state}; натисніть «Зберегти», щоб застосувати',
   'settings.state.on': 'увімкнено',
@@ -367,26 +367,26 @@ window.MNEMO_I18N.uk = {
   'settings.general.autostart.namedSuffix': ' — «{name}»',
   'settings.general.autostart.notFetched': 'стан не отримано',
   'settings.general.autostart.unsupported': 'на цій системі не підтримується',
-  'settings.general.autostart.savedOn': 'Автозапуск: служба підніматиметься при вході в систему.',
-  'settings.general.autostart.savedOff': 'Автозапуск: вимкнено, службу доведеться піднімати самому.',
+  'settings.general.autostart.savedOn': 'Автозапуск: служба підніматиметься при вході в систему',
+  'settings.general.autostart.savedOff': 'Автозапуск: вимкнено, службу доведеться піднімати самому',
 
   'settings.general.autoUpdate.label': 'Автоматичне оновлення',
   'settings.general.autoUpdate.note': 'Придатний реліз застосовується сам — з коротким відліком і ' +
     'кнопкою «Скасувати» просто в консолі. Вимкнено — лишається тільки банер і ручне ' +
     'підтвердження, як і раніше.',
-  'settings.general.autoUpdate.savedOn': 'Автооновлення: увімкнено.',
-  'settings.general.autoUpdate.savedOff': 'Автооновлення: вимкнено.',
+  'settings.general.autoUpdate.savedOn': 'Автооновлення: увімкнено',
+  'settings.general.autoUpdate.savedOff': 'Автооновлення: вимкнено',
   'settings.general.autoUpdate.checking': 'Перевіряємо…',
   'settings.general.autoUpdate.checkBtn': 'Перевірити оновлення',
-  'settings.general.autoUpdate.upToDate': 'Актуальна версія.',
+  'settings.general.autoUpdate.upToDate': 'Актуальна версія',
 
   'settings.general.requireLogin.label': 'Вимагати токен для входу в кабінет',
   'settings.general.requireLogin.noteOff': 'Вимкнено (типово): «/api» (кабінет і CLI) відкритий ' +
     'на loopback, як зараз, — без токена.',
   'settings.general.requireLogin.noteOn': 'Увімкнено: кабінету й CLI потрібен сервісний токен ' +
     'для доступу.',
-  'settings.general.requireLogin.savedOn': 'Вхід у кабінет тепер вимагає токен.',
-  'settings.general.requireLogin.savedOff': 'Кабінет знову відкритий на loopback без токена.',
+  'settings.general.requireLogin.savedOn': 'Вхід у кабінет тепер вимагає токен',
+  'settings.general.requireLogin.savedOff': 'Кабінет знову відкритий на loopback без токена',
   'settings.general.requireLogin.tokenLabel': 'Сервісний токен',
   'settings.general.requireLogin.tokenNote': 'Показано один раз — GET /api/settings більше його не поверне. ' +
     'Консоль уже підставила цей токен у поточну сесію, тож входити ' +
@@ -457,7 +457,7 @@ window.MNEMO_I18N.uk = {
   'settings.embed.mem.hold.na': 'нічого не тримає',
   'settings.embed.mem.hold.unknown': 'невідомо',
   'settings.embed.mem.label': 'Оперативна памʼять',
-  'settings.embed.mem.notFetched': 'Стан ще не отримано.',
+  'settings.embed.mem.notFetched': 'Стан ще не отримано',
   'settings.embed.mem.introStrong': 'Модель піднімається сама, коли потрібна для пошуку чи індексації',
   'settings.embed.mem.introRest': ' — «не в памʼяті» це нормальний стан, не помилка. ' +
     '«Вивантажити» звільняє памʼять одразу, замість тримати модель ' +
@@ -486,7 +486,7 @@ window.MNEMO_I18N.uk = {
   'settings.embed.mem.busyError': 'Черга ще працює через цей бекенд — почекайте, доки вона ' +
     'звільниться, і спробуйте ще раз.',
 
-  'settings.embed.errors.missingUrl': 'Вкажіть адресу ендпоінта.',
+  'settings.embed.errors.missingUrl': 'Вкажіть адресу ендпоінта',
   'settings.embed.errors.dimNotPositive': 'Вимірів має бути додатним числом.',
   'settings.embed.saved.restartRequired': 'Збережено. Набере чинності після перезапуску служби.',
   'settings.embed.saved.appliedNoPending': 'Збережено й застосовано. Перевірте бекенд кнопкою вище.',
@@ -500,7 +500,7 @@ window.MNEMO_I18N.uk = {
   'settings.maint.refreshing': 'Оновлюємо…',
   'settings.maint.refreshBtn': 'Оновити діагностику',
   'settings.maint.collecting': 'Збираємо діагностику…',
-  'settings.maint.notFetched': 'Звіт ще не отримано.',
+  'settings.maint.notFetched': 'Звіт ще не отримано',
   'settings.maint.engineLabel': 'Рушій',
   'settings.maint.embedLabel': 'Ембединг',
   'settings.maint.providerLabel': 'Провайдер',
@@ -527,7 +527,7 @@ window.MNEMO_I18N.uk = {
   'settings.maint.backend.down': 'НЕ ДОСТУПНИЙ — {error}',
   'settings.maint.token.notSet': 'не встановлено · /api відкритий на loopback за замовчуванням',
   'settings.maint.registryUnreadable': 'НЕЧИТАНИЙ — {error}',
-  'settings.maint.registryReadable': 'Реєстр читається.',
+  'settings.maint.registryReadable': 'Реєстр читається',
   'settings.maint.registry.noRoot': 'нема кореня',
   'settings.maint.count.projects': { one: '{n} проєкт', few: '{n} проєкти', many: '{n} проєктів' },
   'settings.maint.wiring.allCurrent': 'усі актуальні',
@@ -589,7 +589,7 @@ window.MNEMO_I18N.uk = {
     '(mnemo doctor) або спробуйте ще раз.',
   'update.timeout.retryBtn': 'Спробувати ще',
 
-  'update.terminal.done': 'Оновлено до {tag}.',
+  'update.terminal.done': 'Оновлено до {tag}',
   'update.terminal.rolledBack': 'Проблема під час оновлення до {tag} — відкотили назад на {current}.',
   'update.terminal.errorSuffix': ' ({error})',
   'update.terminal.failedBase': 'Оновлення не вдалося',

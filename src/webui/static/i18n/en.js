@@ -24,11 +24,11 @@ window.MNEMO_I18N.en = {
     'It is most likely stale, or was copied incompletely — the current token ' +
     'is printed by the command itself.',
   'common.gate.rejected.lead': 'The command prints a ready link with the current token and opens it:',
-  'common.gate.rejected.note': 'The token was rejected by the service.',
+  'common.gate.rejected.note': 'The token was rejected by the service',
   'common.gate.tokenPlaceholder': '48 hex characters',
   'common.gate.manualLabel': 'Or paste the token manually:',
   'common.gate.submit': 'Sign in',
-  'common.gate.enterToken': 'Enter a token.',
+  'common.gate.enterToken': 'Enter a token',
   'common.gate.idle': 'not authenticated',
 
   'common.error.unreachable': 'backend unreachable: {message}',
@@ -204,12 +204,12 @@ window.MNEMO_I18N.en = {
   'memory.pane.banks': 'Banks',
   'memory.pane.refreshTitle': 'Refresh list',
   'memory.pane.files': 'Files',
-  'memory.pane.selectBankHint': 'Select a bank on the left.',
+  'memory.pane.selectBankHint': 'Select a bank on the left',
   'memory.pane.content': 'Content',
   'memory.pane.chunkVizTitle': 'Show chunk boundaries as they lie in the index',
   'memory.pane.chunkVizLabel': 'Chunk boundaries',
   'memory.pane.reindexFileBtn': 'Reindex file',
-  'memory.pane.selectFileHint': 'Select a file in the tree.',
+  'memory.pane.selectFileHint': 'Select a file in the tree',
 
   // -- memory: Памʼять/Memory page — banks, tree, file view (page-memory.js) --
 
@@ -253,7 +253,7 @@ window.MNEMO_I18N.en = {
   'memory.indexedState.yes': 'indexed',
   'memory.indexedState.no': 'not indexed',
 
-  'memory.tree.selectBankHint': 'Select a bank on the left.',
+  'memory.tree.selectBankHint': 'Select a bank on the left',
   'memory.tree.loading': 'Loading…',
   'memory.tree.emptyMd': 'This bank has no .md files.',
 
@@ -293,7 +293,7 @@ window.MNEMO_I18N.en = {
 
   'journal.list.shownOf': 'Showing {shown} of {total}',
   'journal.list.empty': 'Empty',
-  'journal.list.noEvents': 'No events found.',
+  'journal.list.noEvents': 'No events found',
 
   'journal.event.rebuildTitle': 'Full bank rebuild',
   'journal.event.pruneTitle': 'Removed from index',
@@ -317,7 +317,7 @@ window.MNEMO_I18N.en = {
   'journal.detail.trigger': 'trigger',
   'journal.detail.resultsLabel': 'Results',
   'journal.detail.resultsOrderNote': 'in exact rank order',
-  'journal.detail.noHits': 'No hits.',
+  'journal.detail.noHits': 'No hits',
   'journal.detail.filesIndexed': 'files',
   'journal.detail.chunksIndexed': 'chunks',
   'journal.detail.filesPruned': 'removed',
@@ -325,7 +325,7 @@ window.MNEMO_I18N.en = {
   'journal.detail.errorLabel': 'Error',
   'journal.detail.fileSection': 'File',
   'journal.detail.currentFileOf': 'current file of bank {bank}',
-  'journal.detail.selectHint': 'Select an event on the left.',
+  'journal.detail.selectHint': 'Select an event on the left',
 
   // -- settings: static footer markup (index.html) --------------------------
 
@@ -345,7 +345,7 @@ window.MNEMO_I18N.en = {
   'settings.lede.maint': 'The same structured doctor report the CLI prints as text. Checks run only when this section is opened.',
 
   'settings.loading': 'Loading…',
-  'settings.messages.nothingChanged': 'Nothing changed.',
+  'settings.messages.nothingChanged': 'Nothing to save',
   'settings.overrideNote': 'overridden by the {var} environment variable — what is saved here has no effect while it is set',
   'settings.notSavedToggle': 'not saved — currently {state}; press "Save" to apply',
   'settings.state.on': 'on',
@@ -368,22 +368,22 @@ window.MNEMO_I18N.en = {
   'settings.general.autostart.namedSuffix': ' — "{name}"',
   'settings.general.autostart.notFetched': 'state not received',
   'settings.general.autostart.unsupported': 'not supported on this system',
-  'settings.general.autostart.savedOn': 'Autostart: the service will come up at logon.',
-  'settings.general.autostart.savedOff': 'Autostart: off, you will need to start the service yourself.',
+  'settings.general.autostart.savedOn': 'Autostart: the service will come up at logon',
+  'settings.general.autostart.savedOff': 'Autostart: off, you will need to start the service yourself',
 
   'settings.general.autoUpdate.label': 'Automatic update',
   'settings.general.autoUpdate.note': 'A fit release applies itself — with a short countdown and a "Cancel" button right in the console. Off — only the banner and manual confirmation remain, as before.',
-  'settings.general.autoUpdate.savedOn': 'Auto-update: on.',
-  'settings.general.autoUpdate.savedOff': 'Auto-update: off.',
+  'settings.general.autoUpdate.savedOn': 'Auto-update: on',
+  'settings.general.autoUpdate.savedOff': 'Auto-update: off',
   'settings.general.autoUpdate.checking': 'Checking…',
   'settings.general.autoUpdate.checkBtn': 'Check for updates',
-  'settings.general.autoUpdate.upToDate': 'Up to date.',
+  'settings.general.autoUpdate.upToDate': 'Up to date',
 
   'settings.general.requireLogin.label': 'Require a token to sign in',
   'settings.general.requireLogin.noteOff': 'Off (default): "/api" (console and CLI) is open on loopback, as now — no token.',
   'settings.general.requireLogin.noteOn': 'On: the console and CLI need a service token to access.',
-  'settings.general.requireLogin.savedOn': 'Signing in now requires a token.',
-  'settings.general.requireLogin.savedOff': 'The console is open on loopback again, no token.',
+  'settings.general.requireLogin.savedOn': 'Signing in now requires a token',
+  'settings.general.requireLogin.savedOff': 'The console is open on loopback again, no token',
   'settings.general.requireLogin.tokenLabel': 'Service token',
   'settings.general.requireLogin.tokenNote': "Shown once — GET /api/settings will not return it again. The console has already adopted this token for the current session, so signing in again is not needed. If it's lost — the same file is on disk (the path and mnemo doctor will show it), or turn this option off again to drop the token requirement.",
 
@@ -445,7 +445,7 @@ window.MNEMO_I18N.en = {
   'settings.embed.mem.hold.na': 'holds nothing',
   'settings.embed.mem.hold.unknown': 'unknown',
   'settings.embed.mem.label': 'RAM',
-  'settings.embed.mem.notFetched': 'State not received yet.',
+  'settings.embed.mem.notFetched': 'State not received yet',
   'settings.embed.mem.introStrong': 'The model comes up on its own when needed for search or indexing',
   'settings.embed.mem.introRest': ' — "not in memory" is a normal state, not an error. "Unload" frees the memory right away, instead of keeping the model loaded just in case.',
   'settings.embed.mem.statusCaption': 'Status:',
@@ -469,7 +469,7 @@ window.MNEMO_I18N.en = {
   'settings.embed.mem.loadedNote': 'The backend responded — the model is in memory.',
   'settings.embed.mem.busyError': 'The queue is still working through this backend — wait until it clears and try again.',
 
-  'settings.embed.errors.missingUrl': 'Enter the endpoint address.',
+  'settings.embed.errors.missingUrl': 'Enter the endpoint address',
   'settings.embed.errors.dimNotPositive': 'Dimensions must be a positive number.',
   'settings.embed.saved.restartRequired': 'Saved. Takes effect after the service restarts.',
   'settings.embed.saved.appliedNoPending': 'Saved and applied. Check the backend with the button above.',
@@ -481,7 +481,7 @@ window.MNEMO_I18N.en = {
   'settings.maint.refreshing': 'Refreshing…',
   'settings.maint.refreshBtn': 'Refresh diagnostics',
   'settings.maint.collecting': 'Collecting diagnostics…',
-  'settings.maint.notFetched': 'The report has not been received yet.',
+  'settings.maint.notFetched': 'The report has not been received yet',
   'settings.maint.engineLabel': 'Engine',
   'settings.maint.embedLabel': 'Embedding',
   'settings.maint.providerLabel': 'Provider',
@@ -508,7 +508,7 @@ window.MNEMO_I18N.en = {
   'settings.maint.backend.down': 'UNAVAILABLE — {error}',
   'settings.maint.token.notSet': 'not set · /api is open on loopback by default',
   'settings.maint.registryUnreadable': 'UNREADABLE — {error}',
-  'settings.maint.registryReadable': 'The registry reads fine.',
+  'settings.maint.registryReadable': 'The registry reads fine',
   'settings.maint.registry.noRoot': 'root missing',
   'settings.maint.count.projects': { one: '{n} project', other: '{n} projects' },
   'settings.maint.wiring.allCurrent': 'all current',
@@ -567,7 +567,7 @@ window.MNEMO_I18N.en = {
     'manually (mnemo doctor) or try again.',
   'update.timeout.retryBtn': 'Try again',
 
-  'update.terminal.done': 'Updated to {tag}.',
+  'update.terminal.done': 'Updated to {tag}',
   'update.terminal.rolledBack': 'A problem occurred updating to {tag} — rolled back to {current}.',
   'update.terminal.errorSuffix': ' ({error})',
   'update.terminal.failedBase': 'Update failed',
