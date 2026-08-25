@@ -59,6 +59,16 @@ const settings = {
   // reasoning as autostartSaveNote above.
   autoUpdateSaveNote: null,
   autoUpdateSaveError: null,
+  requireLoginWant: null,  // pending edit for "require_login" (MN-19), same
+                           // idiom as autoUpdateWant
+  requireLoginSaveNote: null,
+  requireLoginSaveError: null,
+  // The service token PUT /api/settings hands back the moment this save
+  // turns the gate on (MN-19) — a one-time reveal, never echoed by GET
+  // /api/settings afterwards. Cleared on leaving this section/page, same
+  // hygiene as bankToken.value in app.js.
+  requireLoginToken: null,
+  requireLoginTokenRevealed: false,
   updateCheckBusy: false,  // POST /api/update/check in flight
   updateCheckError: null,
   updateCheckResult: null,  // last check's outcome, worded for display
@@ -196,6 +206,13 @@ function chooseSettingsSection(id) {
   settings.autoUpdateWant = null;
   settings.autoUpdateSaveNote = null;
   settings.autoUpdateSaveError = null;
+  settings.requireLoginWant = null;
+  settings.requireLoginSaveNote = null;
+  settings.requireLoginSaveError = null;
+  // Same hygiene as bankToken.value in app.js: a secret must not survive in
+  // memory past the section it was revealed in.
+  settings.requireLoginToken = null;
+  settings.requireLoginTokenRevealed = false;
   settings.updateCheckError = null;
   // Same rule as the save verdicts above: an update-check result describes
   // an attempt made in the section being left, not a fact about the tab
@@ -290,6 +307,10 @@ function settingsOnLeave() {
   settings.autostartSaveError = null;
   settings.autoUpdateSaveNote = null;
   settings.autoUpdateSaveError = null;
+  settings.requireLoginSaveNote = null;
+  settings.requireLoginSaveError = null;
+  settings.requireLoginToken = null;
+  settings.requireLoginTokenRevealed = false;
   settings.updateCheckError = null;
   settings.updateCheckResult = null;
   settings.updateCheckAvailable = false;
@@ -980,6 +1001,7 @@ function renderGeneralSection(body) {
   renderTheme(body);
   renderAutostart(body);
   renderAutoUpdate(body);
+  renderRequireLogin(body);
   // The one message this can still produce that isn't already handled right
   // under its own field: "Нічого не змінено." (Save clicked with no pending
   // edit to either control above). Placed here, immediately after both
@@ -1243,6 +1265,144 @@ function renderAutoUpdate(body) {
 }
 
 /**
+ * Whether `/api` (console + CLI) requires a token (MN-19: `require_login`,
+ * `PUT /api/settings`) — same Save-gated `.segmented set-toggle` idiom as
+ * autostart/auto-update above, and part of the same `/api/settings`
+ * document, so it carries an env override (`overrideNote`) the same way.
+ */
+function requireLoginStoredValue() {
+  const item = settingValue('require_login');
+  return item ? !!item.value : false;
+}
+
+/** The require-login state the form is showing: the edit if there is one,
+ *  else what the machine reports — same shape as `autoUpdateWanted()`. */
+function requireLoginWanted() {
+  if (settings.requireLoginWant != null) return settings.requireLoginWant;
+  return requireLoginStoredValue();
+}
+
+/** Select a require-login state. Nothing is saved until «Зберегти». */
+function chooseRequireLogin(want) {
+  if (settings.busy) return;
+  settings.requireLoginWant = (!!want === requireLoginStoredValue()) ? null : !!want;
+  settings.errorText = null;
+  settings.note = null;
+  renderSettings();
+}
+
+function renderRequireLogin(body) {
+  const chosen = requireLoginWanted();
+  const seg = el('div', { className: 'segmented set-toggle' });
+  for (const option of [{ on: false, label: 'Вимкнено' }, { on: true, label: 'Увімкнено' }]) {
+    seg.appendChild(el('button', {
+      className: 'seg' + (chosen === option.on ? ' is-active' : ''),
+      text: option.label,
+      attrs: settings.busy ? { disabled: '' } : {},
+      on: { click: () => chooseRequireLogin(option.on) },
+    }));
+  }
+
+  // Manual divider: `renderAutoUpdate` above ends with a check button and
+  // its result note, neither of them a `.set-field`, so the adjacent-sibling
+  // rule that separates every other field here never fires before this one
+  // — same reasoning as the divider before the service-status stats box.
+  body.appendChild(el('div', { className: 'set-divider' }));
+  body.appendChild(setField('Вимагати токен для входу в кабінет', seg, null));
+  // Two facts, two lines: what's off (the current default) and what's on —
+  // same `<br>`-per-sentence shape as the embed section's consequences block.
+  body.appendChild(el('p', { className: 'set-note' }, [
+    document.createTextNode('Вимкнено (типово): «/api» (кабінет і CLI) відкритий ' +
+      'на loopback, як зараз, — без токена.'),
+    el('br'),
+    document.createTextNode('Увімкнено: кабінету й CLI потрібен сервісний токен ' +
+      'для доступу.'),
+  ]));
+
+  const requireLoginOverride = overrideNote('require_login');
+  if (requireLoginOverride) body.appendChild(requireLoginOverride);
+
+  if (chosen !== requireLoginStoredValue()) {
+    body.appendChild(el('p', {
+      className: 'set-override',
+      text: 'не збережено — зараз ' + (requireLoginStoredValue() ? 'увімкнено' : 'вимкнено') +
+            '; натисніть «Зберегти», щоб застосувати',
+    }));
+  }
+
+  // The save verdict for THIS control, right under it — same reasoning as
+  // renderAutostart's/renderAutoUpdate's own blocks above.
+  if (settings.requireLoginSaveError) {
+    body.appendChild(el('p', { className: 'modal-error', text: settings.requireLoginSaveError }));
+  } else if (settings.requireLoginSaveNote) {
+    body.appendChild(el('p', { className: 'tok-ok', text: settings.requireLoginSaveNote }));
+  }
+
+  // The one-time reveal: only appears the instant a save handed back a
+  // fresh `service_token` (see submitGeneral). Not gated behind
+  // scheduleSettingsNoteClear like the notes above — a secret must stay on
+  // screen until the user leaves, not vanish on its own after 5s.
+  if (settings.requireLoginToken) {
+    // Manual divider, not `.set-field + .set-field`: the toggle's own field
+    // ends several plain `<p>` notes/verdicts before this one, so the
+    // adjacent-sibling rule that separates every other field here never
+    // fires before it — same reasoning as renderEmbedSection's memory block.
+    body.appendChild(el('div', { className: 'set-divider' }));
+    body.appendChild(renderRequireLoginToken());
+  }
+}
+
+/**
+ * The freshly-minted service token, shown once — same masked-field +
+ * show/hide + copy idiom as the bank-token panel (app.js), reusing its
+ * generic pieces (`maskToken`, `copyButton`) directly rather than that
+ * panel's bank-specific modal/snippet machinery, which has nothing to do
+ * with a machine-wide service token.
+ */
+function renderRequireLoginToken() {
+  const value = settings.requireLoginToken;
+  const revealed = settings.requireLoginTokenRevealed;
+
+  const field = el('input', {
+    className: 'fs-input tok-value',
+    attrs: {
+      id: 'require-login-token', name: 'require-login-token', type: 'text',
+      readonly: '', spellcheck: 'false', autocomplete: 'off',
+    },
+  });
+  field.value = revealed ? value : maskToken(value);
+
+  return el('div', { className: 'set-field' }, [
+    el('label', {
+      className: 'set-label', text: 'Сервісний токен',
+      attrs: { for: 'require-login-token' },
+    }),
+    el('div', { className: 'tok-row' }, [
+      field,
+      el('button', {
+        className: 'btn',
+        text: revealed ? 'сховати' : 'показати',
+        title: revealed ? 'Прибрати значення з екрана' : 'Показати значення на екрані',
+        attrs: { 'aria-pressed': revealed ? 'true' : 'false' },
+        on: { click: () => {
+          settings.requireLoginTokenRevealed = !settings.requireLoginTokenRevealed;
+          renderSettings();
+        } },
+      }),
+      copyButton(() => settings.requireLoginToken, 'Скопіювати токен, не показуючи його'),
+    ]),
+    el('p', {
+      className: 'tok-note',
+      text: 'Показано один раз — GET /api/settings більше його не поверне. ' +
+            'Консоль уже підставила цей токен у поточну сесію, тож входити ' +
+            'заново не потрібно. Якщо він загубиться — той самий файл лежить ' +
+            'на диску (шлях і mnemo doctor покажуть його), або вимкніть цю ' +
+            'опцію ще раз, щоб зняти вимогу токена.',
+    }),
+  ]);
+}
+
+/**
  * `POST /api/update/check` — the same manual trigger the sidebar banner's
  * own periodic background check uses, reachable here too. Never itself
  * shows the auto-pending countdown modal: it only refreshes `latest_tag`/
@@ -1312,7 +1472,8 @@ async function runUpdateCheck() {
 async function submitGeneral() {
   const autostartWant = settings.autostartWant;
   const autoUpdateWant = settings.autoUpdateWant;
-  if (autostartWant == null && autoUpdateWant == null) {
+  const requireLoginWant = settings.requireLoginWant;
+  if (autostartWant == null && autoUpdateWant == null && requireLoginWant == null) {
     settings.note = 'Нічого не змінено.';
     renderSettings();
     return;
@@ -1326,6 +1487,8 @@ async function submitGeneral() {
   settings.autostartSaveError = null;
   settings.autoUpdateSaveNote = null;
   settings.autoUpdateSaveError = null;
+  settings.requireLoginSaveNote = null;
+  settings.requireLoginSaveError = null;
   renderSettings();
 
   try {
@@ -1356,6 +1519,35 @@ async function submitGeneral() {
       } catch (err) {
         if (isAuthError(err)) { openGate('rejected'); return; }
         settings.autoUpdateSaveError = err.message;
+      }
+    }
+
+    if (requireLoginWant != null) {
+      try {
+        const data = await api('/api/settings', {
+          method: 'PUT', body: { require_login: requireLoginWant },
+        });
+        settings.data = data;
+        settings.requireLoginWant = null;
+        settings.requireLoginSaveNote = requireLoginWant
+          ? 'Вхід у кабінет тепер вимагає токен.'
+          : 'Кабінет знову відкритий на loopback без токена.';
+        // `data.service_token` rides in this exact response the moment the
+        // save turns the gate on (contract: MN-19) — never echoed by a plain
+        // GET afterwards, so it has to be picked up right here or it is
+        // gone. Adopted into this session's own credential immediately too:
+        // otherwise the very next `/api` request (the status/embed refresh
+        // below, or a WS reconnect in shell.js) would 401 and slam the gate
+        // shut on the same screen that just handed the token out.
+        if (data.service_token) {
+          settings.requireLoginToken = data.service_token;
+          settings.requireLoginTokenRevealed = false;
+          token = data.service_token;
+          sessionStorage.setItem('mnemo_token', token);
+        }
+      } catch (err) {
+        if (isAuthError(err)) { openGate('rejected'); return; }
+        settings.requireLoginSaveError = err.message;
       }
     }
   } finally {

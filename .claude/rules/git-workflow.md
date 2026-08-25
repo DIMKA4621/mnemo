@@ -29,6 +29,17 @@ If the user says to continue/pick up a task that already has a branch (in progre
 - Before committing more work on it, check the branch isn't stale vs. its own history in a way that matters (e.g. master moved far ahead and a rebase/merge is warranted) — but that's a judgment call to flag, not a reason to default to a fresh branch.
 - A fresh branch is still the default for genuinely new, unrelated work.
 
+## Handing off finished, reviewed work — commit + PR is part of "done", not a separate ask
+
+Decided 2026-08-25, in response to explicit user feedback: when a task has gone through this repo's own delegation pipeline (planner → dev → tester → reviewer) and come out clean — AC/tests passed, reviewer approved, ticket reached Done — reporting that back to the user IS the moment to commit and open the PR, not a prompt asking "should I commit?".
+Asking separately each time on top of an already-clean, already-reviewed result is exactly the friction this removes.
+
+- Propose the commit message as usual (Conventional Commits, no attribution) but go ahead and commit — one commit or several, whichever fits the work; don't stall picking between them.
+- Push the branch, open the PR per the template below.
+- The hand-off message to the user is: what got done, a short summary that tests/review passed, and the PR link — not a request for permission to commit.
+- This does **not** touch the merge step — the user still reviews and merges the PR themselves, unchanged from below.
+- Scope: this applies to work that reached this point *through* the pipeline above. It does not blanket-remove asking before an isolated `git commit` outside that flow — e.g. a quick fix made mid-conversation that the user hasn't routed through planner/tester/reviewer.
+
 ## "Закоміть і підготуй пул-реквест" / "prepare a pull request"
 
 This means: the work lives on its own branch, not on `master`.
