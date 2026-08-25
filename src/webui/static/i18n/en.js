@@ -211,6 +211,69 @@ window.MNEMO_I18N.en = {
   'memory.pane.reindexFileBtn': 'Reindex file',
   'memory.pane.selectFileHint': 'Select a file in the tree.',
 
+  // -- memory: Памʼять/Memory page — banks, tree, file view (page-memory.js) --
+
+  'memory.header.panelAriaLabel': 'Panel',
+  'memory.header.addBank': '＋ Add bank',
+  'memory.header.addBankTitle': 'Register a new directory with .md as a bank',
+
+  'memory.count.banks': { one: '{n} bank', other: '{n} banks' },
+  'memory.count.files': { one: '{n} file', other: '{n} files' },
+  'memory.count.chunks': { one: '{n} chunk', other: '{n} chunks' },
+  'memory.count.dirs': { one: '{n} directory', other: '{n} directories' },
+
+  'memory.banks.emptyHint': 'No banks registered yet — "＋ Add bank" in the header picks a directory with .md.',
+
+  'memory.bankState.enabled.label': 'Active',
+  'memory.bankState.enabled.note': 'Watching the files, the index updates itself, search works.',
+  'memory.bankState.frozen.label': 'Frozen',
+  'memory.bankState.frozen.note': 'Not watching the files — the index stays as-is, but search still ' +
+    'works. This is what saves a full rebuild when the model changes.',
+  'memory.bankState.disabled.label': 'Disabled',
+  'memory.bankState.disabled.note': 'Not watching, not searching. The bank stays in the registry.',
+
+  'memory.statusNote.indexingHasChunks': 'the base exists, fresh changes are catching up',
+  'memory.statusNote.indexingEmpty': 'first build in progress — still empty',
+  'memory.statusNote.emptyQueued': 'empty, tasks queued',
+  'memory.statusNote.emptyIdle': 'genuinely empty, nothing scheduled',
+  'memory.statusNote.ready': 'index ready',
+
+  'memory.bank.menuBtnTitle': 'Bank actions',
+  'memory.bank.filesStat': '{n} files',
+  'memory.bank.chunksStat': '{n} chunks',
+  'memory.bank.queuedStat': 'queued {n}',
+  'memory.bank.dbSizeTitle': 'index size',
+  'memory.bank.lastIndexed': 'last indexed: {date}',
+  'memory.bank.frozenBadge': 'frozen',
+  'memory.bank.frozenBadgeTitle': 'The index is not updating — files may have changed since {date}. ' +
+    'Search still works and answers from that state.',
+  'memory.bank.disabledBadge': 'disabled',
+  'memory.bank.noRootBadge': 'root missing',
+
+  'memory.indexedState.yes': 'indexed',
+  'memory.indexedState.no': 'not indexed',
+
+  'memory.tree.selectBankHint': 'Select a bank on the left.',
+  'memory.tree.loading': 'Loading…',
+  'memory.tree.emptyMd': 'This bank has no .md files.',
+
+  'memory.chunk.gap': '· outside chunks ·',
+  'memory.chunk.end': { one: 'end · {n} character', other: 'end · {n} characters' },
+
+  'memory.rebuild.action': 'Rebuild',
+  'memory.rebuild.queuing': 'Queuing…',
+  'memory.rebuild.dialogTitle': 'Rebuild indexes',
+  'memory.rebuild.dialogAriaLabel': 'Rebuild indexes',
+  'memory.rebuild.notice.actionable': '{n} bank(s) have an index from a previous model',
+  'memory.rebuild.notice.running': '{n} already rebuilding',
+  'memory.rebuild.notice.disabled': '{n} disabled — enable them first',
+  'memory.rebuild.notice.suffix': '. Search over stale vectors refuses rather than mixing two spaces.',
+  'memory.rebuild.dialog.lead': 'A full reindex will be queued for {n} bank(s). Old derived indexes ' +
+    'will be wiped and rebuilt from the .md from scratch.',
+  'memory.rebuild.dialog.chunksLabel': '{n} chunks',
+  'memory.rebuild.dialog.note': ".md files are not changed. Time is proportional to size; the exact " +
+    "speed depends on this machine's backend and hardware.",
+
   // -- journal: static filter/list markup (index.html) ---------------------
 
   'journal.filter.bankLabel': 'Bank',

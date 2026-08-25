@@ -21,18 +21,13 @@ function bankState(bank) {
   return bank.enabled === false ? 'disabled' : 'enabled';
 }
 
-const BANK_STATE_LABEL = {
-  enabled: 'Активний',
-  frozen: 'Заморожений',
-  disabled: 'Вимкнений',
-};
+function bankStateLabel(state) {
+  return t('memory.bankState.' + state + '.label');
+}
 
-const BANK_STATE_NOTE = {
-  enabled: 'Стежимо за файлами, індекс оновлюється сам, пошук працює.',
-  frozen: 'За файлами не стежимо — індекс лишається як є, але пошук працює. ' +
-          'Це те, що рятує від повної перебудови при зміні моделі.',
-  disabled: 'Не стежимо й не шукаємо. Банк лишається в реєстрі.',
-};
+function bankStateNote(state) {
+  return t('memory.bankState.' + state + '.note');
+}
 
 /**
  * Second line under the status badge.
@@ -44,13 +39,13 @@ const BANK_STATE_NOTE = {
 function statusNote(bank) {
   if (bank.status === 'indexing') {
     return bank.chunks > 0
-      ? 'база є, свіжі зміни доїжджають'
-      : 'перший білд у процесі — ще порожньо';
+      ? t('memory.statusNote.indexingHasChunks')
+      : t('memory.statusNote.indexingEmpty');
   }
   if (bank.status === 'empty') {
-    return bank.queued > 0 ? 'порожньо, задачі в черзі' : 'справді порожньо, нічого не заплановано';
+    return bank.queued > 0 ? t('memory.statusNote.emptyQueued') : t('memory.statusNote.emptyIdle');
   }
-  return 'індекс готовий';
+  return t('memory.statusNote.ready');
 }
 
 // ---------------------------------------------------------------------------
@@ -66,18 +61,19 @@ function memoryHeaderHtml() {
   const mob = (id, label) =>
     '<button class="seg' + (mobPane === id ? ' is-active' : '') + '" data-mob="' + id + '">' +
     label + '</button>';
-  return '<span class="page-title">Памʼять</span>' +
+  return '<span class="page-title">' + t('shell.nav.memory') + '</span>' +
     '<span class="page-sub">' +
-    banks.length + ' ' + pluralizeUk(banks.length, ['банк', 'банки', 'банків']) + ' · ' +
-    files + ' ' + pluralizeUk(files, ['файл', 'файли', 'файлів']) + ' · ' +
-    chunks + ' ' + pluralizeUk(chunks, ['чанк', 'чанки', 'чанків']) +
+    plural('memory.count.banks', banks.length) + ' · ' +
+    plural('memory.count.files', files) + ' · ' +
+    plural('memory.count.chunks', chunks) +
     '</span>' +
     '<div class="grow"></div>' +
-    '<div class="segmented mob-panes" aria-label="Панель">' +
-      mob('banks', 'Банки') + mob('tree', 'Файли') + mob('file', 'Вміст') +
+    '<div class="segmented mob-panes" aria-label="' + t('memory.header.panelAriaLabel') + '">' +
+      mob('banks', t('memory.pane.banks')) + mob('tree', t('memory.pane.files')) +
+      mob('file', t('memory.pane.content')) +
     '</div>' +
-    '<button class="btn btn-sm" id="add-bank" title="Зареєструвати нову директорію з .md як банк">' +
-      '＋ Додати банк</button>';
+    '<button class="btn btn-sm" id="add-bank" title="' + t('memory.header.addBankTitle') + '">' +
+      t('memory.header.addBank') + '</button>';
 }
 
 /**
@@ -123,7 +119,8 @@ function buildRebuildNotice() {
   rebuildNotice.text = el('div', { className: 'rebuild-banner-text' });
   rebuildNotice.action = el('button', {
     className: 'btn',
-    text: 'Перегенерувати',
+    text: t('memory.rebuild.action'),
+    attrs: { 'data-i18n': 'memory.rebuild.action' },
     on: { click: () => openRebuildDialog() },
   });
   rebuildNotice.root = el('div', {
@@ -147,16 +144,15 @@ function renderRebuildNotice() {
 
   const parts = [];
   if (groups.actionable.length) {
-    parts.push(groups.actionable.length + ' банк(и) мають індекс від попередньої моделі');
+    parts.push(t('memory.rebuild.notice.actionable', { n: groups.actionable.length }));
   }
   if (groups.running.length) {
-    parts.push(groups.running.length + ' вже перегенеровуються');
+    parts.push(t('memory.rebuild.notice.running', { n: groups.running.length }));
   }
   if (groups.disabled.length) {
-    parts.push(groups.disabled.length + ' вимкнено — спершу їх треба увімкнути');
+    parts.push(t('memory.rebuild.notice.disabled', { n: groups.disabled.length }));
   }
-  rebuildNotice.text.textContent = parts.join(' · ') +
-    '. Пошук по застарілих векторах відмовляє, а не змішує два простори.';
+  rebuildNotice.text.textContent = parts.join(' · ') + t('memory.rebuild.notice.suffix');
   rebuildNotice.action.hidden = groups.actionable.length === 0;
   rebuildNotice.action.disabled = rebuildDialog.busy;
 }
@@ -165,25 +161,30 @@ function buildRebuildDialog() {
   rebuildDialog.body = el('div', { className: 'modal-body' });
   rebuildDialog.submit = el('button', {
     className: 'btn btn-primary',
-    text: 'Перегенерувати',
+    text: t('memory.rebuild.action'),
     on: { click: () => submitPendingRebuilds() },
   });
   const box = el('div', {
     className: 'modal-box',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Перегенерувати індекси' },
+    attrs: {
+      role: 'dialog', 'aria-modal': 'true', 'aria-label': t('memory.rebuild.dialogAriaLabel'),
+      'data-i18n-aria': 'memory.rebuild.dialogAriaLabel',
+    },
     on: { click: (ev) => ev.stopPropagation() },
   }, [
     el('div', { className: 'modal-head' }, [
-      el('h2', { text: 'Перегенерувати індекси' }),
+      el('h2', { text: t('memory.rebuild.dialogTitle'), attrs: { 'data-i18n': 'memory.rebuild.dialogTitle' } }),
       el('button', {
-        className: 'btn btn-ghost', text: '✕', title: 'Закрити (Esc)',
+        className: 'btn btn-ghost', text: '✕', title: t('common.btn.closeEsc'),
+        attrs: { 'data-i18n-title': 'common.btn.closeEsc' },
         on: { click: () => closeRebuildDialog() },
       }),
     ]),
     rebuildDialog.body,
     el('div', { className: 'modal-foot' }, [
       el('button', {
-        className: 'btn', text: 'Скасувати',
+        className: 'btn', text: t('common.btn.cancel'),
+        attrs: { 'data-i18n': 'common.btn.cancel' },
         on: { click: () => closeRebuildDialog() },
       }),
       rebuildDialog.submit,
@@ -220,19 +221,17 @@ function renderRebuildDialog() {
   clear(rebuildDialog.body);
   rebuildDialog.body.appendChild(el('p', {
     className: 'rm-lead',
-    text: 'Повний реіндекс буде поставлено для ' + rebuildDialog.banks.length +
-          ' банк(ів). Старі derived-індекси буде стерто й зібрано з .md заново.',
+    text: t('memory.rebuild.dialog.lead', { n: rebuildDialog.banks.length }),
   }));
 
   const list = el('div', { className: 'set-stats' });
   for (const bank of rebuildDialog.banks) {
-    list.appendChild(setStat(bank.name, bank.chunks + ' чанків', true));
+    list.appendChild(setStat(bank.name, t('memory.rebuild.dialog.chunksLabel', { n: bank.chunks }), true));
   }
   rebuildDialog.body.appendChild(list);
   rebuildDialog.body.appendChild(el('p', {
     className: 'set-note',
-    text: 'Файли .md не змінюються. Час пропорційний обсягу; конкретна ' +
-          'швидкість залежить від бекенда й заліза цієї машини.',
+    text: t('memory.rebuild.dialog.note'),
   }));
   if (rebuildDialog.errorText) {
     rebuildDialog.body.appendChild(el('p', {
@@ -240,7 +239,7 @@ function renderRebuildDialog() {
     }));
   }
   rebuildDialog.submit.disabled = rebuildDialog.busy || !rebuildDialog.banks.length;
-  rebuildDialog.submit.textContent = rebuildDialog.busy ? 'Ставимо в чергу…' : 'Перегенерувати';
+  rebuildDialog.submit.textContent = rebuildDialog.busy ? t('memory.rebuild.queuing') : t('memory.rebuild.action');
 }
 
 async function submitPendingRebuilds() {
@@ -258,8 +257,9 @@ async function submitPendingRebuilds() {
     const bank = banks[index];
     if (outcome.status === 'fulfilled') {
       const res = outcome.value;
-      setNote(bank.id, 'поставлено: повний реіндекс · у черзі ' + res.queued +
-                       ' · task ' + (res.task_ids || []).join(', '));
+      setNote(bank.id, t('common.reindex.queuedNote', {
+        what: t('common.taskKind.rebuild'), n: res.queued, ids: (res.task_ids || []).join(', '),
+      }));
     } else {
       failed.push({ bank: bank, error: outcome.reason });
     }
@@ -299,7 +299,7 @@ function renderBanks() {
   if (!state.banks.length) {
     list.appendChild(el('p', {
       className: 'empty-hint',
-      text: 'Жодного банку не зареєстровано — «＋ Додати банк» у шапці вибирає директорію з .md.',
+      text: t('memory.banks.emptyHint'),
     }));
     syncTicker();
     if (state.page === 'memory') renderHeader();
@@ -339,17 +339,15 @@ function bankCard(bank) {
     // says so — `status: ready` and a chunk count both look entirely healthy.
     badges.push(el('span', {
       className: 'badge badge-frozen',
-      text: 'заморожено',
-      title: 'Індекс не оновлюється — файли могли змінитись після ' +
-             fmtDateTime(bank.last_indexed) +
-             '. Пошук працює й відповідає за тим станом.',
+      text: t('memory.bank.frozenBadge'),
+      title: t('memory.bank.frozenBadgeTitle', { date: fmtDateTime(bank.last_indexed) }),
     }));
   }
   if (bankState(bank) === 'disabled') {
-    badges.push(el('span', { className: 'badge badge-off', text: 'вимкнено' }));
+    badges.push(el('span', { className: 'badge badge-off', text: t('memory.bank.disabledBadge') }));
   }
   if (bank.exists === false) {
-    badges.push(el('span', { className: 'badge badge-off', text: 'нема кореня' }));
+    badges.push(el('span', { className: 'badge badge-off', text: t('memory.bank.noRootBadge') }));
   }
 
   // Human-facing address is the name, never the hash (lead amendment); the id
@@ -367,8 +365,8 @@ function bankCard(bank) {
     ]),
     el('button', {
       className: 'btn btn-menu',
-      title: 'Дії над банком',
-      attrs: { 'aria-haspopup': 'menu', 'aria-label': 'Дії над банком' },
+      title: t('memory.bank.menuBtnTitle'),
+      attrs: { 'aria-haspopup': 'menu', 'aria-label': t('memory.bank.menuBtnTitle') },
       // Not `stop(...)`: that wrapper calls the handler with no arguments and
       // no `this`, and this one needs the button it fired on to place the menu.
       on: {
@@ -387,12 +385,12 @@ function bankCard(bank) {
   ]);
 
   const stats = el('div', { className: 'bank-stats' }, [
-    el('span', { text: 'файлів ' + bank.files }),
-    el('span', { text: 'чанків ' + bank.chunks }),
+    el('span', { text: t('memory.bank.filesStat', { n: bank.files }) }),
+    el('span', { text: t('memory.bank.chunksStat', { n: bank.chunks }) }),
     // An empty queue is the normal state, not a fact worth a stat of its own —
     // shown only once there is actually something in it.
-    bank.queued ? el('span', { text: 'у черзі ' + bank.queued }) : null,
-    el('span', { text: fmtBytes(bank.db_bytes), title: 'розмір індексу' }),
+    bank.queued ? el('span', { text: t('memory.bank.queuedStat', { n: bank.queued }) }) : null,
+    el('span', { text: fmtBytes(bank.db_bytes), title: t('memory.bank.dbSizeTitle') }),
   ]);
 
   // `statusNote` earns its own line only when it says something the status
@@ -417,7 +415,7 @@ function bankCard(bank) {
     el('span', { className: 'bank-root', text: bank.root }),
     stats,
     el('div', { className: 'bank-stats' }, [
-      el('span', { className: 'muted', text: 'остання індексація: ' + fmtDateTime(bank.last_indexed) }),
+      el('span', { className: 'muted', text: t('memory.bank.lastIndexed', { date: fmtDateTime(bank.last_indexed) }) }),
     ]),
   ]);
 
@@ -504,22 +502,22 @@ function renderTree() {
 
   const bank = bankById(state.selectedBankId);
   if (!bank) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть банк ліворуч.' }));
+    body.appendChild(el('p', { className: 'empty-hint', text: t('memory.tree.selectBankHint') }));
     return;
   }
   if (!state.tree) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Завантаження…' }));
+    body.appendChild(el('p', { className: 'empty-hint', text: t('memory.tree.loading') }));
     return;
   }
 
   sub.textContent =
-    state.tree.files + ' ' + pluralizeUk(state.tree.files, ['файл', 'файли', 'файлів']) + ' · ' +
-    state.tree.dirs + ' ' + pluralizeUk(state.tree.dirs, ['директорія', 'директорії', 'директорій']);
+    plural('memory.count.files', state.tree.files) + ' · ' +
+    plural('memory.count.dirs', state.tree.dirs);
 
   const root = state.tree.tree;
   const children = (root && root.children) || [];
   if (!children.length) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'У цьому банку немає .md файлів.' }));
+    body.appendChild(el('p', { className: 'empty-hint', text: t('memory.tree.emptyMd') }));
     return;
   }
 
@@ -574,7 +572,7 @@ function renderNode(node, depth, out) {
     el('span', { className: 'tree-label', text: node.name }),
     el('span', {
       className: 'tree-chunks',
-      text: node.indexed ? node.chunks + '×' : 'не в індексі',
+      text: node.indexed ? node.chunks + '×' : t('memory.indexedState.no'),
     }),
   ]);
   row.style.paddingLeft = pad + 'px';
@@ -647,7 +645,7 @@ function renderFile() {
   const file = state.file;
   if (!file) {
     button.disabled = true;
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть файл у дереві.' }));
+    body.appendChild(el('p', { className: 'empty-hint', text: t('memory.pane.selectFileHint') }));
     return;
   }
 
@@ -659,8 +657,8 @@ function renderFile() {
     el('div', { className: 'file-meta-path', text: file.path, title: file.path }),
     el('div', { className: 'file-meta-info' }, [
       el('span', { text: fmtBytes(file.size) }),
-      el('span', { text: file.indexed ? 'в індексі' : 'не в індексі' }),
-      el('span', { text: chunks.length + ' чанків' }),
+      el('span', { text: file.indexed ? t('memory.indexedState.yes') : t('memory.indexedState.no') }),
+      el('span', { text: plural('memory.count.chunks', chunks.length) }),
       el('span', { text: 'sha256 ' + String(file.sha256 || '').slice(0, 12), title: file.sha256 }),
     ]),
   ]));
@@ -690,7 +688,7 @@ function renderFile() {
   appendGap(doc, cut.slice(cursor, cut.total));
 
   doc.appendChild(el('div', { className: 'chunk-divider is-end' }, [
-    el('span', { className: 'cd-label', text: 'кінець · ' + cut.total + ' символів' }),
+    el('span', { className: 'cd-label', text: plural('memory.chunk.end', cut.total) }),
   ]));
 
   body.appendChild(doc);
@@ -708,7 +706,7 @@ function appendGap(doc, text) {
   if (!text) return;
   const blank = text.trim() === '';
   if (!blank) {
-    doc.appendChild(el('div', { className: 'gap-note', text: '· поза чанками ·' }));
+    doc.appendChild(el('div', { className: 'gap-note', text: t('memory.chunk.gap') }));
   }
   // A blank gap is still the file's own text and stays in the DOM, selectable
   // and copyable — it is only rendered tighter. See `.gap-body.is-blank`.

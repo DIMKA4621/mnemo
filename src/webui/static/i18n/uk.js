@@ -1,9 +1,9 @@
 /* mnemo web console — Ukrainian dictionary (MN-10).
  *
  * Flat `key -> string` map, plus plural entries (`key -> {one, few, many}`)
- * consumed by `plural()` in app.js, using the same Slavic triad rule as the
- * existing `pluralizeUk()` helper (app.js). Keys mirror `en.js` one for one;
- * a key missing here falls back to English rather than breaking.
+ * consumed by `plural()` in app.js, using the standard Slavic count-noun
+ * triad rule. Keys mirror `en.js` one for one; a key missing here falls back
+ * to English rather than breaking.
  */
 'use strict';
 
@@ -204,6 +204,70 @@ window.MNEMO_I18N.uk = {
   'memory.pane.chunkVizLabel': 'Межі чанків',
   'memory.pane.reindexFileBtn': 'Переіндексувати файл',
   'memory.pane.selectFileHint': 'Оберіть файл у дереві.',
+
+  // -- memory: Памʼять page — banks, tree, file view (page-memory.js) -------
+
+  'memory.header.panelAriaLabel': 'Панель',
+  'memory.header.addBank': '＋ Додати банк',
+  'memory.header.addBankTitle': 'Зареєструвати нову директорію з .md як банк',
+
+  'memory.count.banks': { one: '{n} банк', few: '{n} банки', many: '{n} банків' },
+  'memory.count.files': { one: '{n} файл', few: '{n} файли', many: '{n} файлів' },
+  'memory.count.chunks': { one: '{n} чанк', few: '{n} чанки', many: '{n} чанків' },
+  'memory.count.dirs': { one: '{n} директорія', few: '{n} директорії', many: '{n} директорій' },
+
+  'memory.banks.emptyHint': 'Жодного банку не зареєстровано — «＋ Додати банк» у шапці вибирає ' +
+    'директорію з .md.',
+
+  'memory.bankState.enabled.label': 'Активний',
+  'memory.bankState.enabled.note': 'Стежимо за файлами, індекс оновлюється сам, пошук працює.',
+  'memory.bankState.frozen.label': 'Заморожений',
+  'memory.bankState.frozen.note': 'За файлами не стежимо — індекс лишається як є, але пошук працює. ' +
+    'Це те, що рятує від повної перебудови при зміні моделі.',
+  'memory.bankState.disabled.label': 'Вимкнений',
+  'memory.bankState.disabled.note': 'Не стежимо й не шукаємо. Банк лишається в реєстрі.',
+
+  'memory.statusNote.indexingHasChunks': 'база є, свіжі зміни доїжджають',
+  'memory.statusNote.indexingEmpty': 'перший білд у процесі — ще порожньо',
+  'memory.statusNote.emptyQueued': 'порожньо, задачі в черзі',
+  'memory.statusNote.emptyIdle': 'справді порожньо, нічого не заплановано',
+  'memory.statusNote.ready': 'індекс готовий',
+
+  'memory.bank.menuBtnTitle': 'Дії над банком',
+  'memory.bank.filesStat': 'файлів {n}',
+  'memory.bank.chunksStat': 'чанків {n}',
+  'memory.bank.queuedStat': 'у черзі {n}',
+  'memory.bank.dbSizeTitle': 'розмір індексу',
+  'memory.bank.lastIndexed': 'остання індексація: {date}',
+  'memory.bank.frozenBadge': 'заморожено',
+  'memory.bank.frozenBadgeTitle': 'Індекс не оновлюється — файли могли змінитись після {date}. ' +
+    'Пошук працює й відповідає за тим станом.',
+  'memory.bank.disabledBadge': 'вимкнено',
+  'memory.bank.noRootBadge': 'нема кореня',
+
+  'memory.indexedState.yes': 'в індексі',
+  'memory.indexedState.no': 'не в індексі',
+
+  'memory.tree.selectBankHint': 'Оберіть банк ліворуч.',
+  'memory.tree.loading': 'Завантаження…',
+  'memory.tree.emptyMd': 'У цьому банку немає .md файлів.',
+
+  'memory.chunk.gap': '· поза чанками ·',
+  'memory.chunk.end': { one: 'кінець · {n} символ', few: 'кінець · {n} символи', many: 'кінець · {n} символів' },
+
+  'memory.rebuild.action': 'Перегенерувати',
+  'memory.rebuild.queuing': 'Ставимо в чергу…',
+  'memory.rebuild.dialogTitle': 'Перегенерувати індекси',
+  'memory.rebuild.dialogAriaLabel': 'Перегенерувати індекси',
+  'memory.rebuild.notice.actionable': '{n} банк(и) мають індекс від попередньої моделі',
+  'memory.rebuild.notice.running': '{n} вже перегенеровуються',
+  'memory.rebuild.notice.disabled': '{n} вимкнено — спершу їх треба увімкнути',
+  'memory.rebuild.notice.suffix': '. Пошук по застарілих векторах відмовляє, а не змішує два простори.',
+  'memory.rebuild.dialog.lead': 'Повний реіндекс буде поставлено для {n} банк(ів). Старі ' +
+    'derived-індекси буде стерто й зібрано з .md заново.',
+  'memory.rebuild.dialog.chunksLabel': '{n} чанків',
+  'memory.rebuild.dialog.note': 'Файли .md не змінюються. Час пропорційний обсягу; конкретна ' +
+    'швидкість залежить від бекенда й заліза цієї машини.',
 
   // -- journal: static filter/list markup (index.html) ---------------------
 

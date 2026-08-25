@@ -111,9 +111,7 @@ function t(key, vars) {
   return interpolate(value, vars);
 }
 
-// English is a 2-way split (one/other); Ukrainian is the standard Slavic
-// triad also used by `pluralizeUk()` below (kept, for now, for the pages
-// this rule has not reached yet — see that function's own comment).
+// English is a 2-way split (one/other); Ukrainian is the standard Slavic triad.
 const PLURAL_RULES = {
   en: (n) => (n === 1 ? 'one' : 'other'),
   uk: (n) => {
@@ -204,6 +202,7 @@ function refreshAllViews() {
   if (picker.root && !picker.root.hidden) renderPicker();
   if (bankToken.root && !bankToken.root.hidden) renderTokenPanel();
   if (removal.root && !removal.root.hidden) renderRemoval();
+  if (rebuildDialog.root && !rebuildDialog.root.hidden) renderRebuildDialog();
   // update.js: static modal chrome first, then either the open modal's
   // current phase or (nothing open) just the sidebar banner text.
   applyUpdateStaticI18n();
@@ -558,20 +557,6 @@ function fmtMs(v) {
   return v >= 1000 ? (v / 1000).toFixed(2) + ' s' : v.toFixed(1) + ' ms';
 }
 
-/**
- * Ukrainian count-noun agreement: 1 файл, 2 файли, 5 файлів, 21 файл, 11 файлів.
- * `forms` is `[one, few, many]` — the standard Slavic triad. Works for any
- * countable noun (банк/файл/чанк/…), so a page just supplies its own triad
- * instead of hardcoding a single plural for every count.
- */
-function pluralizeUk(n, forms) {
-  const mod10 = n % 10;
-  const mod100 = n % 100;
-  if (mod10 === 1 && mod100 !== 11) return forms[0];
-  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return forms[1];
-  return forms[2];
-}
-
 function statusLabel(status) {
   switch (status) {
     case 'ready': return t('common.status.ready');
@@ -870,7 +855,7 @@ async function setBankState(bank, next) {
     hideBanner();
     applyBank(info);
     setNote(bank.id, t('common.bankMenu.stateNote', {
-      state: (BANK_STATE_LABEL[info.state] || info.state).toLowerCase(),
+      state: (bankStateLabel(info.state) || info.state).toLowerCase(),
     }));
   } catch (err) {
     reportError(err);
@@ -1963,12 +1948,11 @@ function buildBankMenu() {
     title: opts.title,
     // The state entries are a choice among three, not three commands, so they
     // announce as radios and carry `aria-checked` (set in `openBankMenu`).
-    // `key`/`titleKey` are the ones with fixed, variable-free copy — added as
-    // `data-i18n`/`data-i18n-title` so `applyStaticI18n()` keeps this
-    // build-once menu correct after a language switch, same as every other
-    // build-once dialog node in this file. The three state items opt out
-    // (`opts.key` absent): their text comes from page-memory.js's
-    // `BANK_STATE_LABEL`, outside this step's scope.
+    // `key`/`titleKey` are added as `data-i18n`/`data-i18n-title` so
+    // `applyStaticI18n()` keeps this build-once menu correct after a language
+    // switch, same as every other build-once dialog node in this file —
+    // including the three state items below, whose text/title come from
+    // page-memory.js's `bankStateLabel()`/`bankStateNote()`.
     attrs: Object.assign(
       { role: opts.role || 'menuitem' },
       opts.key ? { 'data-i18n': opts.key } : null,
@@ -2015,8 +1999,8 @@ function buildBankMenu() {
     // are refreshed in `openBankMenu`, because one menu serves every card.
     ...['enabled', 'frozen', 'disabled'].map((value) => {
       const button = item({
-        text: BANK_STATE_LABEL[value],
-        title: BANK_STATE_NOTE[value],
+        text: bankStateLabel(value), key: 'memory.bankState.' + value + '.label',
+        title: bankStateNote(value), titleKey: 'memory.bankState.' + value + '.note',
         role: 'menuitemradio',
         run: (bank) => setBankState(bank, value),
       });
