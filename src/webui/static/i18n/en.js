@@ -285,6 +285,48 @@ window.MNEMO_I18N.en = {
   'journal.filter.period30d': '30 days',
   'journal.list.newestFirst': 'newest first',
 
+  // -- journal: Журнал page — header, list, detail (page-journal.js) -------
+
+  'journal.header.segQuery': 'Queries',
+  'journal.header.segIndex': 'Indexing',
+  'journal.header.refreshTitle': 'Refresh journal',
+
+  'journal.list.shownOf': 'Showing {shown} of {total}',
+  'journal.list.empty': 'Empty',
+  'journal.list.noEvents': 'No events found.',
+
+  'journal.event.rebuildTitle': 'Full bank rebuild',
+  'journal.event.pruneTitle': 'Removed from index',
+  'journal.event.syncTitle': 'Index sync',
+  'journal.event.errorStatus': 'error',
+
+  'journal.hit.openFile': 'Open file',
+  'journal.hit.showMore': 'show more',
+  'journal.hit.collapse': 'collapse',
+  'journal.hit.chunkLabel': '{heading} · chunk {n}',
+
+  'journal.detail.queryKicker': 'query · #{id}',
+  'journal.detail.indexKicker': 'indexing · #{id}',
+  'journal.detail.bank': 'bank',
+  'journal.detail.face': 'face',
+  'journal.detail.prefix': 'prefix',
+  'journal.detail.hits': 'hits',
+  'journal.detail.tookMs': 'time, ms',
+  'journal.detail.when': 'when',
+  'journal.detail.kind': 'kind',
+  'journal.detail.trigger': 'trigger',
+  'journal.detail.resultsLabel': 'Results',
+  'journal.detail.resultsOrderNote': 'in exact rank order',
+  'journal.detail.noHits': 'No hits.',
+  'journal.detail.filesIndexed': 'files',
+  'journal.detail.chunksIndexed': 'chunks',
+  'journal.detail.filesPruned': 'removed',
+  'journal.detail.duration': 'duration',
+  'journal.detail.errorLabel': 'Error',
+  'journal.detail.fileSection': 'File',
+  'journal.detail.currentFileOf': 'current file of bank {bank}',
+  'journal.detail.selectHint': 'Select an event on the left.',
+
   // -- settings: static footer markup (index.html) --------------------------
 
   'settings.btn.save': 'Save',

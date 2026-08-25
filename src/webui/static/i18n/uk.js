@@ -280,6 +280,48 @@ window.MNEMO_I18N.uk = {
   'journal.filter.period30d': '30 днів',
   'journal.list.newestFirst': 'нові спочатку',
 
+  // -- journal: Журнал page — header, list, detail (page-journal.js) -------
+
+  'journal.header.segQuery': 'Запити',
+  'journal.header.segIndex': 'Індексація',
+  'journal.header.refreshTitle': 'Оновити журнал',
+
+  'journal.list.shownOf': 'Показано {shown} із {total}',
+  'journal.list.empty': 'Порожньо',
+  'journal.list.noEvents': 'Подій не знайдено.',
+
+  'journal.event.rebuildTitle': 'Повна перебудова банку',
+  'journal.event.pruneTitle': 'Зняття з індексу',
+  'journal.event.syncTitle': 'Синхронізація індексу',
+  'journal.event.errorStatus': 'помилка',
+
+  'journal.hit.openFile': 'Відкрити файл',
+  'journal.hit.showMore': 'показати повністю',
+  'journal.hit.collapse': 'згорнути',
+  'journal.hit.chunkLabel': '{heading} · чанк {n}',
+
+  'journal.detail.queryKicker': 'запит · #{id}',
+  'journal.detail.indexKicker': 'індексація · #{id}',
+  'journal.detail.bank': 'банк',
+  'journal.detail.face': 'обличчя',
+  'journal.detail.prefix': 'префікс',
+  'journal.detail.hits': 'хітів',
+  'journal.detail.tookMs': 'час, мс',
+  'journal.detail.when': 'коли',
+  'journal.detail.kind': 'вид',
+  'journal.detail.trigger': 'тригер',
+  'journal.detail.resultsLabel': 'Результати',
+  'journal.detail.resultsOrderNote': 'у точному ранговому порядку',
+  'journal.detail.noHits': 'Жодного влучення.',
+  'journal.detail.filesIndexed': 'файлів',
+  'journal.detail.chunksIndexed': 'чанків',
+  'journal.detail.filesPruned': 'знято',
+  'journal.detail.duration': 'тривалість',
+  'journal.detail.errorLabel': 'Помилка',
+  'journal.detail.fileSection': 'Файл',
+  'journal.detail.currentFileOf': 'поточний файл банку {bank}',
+  'journal.detail.selectHint': 'Оберіть подію ліворуч.',
+
   // -- settings: static footer markup (index.html) --------------------------
 
   'settings.btn.save': 'Зберегти',
