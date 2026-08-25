@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="uk">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -25,35 +25,36 @@
 <body>
 
 <div class="app" id="app">
-  <!-- ═══ sidebar: three routes, nothing else — banks live in Памʼять's own
+  <!-- ═══ sidebar: three routes, nothing else — banks live in Memory's own
        first column, never duplicated here ═══ -->
   <aside class="sidebar">
     <div class="sb-top">
       <span class="sb-brand">mnemo</span>
-      <button class="sb-toggle" id="sb-toggle" aria-label="Згорнути навігацію" title="Згорнути навігацію">
+      <button class="sb-toggle" id="sb-toggle" aria-label="Collapse navigation" title="Collapse navigation"
+              data-i18n-aria="shell.sidebar.collapse" data-i18n-title="shell.sidebar.collapse">
         <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
       </button>
     </div>
 
-    <nav class="sb-nav" aria-label="Розділи консолі">
-      <button class="sb-item is-active" data-page="memory" title="Памʼять">
+    <nav class="sb-nav" aria-label="Console sections" data-i18n-aria="shell.nav.ariaLabel">
+      <button class="sb-item is-active" data-page="memory" title="Memory" data-i18n-title="shell.nav.memory">
         <svg viewBox="0 0 24 24"><path d="M5 4.5h11.5A2.5 2.5 0 0 1 19 7v12H7.5A2.5 2.5 0 0 1 5 16.5z"/><path d="M5 16.5A2.5 2.5 0 0 1 7.5 14H19"/></svg>
-        <span class="lbl">Памʼять</span>
+        <span class="lbl" data-i18n="shell.nav.memory">Memory</span>
         <span class="cnt" id="sb-count-memory"></span>
       </button>
-      <button class="sb-item" data-page="journal" title="Журнал">
+      <button class="sb-item" data-page="journal" title="Journal" data-i18n-title="shell.nav.journal">
         <svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
-        <span class="lbl">Журнал</span>
+        <span class="lbl" data-i18n="shell.nav.journal">Journal</span>
       </button>
-      <button class="sb-item" data-page="settings" title="Налаштування">
+      <button class="sb-item" data-page="settings" title="Settings" data-i18n-title="shell.nav.settings">
         <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M19 12c0-.37-.03-.73-.08-1.09l2-1.55-2-3.46-2.44.98a8 8 0 0 0-1.9-1.1L14.2 3H9.8l-.38 2.78a8 8 0 0 0-1.9 1.1l-2.44-.98-2 3.46 2 1.55a7.8 7.8 0 0 0 0 2.18l-2 1.55 2 3.46 2.44-.98a8 8 0 0 0 1.9 1.1L9.8 21h4.4l.38-2.78a8 8 0 0 0 1.9-1.1l2.44.98 2-3.46-2-1.55c.05-.36.08-.72.08-1.09z"/></svg>
-        <span class="lbl">Налаштування</span>
+        <span class="lbl" data-i18n="shell.nav.settings">Settings</span>
       </button>
     </nav>
 
     <!-- Self-update banner (design: engine-self-update-design.md's UX flow,
-         point 1 — "плашка знизу-зліва, де вже показується версія"). Wired
-         and rendered entirely by update.js; hidden until GET
+         point 1 — "a bottom-left banner, where the version is already
+         shown"). Wired and rendered entirely by update.js; hidden until GET
          /api/update/status says a newer tag exists or an apply is running. -->
     <button class="sb-update-banner" id="sb-update-banner" hidden></button>
 
@@ -81,87 +82,99 @@
     <div id="banner" class="banner" hidden></div>
 
     <div class="pages">
-      <!-- ═══ ПАМʼЯТЬ ═══ -->
+      <!-- ═══ MEMORY ═══ -->
       <section class="page" data-panel="memory">
         <div class="layout">
           <section class="pane is-mob" data-mob-panel="banks">
             <div class="pane-head">
-              <h2>Банки</h2>
+              <h2 data-i18n="memory.pane.banks">Banks</h2>
               <div class="pane-actions">
-                <button class="btn btn-ghost" id="banks-refresh" title="Оновити список">↻</button>
+                <button class="btn btn-ghost" id="banks-refresh" title="Refresh list"
+                        data-i18n-title="memory.pane.refreshTitle">↻</button>
               </div>
             </div>
             <div class="pane-body" id="banks-list"></div>
           </section>
 
-          <div class="pane-resizer" id="pane-resizer-1" title="Перетягніть, щоб змінити ширину"></div>
+          <div class="pane-resizer" id="pane-resizer-1" title="Drag to resize"
+               data-i18n-title="common.resizerTitle"></div>
 
           <section class="pane" data-mob-panel="tree">
             <div class="pane-head">
-              <h2>Файли</h2>
+              <h2 data-i18n="memory.pane.files">Files</h2>
               <span class="pane-sub" id="tree-sub"></span>
             </div>
             <div class="pane-body" id="tree-body">
-              <p class="empty-hint">Оберіть банк ліворуч.</p>
+              <p class="empty-hint" data-i18n="memory.pane.selectBankHint">Select a bank on the left.</p>
             </div>
           </section>
 
-          <div class="pane-resizer" id="pane-resizer-2" title="Перетягніть, щоб змінити ширину"></div>
+          <div class="pane-resizer" id="pane-resizer-2" title="Drag to resize"
+               data-i18n-title="common.resizerTitle"></div>
 
           <section class="pane" data-mob-panel="file">
             <div class="pane-head">
-              <h2>Вміст</h2>
+              <h2 data-i18n="memory.pane.content">Content</h2>
               <div class="pane-actions">
-                <label class="toggle" title="Показати межі чанків так, як вони лежать в індексі">
+                <label class="toggle" title="Show chunk boundaries as they lie in the index"
+                       data-i18n-title="memory.pane.chunkVizTitle">
                   <input type="checkbox" id="chunkviz-toggle" checked>
-                  <span>Межі чанків</span>
+                  <span data-i18n="memory.pane.chunkVizLabel">Chunk boundaries</span>
                 </label>
-                <button class="btn" id="file-reindex" disabled>Переіндексувати файл</button>
+                <button class="btn" id="file-reindex" disabled
+                        data-i18n="memory.pane.reindexFileBtn">Reindex file</button>
               </div>
             </div>
             <div class="pane-body" id="file-body">
-              <p class="empty-hint">Оберіть файл у дереві.</p>
+              <p class="empty-hint" data-i18n="memory.pane.selectFileHint">Select a file in the tree.</p>
             </div>
           </section>
         </div>
       </section>
 
-      <!-- ═══ ЖУРНАЛ ═══ -->
+      <!-- ═══ JOURNAL ═══ -->
       <section class="page" data-panel="journal" hidden>
         <div class="filters">
-          <select class="control" id="jbank" aria-label="Банк">
-            <option value="">Усі банки</option>
+          <select class="control" id="jbank" aria-label="Bank" data-i18n-aria="journal.filter.bankLabel">
+            <option value="" data-i18n="journal.filter.allBanks">All banks</option>
           </select>
-          <select class="control" id="jperiod" aria-label="Період">
-            <option value="24h">24 години</option>
-            <option value="1h">Остання година</option>
-            <option value="7d">7 днів</option>
-            <option value="30d">30 днів</option>
+          <select class="control" id="jperiod" aria-label="Period" data-i18n-aria="journal.filter.periodLabel">
+            <option value="24h" data-i18n="journal.filter.period24h">24 hours</option>
+            <option value="1h" data-i18n="journal.filter.period1h">Last hour</option>
+            <option value="7d" data-i18n="journal.filter.period7d">7 days</option>
+            <option value="30d" data-i18n="journal.filter.period30d">30 days</option>
           </select>
         </div>
 
         <div class="jl">
           <section class="events">
-            <div class="events-head"><span id="jcount"></span><span>нові спочатку</span></div>
+            <div class="events-head">
+              <span id="jcount"></span><span data-i18n="journal.list.newestFirst">newest first</span>
+            </div>
             <div class="events-body" id="jlist"></div>
           </section>
-          <div class="pane-resizer" id="journal-resizer" title="Перетягніть, щоб змінити ширину"></div>
+          <div class="pane-resizer" id="journal-resizer" title="Drag to resize"
+               data-i18n-title="common.resizerTitle"></div>
           <section class="detail"><div class="detail-in" id="jdetail"></div></section>
         </div>
       </section>
 
-      <!-- ═══ НАЛАШТУВАННЯ ═══ -->
+      <!-- ═══ SETTINGS ═══ -->
       <section class="page" data-panel="settings" hidden>
         <div class="set-tabs" id="set-tabs"></div>
         <div class="set-body" id="set-body"></div>
         <footer class="set-foot" id="set-foot">
-          <button class="btn btn-primary" id="settings-save">Зберегти</button>
+          <button class="btn btn-primary" id="settings-save" data-i18n="settings.btn.save">Save</button>
         </footer>
       </section>
     </div>
   </main>
 </div>
 
+<!-- Dictionaries load before app.js: t()/plural() and the boot-time static
+     i18n pass both need `window.MNEMO_I18N` populated already. -->
+<script src="i18n/en.js"></script>
+<script src="i18n/uk.js"></script>
 <script src="app.js"></script>
 <script src="shell.js"></script>
 <script src="update.js"></script>

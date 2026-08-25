@@ -29,25 +29,25 @@
 // bare function reference here would be `undefined` at construction time.
 const PAGES = {
   memory: {
-    label: 'Памʼять',
+    label: () => t('shell.nav.memory'),
     header: () => memoryHeaderHtml(),
     count: () => state.banks.length,
     onEnter: () => {},   // banks/tree are already loaded by `start()`
   },
   journal: {
-    label: 'Журнал',
+    label: () => t('shell.nav.journal'),
     header: () => journalHeaderHtml(),
-    // No sidebar count: unlike Памʼять's bank count (small, stable), the log
+    // No sidebar count: unlike Memory's bank count (small, stable), the log
     // total grows without bound and read as noise next to the label.
     count: null,
     onEnter: () => { renderJournal(); },
   },
   settings: {
-    label: 'Налаштування',
+    label: () => t('shell.nav.settings'),
     header: () => settingsHeaderHtml(),
     count: null,
     onEnter: () => { openSettings(); },
-    // Replaces the old overlay's "Закрити": there is nothing to close any
+    // Replaces the old overlay's "Close": there is nothing to close any
     // more, but a secret typed into the API-key field, or an unsaved
     // autostart choice, must not survive the trip to another page.
     onLeave: () => { settingsOnLeave(); },
@@ -109,6 +109,17 @@ function bindHeaderDelegation() {
   });
 }
 
+/** Re-reads `#app`'s collapsed state and re-labels the sidebar toggle from
+ *  it — a module-level function (not `initShell()`'s old local closure) so
+ *  `refreshAllViews()` (app.js) can call it on a language switch too. */
+function updateToggleLabel() {
+  const collapsed = $('app').classList.contains('is-collapsed');
+  const toggle = $('sb-toggle');
+  const label = t(collapsed ? 'shell.sidebar.expand' : 'shell.sidebar.collapse');
+  toggle.title = label;
+  toggle.setAttribute('aria-label', label);
+}
+
 function initShell() {
   bindHeaderDelegation();
 
@@ -118,23 +129,18 @@ function initShell() {
 
   const app = $('app');
   const toggle = $('sb-toggle');
-  const setToggleLabel = (collapsed) => {
-    const label = collapsed ? 'Розгорнути навігацію' : 'Згорнути навігацію';
-    toggle.title = label;
-    toggle.setAttribute('aria-label', label);
-  };
   // Width is a stored user choice (mirrors the `mnemo_theme` pattern), so it
   // survives reload — but restored here rather than pre-paint: a 140ms grid
   // transition is a minor resize, not the color flash a late theme switch
   // would be, so it does not need the same head-of-document treatment.
   if (localStorage.getItem('mnemo_sidebar') === 'collapsed') {
     app.classList.add('is-collapsed');
-    setToggleLabel(true);
   }
+  updateToggleLabel();
   toggle.addEventListener('click', () => {
     const collapsed = app.classList.toggle('is-collapsed');
     localStorage.setItem('mnemo_sidebar', collapsed ? 'collapsed' : 'expanded');
-    setToggleLabel(collapsed);
+    updateToggleLabel();
   });
 
   setPage('memory');
@@ -166,17 +172,28 @@ function renderService() {
   }
   const foot = $('sb-foot');
   if (foot && svc) {
-    foot.title = 'провайдер ' + (svc.provider || '—') + ' · версія ' + (svc.version || '—');
+    foot.title = t('shell.footTitle', { provider: svc.provider || '—', version: svc.version || '—' });
   }
 }
 
-function setConnState(kind, label) {
+// Remembered as an i18n key (not pre-translated text) so a language switch
+// can re-render the current connection state without needing to know why it
+// is in that state — see `refreshConnState()`, called from app.js's
+// `refreshAllViews()`.
+let connState = null;   // { kind, key }
+
+function setConnState(kind, key) {
+  connState = { kind: kind, key: key };
   const dot = $('sb-dot');
   const text = $('sb-status-text');
   const cls = kind === 'open' ? 'dot' : kind === 'error' ? 'dot err'
             : kind === 'wait' ? 'dot busy' : 'dot idle';
   if (dot) dot.className = cls;
-  if (text) text.textContent = label;
+  if (text) text.textContent = t(key);
+}
+
+function refreshConnState() {
+  if (connState) setConnState(connState.kind, connState.key);
 }
 
 // ---------------------------------------------------------------------------
@@ -262,25 +279,25 @@ function connectSocket() {
   const scheme = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
   const url = scheme + '//' + window.location.host + '/ws' +
               '?token=' + encodeURIComponent(token);
-  setConnState('wait', 'підключення…');
+  setConnState('wait', 'shell.conn.connecting');
 
   socket = new WebSocket(url);
 
   socket.onopen = () => {
     retryDelay = 500;
-    setConnState('open', 'наживо');
+    setConnState('open', 'shell.conn.live');
   };
 
   socket.onclose = () => {
     socket = null;
     if (state.gated) return;
-    setConnState('error', 'розірвано');
+    setConnState('error', 'shell.conn.dropped');
     setTimeout(connectSocket, retryDelay);
     retryDelay = Math.min(retryDelay * 2, 10000);
   };
 
   socket.onerror = () => {
-    if (!state.gated) setConnState('error', 'помилка');
+    if (!state.gated) setConnState('error', 'shell.conn.error');
   };
 
   socket.onmessage = (event) => {
@@ -357,8 +374,9 @@ function handleEvent(envelope) {
     case 'index_done':
       clearProgress(bankId, data.task_id);
       clearPendingPath(bankId, data.path);
-      setNote(bankId, 'готово: ' + (data.path || data.kind) + ' · ' +
-                      (data.chunks_indexed || 0) + ' чанків · ' + fmtMs(data.took_ms));
+      setNote(bankId, t('shell.event.done', {
+        what: data.path || data.kind, n: data.chunks_indexed || 0, took: fmtMs(data.took_ms),
+      }));
       scheduleBanksReload();
       // A file just changed its indexed/chunk state — that is what the tree
       // shows, so it has to be pulled again or it stays stale until a reload.
@@ -373,7 +391,7 @@ function handleEvent(envelope) {
     case 'index_error':
       clearProgress(bankId, data.task_id);
       clearPendingPath(bankId, data.path);
-      setNote(bankId, 'помилка: ' + (data.path || data.kind) + ' — ' + data.error);
+      setNote(bankId, t('shell.event.error', { what: data.path || data.kind, error: data.error }));
       scheduleBanksReload();
       break;
 
@@ -390,7 +408,7 @@ function handleEvent(envelope) {
       break;
 
     case 'prune':
-      setNote(bankId, 'знято з індексу: ' + (data.count || 0));
+      setNote(bankId, t('shell.event.pruned', { n: data.count || 0 }));
       scheduleBanksReload();
       if (bankId === state.selectedBankId) scheduleTreeRefresh();
       break;

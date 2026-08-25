@@ -1057,14 +1057,12 @@ _ENV_VARS = ("HOST", "PORT", "TOKEN")
 # substitutes, since `{{MNEMO_BANK}}` no longer appears in the template.
 _RETIRED_ENV_VARS = ("BANK",)
 
-# The one comment `.mcp.env.example` carries for mnemo, verbatim from the
-# skill's `templates/mnemo.example` — it is what tells the next person where
-# the blank value comes from.
-_ENV_EXAMPLE_COMMENT = (
-    "# {instance} — the console (`mnemo ui`) shows the bank's token, or read "
-    "it from\n"
-    "# ~/.mnemo/state/banks.json"
-)
+# The one comment `.mcp.env.example` carries for mnemo — it is what tells
+# the next person where the blank value comes from. No pointer to
+# `banks.json` on disk: that file holds every bank's token, not just this
+# one, so a comment naming its path is a hint at more than this project's
+# secret.
+_ENV_EXAMPLE_COMMENT = "# {instance} — the console (`mnemo ui`) shows the bank's token"
 
 
 def _sed_line(prefix: str, name: str) -> str:

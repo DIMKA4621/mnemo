@@ -27,11 +27,14 @@ function journalHeaderHtml() {
   const seg = (id, label) =>
     '<button class="seg' + (state.logKind === id ? ' is-active' : '') + '" data-kind="' + id + '">' +
     label + '</button>';
-  return '<span class="page-title">Журнал</span>' +
-    '<div class="segmented" id="jkind">' + seg('query', 'Запити') + seg('index', 'Індексація') + '</div>' +
+  const refreshTitle = t('journal.header.refreshTitle');
+  return '<span class="page-title">' + t('shell.nav.journal') + '</span>' +
+    '<div class="segmented" id="jkind">' +
+      seg('query', t('journal.header.segQuery')) + seg('index', t('journal.header.segIndex')) +
+    '</div>' +
     '<div class="grow"></div>' +
     '<button class="btn btn-ghost btn-icon btn-sm" id="journal-refresh" ' +
-      'title="Оновити журнал" aria-label="Оновити журнал">↻</button>';
+      'title="' + refreshTitle + '" aria-label="' + refreshTitle + '">↻</button>';
 }
 
 function setLogKind(kind) {
@@ -47,7 +50,7 @@ function populateBankFilter() {
   const select = $('jbank');
   const current = select.value;
   clear(select);
-  select.appendChild(el('option', { text: 'Усі банки', attrs: { value: '' } }));
+  select.appendChild(el('option', { text: t('journal.filter.allBanks'), attrs: { value: '' } }));
   for (const bank of state.banks) {
     select.appendChild(el('option', { text: bank.name, attrs: { value: bank.name } }));
   }
@@ -106,9 +109,9 @@ function pushLiveLog(kind, row) {
 
 function indexEventTitle(ev) {
   if (ev.path) return ev.path;
-  if (ev.kind === 'rebuild') return 'Повна перебудова банку';
-  if (ev.kind === 'prune') return 'Зняття з індексу';
-  return 'Синхронізація індексу';
+  if (ev.kind === 'rebuild') return t('journal.event.rebuildTitle');
+  if (ev.kind === 'prune') return t('journal.event.pruneTitle');
+  return t('journal.event.syncTitle');
 }
 
 /**
@@ -129,8 +132,8 @@ function evStatusBadgeClass(ev) {
 }
 
 function evStatusWord(ev) {
-  if (state.logKind === 'query') return STATUS_LABEL[ev.status] || ev.status;
-  return ev.result === 'error' ? 'помилка' : ev.result;
+  if (state.logKind === 'query') return statusLabel(ev.status);
+  return ev.result === 'error' ? t('journal.event.errorStatus') : ev.result;
 }
 
 function evStatusBadge(ev) {
@@ -175,11 +178,11 @@ function renderList() {
   const countEl = $('jcount');
   clear(listEl);
   countEl.textContent = state.logRows.length
-    ? 'Показано ' + state.logRows.length + ' із ' + state.logTotal
-    : 'Порожньо';
+    ? t('journal.list.shownOf', { shown: state.logRows.length, total: state.logTotal })
+    : t('journal.list.empty');
 
   if (!state.logRows.length) {
-    listEl.appendChild(el('p', { className: 'empty-hint', text: 'Подій не знайдено.' }));
+    listEl.appendChild(el('p', { className: 'empty-hint', text: t('journal.list.noEvents') }));
     return;
   }
 
@@ -254,12 +257,12 @@ function hitSnapBlock(content) {
   const textEl = el('span', { text: preview });
   const toggle = el('button', {
     className: 'hit-snap-more',
-    text: 'показати повністю',
+    text: t('journal.hit.showMore'),
     on: {
       click: () => {
         const expanded = box.classList.toggle('is-expanded');
         textEl.textContent = expanded ? trimmed : preview;
-        toggle.textContent = expanded ? 'згорнути' : 'показати повністю';
+        toggle.textContent = expanded ? t('journal.hit.collapse') : t('journal.hit.showMore');
       },
     },
   });
@@ -275,7 +278,10 @@ function hitRow(hit, index, bankId) {
       el('span', { className: 'hit-r', text: String(index + 1) }),
       el('div', { className: 'hit-l' }, [
         el('div', { className: 'hit-p', text: hit.path }),
-        el('div', { className: 'hit-h', text: (hit.heading || '—') + ' · чанк ' + hit.chunk_index }),
+        el('div', {
+          className: 'hit-h',
+          text: t('journal.hit.chunkLabel', { heading: hit.heading || '—', n: hit.chunk_index }),
+        }),
       ]),
       el('span', { className: 'hit-s' }, [
         document.createTextNode('score ' + fmtScore(hit.score)),
@@ -289,7 +295,7 @@ function hitRow(hit, index, bankId) {
     el('div', { className: 'hit-foot' }, [
       el('button', {
         className: 'btn btn-sm',
-        text: 'Відкрити файл',
+        text: t('journal.hit.openFile'),
         on: { click: () => openInMemory(bankId, hit.path) },
       }),
     ]),
@@ -299,26 +305,26 @@ function hitRow(hit, index, bankId) {
 
 function renderQueryDetail(box, ev) {
   box.appendChild(el('div', { className: 'd-kick' }, [
-    el('span', { text: 'запит · #' + ev.id }),
+    el('span', { text: t('journal.detail.queryKicker', { id: ev.id }) }),
     evStatusBadge(ev),
   ]));
   box.appendChild(el('h2', { className: 'd-h', text: ev.query }));
   box.appendChild(factsRow([
-    ['банк', bankLabel(ev.bank_id)],
-    ['обличчя', ev.face],
-    ['префікс', ev.path_prefix || '—'],
-    ['хітів', String(ev.n_hits)],
-    ['час, мс', fmtMs(ev.took_ms)],
-    ['коли', fmtDateTime(ev.ts)],
+    [t('journal.detail.bank'), bankLabel(ev.bank_id)],
+    [t('journal.detail.face'), ev.face],
+    [t('journal.detail.prefix'), ev.path_prefix || '—'],
+    [t('journal.detail.hits'), String(ev.n_hits)],
+    [t('journal.detail.tookMs'), fmtMs(ev.took_ms)],
+    [t('journal.detail.when'), fmtDateTime(ev.ts)],
   ]));
   box.appendChild(el('div', { className: 'd-sec' }, [
-    document.createTextNode('Результати '),
-    el('span', { className: 'muted', text: 'у точному ранговому порядку' }),
+    document.createTextNode(t('journal.detail.resultsLabel') + ' '),
+    el('span', { className: 'muted', text: t('journal.detail.resultsOrderNote') }),
   ]));
 
   const hits = ev.hits || [];
   if (!hits.length) {
-    box.appendChild(el('p', { className: 'empty-hint', text: 'Жодного влучення.' }));
+    box.appendChild(el('p', { className: 'empty-hint', text: t('journal.detail.noHits') }));
     return;
   }
   hits.forEach((hit, index) => box.appendChild(hitRow(hit, index, ev.bank_id)));
@@ -326,45 +332,48 @@ function renderQueryDetail(box, ev) {
 
 function renderIndexDetail(box, ev) {
   box.appendChild(el('div', { className: 'd-kick' }, [
-    el('span', { text: 'індексація · #' + ev.id }),
+    el('span', { text: t('journal.detail.indexKicker', { id: ev.id }) }),
     evStatusBadge(ev),
   ]));
   box.appendChild(el('h2', { className: 'd-h', text: indexEventTitle(ev) }));
   box.appendChild(factsRow([
-    ['банк', bankLabel(ev.bank_id)],
-    ['вид', ev.kind],
-    ['тригер', ev.trigger],
-    ['коли', fmtDateTime(ev.ts)],
+    [t('journal.detail.bank'), bankLabel(ev.bank_id)],
+    [t('journal.detail.kind'), ev.kind],
+    [t('journal.detail.trigger'), ev.trigger],
+    [t('journal.detail.when'), fmtDateTime(ev.ts)],
   ]));
   box.appendChild(el('div', { className: 'nums' }, [
-    numBox(ev.files_indexed, 'файлів'),
-    numBox(ev.chunks_indexed, 'чанків'),
-    numBox(ev.files_pruned, 'знято'),
-    numBox(fmtMs(ev.took_ms), 'тривалість'),
+    numBox(ev.files_indexed, t('journal.detail.filesIndexed')),
+    numBox(ev.chunks_indexed, t('journal.detail.chunksIndexed')),
+    numBox(ev.files_pruned, t('journal.detail.filesPruned')),
+    numBox(fmtMs(ev.took_ms), t('journal.detail.duration')),
   ]));
 
   if (ev.error) {
     box.appendChild(el('div', { className: 'note is-err' }, [
-      el('strong', { text: 'Помилка' }),
+      el('strong', { text: t('journal.detail.errorLabel') }),
       el('br'),
       document.createTextNode(ev.error),
     ]));
   }
 
   if (ev.path) {
-    box.appendChild(el('div', { className: 'd-sec', text: 'Файл' }));
+    box.appendChild(el('div', { className: 'd-sec', text: t('journal.detail.fileSection') }));
     box.appendChild(el('article', { className: 'hit' }, [
       el('div', { className: 'hit-top' }, [
         el('span', { className: 'hit-r', text: '·' }),
         el('div', { className: 'hit-l' }, [
           el('div', { className: 'hit-p', text: ev.path }),
-          el('div', { className: 'hit-h', text: 'поточний файл банку ' + bankLabel(ev.bank_id) }),
+          el('div', {
+            className: 'hit-h',
+            text: t('journal.detail.currentFileOf', { bank: bankLabel(ev.bank_id) }),
+          }),
         ]),
       ]),
       el('div', { className: 'hit-foot' }, [
         el('button', {
           className: 'btn btn-sm',
-          text: 'Відкрити файл',
+          text: t('journal.hit.openFile'),
           on: { click: () => openInMemory(ev.bank_id, ev.path) },
         }),
       ]),
@@ -378,7 +387,7 @@ function renderDetail() {
   const selectedId = state.logSelected[state.logKind];
   const ev = state.logRows.find((row) => row.id === selectedId) || state.logRows[0] || null;
   if (!ev) {
-    box.appendChild(el('p', { className: 'empty-hint', text: 'Оберіть подію ліворуч.' }));
+    box.appendChild(el('p', { className: 'empty-hint', text: t('journal.detail.selectHint') }));
     return;
   }
   state.logSelected[state.logKind] = ev.id;

@@ -55,12 +55,15 @@ const UPDATE_POLL_MS = 2000;
 const UPDATE_POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes of silence before giving up
 
 // Ordered for display only — the real state machine is `apply.state` +
-// `apply.step` from the backend (see updateStepIndex()).
-const UPDATE_STEPS = [
-  { key: 'download', label: 'Завантаження з GitHub' },
-  { key: 'venv', label: 'Встановлення пакетів' },
-  { key: 'switching', label: 'Перемикання версії та перезапуск' },
-];
+// `apply.step` from the backend (see updateStepIndex()). A function, not a
+// module-level const, so a language switch re-renders it live via t().
+function updateSteps() {
+  return [
+    { key: 'download', label: t('update.steps.download') },
+    { key: 'venv', label: t('update.steps.venv') },
+    { key: 'switching', label: t('update.steps.switching') },
+  ];
+}
 
 const updateModal = {
   root: null, box: null, title: null, closeBtn: null, body: null, foot: null,
@@ -100,9 +103,9 @@ const updateModal = {
 // ---------------------------------------------------------------------------
 
 function buildUpdateModal() {
-  updateModal.title = el('h2', { text: 'Оновлення mnemo' });
+  updateModal.title = el('h2', { text: t('update.modal.title') });
   updateModal.closeBtn = el('button', {
-    className: 'btn btn-ghost', text: '✕', title: 'Закрити (Esc)',
+    className: 'btn btn-ghost', text: '✕', title: t('common.btn.closeEsc'),
     on: { click: () => dismissUpdateModal() },
   });
   updateModal.body = el('div', { className: 'modal-body' });
@@ -110,7 +113,7 @@ function buildUpdateModal() {
 
   updateModal.box = el('div', {
     className: 'modal-box',
-    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': 'Оновлення mnemo' },
+    attrs: { role: 'dialog', 'aria-modal': 'true', 'aria-label': t('update.modal.title') },
     on: { click: (ev) => ev.stopPropagation() },
   }, [
     el('div', { className: 'modal-head' }, [updateModal.title, updateModal.closeBtn]),
@@ -135,6 +138,17 @@ function buildUpdateModal() {
 
   const banner = $('sb-update-banner');
   if (banner) banner.addEventListener('click', () => onUpdateBannerClick());
+}
+
+/** Re-applies the modal chrome's static text (title, close button, aria
+ *  label) — the parts built once by buildUpdateModal() and not touched by
+ *  any phase's own render function, so a language switch would otherwise
+ *  leave them stale. Called from app.js's refreshAllViews(). */
+function applyUpdateStaticI18n() {
+  if (!updateModal.title) return; // buildUpdateModal() has not run yet
+  updateModal.title.textContent = t('update.modal.title');
+  updateModal.closeBtn.title = t('common.btn.closeEsc');
+  updateModal.box.setAttribute('aria-label', t('update.modal.title'));
 }
 
 function openUpdateModal() {
@@ -204,30 +218,25 @@ function renderUpdateConfirm() {
   const latestTag = (u.latest_known && u.latest_known.tag) || null;
 
   updateModal.body.appendChild(el('p', { className: 'upd-row' }, [
-    document.createTextNode('Поточна версія: '),
+    document.createTextNode(t('update.confirm.currentLabel')),
     el('code', { text: currentTag || '—' }),
   ]));
   updateModal.body.appendChild(el('p', { className: 'upd-row' }, [
-    document.createTextNode('Нова версія: '),
+    document.createTextNode(t('update.confirm.newLabel')),
     el('strong', { text: latestTag || '—' }),
   ]));
 
   // Same visual pattern as the token panel's "перегенерувати" confirmation —
   // an irreversible action, warned about right above the button that starts it.
   updateModal.body.appendChild(el('div', { className: 'tok-confirm' }, [
-    el('p', {
-      className: 'tok-confirm-text',
-      text: 'Службу mnemo буде зупинено й перезапущено на новій версії. На цей ' +
-            'час пошук та індексація недоступні. Після «OK» дію не можна ' +
-            'скасувати — прогрес показуватиметься до завершення.',
-    }),
+    el('p', { className: 'tok-confirm-text', text: t('update.confirm.warning') }),
   ]));
 
   updateModal.foot.appendChild(el('button', {
-    className: 'btn', text: 'Скасувати', on: { click: () => closeUpdateModal() },
+    className: 'btn', text: t('common.btn.cancel'), on: { click: () => closeUpdateModal() },
   }));
   updateModal.foot.appendChild(el('button', {
-    className: 'btn btn-primary', text: 'OK',
+    className: 'btn btn-primary', text: t('update.confirm.okBtn'),
     attrs: latestTag ? {} : { disabled: '' },
     on: { click: () => confirmUpdateApply() },
   }));
@@ -250,8 +259,7 @@ async function confirmUpdateApply() {
     // reported, just without ever having left "confirm".
     let message = err.message;
     if (err.code === 'stale_target' && err.detail && err.detail.latest_tag) {
-      message = 'Показана версія застаріла (актуальна: ' + err.detail.latest_tag +
-                '). Закрийте вікно й спробуйте ще раз.';
+      message = t('update.confirm.staleTarget', { tag: err.detail.latest_tag });
     }
     state.update = state.update || {};
     state.update.apply = {
@@ -296,20 +304,15 @@ function renderUpdateAutoPending() {
   const secondsLeft = pending.seconds_left != null ? pending.seconds_left : 0;
 
   updateModal.body.appendChild(el('p', { className: 'upd-row' }, [
-    document.createTextNode('Автоматичне оновлення до '),
+    document.createTextNode(t('update.autoPending.leadPrefix')),
     el('strong', { text: tag }),
-    document.createTextNode(' почнеться через '),
+    document.createTextNode(t('update.autoPending.leadMiddle')),
     el('strong', { className: 'upd-countdown', text: String(secondsLeft) }),
-    document.createTextNode(' с.'),
+    document.createTextNode(t('update.autoPending.leadSuffix')),
   ]));
 
   updateModal.body.appendChild(el('div', { className: 'tok-confirm' }, [
-    el('p', {
-      className: 'tok-confirm-text',
-      text: 'Якщо нічого не натиснути, оновлення застосується автоматично. ' +
-            '«Скасувати» лише відкладає його — ту саму версію може бути ' +
-            'запропоновано знову під час наступної перевірки.',
-    }),
+    el('p', { className: 'tok-confirm-text', text: t('update.autoPending.note') }),
   ]));
 
   if (updateModal.autoPendingError) {
@@ -317,10 +320,10 @@ function renderUpdateAutoPending() {
   }
 
   updateModal.foot.appendChild(el('button', {
-    className: 'btn', text: 'Скасувати', on: { click: () => cancelAutoPending() },
+    className: 'btn', text: t('common.btn.cancel'), on: { click: () => cancelAutoPending() },
   }));
   updateModal.foot.appendChild(el('button', {
-    className: 'btn btn-primary', text: 'OK', on: { click: () => confirmAutoPending() },
+    className: 'btn btn-primary', text: t('update.confirm.okBtn'), on: { click: () => confirmAutoPending() },
   }));
 }
 
@@ -499,11 +502,11 @@ function renderUpdateProgress() {
   const apply = u.apply || {};
   const tag = apply.tag || (u.latest_known && u.latest_known.tag) || '—';
 
-  updateModal.body.appendChild(el('p', { className: 'upd-row', text: 'Оновлення до ' + tag + '…' }));
+  updateModal.body.appendChild(el('p', { className: 'upd-row', text: t('update.progress.title', { tag: tag }) }));
 
   const activeIndex = updateStepIndex(apply);
   const stepsBox = el('div', { className: 'upd-steps' });
-  UPDATE_STEPS.forEach((step, i) => {
+  updateSteps().forEach((step, i) => {
     const status = i < activeIndex ? 'done' : i === activeIndex ? 'active' : 'pending';
     stepsBox.appendChild(el('div', { className: 'upd-step is-' + status }, [
       el('span', { className: 'upd-step-mark', text: status === 'done' ? '✓' : String(i + 1) }),
@@ -525,9 +528,7 @@ function renderUpdateProgress() {
   if (updateModal.everSwitching) {
     updateModal.body.appendChild(el('p', {
       className: 'upd-note',
-      text: 'Служба перезапускається — сторінка на кілька секунд втратить ' +
-            'з’єднання. Це очікувано: результат стане відомий одразу після ' +
-            'відновлення зв’язку.',
+      text: t('update.progress.switchingNote'),
     }));
   }
 }
@@ -543,16 +544,14 @@ function renderUpdateTimeout() {
 
   updateModal.body.appendChild(el('p', {
     className: 'upd-row modal-error',
-    text: 'Не вдалося дізнатися результат оновлення за відведений час. Служба ' +
-          'могла ще перезапускатися, або консоль тимчасово не звʼязується з ' +
-          'нею. Перевірте вручну (mnemo doctor) або спробуйте ще раз.',
+    text: t('update.timeout.text'),
   }));
 
   updateModal.foot.appendChild(el('button', {
-    className: 'btn', text: 'Спробувати ще', on: { click: () => retryUpdatePolling() },
+    className: 'btn', text: t('update.timeout.retryBtn'), on: { click: () => retryUpdatePolling() },
   }));
   updateModal.foot.appendChild(el('button', {
-    className: 'btn btn-primary', text: 'Закрити', on: { click: () => closeUpdateModal() },
+    className: 'btn btn-primary', text: t('common.btn.close'), on: { click: () => closeUpdateModal() },
   }));
 }
 
@@ -580,23 +579,24 @@ function renderUpdateTerminal() {
   let cls;
   if (apply.state === 'done') {
     cls = 'tok-ok';
-    text = 'Оновлено до ' + (currentTag || apply.tag || '—') + '.';
+    text = t('update.terminal.done', { tag: currentTag || apply.tag || '—' });
   } else if (apply.state === 'rolled_back') {
     // Design point 5, verbatim: "проблема, відкотили назад" instead of a
     // silent failure or a generic error.
     cls = 'modal-error';
-    text = 'Проблема під час оновлення до ' + (apply.tag || '—') + ' — відкотили ' +
-           'назад на ' + (currentTag || '—') + '.' +
-           (apply.error ? ' (' + apply.error + ')' : '');
+    text = t('update.terminal.rolledBack', { tag: apply.tag || '—', current: currentTag || '—' }) +
+           (apply.error ? t('update.terminal.errorSuffix', { error: apply.error }) : '');
   } else { // 'failed'
     cls = 'modal-error';
-    text = 'Оновлення не вдалося' + (apply.error ? ': ' + apply.error : '.');
+    text = t('update.terminal.failedBase') +
+           (apply.error ? t('update.terminal.failedWithError', { error: apply.error })
+                        : t('update.terminal.failedNoError'));
     // See this file's header: reaching 'switching' locally is what
     // distinguishes "staging failed, service untouched" from "the switch
     // itself was attempted" — the safer, narrower claim either way.
     text += updateModal.everSwitching
-      ? ' Стан служби може бути невизначеним — перевірте mnemo doctor.'
-      : ' Поточна версія не змінювалась.';
+      ? t('update.terminal.unknownState')
+      : t('update.terminal.unchanged');
   }
 
   updateModal.body.appendChild(el('p', { className: 'upd-row ' + cls, text: text }));
@@ -608,15 +608,15 @@ function renderUpdateTerminal() {
   // to dismiss" dialog sitting on screen indefinitely.
   const autoCloseRow = (apply.state === 'done' && apply.trigger === 'auto')
     ? el('p', { className: 'upd-row upd-terminal-autoclose' }, [
-        document.createTextNode('Закриється автоматично через '),
+        document.createTextNode(t('update.terminal.autoClosePrefix')),
         el('strong', { className: 'upd-countdown', text: '10' }),
-        document.createTextNode(' с.'),
+        document.createTextNode(t('update.terminal.autoCloseSuffix')),
       ])
     : null;
   if (autoCloseRow) updateModal.body.appendChild(autoCloseRow);
 
   updateModal.foot.appendChild(el('button', {
-    className: 'btn btn-primary', text: 'Закрити', on: { click: () => dismissUpdateModal() },
+    className: 'btn btn-primary', text: t('common.btn.close'), on: { click: () => dismissUpdateModal() },
   }));
 
   if (autoCloseRow) {
@@ -811,14 +811,14 @@ function renderSidebarUpdateBanner() {
   if (busy) {
     box.hidden = false;
     box.classList.add('is-busy');
-    box.textContent = 'Оновлення mnemo триває…';
+    box.textContent = t('update.banner.busy');
     return;
   }
   box.classList.remove('is-busy');
 
   if (auto.pending) {
     box.hidden = false;
-    box.textContent = 'Автооновлення до ' + auto.pending.tag + ' очікує підтвердження';
+    box.textContent = t('update.banner.autoPending', { tag: auto.pending.tag });
     return;
   }
 
@@ -827,7 +827,7 @@ function renderSidebarUpdateBanner() {
     return;
   }
   box.hidden = false;
-  box.textContent = 'Доступна нова версія ' + u.latest_known.tag;
+  box.textContent = t('update.banner.available', { tag: u.latest_known.tag });
 }
 
 function onUpdateBannerClick() {

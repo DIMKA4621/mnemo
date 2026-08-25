@@ -104,19 +104,14 @@ const settings = {
  * permanently greyed-out control reads as broken, not as irrelevant.
  */
 const SETTINGS_SECTIONS = [
-  { id: 'general', label: 'Загальні', render: renderGeneralSection, submit: submitGeneral },
-  { id: 'embed', label: 'Модель ембедингу', render: renderEmbedSection, submit: submitSettings },
-  { id: 'maint', label: 'Обслуговування', render: renderMaintSection, submit: null },
+  { id: 'general', labelKey: 'settings.tabs.general', render: renderGeneralSection, submit: submitGeneral },
+  { id: 'embed', labelKey: 'settings.tabs.embed', render: renderEmbedSection, submit: submitSettings },
+  { id: 'maint', labelKey: 'settings.tabs.maint', render: renderMaintSection, submit: null },
 ];
 
-const SECTION_LEDE = {
-  general: 'Те, що стосується самої консолі й машини в цілому — не окремого ' +
-           'банку і не бекенда ембедингу.',
-  embed: 'Який бекенд рахує вектори для пошуку в банках і скільки оперативної ' +
-         'памʼяті він для цього займає.',
-  maint: 'Той самий структурований doctor report, який CLI показує текстом. ' +
-         'Перевірки запускаються лише при відкритті цього розділу.',
-};
+function sectionLede(id) {
+  return t('settings.lede.' + id);
+}
 
 function settingsSection(id) {
   return SETTINGS_SECTIONS.find((s) => s.id === id) || SETTINGS_SECTIONS[0];
@@ -132,6 +127,29 @@ function backendPreset(id) {
 function modelPreset(backend, name) {
   if (!backend) return null;
   return (backend.models || []).find((m) => m.name === name) || null;
+}
+
+// The catalogue's `label`/`note` text is Ukrainian, sent by the backend
+// (`src/presets.py`) — the language toggle can't reach it by translating
+// the string in place. These look up a matching i18n key by the preset's
+// stable `id`/`name` instead, and fall back to the raw backend text for
+// anything not (yet) in the dictionary, so a future/unlisted preset still
+// shows something rather than a missing-key warning or blank text.
+// Model `label` is left untranslated everywhere — it's the technical model
+// name itself, not descriptive text.
+function backendLabel(item) {
+  if (!item) return '';
+  return tMaybe(`settings.embed.backend.${item.id}.label`) || item.label;
+}
+
+function backendNoteText(backend) {
+  if (!backend) return null;
+  return tMaybe(`settings.embed.backend.${backend.id}.note`) || backend.note || null;
+}
+
+function modelNoteText(model) {
+  if (!model || !model.note) return model ? model.note : null;
+  return tMaybe(`settings.embed.model.${model.name}.note`) || model.note;
 }
 
 function settingValue(key) {
@@ -165,8 +183,8 @@ function backendForSettings() {
 // ---------------------------------------------------------------------------
 
 function settingsHeaderHtml() {
-  return '<span class="page-title">Налаштування</span>' +
-    '<span class="page-sub">стосується цієї машини, не окремого банку</span>';
+  return '<span class="page-title">' + t('settings.header.title') + '</span>' +
+    '<span class="page-sub">' + t('settings.header.sub') + '</span>';
 }
 
 function buildSettings() {
@@ -237,7 +255,7 @@ function renderSettingsTabs() {
   for (const section of SETTINGS_SECTIONS) {
     settings.tabs.appendChild(el('button', {
       className: 'set-tab' + (section.id === settings.section ? ' is-active' : ''),
-      text: section.label,
+      text: t(section.labelKey),
       attrs: { 'data-sec': section.id },
       on: { click: () => chooseSettingsSection(section.id) },
     }));
@@ -414,9 +432,37 @@ function overrideNote(key) {
   if (!item || !item.overridden) return null;
   return el('p', {
     className: 'set-override',
-    text: 'перекрито змінною ' + item.env_var + ' — збережене тут не подіє, ' +
-          'доки вона виставлена',
+    text: t('settings.overrideNote', { var: item.env_var }),
   });
+}
+
+/**
+ * Загальні only: is there a Save-gated edit actually waiting?
+ *
+ * Theme and language do not count — they apply on their own click and were
+ * never part of what Save sends. Deliberately mirrors submitGeneral()'s own
+ * early-return condition, since the button being clickable and the submit
+ * having something to do are the same fact told twice.
+ */
+function generalHasPendingChange() {
+  return settings.autostartWant != null ||
+    settings.autoUpdateWant != null ||
+    settings.requireLoginWant != null;
+}
+
+/**
+ * Модель ембедингу: is the browsed backend tab actually different from the
+ * saved one?
+ *
+ * Deliberately narrower than a full form diff — url/model/dim/timeout/key
+ * edits made *within* the currently-saved backend do not light the button,
+ * only switching to a different backend tab does. A full diff would also
+ * need to cover the write-only key field, which a saved value can never be
+ * compared against; the user asked specifically for the backend-switch case,
+ * so that is the one this answers, not "any field touched."
+ */
+function embedHasPendingChange() {
+  return !!settings.data && settings.backendId !== backendForSettings();
 }
 
 function renderSettings() {
@@ -429,9 +475,20 @@ function renderSettings() {
   // rather than disabled: a permanently greyed-out control reads as something
   // that ought to work and does not.
   settings.save.hidden = !section.submit;
+  // Both Загальні and Модель ембедингу have a cheap, exact answer to "is
+  // there anything Save would do right now" — a Save-gated want-field for
+  // one, the browsed-vs-saved backend id for the other — so both get a
+  // button that stays dark until that answer is yes, rather than always
+  // clickable. Left untouched while busy: a mid-submit disable must not be
+  // overwritten by this recompute.
+  if (!settings.busy) {
+    settings.save.disabled = section.id === 'general' ? !generalHasPendingChange()
+      : section.id === 'embed' ? !embedHasPendingChange()
+      : false;
+  }
 
   if (settings.busy && !settings.data) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Завантаження…' }));
+    body.appendChild(el('p', { className: 'empty-hint', text: t('settings.loading') }));
     return;
   }
   if (!settings.data) {
@@ -442,7 +499,7 @@ function renderSettings() {
   // No section <h2> here: the active tab button right above already names
   // this section — repeating it as a heading said the same word twice.
   const form = el('div', { className: 'set-form' }, [
-    el('p', { className: 'lede', text: SECTION_LEDE[section.id] || '' }),
+    el('p', { className: 'lede', text: sectionLede(section.id) }),
   ]);
   body.appendChild(form);
   section.render(form);
@@ -459,12 +516,11 @@ function renderEmbedSection(body) {
   // One `<br>` per sentence: each is its own fact (the trigger, when it
   // takes effect, what happens to existing indexes), not one run-on line.
   body.appendChild(el('p', { className: 'set-warn' }, [
-    document.createTextNode('Зміна моделі або ширини — це новий ключ перебудови.'),
+    document.createTextNode(t('settings.embed.warn.line1')),
     el('br'),
-    document.createTextNode('Конфігурація діє після збереження налаштувань.'),
+    document.createTextNode(t('settings.embed.warn.line2')),
     el('br'),
-    document.createTextNode('Старі індекси отримають REBUILD PENDING і пошук по них ' +
-      'відмовить, доки їх не перегенерувати.'),
+    document.createTextNode(t('settings.embed.warn.line3')),
   ]));
 
   // -- backend tabs -----------------------------------------------------
@@ -476,11 +532,11 @@ function renderEmbedSection(body) {
   for (const item of presetList) {
     tabs.appendChild(el('button', {
       className: 'seg' + (item.id === settings.backendId ? ' is-active' : ''),
-      text: item.label,
+      text: backendLabel(item),
       on: { click: () => chooseBackend(item.id) },
     }));
   }
-  body.appendChild(setField('Бекенд ембедингу', tabs, backend ? backend.note : null));
+  body.appendChild(setField(t('settings.embed.backendLabel'), tabs, backendNoteText(backend)));
 
   // Same idiom as autostart/auto-update on Загальні: browsing a tab that
   // isn't what's actually stored is a draft, not a change — say so before
@@ -490,9 +546,10 @@ function renderEmbedSection(body) {
     const active = backendPreset(backendForSettings());
     body.appendChild(el('p', {
       className: 'set-override',
-      text: 'не збережено — зараз активний «' + (active ? active.label : '—') +
-            '»; натисніть «Зберегти», щоб перемкнути на «' +
-            (backend ? backend.label : '—') + '»',
+      text: t('settings.embed.notSavedBackend', {
+        active: active ? backendLabel(active) : '—',
+        target: backend ? backendLabel(backend) : '—',
+      }),
     }));
   }
 
@@ -505,14 +562,16 @@ function renderEmbedSection(body) {
   if (backend.provider === 'local') {
     const model = (backend.models || [])[0];
     body.appendChild(el('p', { className: 'set-lead' }, [
-      document.createTextNode('Вектори рахує резидент на цій машині — '),
+      document.createTextNode(t('settings.embed.local.lead')),
       el('code', { text: model ? model.label : '—' }),
-      document.createTextNode(model ? ' (' + model.dim + ' вимірів). ' : '. '),
+      document.createTextNode(model
+        ? t('settings.embed.local.dimsSuffix', { dim: model.dim })
+        : t('settings.embed.local.noDimSuffix')),
       // "Нічого налаштовувати не треба" dropped: `backend.note` right above
       // ("нічого не треба налаштовувати; працює без мережі") already says
       // it — this line only adds what that one doesn't, that memory stays
       // on the machine.
-      document.createTextNode('Жоден байт памʼяті не залишає машину.'),
+      document.createTextNode(t('settings.embed.local.tail')),
     ]));
     // The resident is what holds the most (~1.5 GB), so the one backend with
     // nothing to configure is the one where this block matters most.
@@ -539,7 +598,7 @@ function renderEmbedSection(body) {
   // selectable rather than silently rewriting what the user configured.
   if (settings.form.model && !modelPreset(backend, settings.form.model)) {
     const option = el('option', {
-      text: settings.form.model + ' (не з довідника)',
+      text: settings.form.model + t('settings.embed.model.notInCatalog'),
       attrs: { value: settings.form.model },
     });
     option.selected = true;
@@ -548,14 +607,14 @@ function renderEmbedSection(body) {
   select.addEventListener('change', (ev) => chooseModel(ev.target.value));
 
   const chosen = modelPreset(backend, settings.form.model);
-  body.appendChild(setField('Модель', select, chosen ? chosen.note : null));
+  body.appendChild(setField(t('settings.embed.modelLabel'), select, modelNoteText(chosen)));
   if (chosen && chosen.prefixed) {
     // Said out loud because it is the one property of a model that is
     // invisible in every other way: markers change every vector, and getting
     // them wrong shows up only as quietly worse search.
     body.appendChild(el('p', {
       className: 'set-note',
-      text: 'ця модель тренована з маркерами — mnemo підставить їх сама',
+      text: t('settings.embed.model.prefixedNote'),
     }));
   }
   const modelOverride = overrideNote('api.model');
@@ -571,7 +630,7 @@ function renderEmbedSection(body) {
     settings.form.url = ev.target.value;
     clearSettingsMessages();
   });
-  body.appendChild(setField('Адреса', url, null));
+  body.appendChild(setField(t('settings.embed.urlLabel'), url, null));
   const urlOverride = overrideNote('api.url');
   if (urlOverride) body.appendChild(urlOverride);
 
@@ -603,14 +662,12 @@ function renderEmbedSection(body) {
   // replaced with one full-width rule above the row instead.
   body.appendChild(el('div', { className: 'set-divider' }));
   body.appendChild(el('div', { className: 'set-row' }, [
-    setField('Вимірів', dim, null),
-    setField('Таймаут, с', timeout, null),
+    setField(t('settings.embed.dimLabel'), dim, null),
+    setField(t('settings.embed.timeoutLabel'), timeout, null),
   ]));
   body.appendChild(el('p', {
     className: 'set-note',
-    text: 'Ширина підставлена з довідника, але останнє слово за самим ' +
-          'ендпоінтом: mnemo звіряє її з першим отриманим вектором і ' +
-          'відмовиться писати індекс, якщо вони розійшлися.',
+    text: t('settings.embed.dimNote'),
   }));
   // Every editable field needs its own override line, not just the obvious
   // ones: an environment variable on `dim` or `timeout` makes that input inert
@@ -630,7 +687,7 @@ function renderEmbedSection(body) {
       className: 'fs-input set-wide',
       attrs: {
         type: 'password', spellcheck: 'false', autocomplete: 'off',
-        placeholder: stored ? 'збережений — введіть новий, щоб замінити' : 'sk-…',
+        placeholder: stored ? t('settings.embed.key.placeholderStored') : 'sk-…',
       },
     });
     key.value = settings.form.key;
@@ -638,9 +695,7 @@ function renderEmbedSection(body) {
       settings.form.key = ev.target.value;
       settings.keyTouched = true;
     });
-    body.appendChild(setField('Ключ API', key,
-      'Зберігається у settings.json на цій машині. Назад не показується — ' +
-      'сторінка, яка друкує секрет, друкує його і в скриншот.'));
+    body.appendChild(setField(t('settings.embed.keyLabel'), key, t('settings.embed.keyNote')));
     const keyOverride = overrideNote('api.key_set');
     if (keyOverride) body.appendChild(keyOverride);
   }
@@ -671,12 +726,9 @@ function renderEmbedSection(body) {
  * meanings sitting one line apart is exactly what read as "did it get
  * deleted?" A RAM state needs a RAM word; the file on disk is untouched.
  */
-const HOLD_LABEL = {
-  loaded: 'у памʼяті',
-  unloaded: 'не в памʼяті',
-  'n/a': 'нічого не тримає',
-  unknown: 'невідомо',
-};
+function holdLabel(held) {
+  return t('settings.embed.mem.hold.' + (held === 'n/a' ? 'na' : held));
+}
 
 async function refreshEmbedState() {
   settings.embedError = null;
@@ -699,7 +751,9 @@ async function refreshEmbedState() {
  * a bank's reindex. Putting it behind Save would mean saving to make it
  * happen and then having nothing left to un-save.
  */
-const MEM_LABEL = 'Оперативна памʼять';
+function memLabel() {
+  return t('settings.embed.mem.label');
+}
 
 function renderEmbedMemory(body) {
   const info = settings.embed;
@@ -710,44 +764,42 @@ function renderEmbedMemory(body) {
   // to the card instead, not by replacing the whole field with an error.
   if (!info) {
     body.appendChild(el('div', { className: 'set-field' }, [
-      el('span', { className: 'set-label', text: MEM_LABEL }),
+      el('span', { className: 'set-label', text: memLabel() }),
       el('p', {
         className: settings.embedError ? 'modal-error' : 'empty-hint',
-        text: settings.embedError || 'Стан ще не отримано.',
+        text: settings.embedError || t('settings.embed.mem.notFetched'),
       }),
     ]));
     return;
   }
 
   const held = info.holding;
-  const field = [el('span', { className: 'set-label', text: MEM_LABEL })];
+  const field = [el('span', { className: 'set-label', text: memLabel() })];
 
   // Description right under the heading, before the status card — this is
   // the one thing worth reading before touching any control below it, so it
   // does not wait behind the card the way an ordinary field's note would.
   if (held === 'loaded' || held === 'unloaded') {
     field.push(el('p', { className: 'set-note mem-intro' }, [
-      el('strong', { text: 'Модель піднімається сама, коли потрібна для пошуку чи індексації' }),
-      document.createTextNode(' — «не в памʼяті» це нормальний стан, не помилка. ' +
-        '«Вивантажити» звільняє памʼять одразу, замість тримати модель ' +
-        'постійно завантаженою про запас.'),
+      el('strong', { text: t('settings.embed.mem.introStrong') }),
+      document.createTextNode(t('settings.embed.mem.introRest')),
     ]));
   }
 
   // -- status: caption + badge, caption + model — no framing box any more,
   // just two lines sitting directly in the field, with the actions below --
   field.push(el('div', { className: 'set-mem-line' }, [
-    el('span', { className: 'set-mem-caption', text: 'Статус:' }),
+    el('span', { className: 'set-mem-caption', text: t('settings.embed.mem.statusCaption') }),
     el('span', {
       // `badge-empty`, never the red `badge-off`: an unloaded model is a
       // normal state that costs one wake-up, not a fault — the same reason
       // `frozen` got its own cold colour instead of the error one.
       className: 'badge ' + (held === 'loaded' ? 'badge-ready' : 'badge-empty'),
-      text: HOLD_LABEL[held] || String(held),
+      text: holdLabel(held) || String(held),
     }),
   ]));
   field.push(el('div', { className: 'set-mem-line' }, [
-    el('span', { className: 'set-mem-caption', text: 'Модель:' }),
+    el('span', { className: 'set-mem-caption', text: t('settings.embed.mem.modelCaption') }),
     el('span', { className: 'set-mem-what', text: info.model || '—' }),
   ]));
   // Only where the backend actually has an idle-exit concept (`local`'s own
@@ -755,10 +807,10 @@ function renderEmbedMemory(body) {
   // timestamp, already shown as a footnote below, not a static duration).
   if (info.idle_timeout_s != null) {
     field.push(el('div', { className: 'set-mem-line' }, [
-      el('span', { className: 'set-mem-caption', text: 'Автовивантаження:' }),
+      el('span', { className: 'set-mem-caption', text: t('settings.embed.mem.idleCaption') }),
       el('span', {
         className: 'set-mem-what',
-        text: info.idle_timeout_s > 0 ? humanUptime(info.idle_timeout_s) : 'вимкнено',
+        text: info.idle_timeout_s > 0 ? humanUptime(info.idle_timeout_s) : t('settings.state.off'),
       }),
     ]));
   }
@@ -767,7 +819,7 @@ function renderEmbedMemory(body) {
   if (held === 'loaded') {
     buttons.appendChild(el('button', {
       className: 'btn',
-      text: 'Вивантажити',
+      text: t('settings.embed.mem.unloadBtn'),
       attrs: settings.embedBusy ? { disabled: '' } : {},
       on: { click: () => embedAction('unload') },
     }));
@@ -786,10 +838,10 @@ function renderEmbedMemory(body) {
       // checked; a remote endpoint never holds our memory at all, so only
       // its answer can be verified.
       text: held === 'unloaded'
-        ? 'Підняти в памʼять'
+        ? t('settings.embed.mem.wakeBtn')
         : (held === 'n/a' || held === 'unknown')
-          ? 'Перевірити ендпоінт'
-          : 'Перевірити',
+          ? t('settings.embed.mem.probeEndpointBtn')
+          : t('settings.embed.mem.probeBtn'),
       attrs: settings.embedBusy ? { disabled: '' } : {},
       on: { click: () => embedAction('load') },
     }));
@@ -805,13 +857,13 @@ function renderEmbedMemory(body) {
   if (download && download.active) {
     field.push(el('div', { className: 'set-mem-line' }, [
       el('i', { className: 'dot busy' }),
-      el('span', { text: 'Завантаження моделі…' }),
+      el('span', { text: t('settings.embed.mem.downloading') }),
     ]));
   } else if (download) {
     field.push(el('div', { className: 'set-mem-actions' }, [
       el('button', {
         className: 'btn',
-        text: 'Завантажити модель на диск (2.2 ГБ)',
+        text: t('settings.embed.mem.downloadBtn'),
         attrs: settings.embedBusy ? { disabled: '' } : {},
         on: { click: () => startEmbedDownload() },
       }),
@@ -833,27 +885,24 @@ function renderEmbedMemory(body) {
   // No number: the actual figure moves as hardware/model does, and "a few
   // seconds" is the fact worth knowing, not a specific one to trust.
   if (held === 'loaded' && info.wake_s) {
-    notes.push('Підніметься назад за кілька секунд.');
+    notes.push(t('settings.embed.mem.note.wakeSoon'));
   }
   if (held === 'n/a') {
     // The console's own wording, not the backend's `detail`. A steady state
     // that every client renders the same way belongs to the interface — the
     // API stays English by convention, and echoing it here would put one
     // English line in the middle of a Ukrainian screen.
-    notes.push('Цей ендпоінт не тримає нічого на цій машині — модель живе ' +
-               'на боці постачальника, тож звільняти нічого.');
-    notes.push('«Перевірити ендпоінт» зробить один embedding request. Для ' +
-               'тарифікованого API це може бути платний виклик.');
+    notes.push(t('settings.embed.mem.note.naHosted'));
+    notes.push(t('settings.embed.mem.note.naProbeCost'));
   }
-  if (info.expires_at) notes.push('Бекенд тримає її до ' + info.expires_at + '.');
+  if (info.expires_at) notes.push(t('settings.embed.mem.note.expiresAt', { when: info.expires_at }));
   if (info.others_held) {
     // A count, never the names: the other models are somebody else's, and
     // this console unloads ours alone.
-    notes.push('Там же ще ' + info.others_held + ' модел(і/ей) — не наші, ' +
-               'їх не чіпаємо.');
+    notes.push(t('settings.embed.mem.note.othersHeld', { n: info.others_held }));
   }
   if (download && !download.active && download.failed) {
-    notes.push('Завантаження не вдалося — спробуйте ще раз.');
+    notes.push(t('settings.embed.mem.note.downloadFailed'));
   }
   if (info.detail) notes.push(info.detail);
   for (const text of notes) field.push(el('p', { className: 'set-note', text: text }));
@@ -887,13 +936,13 @@ async function embedAction(what) {
   try {
     settings.embed = await api('/api/embed/' + what, { method: 'POST' });
     if (what === 'unload') {
-      settings.embedNote = 'Памʼять звільнено. Модель повернеться сама при наступному пошуку.';
+      settings.embedNote = t('settings.embed.mem.unloadedNote');
     } else if (settings.embed.holding === 'n/a') {
-      settings.embedNote = 'Ендпоінт відповів' + (settings.embed.probe_dim
-        ? ' — пробний вектор має ' + settings.embed.probe_dim + ' вимірів.'
+      settings.embedNote = t('settings.embed.mem.probeOkBase') + (settings.embed.probe_dim
+        ? t('settings.embed.mem.probeOkDimSuffix', { dim: settings.embed.probe_dim })
         : '.');
     } else {
-      settings.embedNote = 'Бекенд відповів — модель у памʼяті.';
+      settings.embedNote = t('settings.embed.mem.loadedNote');
     }
     scheduleSettingsNoteClear('embedNote', settings.embedNote);
   } catch (err) {
@@ -903,7 +952,7 @@ async function embedAction(what) {
     // stays English by convention, and this is the one code worth naming
     // instead of echoing that English sentence onto a Ukrainian screen.
     settings.embedError = err.code === 'embed_busy'
-      ? 'Черга ще працює через цей бекенд — почекайте, доки вона звільниться, і спробуйте ще раз.'
+      ? t('settings.embed.mem.busyError')
       : err.message;
   } finally {
     settings.embedBusy = false;
@@ -977,9 +1026,9 @@ function humanUptime(seconds) {
   const h = Math.floor(total / 3600);
   const m = Math.floor((total % 3600) / 60);
   const s = total % 60;
-  if (h) return h + ' год ' + m + ' хв';
-  if (m) return m + ' хв ' + String(s).padStart(2, '0') + ' с';
-  return s + ' с';
+  if (h) return t('settings.uptime.hoursMinutes', { h: h, m: m });
+  if (m) return t('settings.uptime.minutesSeconds', { m: m, s: String(s).padStart(2, '0') });
+  return t('settings.uptime.seconds', { s: s });
 }
 
 /**
@@ -992,26 +1041,30 @@ function humanUptime(seconds) {
  */
 /**
  * What applies to this machine's console regardless of which bank is open:
- * the browser's own preference first (theme — applies on click, nothing for
- * Save to do with it), then what changes the machine (autostart — needs
- * Save), then what merely reports (process facts, sitting under both since
- * nobody opens this section to read them first).
+ * the browser's own preferences first (language, theme — both apply on
+ * click, nothing for Save to do with either), then what changes the machine
+ * (autostart, requireLogin, autoUpdate — all need Save), then what merely
+ * reports (process facts, sitting under both since nobody opens this section
+ * to read them first).
  */
 function renderGeneralSection(body) {
+  renderLanguage(body);
   renderTheme(body);
   renderAutostart(body);
-  renderAutoUpdate(body);
   renderRequireLogin(body);
+  renderAutoUpdate(body);
   // The one message this can still produce that isn't already handled right
-  // under its own field: "Нічого не змінено." (Save clicked with no pending
-  // edit to either control above). Placed here, immediately after both
-  // Save-gated fields and before the unrelated Про-проект/Стан blocks below
-  // -- never after them, or it would read as a verdict on those instead.
+  // under its own field: "Немає що зберігати" (Save clicked with no pending
+  // edit to any of the three controls above — theme/language don't count,
+  // they apply on their own and were never gated on Save to begin with).
+  // Placed here, immediately after all three Save-gated fields and before
+  // the unrelated Про-проект/Стан blocks below -- never after them, or it
+  // would read as a verdict on those instead.
   renderSettingsMessages(body);
 
   const svc = state.service;
   if (!svc) {
-    body.appendChild(el('p', { className: 'empty-hint', text: 'Стан служби ще не отримано.' }));
+    body.appendChild(el('p', { className: 'empty-hint', text: t('settings.general.serviceNotLoaded') }));
     renderProjectLink(body);
     return;
   }
@@ -1023,14 +1076,15 @@ function renderGeneralSection(body) {
   body.appendChild(el('div', { className: 'set-divider' }));
 
   const box = el('div', { className: 'set-stats' }, [
-    setStat('Версія', svc.version, true),
-    setStat('PID', svc.pid, true),
-    setStat('Адреса', (svc.host || '—') + ':' + (svc.port != null ? svc.port : '—'), true),
-    setStat('Провайдер', svc.provider, true),
-    setStat('Працює', humanUptime(svc.uptime_s)),
-    setStat('Черга пріоритетів', svc.priority_enabled ? 'увімкнена' : 'вимкнена'),
+    setStat(t('settings.general.stat.version'), svc.version, true),
+    setStat(t('settings.general.stat.pid'), svc.pid, true),
+    setStat(t('settings.general.stat.address'), (svc.host || '—') + ':' + (svc.port != null ? svc.port : '—'), true),
+    setStat(t('settings.general.stat.provider'), svc.provider, true),
+    setStat(t('settings.general.stat.uptime'), humanUptime(svc.uptime_s)),
+    setStat(t('settings.general.stat.priorityQueue'), svc.priority_enabled
+      ? t('settings.general.stat.priorityOn') : t('settings.general.stat.priorityOff')),
   ]);
-  body.appendChild(setField('Стан', box, null));
+  body.appendChild(setField(t('settings.general.statusLabel'), box, null));
 
   renderProjectLink(body);
 }
@@ -1040,7 +1094,7 @@ function renderGeneralSection(body) {
  *  placeholder) regardless of whether that data has loaded. */
 function renderProjectLink(body) {
   body.appendChild(el('div', { className: 'set-divider' }));
-  body.appendChild(setField('Про проект', el('a', {
+  body.appendChild(setField(t('settings.general.aboutLabel'), el('a', {
     className: 'set-link',
     text: 'GitHub',
     attrs: {
@@ -1059,10 +1113,10 @@ function renderProjectLink(body) {
 function renderTheme(body) {
   const seg = el('div', { className: 'segmented set-toggle', attrs: { id: 'theme' } });
   const current = document.documentElement.dataset.theme === 'light' ? 'light' : 'dark';
-  for (const [value, label] of [['dark', 'Темна'], ['light', 'Світла']]) {
+  for (const [value, key] of [['dark', 'settings.general.theme.dark'], ['light', 'settings.general.theme.light']]) {
     seg.appendChild(el('button', {
       className: 'seg' + (current === value ? ' is-active' : ''),
-      text: label,
+      text: t(key),
       attrs: { 'data-theme': value },
       on: {
         click: () => {
@@ -1074,8 +1128,41 @@ function renderTheme(body) {
       },
     }));
   }
-  body.appendChild(setField('Тема консолі', seg,
-    'Вибір цього браузера — тому застосовується одразу й не чекає «Зберегти».'));
+  body.appendChild(setField(t('settings.general.theme.label'), seg, t('settings.general.theme.note')));
+}
+
+/**
+ * The language toggle — same instant-apply idiom as the theme control right
+ * above it: this browser's own preference, not a machine setting, so it
+ * applies on click and does not wait for «Зберегти».
+ *
+ * `.segmented set-toggle`, not the bare `.segmented`: without `set-toggle`
+ * it stretches to the field's full width inside `.set-field`'s flex column
+ * — the same bug fixed for theme once already.
+ *
+ * The two option labels ("English" / "Українська") are the language's own
+ * name, shown in itself regardless of which language is currently active —
+ * the standard convention for a language switcher, and never routed through
+ * `t()`.
+ */
+function renderLanguage(body) {
+  const seg = el('div', { className: 'segmented set-toggle', attrs: { id: 'language' } });
+  for (const [value, label] of [['en', 'English'], ['uk', 'Українська']]) {
+    seg.appendChild(el('button', {
+      className: 'seg' + (resolveLang() === value ? ' is-active' : ''),
+      text: label,
+      attrs: { 'data-lang': value },
+      on: {
+        click: () => {
+          applyLanguage(value);
+          for (const button of seg.querySelectorAll('.seg')) {
+            button.classList.toggle('is-active', button.dataset.lang === value);
+          }
+        },
+      },
+    }));
+  }
+  body.appendChild(setField(t('settings.general.language.label'), seg, t('settings.general.language.note')));
 }
 
 /**
@@ -1094,35 +1181,34 @@ function renderTheme(body) {
 function renderAutostart(body) {
   const auto = settings.autostart;
   if (!auto) {
-    body.appendChild(setField('Автозапуск', el('p', {
+    body.appendChild(setField(t('settings.general.autostart.label'), el('p', {
       className: 'set-note',
-      text: settings.autostartError || 'стан не отримано',
+      text: settings.autostartError || t('settings.general.autostart.notFetched'),
     }), null));
     return;
   }
   if (!auto.supported) {
-    body.appendChild(setField('Автозапуск', el('p', {
+    body.appendChild(setField(t('settings.general.autostart.label'), el('p', {
       className: 'set-note',
-      text: 'на цій системі не підтримується',
+      text: t('settings.general.autostart.unsupported'),
     }), null));
     return;
   }
 
   const chosen = autostartWanted();
   const seg = el('div', { className: 'segmented set-toggle' });
-  for (const option of [{ on: true, label: 'Увімкнено' }, { on: false, label: 'Вимкнено' }]) {
+  for (const option of [{ on: true, key: 'settings.toggle.on' }, { on: false, key: 'settings.toggle.off' }]) {
     seg.appendChild(el('button', {
       className: 'seg' + (chosen === option.on ? ' is-active' : ''),
-      text: option.label,
+      text: t(option.key),
       attrs: settings.busy ? { disabled: '' } : {},
       on: { click: () => chooseAutostart(option.on) },
     }));
   }
 
-  body.appendChild(setField('Запускати службу при вході в систему', seg,
-    'Реєструється як ' + (auto.mechanism || '—') +
-    (auto.name ? ' — «' + auto.name + '»' : '') +
-    '. Діє з наступного входу; те, що працює зараз, не зачіпає.'));
+  const named = auto.name ? t('settings.general.autostart.namedSuffix', { name: auto.name }) : '';
+  body.appendChild(setField(t('settings.general.autostart.label'), seg,
+    t('settings.general.autostart.note', { mechanism: auto.mechanism || '—', named: named })));
 
   // Said plainly, because the control now shows an intention rather than the
   // machine: without this line a page left open on «Вимкнено» reads as a
@@ -1130,8 +1216,7 @@ function renderAutostart(body) {
   if (chosen !== !!auto.enabled) {
     body.appendChild(el('p', {
       className: 'set-override',
-      text: 'не збережено — зараз ' + (auto.enabled ? 'увімкнено' : 'вимкнено') +
-            '; натисніть «Зберегти», щоб застосувати',
+      text: t('settings.notSavedToggle', { state: t(auto.enabled ? 'settings.state.on' : 'settings.state.off') }),
     }));
   }
 
@@ -1195,21 +1280,23 @@ function chooseAutoUpdate(want) {
 }
 
 function renderAutoUpdate(body) {
+  // Manual divider: `renderRequireLogin` above ends with its two-line
+  // "Off (default).../On:..." note, not a `.set-field`, so the adjacent-
+  // sibling rule that separates every other field here never fires before
+  // this one — same reasoning as the divider before requireLogin itself.
+  body.appendChild(el('div', { className: 'set-divider' }));
   const chosen = autoUpdateWanted();
   const seg = el('div', { className: 'segmented set-toggle' });
-  for (const option of [{ on: true, label: 'Увімкнено' }, { on: false, label: 'Вимкнено' }]) {
+  for (const option of [{ on: true, key: 'settings.toggle.on' }, { on: false, key: 'settings.toggle.off' }]) {
     seg.appendChild(el('button', {
       className: 'seg' + (chosen === option.on ? ' is-active' : ''),
-      text: option.label,
+      text: t(option.key),
       attrs: settings.busy ? { disabled: '' } : {},
       on: { click: () => chooseAutoUpdate(option.on) },
     }));
   }
 
-  body.appendChild(setField('Автоматичне оновлення', seg,
-    'Придатний реліз застосовується сам — з коротким відліком і кнопкою ' +
-    '«Скасувати» просто в консолі. Вимкнено — лишається тільки банер і ' +
-    'ручне підтвердження, як і раніше.'));
+  body.appendChild(setField(t('settings.general.autoUpdate.label'), seg, t('settings.general.autoUpdate.note')));
 
   const autoUpdateOverride = overrideNote('auto_update');
   if (autoUpdateOverride) body.appendChild(autoUpdateOverride);
@@ -1217,8 +1304,9 @@ function renderAutoUpdate(body) {
   if (chosen !== autoUpdateStoredValue()) {
     body.appendChild(el('p', {
       className: 'set-override',
-      text: 'не збережено — зараз ' + (autoUpdateStoredValue() ? 'увімкнено' : 'вимкнено') +
-            '; натисніть «Зберегти», щоб застосувати',
+      text: t('settings.notSavedToggle', {
+        state: t(autoUpdateStoredValue() ? 'settings.state.on' : 'settings.state.off'),
+      }),
     }));
   }
 
@@ -1235,7 +1323,9 @@ function renderAutoUpdate(body) {
   body.appendChild(el('div', { className: 'maint-head' }, [
     el('button', {
       className: 'btn',
-      text: settings.updateCheckBusy ? 'Перевіряємо…' : 'Перевірити оновлення',
+      text: settings.updateCheckBusy
+        ? t('settings.general.autoUpdate.checking')
+        : t('settings.general.autoUpdate.checkBtn'),
       attrs: settings.updateCheckBusy ? { disabled: '' } : {},
       on: { click: () => runUpdateCheck() },
     }),
@@ -1294,29 +1384,27 @@ function chooseRequireLogin(want) {
 function renderRequireLogin(body) {
   const chosen = requireLoginWanted();
   const seg = el('div', { className: 'segmented set-toggle' });
-  for (const option of [{ on: false, label: 'Вимкнено' }, { on: true, label: 'Увімкнено' }]) {
+  for (const option of [{ on: false, key: 'settings.toggle.off' }, { on: true, key: 'settings.toggle.on' }]) {
     seg.appendChild(el('button', {
       className: 'seg' + (chosen === option.on ? ' is-active' : ''),
-      text: option.label,
+      text: t(option.key),
       attrs: settings.busy ? { disabled: '' } : {},
       on: { click: () => chooseRequireLogin(option.on) },
     }));
   }
 
-  // Manual divider: `renderAutoUpdate` above ends with a check button and
+  // Manual divider: `renderAutostart` above ends with a check button and
   // its result note, neither of them a `.set-field`, so the adjacent-sibling
   // rule that separates every other field here never fires before this one
   // — same reasoning as the divider before the service-status stats box.
   body.appendChild(el('div', { className: 'set-divider' }));
-  body.appendChild(setField('Вимагати токен для входу в кабінет', seg, null));
+  body.appendChild(setField(t('settings.general.requireLogin.label'), seg, null));
   // Two facts, two lines: what's off (the current default) and what's on —
   // same `<br>`-per-sentence shape as the embed section's consequences block.
   body.appendChild(el('p', { className: 'set-note' }, [
-    document.createTextNode('Вимкнено (типово): «/api» (кабінет і CLI) відкритий ' +
-      'на loopback, як зараз, — без токена.'),
+    document.createTextNode(t('settings.general.requireLogin.noteOff')),
     el('br'),
-    document.createTextNode('Увімкнено: кабінету й CLI потрібен сервісний токен ' +
-      'для доступу.'),
+    document.createTextNode(t('settings.general.requireLogin.noteOn')),
   ]));
 
   const requireLoginOverride = overrideNote('require_login');
@@ -1325,8 +1413,9 @@ function renderRequireLogin(body) {
   if (chosen !== requireLoginStoredValue()) {
     body.appendChild(el('p', {
       className: 'set-override',
-      text: 'не збережено — зараз ' + (requireLoginStoredValue() ? 'увімкнено' : 'вимкнено') +
-            '; натисніть «Зберегти», щоб застосувати',
+      text: t('settings.notSavedToggle', {
+        state: t(requireLoginStoredValue() ? 'settings.state.on' : 'settings.state.off'),
+      }),
     }));
   }
 
@@ -1374,30 +1463,26 @@ function renderRequireLoginToken() {
 
   return el('div', { className: 'set-field' }, [
     el('label', {
-      className: 'set-label', text: 'Сервісний токен',
+      className: 'set-label', text: t('settings.general.requireLogin.tokenLabel'),
       attrs: { for: 'require-login-token' },
     }),
     el('div', { className: 'tok-row' }, [
       field,
       el('button', {
         className: 'btn',
-        text: revealed ? 'сховати' : 'показати',
-        title: revealed ? 'Прибрати значення з екрана' : 'Показати значення на екрані',
+        text: revealed ? t('common.token.hide') : t('common.token.show'),
+        title: revealed ? t('common.token.hideTitle') : t('common.token.showTitle'),
         attrs: { 'aria-pressed': revealed ? 'true' : 'false' },
         on: { click: () => {
           settings.requireLoginTokenRevealed = !settings.requireLoginTokenRevealed;
           renderSettings();
         } },
       }),
-      copyButton(() => settings.requireLoginToken, 'Скопіювати токен, не показуючи його'),
+      copyButton(() => settings.requireLoginToken, t('common.token.copyTokenTitle')),
     ]),
     el('p', {
       className: 'tok-note',
-      text: 'Показано один раз — GET /api/settings більше його не поверне. ' +
-            'Консоль уже підставила цей токен у поточну сесію, тож входити ' +
-            'заново не потрібно. Якщо він загубиться — той самий файл лежить ' +
-            'на диску (шлях і mnemo doctor покажуть його), або вимкніть цю ' +
-            'опцію ще раз, щоб зняти вимогу токена.',
+      text: t('settings.general.requireLogin.tokenNote'),
     }),
   ]);
 }
@@ -1426,8 +1511,8 @@ async function runUpdateCheck() {
       : (result.update_available
           // Same wording the sidebar banner uses (renderSidebarUpdateBanner,
           // update.js) -- one fact, one sentence, wherever it shows up.
-          ? 'Доступна нова версія ' + result.latest_tag
-          : 'Актуальна версія.');
+          ? t('update.banner.available', { tag: result.latest_tag })
+          : t('settings.general.autoUpdate.upToDate'));
     if (result.error) settings.updateCheckError = result.error;
     // `updateCheckAvailable` has no text of its own to compare against on
     // expiry, so its clear rides along with its paired `updateCheckResult`
@@ -1474,7 +1559,7 @@ async function submitGeneral() {
   const autoUpdateWant = settings.autoUpdateWant;
   const requireLoginWant = settings.requireLoginWant;
   if (autostartWant == null && autoUpdateWant == null && requireLoginWant == null) {
-    settings.note = 'Нічого не змінено.';
+    settings.note = t('settings.messages.nothingChanged');
     renderSettings();
     return;
   }
@@ -1499,8 +1584,8 @@ async function submitGeneral() {
         });
         settings.autostartWant = null;
         settings.autostartSaveNote = settings.autostart.enabled
-          ? 'Автозапуск: служба підніматиметься при вході в систему.'
-          : 'Автозапуск: вимкнено, службу доведеться піднімати самому.';
+          ? t('settings.general.autostart.savedOn')
+          : t('settings.general.autostart.savedOff');
         scheduleSettingsNoteClear('autostartSaveNote', settings.autostartSaveNote);
       } catch (err) {
         if (isAuthError(err)) { openGate('rejected'); return; }
@@ -1514,7 +1599,9 @@ async function submitGeneral() {
           method: 'PUT', body: { auto_update: autoUpdateWant },
         });
         settings.autoUpdateWant = null;
-        settings.autoUpdateSaveNote = autoUpdateWant ? 'Автооновлення: увімкнено.' : 'Автооновлення: вимкнено.';
+        settings.autoUpdateSaveNote = autoUpdateWant
+          ? t('settings.general.autoUpdate.savedOn')
+          : t('settings.general.autoUpdate.savedOff');
         scheduleSettingsNoteClear('autoUpdateSaveNote', settings.autoUpdateSaveNote);
       } catch (err) {
         if (isAuthError(err)) { openGate('rejected'); return; }
@@ -1530,8 +1617,8 @@ async function submitGeneral() {
         settings.data = data;
         settings.requireLoginWant = null;
         settings.requireLoginSaveNote = requireLoginWant
-          ? 'Вхід у кабінет тепер вимагає токен.'
-          : 'Кабінет знову відкритий на loopback без токена.';
+          ? t('settings.general.requireLogin.savedOn')
+          : t('settings.general.requireLogin.savedOff');
         // `data.service_token` rides in this exact response the moment the
         // save turns the gate on (contract: MN-19) — never echoed by a plain
         // GET afterwards, so it has to be picked up right here or it is
@@ -1592,7 +1679,7 @@ function renderMaintSection(body) {
   body.appendChild(el('div', { className: 'maint-head' }, [
     el('button', {
       className: 'btn',
-      text: settings.maintenanceBusy ? 'Оновлюємо…' : 'Оновити діагностику',
+      text: settings.maintenanceBusy ? t('settings.maint.refreshing') : t('settings.maint.refreshBtn'),
       attrs: settings.maintenanceBusy ? { disabled: '' } : {},
       on: { click: () => refreshMaintenance() },
     }),
@@ -1604,13 +1691,13 @@ function renderMaintSection(body) {
   if (!report) {
     body.appendChild(el('p', {
       className: 'empty-hint',
-      text: settings.maintenanceBusy ? 'Збираємо діагностику…' : 'Звіт ще не отримано.',
+      text: settings.maintenanceBusy ? t('settings.maint.collecting') : t('settings.maint.notFetched'),
     }));
     return;
   }
 
   const engine = report.engine || {};
-  body.appendChild(setField('Рушій', el('div', { className: 'set-stats' }, [
+  body.appendChild(setField(t('settings.maint.engineLabel'), el('div', { className: 'set-stats' }, [
     setStat('Engine home', engine.home, true),
     setStat('State dir', engine.state_dir, true),
     setStat('Python', engine.python, true),
@@ -1625,69 +1712,69 @@ function renderMaintSection(body) {
     ? ' · overrides: ' + provider.overrides.join(', ')
     : '');
   const providerStats = [
-    setStat('Провайдер', providerValue, true),
-    setStat('Локальна модель', model.needed
-      ? (model.cached ? 'кеш повний' : 'НЕ ЗАВАНТАЖЕНА')
-      : (model.cached ? 'є, але не потрібна' : 'не потрібна')),
-    setStat('sqlite-vec', vec.ok ? 'ok' : 'НЕДОСТУПНИЙ'),
-    setStat('Резидент', resident.applicable
-      ? ((resident.up ? 'працює' : 'не завантажений') +
-         ' · ' + resident.host + ':' + resident.port + ' · машинний порт')
-      : 'n/a для цього провайдера'),
+    setStat(t('settings.maint.providerLabel'), providerValue, true),
+    setStat(t('settings.maint.localModelLabel'), model.needed
+      ? (model.cached ? t('settings.maint.model.cachedFull') : t('settings.maint.model.notLoaded'))
+      : (model.cached ? t('settings.maint.model.cachedNotNeeded') : t('settings.maint.model.notNeeded'))),
+    setStat('sqlite-vec', vec.ok ? 'ok' : t('settings.maint.unavailable')),
+    setStat(t('settings.maint.residentLabel'), resident.applicable
+      ? (t(resident.up ? 'settings.maint.resident.up' : 'settings.maint.resident.down') +
+         ' · ' + resident.host + ':' + resident.port + t('settings.maint.resident.portSuffix'))
+      : t('settings.maint.resident.na')),
   ];
   if (endpoint.applicable) {
     providerStats.push(setStat('API endpoint', endpoint.configured
-      ? endpoint.url + ' · ' + endpoint.model + ' · ' + endpoint.dim + ' вимірів' +
-        (endpoint.key_set ? ' · key set' : ' · no key')
-      : 'НЕ НАЛАШТОВАНО — ' + (endpoint.error || 'невідомо'), true));
+      ? endpoint.url + ' · ' + endpoint.model + ' · ' + endpoint.dim + ' ' +
+        t('settings.maint.endpoint.dimsUnit') + (endpoint.key_set ? ' · key set' : ' · no key')
+      : t('settings.maint.endpoint.notConfigured', { error: endpoint.error || t('settings.maint.unknown') }), true));
   }
-  body.appendChild(setField('Ембединг', el('div', { className: 'set-stats' }, providerStats), null));
+  body.appendChild(setField(t('settings.maint.embedLabel'), el('div', { className: 'set-stats' }, providerStats), null));
   if (vec.error) body.appendChild(el('p', { className: 'modal-error', text: vec.error }));
 
   const backend = report.backend || {};
   const tokenFact = report.token || {};
-  body.appendChild(setField('Служба', el('div', { className: 'set-stats' }, [
+  body.appendChild(setField(t('settings.maint.serviceLabel'), el('div', { className: 'set-stats' }, [
     setStat('Backend', backend.up
-      ? 'працює · pid ' + backend.serving_pid + ' · машинний порт'
-      : 'НЕ ДОСТУПНИЙ — ' + (backend.error || 'невідомо')),
+      ? t('settings.maint.backend.upSummary', { pid: backend.serving_pid })
+      : t('settings.maint.backend.down', { error: backend.error || t('settings.maint.unknown') })),
     setStat('URL', backend.url, true),
-    setStat('Черга', backend.queue_depth),
+    setStat(t('settings.maint.queueLabel'), backend.queue_depth),
     setStat('API token', tokenFact.present
       ? 'set · ' + (tokenFact.where || tokenFact.source || 'unknown') +
         ' · ' + (tokenFact.scope || 'unknown scope')
-      : 'не встановлено · /api відкритий на loopback за замовчуванням', true),
+      : t('settings.maint.token.notSet'), true),
   ]), null));
 
   const registry = report.registry || {};
   if (!registry.ok) {
-    body.appendChild(setField('Реєстр', el('p', {
+    body.appendChild(setField(t('settings.maint.registryLabel'), el('p', {
       className: 'modal-error',
-      text: 'НЕЧИТАНИЙ — ' + (registry.error || 'невідомо'),
+      text: t('settings.maint.registryUnreadable', { error: registry.error || t('settings.maint.unknown') }),
     }), null));
   } else {
     const registryBox = el('div', { className: 'maint-list' });
     registryBox.appendChild(maintItem(
-      registry.count + ' банк(ів)', null, 'Реєстр читається.', 'ok'));
+      plural('memory.count.banks', registry.count), null, t('settings.maint.registryReadable'), 'ok'));
     for (const bank of registry.banks || []) {
       const flags = [];
       if (bank.state !== 'enabled') flags.push(bank.state);
-      if (!bank.exists) flags.push('нема кореня');
+      if (!bank.exists) flags.push(t('settings.maint.registry.noRoot'));
       registryBox.appendChild(maintItem(
         bank.name,
         flags.length ? flags.join(' · ') : 'ok',
         bank.root,
         flags.length ? 'warn' : null));
     }
-    body.appendChild(setField('Реєстр', registryBox, null));
+    body.appendChild(setField(t('settings.maint.registryLabel'), registryBox, null));
   }
 
   const wiring = report.wiring || {};
   const wiringBox = el('div', { className: 'maint-list' });
   if (!wiring.ok) {
-    wiringBox.appendChild(maintItem('Невідомо', null, wiring.error || 'помилка', 'error'));
+    wiringBox.appendChild(maintItem(t('settings.maint.unknownTitle'), null, wiring.error || t('settings.maint.genericError'), 'error'));
   } else if (!(wiring.stale || []).length) {
     wiringBox.appendChild(maintItem(
-      (wiring.total || 0) + ' проєкт(ів)', 'усі актуальні', null, 'ok'));
+      plural('settings.maint.count.projects', wiring.total || 0), t('settings.maint.wiring.allCurrent'), null, 'ok'));
   } else {
     for (const project of wiring.stale) {
       wiringBox.appendChild(maintItem(
@@ -1706,33 +1793,35 @@ function renderOrphanMaintenance(body, orphans) {
   const box = el('div', { className: 'maint-list' });
   if (!orphans.ok) {
     box.appendChild(maintItem(
-      'Список недоступний', null,
-      'Видалення заборонене: ' + (orphans.error || 'реєстр не можна перевірити'),
+      t('settings.maint.orphans.unavailableTitle'), null,
+      t('settings.maint.orphans.deletionForbidden', {
+        reason: orphans.error || t('settings.maint.orphans.registryUncheckable'),
+      }),
       'error'));
   } else if (!orphans.count) {
-    box.appendChild(maintItem('Сиріт немає', '0 B', 'Кожен index належить банку.', 'ok'));
+    box.appendChild(maintItem(t('settings.maint.orphans.noneTitle'), '0 B', t('settings.maint.orphans.noneNote'), 'ok'));
   } else {
     for (const orphan of orphans.items || []) {
       let note = orphan.error
-        ? 'не читається — ' + orphan.error
+        ? t('settings.maint.orphans.unreadable', { error: orphan.error })
         : orphan.root || (orphan.schema == null
-          ? 'pre-v3 index — root не записаний'
-          : 'root не записаний');
-      if (orphan.root_exists) note += ' · root досі є на диску';
+          ? t('settings.maint.orphans.preV3NoRoot')
+          : t('settings.maint.orphans.noRoot'));
+      if (orphan.root_exists) note += t('settings.maint.orphans.rootStillOnDisk');
       box.appendChild(maintItem(
         orphan.id,
         fmtBytes(orphan.size),
-        (orphan.files == null ? '? файлів' : orphan.files + ' файлів') + ' · ' + note,
+        (orphan.files == null ? t('settings.maint.orphans.unknownFiles') : plural('memory.count.files', orphan.files)) +
+          ' · ' + note,
         'warn'));
     }
   }
   body.appendChild(setField(
-    'Індекси-сироти' + (orphans.ok && orphans.count
+    t('settings.maint.orphans.sectionLabel') + (orphans.ok && orphans.count
       ? ' · ' + orphans.count + ' · ' + fmtBytes(orphans.bytes)
       : ''),
     box,
-    'Doctor лише показує. Прибирає тільки окрема підтверджена дія — ніколи ' +
-    'автоматично й ніколи разом із діагностикою.'));
+    t('settings.maint.orphans.sectionNote')));
 
   if (settings.cleanupNote) {
     body.appendChild(el('p', { className: 'tok-ok', text: settings.cleanupNote }));
@@ -1743,7 +1832,7 @@ function renderOrphanMaintenance(body, orphans) {
     body.appendChild(el('div', { className: 'maint-actions' }, [
       el('button', {
         className: 'btn',
-        text: 'Прибрати сироти',
+        text: t('settings.maint.orphans.cleanupBtn'),
         attrs: settings.cleanupBusy ? { disabled: '' } : {},
         on: { click: () => {
           settings.cleanupConfirming = true;
@@ -1758,12 +1847,11 @@ function renderOrphanMaintenance(body, orphans) {
   body.appendChild(el('div', { className: 'tok-confirm' }, [
     el('p', {
       className: 'tok-confirm-text',
-      text: 'Буде видалено тільки ці показані derived index id: ' + ids.join(', ') +
-            '. Перед кожним видаленням реєстр перевіряється знову; .md не чіпаються.',
+      text: t('settings.maint.orphans.confirmText', { ids: ids.join(', ') }),
     }),
     el('div', { className: 'tok-confirm-row' }, [
       el('button', {
-        className: 'btn', text: 'Скасувати',
+        className: 'btn', text: t('common.btn.cancel'),
         attrs: settings.cleanupBusy ? { disabled: '' } : {},
         on: { click: () => {
           settings.cleanupConfirming = false;
@@ -1772,7 +1860,9 @@ function renderOrphanMaintenance(body, orphans) {
       }),
       el('button', {
         className: 'btn btn-danger',
-        text: settings.cleanupBusy ? 'Прибираємо…' : 'Видалити ' + ids.length,
+        text: settings.cleanupBusy
+          ? t('settings.maint.orphans.cleaning')
+          : t('settings.maint.orphans.deleteBtn', { n: ids.length }),
         attrs: settings.cleanupBusy ? { disabled: '' } : {},
         on: { click: () => submitOrphanCleanup(ids) },
       }),
@@ -1791,17 +1881,18 @@ async function submitOrphanCleanup(ids) {
       method: 'POST', body: { ids: ids },
     });
     const parts = [
-      'видалено ' + result.removed.length + ' з ' + result.requested.length,
-      'звільнено ' + fmtBytes(result.freed_bytes),
+      t('settings.maint.orphans.result.removed', { removed: result.removed.length, total: result.requested.length }),
+      t('settings.maint.orphans.result.freed', { bytes: fmtBytes(result.freed_bytes) }),
     ];
-    if (result.skipped.length) parts.push('пропущено ' + result.skipped.length);
-    if (result.locked.length) parts.push('locked ' + result.locked.length);
+    if (result.skipped.length) parts.push(t('settings.maint.orphans.result.skipped', { n: result.skipped.length }));
+    if (result.locked.length) parts.push(t('settings.maint.orphans.result.locked', { n: result.locked.length }));
     settings.cleanupNote = parts.join(' · ');
     settings.cleanupConfirming = false;
     settings.maintenance = await api('/api/doctor');
     if (result.locked.length) {
-      settings.maintenanceError = 'Не всі файли видалено: ' + result.locked.map((item) =>
-        item.id + ' (' + item.paths.join(', ') + ')').join(' · ');
+      settings.maintenanceError = t('settings.maint.orphans.lockedError', {
+        list: result.locked.map((item) => item.id + ' (' + item.paths.join(', ') + ')').join(' · '),
+      });
     }
   } catch (err) {
     if (isAuthError(err)) { openGate('rejected'); return; }
@@ -1841,7 +1932,7 @@ async function submitSettings() {
   if (backend.provider === 'api') {
     const dim = parseInt(settings.form.dim, 10);
     if (!settings.form.url.trim()) {
-      settings.errorText = 'Вкажіть адресу ендпоінта.';
+      settings.errorText = t('settings.embed.errors.missingUrl');
       renderSettings();
       return;
     }
@@ -1849,7 +1940,7 @@ async function submitSettings() {
       // Refused here rather than sent: `dim` declares the vector column's
       // width, so a zero would not be a slow degradation but an index that
       // cannot hold what the endpoint returns.
-      settings.errorText = 'Вимірів має бути додатним числом.';
+      settings.errorText = t('settings.embed.errors.dimNotPositive');
       renderSettings();
       return;
     }
@@ -1880,14 +1971,10 @@ async function submitSettings() {
     const pending = pendingRebuilds();
     const pendingCount = pending.actionable.length + pending.running.length + pending.disabled.length;
     settings.note = data.restart_required
-      ? 'Збережено. Набере чинності після перезапуску служби.'
-      : 'Збережено й застосовано. Перевірте бекенд кнопкою вище' +
-        (pendingCount
-          ? ', потім перегенеруйте банки з REBUILD PENDING на головному екрані.'
-          : '.');
+      ? t('settings.embed.saved.restartRequired')
+      : t(pendingCount ? 'settings.embed.saved.appliedPending' : 'settings.embed.saved.appliedNoPending');
     if (refreshFailed) {
-      settings.errorText = 'Налаштування збережено, але не всі стани вдалося ' +
-        'перечитати. Оновіть сторінку — повторно зберігати не потрібно.';
+      settings.errorText = t('settings.embed.errors.refreshFailed');
     }
   } catch (err) {
     if (isAuthError(err)) { openGate('rejected'); return; }
