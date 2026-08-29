@@ -79,6 +79,8 @@ Service (the persistent backend):
 - `src/workqueue.py`, `src/watcher.py` — priority queue + worker and the watchdog→debounce→enqueue path (**phase 3, in flight**).
 - `src/service_ctl.py` — `mnemo service …`, windowless spawn, PID/port state (**phase 5, in flight**).
 - `src/webui/` — the local console served by the backend; `devserver.py` answers contract shapes from fixtures and is a dev tool only, so it grows a route whenever the real API does or dev mode breaks.
+  `frontend/` — the console's actual source: a Next.js static export (App Router, TypeScript, Ant Design, Zustand, TanStack Query).
+  `src/webui/static/` is that export's **build output** (`cd frontend && npm run release`), committed to git, **never hand-edited**; build/dev setup lives in `frontend/README.md`.
   **Every per-bank action lives in one `···` menu** at the right end of the card's title row — reindex, full rebuild, MCP access, remove — and the card carries no buttons of its own.
   That row of buttons was what pinned the column's width from both sides (under 287px it wrapped, over 311px the document ended up narrower than the file list); with only a glyph to fit, the constraint is gone and every card is four lines shorter.
   Removal is the only irreversible action here, and its dialog leads with the **token**, not the megabytes: the index rebuilds, the token is minted and cannot be reissued.
@@ -250,7 +252,8 @@ This manual path stays the one for developing mnemo itself: it always rebuilds t
 Extra steps only when:
 - the embedding model changed in `src/config.py` → also run `~/.mnemo/bin/mnemo warmup` and let the index rebuild;
 - the wiring schema changed (hooks / `.mcp.json` shape) → re-run `~/.mnemo/bin/mnemo init` in each adopted project (additive, idempotent — it only adds mnemo's own keys), with `--migrate` where the project still carries an older mnemo-authored entry.
-  If `.mcp.json` is git-tracked there, `init` refuses until `git rm --cached .mcp.json` — it will not write a bank token into a tracked file.
+  If `.mcp.json` is git-tracked there, `init` refuses until `git rm --cached .mcp.json` — it will not write a bank token into a tracked file;
+- `frontend/` changed → rebuild it first (`cd frontend && npm run release`) and commit the regenerated `src/webui/static/`; the installer mirrors `src/` as committed, it does not build the console itself.
 
 **Coming from v2, the installer notices and says so.** A v2 engine is recognised by what v2 never had — a banks registry — so an absent `state/banks.json` next to `.db` files is unambiguous, and safe to act on: with no registry, no index can belong to a live bank.
 Those indexes are orphaned the instant v3 runs (v2 keyed them by *project* root, v3 by *bank* root) and go via `clean-orphans --yes`.
