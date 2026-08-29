@@ -281,6 +281,72 @@
       }
     }
   },
+  "agents": {
+    "header": {
+      "count": "{n, plural, one {# agent} other {# agents}} · {c, plural, one {# chat} other {# chats}}",
+      "add": "＋ Add agent",
+      "addTitle": "Create or adopt a new agent"
+    },
+    "tree": {
+      "loading": "Loading…",
+      "empty": "No agents yet — \"＋ Add agent\" creates the first one.",
+      "noChats": "No chats yet — select this agent to start one."
+    },
+    "workspace": {
+      "selectHint": "Select an agent on the left, or create a new one.",
+      "stubTitle": "The session console goes here",
+      "stubBody": "Streaming display of the agent's thinking, tool calls and slash commands. Rendered by a separate task (agent-runtime.py plus a WS stream). Switching between agents doesn't stop background generation."
+    },
+    "wizard": {
+      "title": "Add agent",
+      "ariaLabel": "Create agent",
+      "step1": "Persona",
+      "step2": "Backend",
+      "nameLabel": "Agent name",
+      "namePlaceholder": "e.g. Project debug assistant",
+      "claudeMdLabel": "CLAUDE.md",
+      "sourceLabel": "Folder source",
+      "sourceNew": "Create new",
+      "sourceExisting": "Point to an existing folder",
+      "newFolderHint": "Will be created automatically under the engine's own agents directory.",
+      "chosenNote": "✓ Chosen: {path}",
+      "confirm": {
+        "title": "This folder already has something — confirm before adopting",
+        "claudeMd": "CLAUDE.md",
+        "mcp": "MCP servers",
+        "skills": "Skills",
+        "rules": "Rules",
+        "yes": "yes",
+        "no": "no",
+        "note": "What's already there is adopted as-is, nothing gets overwritten; whatever's missing is filled in.",
+        "cancel": "Cancel",
+        "ok": "Create"
+      },
+      "previewError": "Couldn't inspect this folder: {message}",
+      "backendLabel": "Authentication",
+      "backendStandard": "System (Claude Code)",
+      "backendCustom": "Proxy",
+      "backendStandardHint": "Claude Code CLI/SDK defaults — the subscription or key as configured, nothing to fill in.",
+      "hostLabel": "Host",
+      "portLabel": "Port",
+      "modelLabel": "Model override",
+      "modelPlaceholder": "e.g. claude-sonnet-5",
+      "backendSavedHint": "Saved in the agent's own launch.json — per-agent, not a machine setting.",
+      "linksHint": "MCP / Skills / Rules aren't picked here — they attach later, separately, for this agent.",
+      "next": "Next",
+      "submit": "Create agent",
+      "creating": "Creating…",
+      "createdNote": "Agent «{name}» created.",
+      "launchWarnNote": "Agent «{name}» created, but the backend setting couldn't be saved: {error}"
+    },
+    "folder": {
+      "pathLabel": "Folder",
+      "home": "home",
+      "reading": "reading…",
+      "noSubdirs": "no subdirectories",
+      "chooseBtn": "Choose this folder"
+    }
+  },
   "journal": {
     "filter": {
       "bankLabel": "Bank",

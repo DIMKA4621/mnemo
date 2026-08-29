@@ -66,4 +66,11 @@ export const queryKeys = {
     list: (category?: string) => ["catalog", category ?? null] as const,
     one: (entryId: string) => ["catalog", "entry", entryId] as const,
   },
+  agents: {
+    all: ["agents"] as const,
+    one: (slug: string) => ["agents", slug] as const,
+  },
+  agentLaunch: {
+    one: (slug: string) => ["agentLaunch", slug] as const,
+  },
 };

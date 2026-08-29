@@ -151,9 +151,12 @@ FS_FIXTURE: dict[str, list[str]] = {
     "/home/dev/.claude/memory/logs": [],
     "/home/dev/.claude/skills": [],
     "/home/dev/notes": [],
-    "/home/dev/projects": ["mnemo", "voice-agent"],
+    "/home/dev/projects": ["mnemo", "voice-agent", "legacy-tool"],
     "/home/dev/projects/mnemo": ["docs"],
     "/home/dev/projects/mnemo/docs": [],
+    # Agents wizard's "Вказати наявну теку" adoption-preview demo — see
+    # `_AGENT_ADOPTABLE` below (MN-42 Фаза B).
+    "/home/dev/projects/legacy-tool": [],
     # `.claude/memory` here specifically, so the add-bank picker's "одразу
     # підключити проєкт (MCP)" checkbox has a second eligible target — one
     # whose fixture `init` outcome (`_mock_init_result`) is the *honest
@@ -176,6 +179,7 @@ FS_MD: dict[str, int] = {
     "/home/dev/projects": 0,
     "/home/dev/projects/mnemo": 9,
     "/home/dev/projects/mnemo/docs": 9,
+    "/home/dev/projects/legacy-tool": 5,
     "/home/dev/projects/voice-agent": 5,
     "/home/dev/projects/voice-agent/.claude": 5,
     "/home/dev/projects/voice-agent/.claude/memory": 5,
@@ -385,6 +389,160 @@ def _find_duplicate_mcp(content: str, *, exclude_id: str | None) -> dict[str, An
         if _canonical_json(entry["content"]) == normalized:
             return entry
     return None
+
+
+# --------------------------------------------------------------------------
+# agent registry fixture (MN-40 backend / MN-42 Фаза B frontend)
+# --------------------------------------------------------------------------
+#
+# Shaped exactly like `_agent_info()`'s response (`src/api.py`'s agent
+# registry section) — `launch` is the same `read_launch_config()` shape
+# (`{"mode": "standard"}` or `{"mode": "custom", "host", "port", ...}`).
+# `AGENTS[].chats` does not exist: MN-43 (the chat backend) isn't built yet,
+# so the tree's chat lists are always empty — nothing here needs to fake one.
+
+_AGENT_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _agent_slugify(name: str) -> str:
+    base = _AGENT_SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")
+    return base or "agent"
+
+
+def _unique_agent_slug(candidate: str) -> str:
+    with _lock:
+        taken = {a["slug"] for a in AGENTS}
+    if candidate not in taken:
+        return candidate
+    n = 2
+    while f"{candidate}-{n}" in taken:
+        n += 1
+    return f"{candidate}-{n}"
+
+
+AGENTS: list[dict[str, Any]] = [
+    {
+        "slug": "debug-assistant",
+        "name": "Дебаг-асистент проєкту",
+        "root": "/home/dev/.mnemo/agents/debug-assistant",
+        "owns_root": True,
+        "created_at": "2026-08-20T09:00:00+03:00",
+        "bank_id": "agent_debug_assistant",
+        "bank_name": "Дебаг-асистент проєкту",
+        "launch": {"mode": "standard"},
+    },
+    {
+        "slug": "release-manager",
+        "name": "Реліз-менеджер",
+        "root": "/home/dev/.mnemo/agents/release-manager",
+        "owns_root": True,
+        "created_at": "2026-08-21T09:00:00+03:00",
+        "bank_id": "agent_release_manager",
+        "bank_name": "Реліз-менеджер",
+        "launch": {"mode": "custom", "host": "127.0.0.1", "port": 8790, "model": "claude-sonnet-5"},
+    },
+    {
+        "slug": "ui-tester",
+        "name": "Тестувальник UI",
+        "root": "/home/dev/.mnemo/agents/ui-tester",
+        "owns_root": True,
+        "created_at": "2026-08-22T09:00:00+03:00",
+        "bank_id": "agent_ui_tester",
+        "bank_name": "Тестувальник UI",
+        "launch": {"mode": "standard"},
+    },
+]
+
+
+def _find_agent(slug: str) -> dict[str, Any] | None:
+    with _lock:
+        return next((a for a in AGENTS if a["slug"] == slug), None)
+
+
+# Adoption-preview demo: one path in `FS_FIXTURE` that already looks like an
+# agent workspace, so the wizard's "Вказати наявну теку" branch has a
+# non-empty case to confirm — mirrors the mockup's `CLAUDE_FOLDERS`. Every
+# other `FS_FIXTURE` path previews as empty (a fresh folder to build into).
+_AGENT_ADOPTABLE: dict[str, dict[str, Any]] = {
+    "/home/dev/projects/legacy-tool": {
+        "has_claude_md": True,
+        "claude_md_excerpt": "# legacy-tool\n\nAgent for triaging legacy-tool issues.\n",
+        "has_mcp_json": True,
+        "mcp_server_names": ["mnemo-memory", "github"],
+        "has_claude_dir": True,
+        "rule_files": ["v3-build.md"],
+        "skill_dirs": ["code-review"],
+        "has_memory": True,
+        "memory_already_bank": False,
+    },
+}
+
+
+def _agent_preview(root: str) -> dict[str, Any]:
+    """Fixture mirror of `agent_registry.preview_adopt()` — a read-only
+    inspection of a candidate folder, keyed off the same `FS_FIXTURE` the
+    bank picker already browses."""
+    target = (root or "").strip().replace("\\", "/").rstrip("/") or root
+    root_exists = target in FS_FIXTURE
+    adopt_info = _AGENT_ADOPTABLE.get(target)
+    with _lock:
+        already = next((a["slug"] for a in AGENTS if a["root"].rstrip("/") == target), None)
+    empty = root_exists and not FS_FIXTURE.get(target) and adopt_info is None
+    suggested_name = target.rsplit("/", 1)[-1] or target
+    suggested_slug = _unique_agent_slug(_agent_slugify(suggested_name))
+    base: dict[str, Any] = {
+        "root_exists": root_exists,
+        "empty": empty,
+        "already_registered_agent": already,
+        "has_claude_md": False,
+        "claude_md_excerpt": None,
+        "has_mcp_json": False,
+        "mcp_server_names": [],
+        "has_claude_dir": False,
+        "rule_files": [],
+        "skill_dirs": [],
+        "has_memory": False,
+        "memory_already_bank": False,
+        "suggested_slug": suggested_slug,
+        "suggested_name": suggested_name,
+    }
+    if adopt_info:
+        base.update(adopt_info)
+        base["empty"] = False
+    return base
+
+
+_LAUNCH_MODES = frozenset({"standard", "custom"})
+_LAUNCH_CUSTOM_FIELDS = frozenset({"mode", "host", "port", "model", "autocompact", "extra_args"})
+
+
+def _validate_launch_config(data: Any) -> dict[str, Any] | None:
+    """Fixture mirror of `agent_registry.validate_launch_config` — returns
+    the normalized dict, or `None` on anything invalid (the caller turns
+    that into a 400, same as the real endpoint's `InvalidLaunchConfig`)."""
+    if not isinstance(data, dict):
+        return None
+    mode = data.get("mode")
+    if mode not in _LAUNCH_MODES:
+        return None
+    if mode == "standard":
+        return {"mode": "standard"} if not (set(data) - {"mode"}) else None
+    if set(data) - _LAUNCH_CUSTOM_FIELDS:
+        return None
+    host = data.get("host")
+    if not isinstance(host, str) or not host.strip():
+        return None
+    port = data.get("port")
+    if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
+        return None
+    result: dict[str, Any] = {"mode": "custom", "host": host, "port": port}
+    if data.get("model"):
+        result["model"] = data["model"]
+    if "autocompact" in data:
+        result["autocompact"] = data["autocompact"]
+    if "extra_args" in data:
+        result["extra_args"] = data["extra_args"]
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -1324,6 +1482,18 @@ class Handler(BaseHTTPRequestHandler):
             self.delete_catalog_entry(unquote(parsed.path[len("/api/catalog/"):]))
             return
 
+        if parsed.path.startswith("/api/agents/"):
+            slug_ref = unquote(parsed.path[len("/api/agents/"):])
+            with _lock:
+                before = len(AGENTS)
+                AGENTS[:] = [a for a in AGENTS if a["slug"] != slug_ref]
+                removed = len(AGENTS) != before
+            if not removed:
+                self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
+                return
+            self.json_out(200, {"ok": True})
+            return
+
         if not parsed.path.startswith("/api/banks/"):
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -1432,6 +1602,28 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorised():
             self.fail(401, "unauthorized", "missing or invalid token")
             return
+
+        if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/launch"):
+            slug_ref = unquote(parsed.path[len("/api/agents/"): -len("/launch")])
+            agent = _find_agent(slug_ref)
+            if agent is None:
+                self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self.fail(422, "validation_error", "body is not valid JSON")
+                return
+            normalized = _validate_launch_config(body)
+            if normalized is None:
+                self.fail(400, "invalid_launch_config", "invalid launch config", {"slug": slug_ref})
+                return
+            with _lock:
+                agent["launch"] = normalized
+            self.json_out(200, dict(normalized))
+            return
+
         if parsed.path != "/api/settings":
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -1504,6 +1696,16 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/catalog":
             self.post_catalog_entry(body)
+            return
+        if parsed.path == "/api/agents/preview":
+            root = str(body.get("root") or "").strip()
+            if not root:
+                self.fail(400, "bad_request", "'root' is required")
+                return
+            self.json_out(200, _agent_preview(root))
+            return
+        if parsed.path == "/api/agents":
+            self.post_agent(body)
             return
         if parsed.path == "/api/autostart":
             if "enabled" not in body:
@@ -1833,6 +2035,25 @@ class Handler(BaseHTTPRequestHandler):
             self.json_out(200, _catalog_entry_info(entry))
             return
 
+        if path == "/api/agents":
+            with _lock:
+                agents = [dict(a) for a in AGENTS]
+            self.json_out(200, {"agents": agents})
+            return
+
+        if path.startswith("/api/agents/"):
+            rest = path[len("/api/agents/"):]
+            wants_launch = rest.endswith("/launch")
+            if wants_launch:
+                rest = rest[: -len("/launch")]
+            slug_ref = unquote(rest)
+            agent = _find_agent(slug_ref)
+            if agent is None:
+                self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
+                return
+            self.json_out(200, dict(agent["launch"]) if wants_launch else dict(agent))
+            return
+
         self.fail(404, "internal", "no route " + path)
 
     def get_logs(self, query: dict) -> None:
@@ -1911,6 +2132,51 @@ class Handler(BaseHTTPRequestHandler):
         if body.get("init"):
             info["init"] = _mock_init_result(root)
         self.json_out(201, info)
+
+    def post_agent(self, body: dict) -> None:
+        """`POST /api/agents` — mirrors `api_create_agent`'s shape: a name is
+        required, an explicit `root` gets `owns_root=False` and a non-empty
+        target needs `confirm_adopt` (409 `adoption_confirmation_required`
+        otherwise, carrying the same preview the wizard already showed)."""
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self.fail(400, "bad_request", "'name' cannot be empty")
+            return
+        claude_md = body.get("claude_md")
+        confirm_adopt = bool(body.get("confirm_adopt"))
+        root_in = body.get("root")
+
+        with _lock:
+            slug = _unique_agent_slug(_agent_slugify(name))
+            if root_in:
+                root = str(root_in).strip().replace("\\", "/").rstrip("/")
+                if not root.startswith("/"):
+                    self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root_in})
+                    return
+                preview = _agent_preview(root)
+                if preview["root_exists"] and not preview["empty"] and not confirm_adopt:
+                    self.fail(409, "adoption_confirmation_required",
+                              f"{root} is not empty — confirm adoption to proceed",
+                              {"root": root_in, "preview": preview})
+                    return
+                owns_root = False
+            else:
+                root = f"/home/dev/.mnemo/agents/{slug}"
+                owns_root = True
+
+            agent = {
+                "slug": slug,
+                "name": name,
+                "root": root,
+                "owns_root": owns_root,
+                "created_at": now_iso(),
+                "bank_id": f"agent_{slug.replace('-', '_')}",
+                "bank_name": name,
+                "launch": {"mode": "standard"},
+            }
+            AGENTS.append(agent)
+        _ = claude_md  # fixture has no filesystem to write it to — accepted, not stored
+        self.json_out(201, dict(agent))
 
     def post_catalog_entry(self, body: dict) -> None:
         """`POST /api/catalog` — same validation/dedup rules as `catalog.add`

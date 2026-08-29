@@ -1,0 +1,142 @@
+/* Агенти: дерево агент→чати + робоча область. Ported from the live-verified
+ * mockup (`.claude/scratch/agents-page-mockup/styles.css`'s `.ag-*`/`.wiz-*`
+ * rules), same class names, same layout. Self-contained on purpose — does
+ * not rely on `.pane`/`.pane-body` from `memory.css` (a different route's
+ * stylesheet, not guaranteed loaded here). `.ag-layout`'s
+ * `grid-template-columns` fallback below is only the value for the instant
+ * before `AgentsPage.tsx` applies the hydrated store width inline — same
+ * pattern as `registry.css`'s `.reg-list`. */
+
+.ag-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 300px 6px minmax(0, 1fr);
+}
+
+.ag-tree-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-pane);
+  border-right: 1px solid var(--line);
+}
+
+.ag-workspace {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-pane);
+}
+
+/* ---- tree ------------------------------------------------------------- */
+
+.ag-agent { border-bottom: 1px solid var(--line); }
+
+.ag-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 8px 8px 8px 13.6px;
+  background: color-mix(in srgb, var(--bg-hover) 72%, var(--bg-pane));
+  border: 0;
+  text-align: left;
+  color: var(--fg);
+  cursor: pointer;
+}
+.ag-agent-row:hover { background: var(--bg-hover); }
+.ag-agent-row.is-selected { background: var(--sel-bg); color: var(--sel-fg); box-shadow: inset 2px 0 0 var(--accent); }
+
+.ag-agent-title { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 9px; }
+.ag-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 12.5px; }
+
+.ag-agent-count { flex: none; color: var(--fg-mute); font-family: var(--mono); font-size: 11px; }
+.ag-twisty { flex: none; width: 12px; text-align: center; color: var(--fg-mute); font-family: var(--mono); font-size: 11px; }
+
+.ag-chats { padding: 0; }
+
+.ag-no-chats { padding: 7px 8px 9px 13.6px; color: var(--fg-mute); font-size: 11.5px; }
+
+/* ---- workspace (chat/settings stub) ------------------------------------ */
+
+.ag-ws-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+.ag-ws-title { font-weight: 650; font-size: 13px; }
+.ag-ws-sub { color: var(--fg-mute); font-size: 11.5px; font-family: var(--mono); }
+
+.ag-ws-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+}
+
+.ag-ws-stub {
+  max-width: 420px;
+  text-align: center;
+  color: var(--fg-mute);
+  padding: 26px 22px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+}
+.ag-ws-stub .glyph { font-size: 26px; margin-bottom: 8px; }
+.ag-ws-stub p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.55; }
+.ag-ws-stub code { font-family: var(--mono); background: var(--bg-hover); padding: 1px 5px; border-radius: 3px; }
+
+/* ---- create-agent wizard ------------------------------------------------ */
+
+.wiz-steps { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.wiz-step { display: flex; align-items: center; gap: 7px; color: var(--fg-mute); font-size: 12px; }
+.wiz-step.is-active { color: var(--fg); }
+.wiz-step.is-done { color: var(--fg-dim); }
+.wiz-step-mark {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 50%;
+  color: var(--fg-mute); font-family: var(--mono); font-size: 11px;
+}
+.wiz-step.is-active .wiz-step-mark { border-color: var(--accent); color: var(--accent); }
+.wiz-step.is-done .wiz-step-mark { border-color: var(--ok); color: var(--ok); }
+.wiz-step-line { flex: 1 1 auto; height: 1px; background: var(--line); max-width: 60px; }
+
+.wiz-field-label { display: block; margin: 8px 0 3px; color: var(--fg-mute); font-size: 12px; }
+.wiz-field-label:first-child { margin-top: 0; }
+.wiz-hint { margin: 4px 0 0; color: var(--fg-mute); font-size: 11.5px; line-height: 1.5; }
+
+.wiz-source-row { margin: 4px 0 2px; }
+
+.wiz-confirm {
+  margin-top: 8px; padding: 10px 11px;
+  background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: var(--radius);
+}
+.wiz-confirm-title { margin: 0 0 6px; color: var(--warn-fg); font-size: 12.5px; font-weight: 600; }
+.wiz-confirm-list { margin: 0 0 9px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--fg-dim); }
+.wiz-confirm-list li span.v { font-family: var(--mono); color: var(--fg); }
+.wiz-confirm-row { display: flex; justify-content: flex-end; gap: 8px; }
+
+.wiz-backend-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding: 10px 11px; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: var(--radius); }
+.wiz-backend-fields .row { display: flex; gap: 8px; }
+.wiz-backend-fields .row > * { flex: 1 1 auto; }
+
+/* ---- responsive: keep the agent tree from breaking narrow --------------
+ * Below 940px the two columns cannot sit side by side — same fallback
+ * `registry.css`'s `.reg-list` uses: the tree becomes a fixed-height,
+ * independently-scrolling strip stacked above the workspace. */
+@media (max-width: 940px) {
+  .ag-layout { display: flex; flex-direction: column; }
+  .ag-layout .ag-tree-pane { flex: none; height: 260px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .ag-layout .ag-workspace { flex: 1 1 auto; min-height: 0; }
+  .ag-layout .mnemo-pane-resizer { display: none; }
+}
