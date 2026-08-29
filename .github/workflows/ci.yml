@@ -54,6 +54,12 @@ jobs:
       - name: Run native Windows installer smoke test
         if: runner.os == 'Windows'
         run: python tests/test_install_windows.py
+      # engine_update.py shells out to `powershell` directly (not `pwsh`),
+      # so this is practically Windows-only -- it isn't skipped on other
+      # OSes so much as it wouldn't find its interpreter there.
+      - name: Run engine self-update tests
+        if: runner.os == 'Windows'
+        run: python tests/test_engine_update.py
       # install.sh and uninstall.sh had never been executed by anything,
       # anywhere: the steps above install the dependencies straight into the
       # runner and test the engine's internals, so the POSIX pair shipped on
@@ -63,3 +69,26 @@ jobs:
       - name: Run POSIX installer smoke test
         if: runner.os != 'Windows'
         run: python tests/test_install_posix.py
+
+  # Guards against committing src/webui/static without rebuilding it from
+  # frontend/ first. Separate from the `platform` matrix (ubuntu-only, no
+  # need to repeat this once per OS/python combination).
+  #
+  # frontend/next.config.ts pins generateBuildId to a fixed string, so a
+  # clean rebuild of unchanged source diffs empty here -- without that, the
+  # random per-build buildId Next.js otherwise bakes into every HTML file
+  # would make this red even with zero real source changes.
+  frontend-static-guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: frontend/.nvmrc
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - run: npm ci
+        working-directory: frontend
+      - run: npm run release
+        working-directory: frontend
+      - run: git diff --exit-code -- src/webui/static
