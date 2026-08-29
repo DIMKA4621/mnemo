@@ -15,18 +15,17 @@ import { LangToggle } from "./LangToggle";
  * live here (user decision, 2026-08-29): it moved to the sidebar footer's
  * `WsStatusIndicator`, the same spot the vanilla console's machine facts
  * used, so the topbar never says anything about the machine.
+ * Both controls are icon-sized `.sb-toggle` buttons in one row at one
+ * height (`.top-right`, see `shell.css`) — `LangToggle`'s dropdown opens as
+ * an overlay, so it never reflows this row.
  */
 export function Topbar() {
   return (
     <header className="topbar">
       <div className="top-left" />
       <div className="top-right">
-        <div className="top-right-slot">
-          <LangToggle />
-        </div>
-        <div className="top-right-slot">
-          <ThemeToggle />
-        </div>
+        <LangToggle />
+        <ThemeToggle />
       </div>
     </header>
   );

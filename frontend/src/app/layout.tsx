@@ -30,7 +30,13 @@ if (localStorage.getItem('mnemo_theme') === 'light') {
 
 export default function RootLayout({ children }: LayoutProps<"/">) {
   return (
-    <html lang="en">
+    // `suppressHydrationWarning` scoped to this one element only: the
+    // bootstrap script above deliberately sets `data-theme` on `<html>`
+    // before React hydrates, which React would otherwise (correctly) flag
+    // as a server/client attribute mismatch. This is the documented
+    // Next.js pattern for exactly this early-theme-script case — it does
+    // not silence hydration warnings for the tree below.
+    <html lang="en" suppressHydrationWarning>
       <head>
         <script dangerouslySetInnerHTML={{ __html: THEME_BOOTSTRAP }} />
       </head>

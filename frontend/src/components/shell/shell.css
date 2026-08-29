@@ -115,32 +115,25 @@
   min-width: 0;
 }
 .top-left { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
-/* Stacked, not side-by-side (2026-08-29, user request): language above
-   theme, both centered on the same vertical axis in the topbar's own
-   corner. `.topbar`'s `min-height` (not a fixed `height`) grows to fit this
-   two-row stack on its own. */
-.top-right { flex: none; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+/* One row, one height (2026-08-29, revised same day): the earlier stacked
+   layout, and before that the `Select`-based `LangToggle`, both reserved
+   inline space proportional to their own content, so the row never lined
+   up with the plain icon button next to it. Both controls are now the same
+   `.sb-toggle` box (see below), so a plain row with no extra alignment
+   hacks is enough. */
+.top-right { flex: none; display: flex; align-items: center; gap: 4px; }
 
-/* Both controls sit in an identically-sized slot, right-aligned within it
-   (`align-items` on `.top-right` alone doesn't help: the `Select`'s own box
-   is far wider than the plain icon button's, so a naive edge-align of two
-   very differently sized boxes still reads as crooked). The slot width is
-   the `Select`'s own rendered width (it fills the slot, `width: '100%'` in
-   `LangToggle.tsx`) — the icon button, much narrower, is explicitly pushed
-   to the same right edge here, landing its icon at the same X as the
-   `Select`'s dropdown arrow (AntD pins that arrow flush right internally
-   via its own margin, independent of anything set here — confirmed live:
-   trying to `justify-content: center` the `Select`'s internal text+arrow
-   pair fights that internal margin and truncates the text instead of
-   centering it, so this only touches the slot, never the `Select`'s own
-   layout). */
-/* 60px, not a rounder number: measured live (`content.scrollWidth` vs.
-   `clientWidth`) — both "EN" and "UK" need exactly 56px of slot width
-   before AntD's `Select` starts silently ellipsis-truncating the text
-   (`E…`/`U…`, no console warning, no layout error — only visible by eye or
-   by checking `scrollWidth > clientWidth`). 60px keeps a small margin
-   above that measured threshold rather than sitting exactly on it. */
-.top-right-slot { width: 60px; display: flex; justify-content: flex-end; }
+/* `LangToggle`'s trigger reuses `.sb-toggle` (padding, radius, hover) so it
+   is pixel-identical in height to `ThemeToggle`'s icon button; only the
+   width differs (text vs. `svg`), fixed here so "EN"/"UK" don't shift the
+   button's own size between the two. AntD's `Dropdown` menu is a portaled
+   overlay — it draws over the page and never affects this box's layout. */
+.lang-toggle {
+  min-width: 26px;
+  justify-content: center;
+  font: 600 11px/1 var(--mono);
+  letter-spacing: .02em;
+}
 
 .page-title { font-size: 13.5px; font-weight: 650; white-space: nowrap; }
 
