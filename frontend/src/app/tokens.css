@@ -262,7 +262,20 @@ svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width:
   cursor: col-resize;
   background: var(--line);
 }
-.mnemo-pane-resizer:hover { background: var(--accent); }
+.mnemo-pane-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  right: -3px;
+}
+.mnemo-pane-resizer:hover,
+body.is-resizing-pane .mnemo-pane-resizer { background: var(--accent); }
+/* Set on `<body>` for the whole drag gesture — listeners live on `document`
+   (`components/common/PaneResizer.tsx`), so a fast mouse movement slipping
+   off the 6px track mid-drag never drops the resize. */
+body.is-resizing-pane { cursor: col-resize; user-select: none; }
 
 /* ---- journal live-event flash ---- */
 .mnemo-flash { background: var(--flash-bg); }

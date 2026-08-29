@@ -63,7 +63,8 @@
       "close": "Close",
       "closeEsc": "Close (Esc)",
       "copy": "copy",
-      "copied": "copied"
+      "copied": "copied",
+      "back": "← Back"
     },
     "resizerTitle": "Drag to resize",
     "picker": {
@@ -94,7 +95,7 @@
         "willBecome": "Will become the bank: {root}",
         "project": "Project: {root}",
         "willConnect": "Will be connected once the structure is created",
-        "projectOnly": "available only for a bank at «<project>/.claude/memory»"
+        "projectOnly": "available only for a bank at «‹project›/.claude/memory»"
       },
       "mcpSkipped": "MCP not connected",
       "mcpConnected": "MCP connected",
@@ -203,7 +204,6 @@
       "selectFileHint": "Select a file in the tree"
     },
     "header": {
-      "panelAriaLabel": "Panel",
       "addBank": "＋ Add bank",
       "addBankTitle": "Register a new directory with .md as a bank"
     },

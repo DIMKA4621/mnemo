@@ -63,7 +63,8 @@
       "close": "Закрити",
       "closeEsc": "Закрити (Esc)",
       "copy": "копіювати",
-      "copied": "скопійовано"
+      "copied": "скопійовано",
+      "back": "← Назад"
     },
     "resizerTitle": "Перетягніть, щоб змінити ширину",
     "picker": {
@@ -94,7 +95,7 @@
         "willBecome": "Банком стане: {root}",
         "project": "Проєкт: {root}",
         "willConnect": "Буде підключено після створення структури",
-        "projectOnly": "доступно лише для банку в «<проєкт>/.claude/memory»"
+        "projectOnly": "доступно лише для банку в «‹проєкт›/.claude/memory»"
       },
       "mcpSkipped": "MCP не підключено",
       "mcpConnected": "MCP підключено",
@@ -203,7 +204,6 @@
       "selectFileHint": "Оберіть файл у дереві"
     },
     "header": {
-      "panelAriaLabel": "Панель",
       "addBank": "＋ Додати банк",
       "addBankTitle": "Зареєструвати нову директорію з .md як банк"
     },

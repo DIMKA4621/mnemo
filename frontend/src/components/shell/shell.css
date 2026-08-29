@@ -136,8 +136,10 @@
 }
 
 .page-title { font-size: 13.5px; font-weight: 650; white-space: nowrap; }
+.page-sub { color: var(--fg-mute); font-size: 11.5px; white-space: nowrap; }
 
 @media (max-width: 940px) {
+  .page-sub { display: none; }
   .mnemo-app, .mnemo-app.is-collapsed { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
   .sb-brand { display: none; }
   .sb-foot { justify-content: center; padding: 8px 4px; }

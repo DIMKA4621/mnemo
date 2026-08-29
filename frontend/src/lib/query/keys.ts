@@ -17,6 +17,15 @@ export const queryKeys = {
   banks: {
     all: ["banks"] as const,
   },
+  bankToken: {
+    one: (bankId: string) => ["bankToken", bankId] as const,
+  },
+  bankMcpWiring: {
+    one: (bankId: string) => ["bankMcpWiring", bankId] as const,
+  },
+  fsDirs: {
+    at: (path: string | null) => ["fsDirs", path ?? null] as const,
+  },
   tree: {
     all: ["tree"] as const,
     bank: (bankId: string) => ["tree", bankId] as const,
