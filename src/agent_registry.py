@@ -59,7 +59,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from . import config, registry
+from . import catalog, config, registry
 
 log = logging.getLogger("mnemo.agent_registry")
 
@@ -77,6 +77,57 @@ class AgentNotFound(LookupError):
 
 class AgentExists(ValueError):
     """The target folder already exists and is not empty."""
+
+
+class InvalidLinksConfig(ValueError):
+    """``links.json`` is malformed, or fails structural validation."""
+
+
+class LinkNotFound(LookupError):
+    """No link matches the given (agent, category, entry_id)."""
+
+
+class LinkExists(ValueError):
+    """This catalog entry is already attached in this (agent, category)."""
+
+
+class LinkNameExists(ValueError):
+    """Another link in this (agent, category) already carries this name.
+
+    ``existing_entry_id`` names the entry already holding it, so the API
+    layer can surface it in the error detail — same shape as
+    ``catalog.EntryExists``'s ``existing_id``.
+    """
+
+    def __init__(self, message: str, *, existing_entry_id: str | None = None) -> None:
+        super().__init__(message)
+        self.existing_entry_id = existing_entry_id
+
+
+class CategoryMismatch(ValueError):
+    """The catalog entry's own category does not match the URL category."""
+
+
+class UnknownLinkVar(ValueError):
+    """``vars`` names a key the catalog entry does not currently declare."""
+
+
+class InvalidSubstitutedConfig(ValueError):
+    """An ``mcp`` entry's content, after ``{{VAR}}`` substitution, is not
+    valid JSON. Nothing is written when this is raised."""
+
+
+class InvalidLinkName(ValueError):
+    """``name`` is empty, or would be unsafe to use as a filesystem path
+    component (``skill``/``rule`` categories only — an ``mcp`` link's name is
+    only ever a JSON object key, never a path)."""
+
+
+class LinkPathConflict(ValueError):
+    """The on-disk materialization target already exists and is not owned by
+    any link this agent's ``links.json`` currently tracks — most likely a
+    manual edit to ``.mcp.json``/``.claude/skills``/``.claude/rules``.
+    Refuse rather than silently overwrite it."""
 
 
 # --------------------------------------------------------------- settings
@@ -306,6 +357,39 @@ def get(slug: str) -> Agent:
     raise AgentNotFound(f"no agent with slug {slug!r}")
 
 
+def rename(slug: str, new_name: str) -> Agent:
+    """Change only ``Agent.name`` — ``slug`` and ``root`` never move.
+
+    Unlike ``registry.update``'s bank rename, this has no cross-entry
+    uniqueness check: ``Agent.name`` was never unique to begin with
+    (`create`/`adopt` never enforce it either, only `slug` is), so a rename
+    is not the place to start.
+    """
+    clean = (new_name or "").strip()
+    if not clean:
+        raise ValueError("name must not be empty")
+    with _lock, _file_lock():
+        agents = load(force=True)
+        idx = next(
+            (i for i, a in enumerate(agents) if _norm_slug(a.slug) == _norm_slug(slug)),
+            None,
+        )
+        if idx is None:
+            raise AgentNotFound(f"no agent with slug {slug!r}")
+        current = agents[idx]
+        updated = Agent(
+            slug=current.slug,
+            name=clean,
+            root=current.root,
+            owns_root=current.owns_root,
+            created_at=current.created_at,
+            extra=current.extra,
+        )
+        agents[idx] = updated
+        save(agents)
+        return updated
+
+
 # --------------------------------------------------------------- launch.json
 
 
@@ -425,6 +509,578 @@ def write_launch_config(root: Path, data: dict) -> dict:
     )
     os.replace(tmp, path)
     return validated
+
+
+# ---------------------------------------------------------------- CLAUDE.md
+
+
+def _claude_md_path(root: Path) -> Path:
+    return Path(root) / "CLAUDE.md"
+
+
+def read_claude_md(root: Path) -> str:
+    """The agent's ``CLAUDE.md``. Missing file -> ``""``, never an error —
+    same "absence is not broken" stance as `read_launch_config`."""
+    try:
+        return _claude_md_path(root).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def write_claude_md(root: Path, text: str) -> None:
+    """Write atomically (tmp + ``os.replace``). No JSON validation — this is
+    plain text, unlike ``launch.json``/``links.json``."""
+    path = _claude_md_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(text or "", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+# ----------------------------------------------------------------- links.json
+#
+# The agent <-> catalog attachment record — deliberately its own file,
+# separate from ``agents.json`` (the registry) and ``launch.json`` (how to
+# start the agent): one responsibility, one file, same as the rest of this
+# module. Same "light" pattern as ``launch.json``/``CLAUDE.md`` — no
+# cross-process ``_file_lock()``, this is a single agent's own file, not a
+# shared registry several processes race to edit — but still validated on
+# read the way `launch.json` is, since it is just as hand-editable.
+#
+# `vars` here is a NAME -> VALUE mapping (what to substitute a catalog
+# entry's `{{VAR}}` placeholders with for THIS attachment). That is the
+# opposite shape from `catalog.CatalogEntry.vars`, which is a *list* of the
+# placeholder *names* an entry declares — deliberately asymmetric: the
+# catalog knows which vars an entry needs, an agent's link knows what to fill
+# them in with. Easy to confuse the two; do not.
+
+
+LINKS_VERSION = 1
+
+
+def _links_path(root: Path) -> Path:
+    return Path(root) / "links.json"
+
+
+def _default_links_doc() -> dict:
+    return {"version": LINKS_VERSION, "mcp": [], "skill": [], "rule": []}
+
+
+def _normalize_links_doc(data: Any) -> dict:
+    if not isinstance(data, dict):
+        raise InvalidLinksConfig("links.json must be a JSON object")
+    doc: dict[str, Any] = {"version": LINKS_VERSION}
+    for category in catalog.CATEGORIES:
+        raw = data.get(category, [])
+        if not isinstance(raw, list):
+            raise InvalidLinksConfig(f"{category!r} must be an array")
+        bucket: list[dict[str, Any]] = []
+        for item in raw:
+            if not isinstance(item, dict):
+                raise InvalidLinksConfig(f"a {category!r} entry must be an object")
+            entry_id = item.get("entry_id")
+            name = item.get("name")
+            link_vars = item.get("vars", {})
+            if not isinstance(entry_id, str) or not entry_id:
+                raise InvalidLinksConfig(f"a {category!r} entry is missing 'entry_id'")
+            if not isinstance(name, str) or not name:
+                raise InvalidLinksConfig(f"a {category!r} entry is missing 'name'")
+            if not isinstance(link_vars, dict) or not all(
+                isinstance(k, str) and isinstance(v, str) for k, v in link_vars.items()
+            ):
+                raise InvalidLinksConfig(
+                    f"a {category!r} entry's 'vars' must be an object of string -> string"
+                )
+            bucket.append({"entry_id": entry_id, "name": name, "vars": dict(link_vars)})
+        doc[category] = bucket
+    return doc
+
+
+def read_links_config(root: Path) -> dict:
+    """This agent's link record. Missing file -> the empty document, never
+    an error — same "absence is not broken" stance as `read_launch_config`."""
+    path = _links_path(root)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _default_links_doc()
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidLinksConfig(f"{path} is not valid JSON: {exc}") from exc
+    return _normalize_links_doc(data)
+
+
+def write_links_config(root: Path, data: dict) -> dict:
+    """Validate, then write atomically (tmp + ``os.replace``). Returns the
+    normalised document that was written."""
+    normalized = _normalize_links_doc(data)
+    path = _links_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(normalized, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(tmp, path)
+    return normalized
+
+
+# --------------------------------------------------- links.json: materialization
+#
+# Write-through, at attach/edit/detach time — never at read time. Claude
+# Code's own CLI reads `.mcp.json` / `.claude/skills/` / `.claude/rules/`
+# when an agent starts; mnemo does not intercept that read, so the only way
+# a catalog entry actually reaches the agent is to write these files
+# ourselves, right now, in the same call that records the link.
+
+_VAR_RE = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")  # mirrors catalog._VAR_RE
+
+
+def _substitute_vars(content: str, values: dict[str, str]) -> str:
+    """``{{VAR}}`` -> ``values[VAR]`` for every name `values` supplies; a
+    placeholder with no supplied value is left as literal text."""
+    return _VAR_RE.sub(lambda m: values.get(m.group(1), m.group(0)), content or "")
+
+
+def _parse_substituted_mcp_config(content: str) -> Any:
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise InvalidSubstitutedConfig(
+            f"substituted config is not valid JSON: {exc}"
+        ) from exc
+
+
+_WINDOWS_INVALID_CHARS = frozenset('<>:"|?*')
+
+_WINDOWS_RESERVED_NAMES = frozenset({
+    "con", "prn", "aux", "nul",
+    *(f"com{i}" for i in range(1, 10)),
+    *(f"lpt{i}" for i in range(1, 10)),
+})
+
+
+def _validate_link_name_path_safe(root: Path, category: str, local_name: str) -> None:
+    """``local_name`` becomes a real filesystem path component under this
+    agent's ``.claude/skills/`` or ``.claude/rules/`` — validate it the way
+    a filesystem path deserves, not just against a couple of patterns an
+    attacker might type.
+
+    Three independent checks, each catching a different shape of bad input:
+
+    * **Containment**, after actually resolving the candidate path — this is
+      the one that matters. A bare separator/``..`` denylist misses a
+      Windows drive-letter-anchored name (``"C:mnemo-poc"``): ``pathlib``'s
+      ``/`` treats a component starting with ``X:`` as a NEW anchor and
+      silently discards everything joined before it, so ``Path(root) /
+      ".claude" / "skills" / "C:mnemo-poc"`` resolves to ``C:\\mnemo-poc``
+      — nowhere near ``root`` (confirmed live: this actually wrote a
+      SKILL.md to the drive root before this check existed). Resolving the
+      real candidate and checking it stays under ``root`` closes this whole
+      class of "anchor" tricks in one place, instead of special-casing
+      individual patterns. The separator/``.``/``..`` checks stay too — not
+      as the security boundary any more, but because a name silently
+      spanning multiple path segments (``"a/b"``) is confusing even when it
+      would have stayed under ``root``.
+    * A **denylist of characters NTFS itself rejects** (``<>:"|?*``) —
+      without this, ``mkdir``/``write_text`` raises a raw ``OSError`` that
+      would otherwise surface as an undifferentiated 500, not a clean 400.
+    * **Windows reserved device names** (``con``, ``nul``, ``prn``, ``aux``,
+      ``com1``..``9``, ``lpt1``..``9``), checked against the name's stem
+      before its FIRST dot — ``"nul.md"`` is exactly as reserved as
+      ``"nul"`` on Windows, and without this check ``mkdir("nul")``
+      sometimes silently succeeds (observed: it really does create a
+      directory) and sometimes doesn't, which is worse than a clean
+      rejection either way.
+    """
+    if not local_name or "/" in local_name or "\\" in local_name or local_name in (".", ".."):
+        raise InvalidLinkName(
+            f"name {local_name!r} cannot be used as a file/folder name "
+            f"(no path separators, and not '.' or '..')"
+        )
+    bad_chars = set(local_name) & _WINDOWS_INVALID_CHARS
+    if bad_chars:
+        raise InvalidLinkName(
+            f"name {local_name!r} contains character(s) not valid in a "
+            f"file/folder name: {sorted(bad_chars)!r}"
+        )
+    stem = local_name.split(".", 1)[0].strip().lower()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        raise InvalidLinkName(
+            f"name {local_name!r} is a reserved device name on Windows"
+        )
+
+    candidate = _skill_dir(root, local_name) if category == catalog.CATEGORY_SKILL \
+        else _rule_md_path(root, local_name)
+    try:
+        contained = candidate.resolve().is_relative_to(Path(root).resolve())
+    except (OSError, ValueError) as exc:
+        raise InvalidLinkName(f"name {local_name!r} is not a usable path: {exc}") from exc
+    if not contained:
+        raise InvalidLinkName(
+            f"name {local_name!r} would resolve outside the agent's own folder"
+        )
+
+
+def _skill_dir(root: Path, local_name: str) -> Path:
+    return Path(root) / ".claude" / "skills" / local_name
+
+
+def _skill_md_path(root: Path, local_name: str) -> Path:
+    return _skill_dir(root, local_name) / "SKILL.md"
+
+
+def _rule_md_path(root: Path, local_name: str) -> Path:
+    # `local_name` is the mockup-style name and already carries its own
+    # `.md` — this is the filename verbatim, no suffix is appended here.
+    return Path(root) / ".claude" / "rules" / local_name
+
+
+def _mcp_json_path(root: Path) -> Path:
+    return Path(root) / ".mcp.json"
+
+
+def _read_mcp_servers(root: Path) -> tuple[dict, dict] | None:
+    """``(doc, mcpServers)`` for this agent's ``.mcp.json``, or ``None`` if
+    the file is missing/unreadable/malformed. Read-only helper — never
+    called from a write path without also handling the "file does not
+    parse" case explicitly (see `_merge_mcp_server`).
+
+    A malformed ``.mcp.json`` (hand-corrupted mid-edit, say) falls through
+    to ``None`` rather than raising: a file we cannot parse is a file whose
+    other content we cannot preserve either way, so `_merge_mcp_server`
+    rebuilds it with just this one key instead of refusing outright and
+    leaving the agent stuck until a human fixes the JSON by hand. This is
+    the one case the `path_conflict` "never overwrite a manual edit" guard
+    cannot catch, because it cannot see what is there to conflict with.
+    """
+    path = _mcp_json_path(root)
+    if not path.exists():
+        return None
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(doc, dict):
+        return None
+    servers = doc.get("mcpServers")
+    return doc, (servers if isinstance(servers, dict) else {})
+
+
+def _check_path_conflict(
+    root: Path, category: str, local_name: str, bucket: list[dict[str, Any]]
+) -> None:
+    """Refuse to materialize at `local_name` when the on-disk target already
+    exists and no entry already in `bucket` (this category's own list,
+    *before* the current attach/update is applied to it) claims that name.
+
+    Deliberately checked against `bucket` rather than "is this the entry
+    being updated": on a rename `bucket` still holds the entry under its OLD
+    name, so a new name never matches anything in it and the check runs
+    cleanly against the new target; on a same-name update `bucket` already
+    holds this exact name, so the check is skipped — the file on disk is
+    ours, not evidence of somebody else's manual edit.
+    """
+    owned = any(link["name"] == local_name for link in bucket)
+    if owned:
+        return
+
+    if category == catalog.CATEGORY_MCP:
+        found = _read_mcp_servers(root)
+        if found is not None:
+            _, servers = found
+            if local_name in servers:
+                raise LinkPathConflict(
+                    f".mcp.json already has an mcpServers entry named {local_name!r}"
+                )
+    elif category == catalog.CATEGORY_SKILL:
+        if _skill_dir(root, local_name).exists():
+            raise LinkPathConflict(
+                f".claude/skills/{local_name} already exists"
+            )
+    elif category == catalog.CATEGORY_RULE:
+        if _rule_md_path(root, local_name).exists():
+            raise LinkPathConflict(
+                f".claude/rules/{local_name} already exists"
+            )
+
+
+def _merge_mcp_server(root: Path, local_name: str, server_config: Any) -> None:
+    """Merge ``mcpServers[local_name] = server_config`` into ``.mcp.json``,
+    touching only that one key — json.load -> mutate one key -> json.dump,
+    never a text patch, so every other server a human already wired by hand
+    is left byte-for-byte alone."""
+    path = _mcp_json_path(root)
+    found = _read_mcp_servers(root)
+    doc, servers = found if found is not None else ({}, {})
+    servers = dict(servers)
+    servers[local_name] = server_config
+    doc = dict(doc)
+    doc["mcpServers"] = servers
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _unmerge_mcp_server(root: Path, local_name: str) -> None:
+    found = _read_mcp_servers(root)
+    if found is None:
+        return
+    doc, servers = found
+    if local_name not in servers:
+        return
+    servers = dict(servers)
+    del servers[local_name]
+    doc = dict(doc)
+    doc["mcpServers"] = servers
+    path = _mcp_json_path(root)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _validate_and_materialize(
+    root: Path,
+    category: str,
+    local_name: str,
+    entry: catalog.CatalogEntry,
+    link_vars: dict[str, str],
+    bucket: list[dict[str, Any]],
+) -> None:
+    """Validate everything about this write, then perform it. Raises
+    (`InvalidLinkName`, `LinkPathConflict`, `InvalidSubstitutedConfig`)
+    before anything is written — never partway through."""
+    if category in (catalog.CATEGORY_SKILL, catalog.CATEGORY_RULE):
+        _validate_link_name_path_safe(root, category, local_name)
+    _check_path_conflict(root, category, local_name, bucket)
+
+    if category == catalog.CATEGORY_MCP:
+        substituted = _substitute_vars(entry.content, link_vars)
+        parsed = _parse_substituted_mcp_config(substituted)
+        _merge_mcp_server(root, local_name, parsed)
+    elif category == catalog.CATEGORY_SKILL:
+        path = _skill_md_path(root, local_name)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(entry.content, encoding="utf-8")
+        except OSError as exc:
+            # A safety net behind `_validate_link_name_path_safe`, not the
+            # primary defense — anything that reaches here slipped past the
+            # denylist (an OS/filesystem quirk that check does not know
+            # about) and must still come back as a clean 400, not a raw 500.
+            raise InvalidLinkName(
+                f"name {local_name!r} could not be used as a path: {exc}"
+            ) from exc
+    else:  # catalog.CATEGORY_RULE
+        path = _rule_md_path(root, local_name)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(entry.content, encoding="utf-8")
+        except OSError as exc:
+            raise InvalidLinkName(
+                f"name {local_name!r} could not be used as a path: {exc}"
+            ) from exc
+
+
+def _remove_materialization(root: Path, category: str, local_name: str) -> None:
+    if category == catalog.CATEGORY_MCP:
+        _unmerge_mcp_server(root, local_name)
+    elif category == catalog.CATEGORY_SKILL:
+        d = _skill_dir(root, local_name)
+        if d.exists():
+            shutil.rmtree(d)
+    elif category == catalog.CATEGORY_RULE:
+        with contextlib.suppress(FileNotFoundError):
+            _rule_md_path(root, local_name).unlink()
+
+
+# --------------------------------------------------- links.json: attach/detach
+
+
+def _norm_link_name(name: str) -> str:
+    return name.strip().casefold()
+
+
+def _link_info(category: str, link: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "entry_id": link["entry_id"],
+        "category": category,
+        "name": link["name"],
+        "vars": dict(link.get("vars") or {}),
+    }
+
+
+def list_links(slug: str) -> dict[str, list[dict[str, Any]]]:
+    """Every link this agent carries, grouped by category."""
+    agent = get(slug)
+    doc = read_links_config(agent.root)
+    return {
+        category: [_link_info(category, link) for link in doc.get(category, [])]
+        for category in catalog.CATEGORIES
+    }
+
+
+def attach_link(
+    slug: str, category: str, entry_id: str, name: str,
+    vars: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Attach a catalog entry to an agent and materialize it write-through.
+
+    Raises `AgentNotFound`, `catalog.EntryNotFound`, `CategoryMismatch`,
+    `LinkExists` (duplicate entry_id in this category), `InvalidLinkName`
+    (empty name), `LinkNameExists`, `UnknownLinkVar`, `LinkPathConflict`, or
+    `InvalidSubstitutedConfig` — nothing is written on any of them.
+    """
+    if category not in catalog.CATEGORIES:
+        raise ValueError(f"unknown category {category!r}")
+    link_vars = dict(vars or {})
+
+    with _lock:
+        agent = get(slug)
+        entry = catalog.get(entry_id)
+        if entry.category != category:
+            raise CategoryMismatch(
+                f"catalog entry {entry_id!r} is category {entry.category!r}, "
+                f"not {category!r}"
+            )
+
+        doc = read_links_config(agent.root)
+        bucket = doc[category]
+
+        if any(link["entry_id"] == entry_id for link in bucket):
+            raise LinkExists(
+                f"{entry_id!r} is already attached to agent {slug!r} in "
+                f"category {category!r}"
+            )
+
+        clean_name = (name or "").strip()
+        if not clean_name:
+            raise InvalidLinkName("name must not be empty")
+        clash = next(
+            (link for link in bucket if _norm_link_name(link["name"]) == _norm_link_name(clean_name)),
+            None,
+        )
+        if clash is not None:
+            raise LinkNameExists(
+                f"another {category} link is already named {clean_name!r}",
+                existing_entry_id=clash["entry_id"],
+            )
+
+        unknown = set(link_vars) - set(entry.vars)
+        if unknown:
+            raise UnknownLinkVar(
+                f"unknown var(s) {sorted(unknown)} for catalog entry {entry_id!r} "
+                f"(it declares {sorted(entry.vars)})"
+            )
+
+        _validate_and_materialize(agent.root, category, clean_name, entry, link_vars, bucket)
+
+        bucket.append({"entry_id": entry_id, "name": clean_name, "vars": link_vars})
+        write_links_config(agent.root, doc)
+        return _link_info(category, {"entry_id": entry_id, "name": clean_name, "vars": link_vars})
+
+
+def update_link(
+    slug: str, category: str, entry_id: str, *,
+    name: str | None = None, vars: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Edit an existing link in place — full-replace ``vars`` (never a
+    merge — the catalog entry's own var set may have changed since attach,
+    so a stale caller-side value must not linger). Re-runs the same
+    validation and materialization as `attach_link`, against the *current*
+    state of the catalog entry.
+    """
+    if category not in catalog.CATEGORIES:
+        raise ValueError(f"unknown category {category!r}")
+
+    with _lock:
+        agent = get(slug)
+        entry = catalog.get(entry_id)
+        if entry.category != category:
+            raise CategoryMismatch(
+                f"catalog entry {entry_id!r} is category {entry.category!r}, "
+                f"not {category!r}"
+            )
+
+        doc = read_links_config(agent.root)
+        bucket = doc[category]
+        idx = next((i for i, link in enumerate(bucket) if link["entry_id"] == entry_id), None)
+        if idx is None:
+            raise LinkNotFound(
+                f"{entry_id!r} is not attached to agent {slug!r} in category {category!r}"
+            )
+        current = bucket[idx]
+
+        new_name = current["name"] if name is None else name.strip()
+        if not new_name:
+            raise InvalidLinkName("name must not be empty")
+        if name is not None:
+            clash = next(
+                (
+                    link for j, link in enumerate(bucket)
+                    if j != idx and _norm_link_name(link["name"]) == _norm_link_name(new_name)
+                ),
+                None,
+            )
+            if clash is not None:
+                raise LinkNameExists(
+                    f"another {category} link is already named {new_name!r}",
+                    existing_entry_id=clash["entry_id"],
+                )
+
+        new_vars = dict(current["vars"]) if vars is None else dict(vars)
+        unknown = set(new_vars) - set(entry.vars)
+        if unknown:
+            raise UnknownLinkVar(
+                f"unknown var(s) {sorted(unknown)} for catalog entry {entry_id!r} "
+                f"(it declares {sorted(entry.vars)})"
+            )
+
+        renaming = new_name != current["name"]
+        _validate_and_materialize(agent.root, category, new_name, entry, new_vars, bucket)
+        if renaming:
+            _remove_materialization(agent.root, category, current["name"])
+
+        bucket[idx] = {"entry_id": entry_id, "name": new_name, "vars": new_vars}
+        write_links_config(agent.root, doc)
+        return _link_info(category, bucket[idx])
+
+
+def detach_link(slug: str, category: str, entry_id: str) -> None:
+    """Remove a link and its on-disk materialization."""
+    if category not in catalog.CATEGORIES:
+        raise ValueError(f"unknown category {category!r}")
+
+    with _lock:
+        agent = get(slug)
+        doc = read_links_config(agent.root)
+        bucket = doc[category]
+        idx = next((i for i, link in enumerate(bucket) if link["entry_id"] == entry_id), None)
+        if idx is None:
+            raise LinkNotFound(
+                f"{entry_id!r} is not attached to agent {slug!r} in category {category!r}"
+            )
+        removed = bucket.pop(idx)
+        _remove_materialization(agent.root, category, removed["name"])
+        write_links_config(agent.root, doc)
+
+
+def catalog_entry_used_by(entry_id: str) -> list[str]:
+    """Slugs of every agent whose ``links.json`` references ``entry_id`` in
+    any category. This is the finder `api.py`'s ``_catalog_used_by`` already
+    looks for via ``getattr`` (MN-41) — its presence alone is what turns
+    ``DELETE /api/catalog/{id}`` from an always-``[]`` check into a real one.
+    """
+    slugs: list[str] = []
+    for agent in list_agents():
+        doc = read_links_config(agent.root)
+        for category in catalog.CATEGORIES:
+            if any(link["entry_id"] == entry_id for link in doc.get(category, [])):
+                slugs.append(agent.slug)
+                break
+    return slugs
 
 
 # ------------------------------------------------------------ folder shape

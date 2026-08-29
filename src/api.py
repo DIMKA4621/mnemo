@@ -366,6 +366,18 @@ _ERROR_STATUS: dict[str, int] = {
     # "show the blocker, let the human decide" shape as
     # `orphan_cleanup_refused`.
     "entry_in_use": 409,
+    # [NEW beyond §9.2, MN-48] `PATCH/PUT /api/agents/{slug}/...` — the
+    # linked-catalog-entry endpoints below. Same reasoning throughout as the
+    # matching bank/catalog codes above: 404 for "does not exist", 400 for
+    # "well-formed request, invalid value", 409 for "conflicts with what is
+    # already there".
+    "category_mismatch": 400,
+    "link_exists": 409,
+    "link_name_exists": 409,
+    "link_not_found": 404,
+    "unknown_var": 400,
+    "path_conflict": 409,
+    "invalid_substituted_config": 400,
     "internal": 500,
 }
 
@@ -1767,6 +1779,20 @@ class AgentCreateRequest(BaseModel):
     confirm_adopt: bool = False
 
 
+class PatchAgentRequest(BaseModel):
+    """Editable fields of a registered agent. Omitted means unchanged.
+
+    Mirrors `PatchBankRequest`: `slug`/`root` are absent on purpose — a
+    rename changes only the display name (`agent_registry.rename`).
+    """
+
+    name: str | None = None
+
+
+class ClaudeMdRequest(BaseModel):
+    content: str
+
+
 def _resolve_agent(slug: str) -> agent_registry.Agent:
     try:
         return agent_registry.get(slug)
@@ -1890,6 +1916,150 @@ def api_agent_launch_save(slug: str, payload: dict = Body(...)) -> dict:
         raise ApiError("invalid_launch_config", str(exc), slug=slug) from exc
 
 
+@app.patch("/api/agents/{slug}", include_in_schema=False)
+def api_patch_agent(slug: str, req: PatchAgentRequest) -> dict:
+    """Rename an agent. Mirrors `PATCH /api/banks/{id}`'s shape; unlike that
+    endpoint, there is no cross-entry name collision to guard against — see
+    `agent_registry.rename`."""
+    agent = _resolve_agent(slug)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise ApiError("bad_request", "nothing to change", slug=slug)
+    try:
+        updated = agent_registry.rename(agent.slug, fields["name"])
+    except agent_registry.AgentNotFound as exc:
+        raise ApiError("agent_not_found", str(exc), slug=slug) from exc
+    except ValueError as exc:
+        raise ApiError("bad_request", str(exc), slug=slug) from exc
+    log.info("renamed agent %s -> %r", updated.slug, updated.name)
+    return _agent_info(updated)
+
+
+@app.get("/api/agents/{slug}/claude-md", include_in_schema=False)
+def api_agent_claude_md(slug: str) -> dict:
+    agent = _resolve_agent(slug)
+    return {"content": agent_registry.read_claude_md(agent.root)}
+
+
+@app.put("/api/agents/{slug}/claude-md", include_in_schema=False)
+def api_agent_claude_md_save(slug: str, req: ClaudeMdRequest) -> dict:
+    agent = _resolve_agent(slug)
+    agent_registry.write_claude_md(agent.root, req.content)
+    return {"content": req.content}
+
+
+# ------------------------------------------------- agent <-> catalog links (MN-48)
+#
+# Attach/detach a catalog entry to an agent's `.mcp.json` / `.claude/skills`
+# / `.claude/rules`, materializing write-through at attach/edit/detach time
+# (`agent_registry.py`'s module docstring on `links.json` explains why: the
+# Claude Code CLI reads those files itself at agent start, mnemo does not
+# intercept that read). This section is only the HTTP shape around
+# `agent_registry.attach_link`/`update_link`/`detach_link`/`list_links` —
+# same style as every other resource in this file.
+#
+# Editing a catalog entry after it is attached deliberately does NOT
+# refresh what was already materialized (pinned-copy semantics, MN-48's
+# ticket) — nothing here tries to "fix" that; drift is out of scope by
+# design.
+
+
+class AttachLinkRequest(BaseModel):
+    entry_id: str
+    name: str
+    vars: dict[str, str] = Field(default_factory=dict)
+
+
+class UpdateLinkRequest(BaseModel):
+    """Editable fields of a link. Omitted means unchanged; `vars: {}`
+    (present but empty) is a deliberate "clear every var", distinct from
+    omitting `vars` entirely — see the filtering below."""
+
+    name: str | None = None
+    vars: dict[str, str] | None = None
+
+
+@app.get("/api/agents/{slug}/links", include_in_schema=False)
+def api_agent_links(slug: str) -> dict:
+    _resolve_agent(slug)  # 404 before touching anything
+    return agent_registry.list_links(slug)
+
+
+@app.post("/api/agents/{slug}/links/{category}", status_code=201, include_in_schema=False)
+def api_attach_link(
+    slug: str, category: Literal["mcp", "skill", "rule"], req: AttachLinkRequest
+) -> dict:
+    _resolve_agent(slug)
+    try:
+        link = agent_registry.attach_link(slug, category, req.entry_id, req.name, req.vars)
+    except catalog.EntryNotFound as exc:
+        raise ApiError("catalog_entry_not_found", str(exc), id=req.entry_id) from exc
+    except agent_registry.CategoryMismatch as exc:
+        raise ApiError("category_mismatch", str(exc), id=req.entry_id) from exc
+    except agent_registry.LinkExists as exc:
+        raise ApiError("link_exists", str(exc), id=req.entry_id) from exc
+    except agent_registry.LinkNameExists as exc:
+        raise ApiError(
+            "link_name_exists", str(exc), existing_entry_id=exc.existing_entry_id
+        ) from exc
+    except agent_registry.UnknownLinkVar as exc:
+        raise ApiError("unknown_var", str(exc), id=req.entry_id) from exc
+    except agent_registry.InvalidLinkName as exc:
+        raise ApiError("bad_request", str(exc), id=req.entry_id) from exc
+    except agent_registry.LinkPathConflict as exc:
+        raise ApiError("path_conflict", str(exc), id=req.entry_id) from exc
+    except agent_registry.InvalidSubstitutedConfig as exc:
+        raise ApiError("invalid_substituted_config", str(exc), id=req.entry_id) from exc
+    log.info("attached %s link %s (%r) to agent %s", category, req.entry_id, link["name"], slug)
+    return link
+
+
+@app.patch("/api/agents/{slug}/links/{category}/{entry_id}", include_in_schema=False)
+def api_update_link(
+    slug: str, category: Literal["mcp", "skill", "rule"], entry_id: str,
+    req: UpdateLinkRequest,
+) -> dict:
+    _resolve_agent(slug)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise ApiError("bad_request", "nothing to change", slug=slug, id=entry_id)
+    try:
+        link = agent_registry.update_link(slug, category, entry_id, **fields)
+    except catalog.EntryNotFound as exc:
+        raise ApiError("catalog_entry_not_found", str(exc), id=entry_id) from exc
+    except agent_registry.CategoryMismatch as exc:
+        raise ApiError("category_mismatch", str(exc), id=entry_id) from exc
+    except agent_registry.LinkNotFound as exc:
+        raise ApiError("link_not_found", str(exc), id=entry_id) from exc
+    except agent_registry.LinkNameExists as exc:
+        raise ApiError(
+            "link_name_exists", str(exc), existing_entry_id=exc.existing_entry_id
+        ) from exc
+    except agent_registry.UnknownLinkVar as exc:
+        raise ApiError("unknown_var", str(exc), id=entry_id) from exc
+    except agent_registry.InvalidLinkName as exc:
+        raise ApiError("bad_request", str(exc), id=entry_id) from exc
+    except agent_registry.LinkPathConflict as exc:
+        raise ApiError("path_conflict", str(exc), id=entry_id) from exc
+    except agent_registry.InvalidSubstitutedConfig as exc:
+        raise ApiError("invalid_substituted_config", str(exc), id=entry_id) from exc
+    log.info("updated %s link %s on agent %s", category, entry_id, slug)
+    return link
+
+
+@app.delete("/api/agents/{slug}/links/{category}/{entry_id}", include_in_schema=False)
+def api_detach_link(
+    slug: str, category: Literal["mcp", "skill", "rule"], entry_id: str
+) -> dict:
+    _resolve_agent(slug)
+    try:
+        agent_registry.detach_link(slug, category, entry_id)
+    except agent_registry.LinkNotFound as exc:
+        raise ApiError("link_not_found", str(exc), id=entry_id) from exc
+    log.info("detached %s link %s from agent %s", category, entry_id, slug)
+    return {"ok": True}
+
+
 # -------------------------------------------------------- catalog (MN-41)
 #
 # The general MCP/Skills/Rules registry (`catalog.py`) — a flat, agent-
@@ -1901,11 +2071,12 @@ def api_agent_launch_save(slug: str, payload: dict = Body(...)) -> dict:
 #
 # `catalog.py` never imports `agent_registry` (see its module docstring) —
 # whether an entry is still referenced by an agent is answered by
-# `_catalog_used_by` below, a **guarded call** rather than a hard dependency:
-# MN-42 has not yet added the actual attach/detach link storage to
-# `agent_registry.Agent`, so `catalog_entry_used_by` may not exist on that
-# module at all. Same shape as `_queue()`'s guarded import ahead of phase 3 —
-# a missing capability answers "nothing uses this" rather than a 500.
+# `_catalog_used_by` below, a **guarded call** rather than a hard dependency,
+# same shape as `_queue()`'s guarded import ahead of phase 3: a missing
+# capability answers "nothing uses this" rather than a 500. MN-48 added the
+# finder (`agent_registry.catalog_entry_used_by`) the guard was written for,
+# so the guard itself stays — a future capability going away should degrade
+# the same way a not-yet-arrived one does, not turn into a 500.
 
 
 class CreateCatalogEntryRequest(BaseModel):
@@ -1934,7 +2105,13 @@ def _resolve_catalog_entry(entry_id: str) -> catalog.CatalogEntry:
 
 
 def _entry_info(entry: catalog.CatalogEntry) -> dict:
-    """The one catalog-entry shape the API returns."""
+    """The one catalog-entry shape the API returns.
+
+    ``used_by_count`` calls `_catalog_used_by` even though it is defined
+    below this function in the file — fine, both are plain module-level
+    functions resolved at call time, not at definition time, and every call
+    to `_entry_info` happens well after the module has finished loading.
+    """
     return {
         "id": entry.id,
         "category": entry.category,
@@ -1942,13 +2119,15 @@ def _entry_info(entry: catalog.CatalogEntry) -> dict:
         "content": entry.content,
         "created_at": entry.created_at,
         "vars": entry.vars,
+        "used_by_count": len(_catalog_used_by(entry.id)),
     }
 
 
 def _catalog_used_by(entry_id: str) -> list[str]:
-    """Agent slugs that reference this catalog entry — `[]` until MN-42 adds
-    the link storage `agent_registry.catalog_entry_used_by` would read (see
-    the section banner above for why this is a guarded call, not an import)."""
+    """Agent slugs that reference this catalog entry via `links.json` — `[]`
+    when `agent_registry.catalog_entry_used_by` is not present (see the
+    section banner above for why this is a guarded call, not an import); as
+    of MN-48 that finder exists, so this now reports real state."""
     finder = getattr(agent_registry, "catalog_entry_used_by", None)
     if finder is None:
         return []
