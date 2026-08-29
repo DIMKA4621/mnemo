@@ -61,8 +61,8 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import (
-    agent_registry, catalog, config, engine_update, presets, registry,
-    servicelog, settings, store,
+    agent_registry, agent_runtime, catalog, config, engine_update, presets,
+    registry, servicelog, settings, store,
 )
 from .config import TOP_K
 from .providers import EmbeddingUnavailable, forget_providers, get_provider
@@ -378,6 +378,15 @@ _ERROR_STATUS: dict[str, int] = {
     "unknown_var": 400,
     "path_conflict": 409,
     "invalid_substituted_config": 400,
+    # [NEW beyond §9.2, MN-43] No chat matches the given (agent, chat_id) —
+    # same shape as `link_not_found`.
+    "chat_not_found": 404,
+    # [NEW beyond §9.2, MN-43] The machine-wide live-session cap
+    # (`config.MAX_LIVE_SESSIONS`) is already reached. Reachable in practice
+    # only via the WS route's own error envelope (real spawns are lazy, on
+    # first WS subscriber) — mapped here too so an HTTP surface that ever
+    # needs to report it agrees with the WS one.
+    "too_many_sessions": 409,
     "internal": 500,
 }
 
@@ -1016,6 +1025,7 @@ async def lifespan(app: FastAPI):
             _watcher.start()
 
     hub.bind(asyncio.get_running_loop())
+    agent_runtime.bind_loop(asyncio.get_running_loop())
     ping = asyncio.create_task(_ping_loop())
     _write_service_info()
     log.info("mnemo backend %s on %s:%s", SERVICE_VERSION, API_HOST, API_PORT)
@@ -1042,6 +1052,12 @@ async def _shutdown(ping, q, watcher_mod) -> None:
     with suppress(asyncio.CancelledError):
         await ping
     hub.bind(None)
+    # Waits for real process termination (join with a timeout), same
+    # contract as `q.stop()` below — a live `claude` process must not be
+    # left running, unmonitored, once the backend that owns it is gone.
+    with suppress(Exception):
+        agent_runtime.stop_all()
+    agent_runtime.bind_loop(None)
     if watcher_mod is not None:
         with suppress(Exception):
             watcher_mod.stop()
@@ -1946,6 +1962,57 @@ def api_agent_claude_md_save(slug: str, req: ClaudeMdRequest) -> dict:
     agent = _resolve_agent(slug)
     agent_registry.write_claude_md(agent.root, req.content)
     return {"content": req.content}
+
+
+# --------------------------------------------------------- agent chats (MN-43)
+#
+# Lifecycle only — list/create/get/delete a chat *record*. The live PTY
+# process itself is owned by `agent_runtime.py` and is never touched here:
+# it spawns lazily on the first WebSocket subscriber
+# (`/ws/agents/{slug}/chats/{chat_id}`, below), which is exactly why
+# `POST` here is cheap and does not itself start `claude`.
+
+
+class CreateChatRequest(BaseModel):
+    title: str | None = None
+
+
+def _resolve_chat(slug: str, chat_id: str) -> dict:
+    try:
+        return agent_registry.get_chat(slug, chat_id)
+    except agent_registry.ChatNotFound as exc:
+        raise ApiError("chat_not_found", str(exc), slug=slug, chat_id=chat_id) from exc
+
+
+@app.get("/api/agents/{slug}/chats", include_in_schema=False)
+def api_agent_chats(slug: str) -> dict:
+    _resolve_agent(slug)
+    return {"chats": agent_registry.list_chats(slug)}
+
+
+@app.post("/api/agents/{slug}/chats", status_code=201, include_in_schema=False)
+def api_create_chat(slug: str, req: CreateChatRequest) -> dict:
+    _resolve_agent(slug)
+    return agent_registry.create_chat(slug, title=req.title)
+
+
+@app.get("/api/agents/{slug}/chats/{chat_id}", include_in_schema=False)
+def api_agent_chat(slug: str, chat_id: str) -> dict:
+    _resolve_agent(slug)
+    return _resolve_chat(slug, chat_id)
+
+
+@app.delete("/api/agents/{slug}/chats/{chat_id}", include_in_schema=False)
+def api_delete_chat(slug: str, chat_id: str) -> dict:
+    _resolve_agent(slug)
+    _resolve_chat(slug, chat_id)
+    # Best-effort: a live session is stopped before the record and its
+    # `chats/<id>/` folder disappear, so a still-running `claude` process
+    # never outlives the storage its own history.log was writing into.
+    with suppress(Exception):
+        agent_runtime.stop_session(chat_id)
+    agent_registry.delete_chat(slug, chat_id)
+    return {"ok": True}
 
 
 # ------------------------------------------------- agent <-> catalog links (MN-48)
@@ -3724,6 +3791,105 @@ async def ws_endpoint(
         pass
     finally:
         hub.disconnect(websocket)
+
+
+# ------------------------------------------------------ agent chat websocket
+# (MN-43)
+
+
+@app.websocket("/ws/agents/{slug}/chats/{chat_id}")
+async def ws_agent_chat(
+    websocket: WebSocket,
+    slug: str,
+    chat_id: str,
+    token: str | None = Query(default=None),
+) -> None:
+    """Live byte-mirror of one chat's real ``claude`` PTY session.
+
+    Same gate as `/ws` above — same reasoning (`_api_gated()`), same
+    query-string token (a browser cannot set headers on a WS handshake).
+    Envelopes (§43.3): server -> client is one of ``output`` (a chunk of PTY
+    output), ``replay_done`` (history replay finished, live output follows),
+    ``exited`` (the process terminated), ``error``; client -> server is
+    ``input`` (keystrokes) or ``resize`` (terminal dimensions).
+
+    Connecting spawns the real process on the FIRST subscriber for this
+    ``chat_id`` (`agent_runtime.ensure_and_subscribe`) — cheap for every
+    connection after that, since the process is already running and this
+    call only subscribes. Any number of simultaneous viewers of the same
+    chat see the same live stream; closing this socket never stops the
+    process, only removes this one subscriber.
+    """
+    if _api_gated() and not _token_ok(token):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+
+    try:
+        sub_id, queue, replay_text = agent_runtime.ensure_and_subscribe(slug, chat_id)
+    except agent_registry.AgentNotFound as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1008)
+        return
+    except agent_registry.ChatNotFound as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1008)
+        return
+    except agent_runtime.SessionLimitExceeded as exc:
+        await websocket.send_json(
+            {"type": "error", "code": "too_many_sessions", "message": str(exc)}
+        )
+        await websocket.close(code=1013)  # "try again later" (RFC 6455 IANA registry)
+        return
+    except agent_runtime.ClaudeNotFound as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1011)
+        return
+    except Exception as exc:  # noqa: BLE001 - a spawn failure is not our bug to hide
+        log.exception("failed to spawn/subscribe chat %s for agent %s", chat_id, slug)
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1011)
+        return
+
+    if replay_text:
+        await websocket.send_json({"type": "output", "data": replay_text})
+    await websocket.send_json({"type": "replay_done"})
+
+    async def pump_queue() -> None:
+        while True:
+            item = await queue.get()
+            try:
+                await websocket.send_json(item)
+            except Exception:  # noqa: BLE001 - a dead socket ends the pump, not the process
+                break
+            if item.get("type") == "exited":
+                break
+
+    pump_task = asyncio.create_task(pump_queue())
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue  # same tolerance contract as `/ws` above
+            if not isinstance(msg, dict):
+                continue
+            kind = msg.get("type")
+            if kind == "input":
+                agent_runtime.send_input(chat_id, str(msg.get("data", "")))
+            elif kind == "resize":
+                with suppress(Exception):
+                    agent_runtime.resize(
+                        chat_id, int(msg.get("rows", 24)), int(msg.get("cols", 80))
+                    )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        pump_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await pump_task
+        agent_runtime.unsubscribe(chat_id, sub_id)
 
 
 # The console's assets — `src.webui.STATIC_DIR` and nothing else from that

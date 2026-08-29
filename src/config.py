@@ -686,3 +686,9 @@ INSTALL_DISK_BUFFER_BYTES: int = 500_000_000
 # above — USER_HOME has no independent relocation override, so nothing here
 # needs the STATE_DIR-style live accessor.
 AGENTS_DIR: Path = USER_HOME / "agents"
+
+# Machine-wide soft cap on concurrently live PTY chat sessions
+# (`agent_runtime.py`, MN-43). This is a cheap guard against a double-click
+# or a UI bug forking a pile of real, paid `claude` processes — not the
+# tuned real policy (a separate future ticket, MN-46, owns that).
+MAX_LIVE_SESSIONS: int = int(os.environ.get("MNEMO_MAX_LIVE_SESSIONS", "8"))

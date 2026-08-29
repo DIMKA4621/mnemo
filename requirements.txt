@@ -19,3 +19,10 @@ fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
 watchdog>=4.0.0
 httpx>=0.27.0
+
+# agent_runtime.py (MN-43): resident PTY-backed live chat sessions.
+# Split by platform marker rather than one "the OS picks" package — pywinpty
+# wraps ConPTY and only builds on win32; ptyprocess wraps the POSIX pty
+# module and does not install there at all.
+pywinpty>=2.0; sys_platform == "win32"
+ptyprocess>=0.7; sys_platform != "win32"

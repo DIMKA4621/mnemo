@@ -53,6 +53,7 @@ import re
 import shutil
 import threading
 import time
+import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -1081,6 +1082,188 @@ def catalog_entry_used_by(entry_id: str) -> list[str]:
                 slugs.append(agent.slug)
                 break
     return slugs
+
+
+# --------------------------------------------------------------- chats.json
+#
+# The live-chat metadata index (MN-43) — one JSON file per agent, mirroring
+# ``links.json``'s "light" pattern: no cross-process ``_file_lock()`` (this
+# is a single agent's own file, not a registry several processes race to
+# edit), but every mutation still goes through the module's in-process
+# ``_lock`` the way ``attach_link``/``detach_link`` do, so two threads in
+# this same backend process cannot tear a read-modify-write of the same
+# agent's chat list.
+#
+# This module owns storage only — chat_id allocation, the JSON index, and
+# the on-disk folder shape (``chats/<chat_id>/history.log``). It knows
+# nothing about a live PTY process; that is `agent_runtime.py`'s job
+# entirely, kept a separate module on purpose (resident process management
+# is not a filesystem concern). `delete_chat` in particular does not check
+# whether a session for that chat_id is currently live — the caller
+# (`api.py`'s `DELETE /api/agents/{slug}/chats/{chat_id}`) is responsible
+# for asking `agent_runtime.stop_session` first.
+
+
+CHATS_VERSION = 1
+
+
+class ChatNotFound(LookupError):
+    """No chat matches the given (agent, chat_id)."""
+
+
+def _chats_dir(root: Path) -> Path:
+    return Path(root) / "chats"
+
+
+def _chats_index_path(root: Path) -> Path:
+    return _chats_dir(root) / "chats.json"
+
+
+def chat_dir(root: Path, chat_id: str) -> Path:
+    """Where one chat's own files live (currently just ``history.log``, but
+    named for the folder rather than the one file so a later addition — a
+    transcript sidecar, say — has somewhere to go without a new convention).
+    """
+    return _chats_dir(root) / chat_id
+
+
+def chat_history_path(root: Path, chat_id: str) -> Path:
+    """Append-only raw output log for one chat. Owned here (the storage
+    layer decides the path); written to by `agent_runtime.py` (the runtime
+    layer decides when)."""
+    return chat_dir(root, chat_id) / "history.log"
+
+
+def _default_chats_doc() -> dict:
+    return {"version": CHATS_VERSION, "chats": []}
+
+
+def _read_chats_doc(root: Path) -> dict:
+    path = _chats_index_path(root)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return _default_chats_doc()
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise ValueError(f"{path} is not valid JSON: {exc}") from exc
+    if not isinstance(data, dict) or not isinstance(data.get("chats"), list):
+        raise ValueError(f"{path}: expected an object with a 'chats' array")
+    return {"version": CHATS_VERSION, "chats": list(data["chats"])}
+
+
+def _write_chats_doc(root: Path, doc: dict) -> None:
+    path = _chats_index_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(
+        json.dumps(doc, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    os.replace(tmp, path)
+
+
+def _chat_info(chat: dict) -> dict[str, Any]:
+    return {
+        "chat_id": chat["chat_id"],
+        "title": chat.get("title"),
+        "created_at": chat.get("created_at", ""),
+        "last_active_at": chat.get("last_active_at", ""),
+    }
+
+
+def list_chats(slug: str) -> list[dict[str, Any]]:
+    """Every chat this agent has, most-recently-active first. Raises
+    `AgentNotFound`.
+
+    Sorted over the REVERSED append order, not the append order itself:
+    ``last_active_at`` is second-precision (``_now_iso``'s
+    ``timespec="seconds"``, the convention this whole module uses), so two
+    chats touched in the same second tie on the sort key. A stable sort over
+    the reversed list keeps the most-recently-appended one first among ties
+    — the only tiebreak that reads as "most recent" to a human, instead of
+    silently depending on `chats.json`'s on-disk order.
+    """
+    agent = get(slug)
+    doc = _read_chats_doc(agent.root)
+    chats = sorted(
+        reversed(doc["chats"]), key=lambda c: c.get("last_active_at") or "", reverse=True
+    )
+    return [_chat_info(c) for c in chats]
+
+
+def get_chat(slug: str, chat_id: str) -> dict[str, Any]:
+    """Raises `AgentNotFound` or `ChatNotFound`."""
+    agent = get(slug)
+    doc = _read_chats_doc(agent.root)
+    for chat in doc["chats"]:
+        if chat.get("chat_id") == chat_id:
+            return _chat_info(chat)
+    raise ChatNotFound(f"no chat {chat_id!r} for agent {slug!r}")
+
+
+def create_chat(slug: str, title: str | None = None) -> dict[str, Any]:
+    """Create a new chat record and its empty folder. Cheap and side-effect
+    free beyond that — no ``claude`` process is spawned here. A real PTY only
+    starts on the first WebSocket subscriber
+    (`agent_runtime.ensure_and_subscribe`), because chat-record creation is
+    free and a real spawn costs a paid API call.
+
+    Raises `AgentNotFound`.
+    """
+    with _lock:
+        agent = get(slug)
+        chat_id = uuid.uuid4().hex
+        now = _now_iso()
+        chat = {
+            "chat_id": chat_id,
+            "title": (title or "").strip() or None,
+            "created_at": now,
+            "last_active_at": now,
+        }
+        doc = _read_chats_doc(agent.root)
+        doc["chats"].append(chat)
+        chat_dir(agent.root, chat_id).mkdir(parents=True, exist_ok=True)
+        _write_chats_doc(agent.root, doc)
+        return _chat_info(chat)
+
+
+def touch_chat(slug: str, chat_id: str) -> dict[str, Any]:
+    """Bump ``last_active_at`` to now. Called by `agent_runtime` around a
+    session's spawn and teardown — deliberately not on every PTY output
+    chunk, which would turn a JSON read-modify-write into the hot path of
+    every keystroke a live session produces.
+
+    Raises `AgentNotFound` or `ChatNotFound`.
+    """
+    with _lock:
+        agent = get(slug)
+        doc = _read_chats_doc(agent.root)
+        for chat in doc["chats"]:
+            if chat.get("chat_id") == chat_id:
+                chat["last_active_at"] = _now_iso()
+                _write_chats_doc(agent.root, doc)
+                return _chat_info(chat)
+        raise ChatNotFound(f"no chat {chat_id!r} for agent {slug!r}")
+
+
+def delete_chat(slug: str, chat_id: str) -> None:
+    """Remove a chat's record and its on-disk folder (``history.log`` and
+    everything else under it). Purely storage — does not know whether a live
+    PTY session for this ``chat_id`` exists; see the module note above.
+
+    Raises `AgentNotFound` or `ChatNotFound`.
+    """
+    with _lock:
+        agent = get(slug)
+        doc = _read_chats_doc(agent.root)
+        remaining = [c for c in doc["chats"] if c.get("chat_id") != chat_id]
+        if len(remaining) == len(doc["chats"]):
+            raise ChatNotFound(f"no chat {chat_id!r} for agent {slug!r}")
+        doc["chats"] = remaining
+        _write_chats_doc(agent.root, doc)
+        with contextlib.suppress(FileNotFoundError):
+            shutil.rmtree(chat_dir(agent.root, chat_id))
 
 
 # ------------------------------------------------------------ folder shape
