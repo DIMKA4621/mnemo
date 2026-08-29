@@ -41,11 +41,16 @@ output starts" are the same instant from the producer's point of view, and
 no byte can be lost or duplicated between them. See `_subscribe` and
 `_publish_output`.
 
-**Soft concurrency ceiling.** `config.MAX_LIVE_SESSIONS` (default 8,
-machine-wide) is a cheap guard against a double-click or a UI bug forking a
-pile of real, paid ``claude`` processes — not the tuned real policy (a
-separate future ticket, MN-46, owns that). Exceeding it on a new spawn
-raises `SessionLimitExceeded`.
+**Concurrency ceiling.** `config.MAX_LIVE_SESSIONS` (default 8, machine-wide,
+`$MNEMO_MAX_LIVE_SESSIONS`) started as a cheap guard against a double-click or
+a UI bug forking a pile of real, paid ``claude`` processes. MN-46's lead
+decision (2026-08-29) made it the real policy: still a flat reject once the
+cap is hit — no queue, no auto-eviction of the oldest idle session, since
+silently killing a real conversation to free a slot is worse than refusing
+the new spawn — but now visible: `live_session_count()` feeds `GET
+/api/status` and `mnemo doctor`, and the WS rejection (`SessionLimitExceeded`
+below) carries the current count alongside the limit so a caller can render
+"N/N" instead of a bare 409.
 
 **No console-hiding machinery here.** `v3-build.md`'s "no console windows
 on Windows" rule is about GUI-subsystem spawns of mnemo's own service
@@ -88,7 +93,18 @@ else:
 
 class SessionLimitExceeded(RuntimeError):
     """The machine-wide live-session cap (`config.MAX_LIVE_SESSIONS`) is
-    already reached."""
+    already reached.
+
+    Carries ``count``/``limit`` (MN-46) so a catcher can report "N/N" rather
+    than re-deriving them — `count` is the live count `_spawn_session` itself
+    just measured, not a fresh `live_session_count()` call, so it cannot
+    disagree with the number that actually triggered the rejection even if
+    another session exits in the split second before the catcher looks."""
+
+    def __init__(self, message: str, *, count: int, limit: int) -> None:
+        super().__init__(message)
+        self.count = count
+        self.limit = limit
 
 
 class ClaudeNotFound(RuntimeError):
@@ -521,7 +537,8 @@ def _spawn_session(agent: agent_registry.Agent, chat_id: str) -> Session:
     live = sum(1 for s in _sessions.values() if s.alive)
     if live >= config.MAX_LIVE_SESSIONS:
         raise SessionLimitExceeded(
-            f"machine-wide live-session cap reached ({config.MAX_LIVE_SESSIONS})"
+            f"machine-wide live-session cap reached ({live}/{config.MAX_LIVE_SESSIONS})",
+            count=live, limit=config.MAX_LIVE_SESSIONS,
         )
 
     launch = agent_registry.read_launch_config(agent.root)

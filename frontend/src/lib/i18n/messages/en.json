@@ -308,9 +308,11 @@
         "replaying": "replaying…",
         "live": "live",
         "error": "reconnecting…",
-        "exited": "session ended"
+        "exited": "session ended",
+        "limit": "session limit reached"
       },
       "errorBanner": "Connection error: {message}",
+      "limitBanner": "Machine-wide live-session limit reached ({count}/{limit}) — close another chat and try again.",
       "exitedBanner": "The session ended (exit code: {code}).",
       "dropHint": "Drop a file to attach it",
       "attachTitle": "Attach a file",

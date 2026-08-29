@@ -3064,6 +3064,12 @@ def api_status() -> dict:
             "provider_error": provider_error,
             "priority_enabled": os.environ.get("MNEMO_QUEUE_PRIORITY", "1") != "0",
             "embed": embed,
+            # MN-46: the machine-wide live-PTY-session ceiling, made visible
+            # rather than only discoverable via a raw 409 on the WS route.
+            "live_sessions": {
+                "count": agent_runtime.live_session_count(),
+                "limit": config.MAX_LIVE_SESSIONS,
+            },
         },
         "queue": _queue_snapshot_json(),
         "banks": [_bank_info(b) for b in registry.load()],
@@ -4148,8 +4154,18 @@ async def ws_agent_chat(
         await websocket.close(code=1008)
         return
     except agent_runtime.SessionLimitExceeded as exc:
+        # count/limit (MN-46) let the client render "N/N" and — just as
+        # important — recognize this specific rejection so it can skip the
+        # generic reconnect-backoff loop `onclose` otherwise starts: retrying
+        # against a ceiling that is still full is pointless spam.
         await websocket.send_json(
-            {"type": "error", "code": "too_many_sessions", "message": str(exc)}
+            {
+                "type": "error",
+                "code": "too_many_sessions",
+                "message": str(exc),
+                "count": exc.count,
+                "limit": exc.limit,
+            }
         )
         await websocket.close(code=1013)  # "try again later" (RFC 6455 IANA registry)
         return

@@ -440,6 +440,76 @@ def test_concurrency_ceiling() -> None:
             agent_runtime._sessions.pop(fid, None)
 
 
+# ------------------------------------------------------ 46 limit visibility
+
+
+def test_session_limit_visibility() -> None:
+    """MN-46: the ceiling stays a flat reject (no queue, no auto-eviction —
+    the lead's decision comment, verbatim), but the rejection now carries
+    real numbers instead of a bare 409: `SessionLimitExceeded.count`/`.limit`,
+    and the same facts surfacing on `GET /api/status` (`api.api_status`) and
+    `mnemo doctor` (`diagnostics.collect`)."""
+    from src import api, diagnostics
+
+    agent = _make_agent("limit-visibility")
+    chat = agent_registry.create_chat(agent.slug)
+
+    original_limit = config.MAX_LIVE_SESSIONS
+    config.MAX_LIVE_SESSIONS = 2
+    fake_ids = [f"fake-limit-vis-{i}" for i in range(config.MAX_LIVE_SESSIONS)]
+    for fid in fake_ids:
+        agent_runtime._sessions[fid] = agent_runtime.Session(
+            chat_id=fid, agent_slug=agent.slug,
+            history_path=Path(tempfile.mktemp()), proc=None,
+            token=f"tok-{fid}", alive=True,
+        )
+    try:
+        try:
+            agent_runtime.ensure_and_subscribe(agent.slug, chat["chat_id"])
+            check(
+                "limit visibility: raises SessionLimitExceeded once the cap is hit",
+                False, "no exception raised",
+            )
+        except agent_runtime.SessionLimitExceeded as exc:
+            check(
+                "limit visibility: exception carries count/limit",
+                exc.count == 2 and exc.limit == 2,
+                f"count={exc.count} limit={exc.limit}",
+            )
+            check(
+                "limit visibility: message names both numbers",
+                str(exc) == "machine-wide live-session cap reached (2/2)",
+                str(exc),
+            )
+
+        status = api.api_status()
+        live = status["service"]["live_sessions"]
+        check(
+            "GET /api/status: reports live_sessions count/limit",
+            live == {"count": 2, "limit": 2},
+            repr(live),
+        )
+
+        report = diagnostics.collect(
+            backend={"up": True, "url": "http://x", "scope": "machine_port", "error": None},
+            token={"present": False, "source": None, "where": None, "scope": None},
+        )
+        doctor_live = report.get("live_sessions")
+        check(
+            "mnemo doctor: reports the same live_sessions shape",
+            doctor_live == {"count": 2, "limit": 2},
+            repr(doctor_live),
+        )
+        check(
+            "mnemo doctor: render_text includes a live sessions line",
+            "live sessions" in diagnostics.render_text(report),
+        )
+    finally:
+        for fid in fake_ids:
+            agent_runtime._sessions.pop(fid, None)
+        config.MAX_LIVE_SESSIONS = original_limit
+
+
 # -------------------------------------------------- 43.3 race-free reconnect
 
 
@@ -1589,6 +1659,7 @@ def main() -> int:
     test_write_agent_configs()
     test_session_token_lifecycle()
     test_concurrency_ceiling()
+    test_session_limit_visibility()
     test_race_free_reconnect()
     test_http_chat_endpoints()
     test_auth_middleware_agent_branch()

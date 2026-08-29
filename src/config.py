@@ -687,10 +687,16 @@ INSTALL_DISK_BUFFER_BYTES: int = 500_000_000
 # needs the STATE_DIR-style live accessor.
 AGENTS_DIR: Path = USER_HOME / "agents"
 
-# Machine-wide soft cap on concurrently live PTY chat sessions
-# (`agent_runtime.py`, MN-43). This is a cheap guard against a double-click
-# or a UI bug forking a pile of real, paid `claude` processes — not the
-# tuned real policy (a separate future ticket, MN-46, owns that).
+# Machine-wide cap on concurrently live PTY chat sessions (`agent_runtime.py`,
+# MN-43). Originally a cheap guard against a double-click or a UI bug forking
+# a pile of real, paid `claude` processes; MN-46's lead decision (2026-08-29)
+# confirmed the policy stays a flat reject-at-N with no queue and no
+# auto-eviction of an idle session — silently killing a real conversation to
+# free a slot is worse than refusing the new spawn. What MN-46 actually
+# changed: this default is now overridable (this env var), and the rejection
+# is surfaced with real numbers instead of a bare 409 — see
+# `agent_runtime.live_session_count()`, `GET /api/status`'s
+# `service.live_sessions`, and `mnemo doctor`.
 MAX_LIVE_SESSIONS: int = int(os.environ.get("MNEMO_MAX_LIVE_SESSIONS", "8"))
 
 # Per-file cap for `POST /api/agents/{slug}/chats/{chat_id}/upload` (MN-44

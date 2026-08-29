@@ -18,7 +18,7 @@ interface ChatConsoleProps {
   chatId: string;
 }
 
-type ConnStatus = "connecting" | "replaying" | "live" | "error" | "exited";
+type ConnStatus = "connecting" | "replaying" | "live" | "error" | "exited" | "limit";
 
 /** Same reasoning as `lib/ws/client.ts`'s `wsBaseUrl()`: `next dev` points
  *  straight at the backend/`devserver.py`, the exported build is same-origin. */
@@ -118,6 +118,11 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
   const [status, setStatus] = useState<ConnStatus>("connecting");
   const [exitInfo, setExitInfo] = useState<{ code: number | null } | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  // MN-46: set only for a `too_many_sessions` rejection — distinct from
+  // `errorMessage` above because this status must never trigger the
+  // reconnect-backoff loop `onclose` runs for a generic connection failure
+  // (see `limitReachedRef` below).
+  const [limitInfo, setLimitInfo] = useState<{ count: number; limit: number } | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [attachment, setAttachment] = useState<{ name: string } | null>(null);
   const [uploading, setUploading] = useState(false);
@@ -160,6 +165,14 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
     let retryDelay = 500;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let resizeDebounce: ReturnType<typeof setTimeout> | null = null;
+    // MN-46: set by the `too_many_sessions` branch below, read by `onclose`.
+    // A rejection because the machine-wide live-session ceiling is full is
+    // not a transient network failure — retrying against a still-full
+    // ceiling is pointless spam, so `onclose` must skip its usual
+    // reconnect-backoff scheduling for this one case. Reset at the top of
+    // every `connect()` so a later, genuine network error (after the user
+    // reopens this chat) still gets the normal retry behavior.
+    let limitReached = false;
 
     function sendResize(socket: WebSocket) {
       if (socket.readyState !== WebSocket.OPEN) return;
@@ -170,8 +183,10 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
 
     function connect() {
       if (disposed) return;
+      limitReached = false;
       setStatus("connecting");
       setErrorMessage(null);
+      setLimitInfo(null);
       const { token } = useTokenStore.getState();
       const url =
         `${wsBaseUrl()}/ws/agents/${encodeURIComponent(agent.slug)}` +
@@ -198,7 +213,9 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
           type: string;
           data?: string;
           message?: string;
-          code?: number;
+          code?: string;
+          count?: number;
+          limit?: number;
           [key: string]: unknown;
         };
         try {
@@ -218,8 +235,19 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
             setExitInfo({ code: typeof envelope.code === "number" ? envelope.code : null });
             break;
           case "error":
-            setStatus("error");
-            setErrorMessage(envelope.message ?? null);
+            if (envelope.code === "too_many_sessions") {
+              // MN-46: a distinct, non-retrying state — `onclose` (below)
+              // checks `limitReached` and skips its reconnect-backoff loop.
+              limitReached = true;
+              setStatus("limit");
+              setLimitInfo({
+                count: typeof envelope.count === "number" ? envelope.count : 0,
+                limit: typeof envelope.limit === "number" ? envelope.limit : 0,
+              });
+            } else {
+              setStatus("error");
+              setErrorMessage(envelope.message ?? null);
+            }
             break;
           case "subagent_event":
             // `SubagentEvent` carries an index signature, so the leftover
@@ -234,6 +262,14 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
         ws = null;
         wsRef.current = null;
         if (disposed) return;
+        if (limitReached) {
+          // The backend already sent the `too_many_sessions` error envelope
+          // and `onmessage` above set status "limit" — this close (code
+          // 1013) just follows it. Retrying now would only hit the same
+          // still-full ceiling; the user reopening this chat (a fresh mount)
+          // is what tries again, not an automatic loop.
+          return;
+        }
         setStatus("error");
         reconnectTimer = setTimeout(connect, retryDelay);
         retryDelay = Math.min(retryDelay * 2, 10000);
@@ -327,6 +363,7 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
     live: t("agents.console.status.live"),
     error: t("agents.console.status.error"),
     exited: t("agents.console.status.exited"),
+    limit: t("agents.console.status.limit"),
   };
   // Same `.dot`/`.dot.busy`/`.dot.err`/`.dot.idle` classes `shell.css`
   // already defines globally (`WsStatusIndicator.tsx`'s convention) — no
@@ -337,6 +374,9 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
     live: "dot",
     error: "dot err",
     exited: "dot idle",
+    // Not "err": nothing is broken, the machine is just full — same "idle,
+    // not alarming" treatment as "exited".
+    limit: "dot idle",
   };
 
   return (
@@ -357,6 +397,11 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
 
       {status === "error" && errorMessage && (
         <div className="cc-banner cc-banner-error">{t("agents.console.errorBanner", { message: errorMessage })}</div>
+      )}
+      {status === "limit" && limitInfo && (
+        <div className="cc-banner cc-banner-idle">
+          {t("agents.console.limitBanner", { count: limitInfo.count, limit: limitInfo.limit })}
+        </div>
       )}
       {status === "exited" && (
         <div className="cc-banner cc-banner-idle">
