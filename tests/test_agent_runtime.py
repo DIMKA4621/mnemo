@@ -46,9 +46,16 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Redirect all writable state into a temp dir BEFORE config is imported —
 # same convention as test_watcher.py / test_service_ctl.py. Nothing in this
-# file touches the real ~/.mnemo.
+# file touches the real ~/.mnemo. `MNEMO_HOME` matters here specifically for
+# MN-45's launch test: `agent_registry.create()` with no explicit `root`
+# (the default-location branch a real launch always takes) resolves to
+# `config.AGENTS_DIR` = `USER_HOME / "agents"`, and `USER_HOME` has no other
+# relocation override — without this, that branch would write into the
+# real ~/.mnemo/agents on whatever machine runs this file.
 _STATE = tempfile.mkdtemp(prefix="mnemo agent-runtime state ")
+_HOME = tempfile.mkdtemp(prefix="mnemo agent-runtime home ")
 os.environ["MNEMO_STATE_DIR"] = _STATE
+os.environ["MNEMO_HOME"] = _HOME
 os.environ.setdefault("MNEMO_RECONCILE_ON_START", "0")
 
 from src import agent_registry, agent_runtime, config  # noqa: E402
@@ -1472,6 +1479,110 @@ def test_agent_subagents_endpoint() -> None:
     )
 
 
+def test_launch_subagent_endpoint() -> None:
+    """MN-45 Phase 45c: `POST /api/agents/{slug}/subagents/{name}/launch`
+    promotes a `.claude/agents/*.md` definition into a brand-new, top-level
+    agent (`owns_root=True`, default `config.AGENTS_DIR` location — never
+    nested under the source agent) plus an empty chat record. No `claude`
+    process is spawned: the whole flow is filesystem/registry logic, same
+    reasoning as `test_chat_storage` above.
+    """
+    from src import api  # noqa: PLC0415
+
+    source = _make_agent("launch-source")
+    dest_dir = source.root / ".claude" / "agents"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    (dest_dir / "helper.md").write_text(
+        "---\n"
+        "name: helper\n"
+        "description: >\n"
+        "  A helper subagent for testing the launch endpoint.\n"
+        "---\n"
+        "\n"
+        "You are the helper. Do helper things.\n",
+        encoding="utf-8",
+    )
+    (dest_dir / "no-frontmatter.md").write_text("just prose, no frontmatter at all\n", encoding="utf-8")
+
+    # --- happy path ---------------------------------------------------
+    result = api.api_launch_subagent(source.slug, "helper")
+    check("launch: returns an {agent, chat} pair", "agent" in result and "chat" in result, repr(result))
+    new_info = result["agent"]
+    check(
+        "launch: the new agent is real and top-level (owns_root=True)",
+        new_info.get("owns_root") is True,
+        repr(new_info),
+    )
+    check("launch: new agent's name comes from the subagent's frontmatter", new_info.get("name") == "helper", repr(new_info))
+    check("launch: a chat record was created", bool(result["chat"].get("chat_id")), repr(result["chat"]))
+
+    new_slug = new_info["slug"]
+    new_agent = agent_registry.get(new_slug)
+    check(
+        "launch: new agent lives under the default AGENTS_DIR, not nested under the source",
+        new_agent.root.parent == config.AGENTS_DIR,
+        f"{new_agent.root} (parent {new_agent.root.parent}) vs AGENTS_DIR={config.AGENTS_DIR}",
+    )
+    claude_md = agent_registry.read_claude_md(new_agent.root)
+    check(
+        "launch: CLAUDE.md is the subagent's body with frontmatter stripped",
+        claude_md.strip() == "You are the helper. Do helper things.",
+        repr(claude_md),
+    )
+    chats = agent_registry.list_chats(new_slug)
+    check("launch: exactly one chat record exists, nothing else running", len(chats) == 1, repr(chats))
+
+    # --- relaunching the same subagent: name collision handled, not a crash
+    result2 = api.api_launch_subagent(source.slug, "helper")
+    check(
+        "launch: relaunching disambiguates the slug rather than erroring",
+        result2["agent"]["slug"] != new_slug,
+        f"{result2['agent']['slug']} == {new_slug}",
+    )
+
+    # --- a frontmatter-less subagent file still launches gracefully ----
+    result3 = api.api_launch_subagent(source.slug, "no-frontmatter")
+    check(
+        "launch: a subagent file with no frontmatter falls back to its filename stem",
+        result3["agent"]["name"] == "no-frontmatter",
+        repr(result3["agent"]),
+    )
+    claude_md3 = agent_registry.read_claude_md(agent_registry.get(result3["agent"]["slug"]).root)
+    check(
+        "launch: a frontmatter-less file's whole content becomes the CLAUDE.md body",
+        claude_md3.strip() == "just prose, no frontmatter at all",
+        repr(claude_md3),
+    )
+
+    # --- 404s -----------------------------------------------------------
+    try:
+        api.api_launch_subagent("no-such-agent", "helper")
+        check("launch: 404s a bad source agent slug", False, "no exception raised")
+    except api.ApiError as exc:
+        check(
+            "launch: 404s a bad source agent slug",
+            exc.code == "agent_not_found" and exc.status == 404,
+            f"code={exc.code} status={exc.status}",
+        )
+
+    try:
+        api.api_launch_subagent(source.slug, "no-such-subagent")
+        check("launch: 404s a nonexistent subagent name", False, "no exception raised")
+    except api.ApiError as exc:
+        check(
+            "launch: 404s a nonexistent subagent name",
+            exc.code == "subagent_not_found" and exc.status == 404,
+            f"code={exc.code} status={exc.status}",
+        )
+
+    routes = {r.path for r in api.app.routes if hasattr(r, "path")}
+    check(
+        "the launch route is registered",
+        "/api/agents/{slug}/subagents/{name}/launch" in routes,
+        repr(sorted(p for p in routes if "launch" in p)),
+    )
+
+
 def main() -> int:
     test_chat_storage()
     test_launch_translation()
@@ -1490,6 +1601,7 @@ def main() -> int:
     test_sanitize_upload_filename()
     test_agent_chat_upload_endpoint()
     test_agent_subagents_endpoint()
+    test_launch_subagent_endpoint()
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0

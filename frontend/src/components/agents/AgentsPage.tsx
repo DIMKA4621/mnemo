@@ -12,6 +12,7 @@ import { useInlineNote, InlineNote } from "@/components/common/InlineNote";
 import { useAgentsPaneWidthStore } from "@/lib/store/agents-pane-width";
 import { useAgents } from "@/hooks/useAgentQueries";
 import type { AgentInfo } from "@/lib/api/agents";
+import type { ChatInfo } from "@/lib/api/agentChats";
 import "./agents.css";
 import "@/components/common/dialogs.css";
 
@@ -87,6 +88,15 @@ export default function AgentsPage() {
     setNote(message);
   }
 
+  // MN-45 Phase C: unlike `handleCreated` above, a launch already has a real
+  // chat (the backend creates agent + chat atomically) — open straight into
+  // it via `selectChat` rather than landing on the "pick or start a chat"
+  // stub.
+  function handleSubagentLaunched(agent: AgentInfo, chat: ChatInfo, message: string) {
+    selectChat(agent.slug, chat.chat_id);
+    setNote(message);
+  }
+
   const selectedAgent: AgentInfo | null = agentsQuery.data?.find((a) => a.slug === selectedSlug) ?? null;
 
   return (
@@ -107,7 +117,12 @@ export default function AgentsPage() {
         <PaneResizer onStart={beginDrag} onDrag={applyDrag} onCommit={commitDrag} />
         <div className="ag-workspace">
           {workspaceMode === "settings" && selectedAgent ? (
-            <AgentSettings key={selectedAgent.slug} agent={selectedAgent} onClose={() => setWorkspaceMode("chat")} />
+            <AgentSettings
+              key={selectedAgent.slug}
+              agent={selectedAgent}
+              onClose={() => setWorkspaceMode("chat")}
+              onLaunched={handleSubagentLaunched}
+            />
           ) : workspaceMode === "chat" && selectedAgent && selectedChatId ? (
             <ChatConsole key={selectedChatId} agent={selectedAgent} chatId={selectedChatId} />
           ) : (

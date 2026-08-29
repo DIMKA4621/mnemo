@@ -19,7 +19,7 @@ import {
   type PatchAgentRequest,
   type UpdateLinkRequest,
 } from "@/lib/api/agents";
-import { createChat, deleteChat } from "@/lib/api/agentChats";
+import { createChat, deleteChat, launchSubagent } from "@/lib/api/agentChats";
 import type { CatalogCategory } from "@/lib/api/catalog";
 
 /** No cache to invalidate — a dry-run inspection, not a write. */
@@ -158,5 +158,20 @@ export function useDeleteChat() {
   return useMutation({
     mutationFn: ({ slug, chatId }: { slug: string; chatId: string }) => deleteChat(slug, chatId),
     onSuccess: (_result, { slug }) => qc.invalidateQueries({ queryKey: queryKeys.agentChats.list(slug) }),
+  });
+}
+
+/** MN-45 Phase C. Promotes a subagent definition into a brand-new top-level
+ *  agent + an empty chat in one call — invalidates the agent tree (the new
+ *  agent shows up) and primes that new agent's own chat list, same as
+ *  `useCreateAgent`/`useCreateChat` would after two separate calls. */
+export function useLaunchSubagent() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, name }: { slug: string; name: string }) => launchSubagent(slug, name),
+    onSuccess: ({ agent }) => {
+      qc.invalidateQueries({ queryKey: queryKeys.agents.all });
+      qc.invalidateQueries({ queryKey: queryKeys.agentChats.list(agent.slug) });
+    },
   });
 }

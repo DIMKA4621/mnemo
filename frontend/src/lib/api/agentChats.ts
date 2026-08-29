@@ -1,4 +1,5 @@
 import { api, apiUpload } from "./fetcher";
+import type { AgentInfo } from "./agents";
 
 /** MN-43/MN-44. Lifecycle only — `agent_registry.py`'s `{chat_id, title,
  *  created_at, last_active_at}` shape. The live PTY session behind a chat
@@ -45,8 +46,7 @@ export function uploadChatFile(slug: string, chatId: string, file: File): Promis
 }
 
 /** `api_agent_subagents` — read-only, best-effort listing of
- *  `.claude/agents/*.md` inside this agent's own folder. No launch action
- *  (MN-45, out of scope here). */
+ *  `.claude/agents/*.md` inside this agent's own folder. */
 export interface SubagentInfo {
   name: string;
   description: string | null;
@@ -54,6 +54,17 @@ export interface SubagentInfo {
 
 export function getSubagents(slug: string): Promise<{ subagents: SubagentInfo[] }> {
   return api(`/api/agents/${encodeURIComponent(slug)}/subagents`);
+}
+
+/** MN-45 Phase C. Promotes one subagent definition (by the same `name` a
+ *  `SubagentInfo` row shows) into a brand-new, top-level agent + an empty
+ *  chat ready to open — mirrors `createAgent()`/`createChat()`'s own shapes
+ *  rather than inventing a new one, since that's exactly what the backend
+ *  does under the hood (`agent_registry.create` + `agent_registry.create_chat`). */
+export function launchSubagent(slug: string, name: string): Promise<{ agent: AgentInfo; chat: ChatInfo }> {
+  return api(`/api/agents/${encodeURIComponent(slug)}/subagents/${encodeURIComponent(name)}/launch`, {
+    method: "POST",
+  });
 }
 
 /** One `SubagentStart`/`SubagentStop` hook event, as persisted by

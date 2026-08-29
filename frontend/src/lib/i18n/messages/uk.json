@@ -383,7 +383,11 @@
       "general": {
         "savedNote": "Налаштування збережено.",
         "subagentsTitle": "Сабагенти",
-        "subagentsEmpty": "У теці цього агента немає файлів .claude/agents/*.md."
+        "subagentsEmpty": "У теці цього агента немає файлів .claude/agents/*.md.",
+        "subagentLaunchBtn": "Перетворити на агента",
+        "subagentLaunching": "Перетворюємо…",
+        "subagentLaunchedNote": "Агента «{name}» створено та відкрито.",
+        "subagentLaunchError": "Не вдалося перетворити «{name}» на агента: {message}"
       },
       "backend": {
         "savedNote": "Налаштування бекенда збережено.",

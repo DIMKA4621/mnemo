@@ -407,6 +407,10 @@ _ERROR_STATUS: dict[str, int] = {
     # standard "request entity too large" status, rather than 400 — the
     # request is otherwise well-formed, only its size is the problem.
     "upload_too_large": 413,
+    # [NEW beyond §9.2, MN-45] `POST /api/agents/{slug}/subagents/{name}/
+    # launch` — no `.claude/agents/*.md` under the source agent matches
+    # `name` (or it could not be read). Same shape as `chat_not_found`.
+    "subagent_not_found": 404,
     "internal": 500,
 }
 
@@ -1930,15 +1934,8 @@ def api_create_agent(req: AgentCreateRequest) -> dict:
         except BankExists as exc:
             raise ApiError("bank_exists", str(exc)) from exc
 
-    info = _agent_info(agent)
-    hub.publish("bank_added", {"bank": _bank_info(registry.get(agent.bank_id))}, agent.bank_id)
-    q = _queue()
-    if q is not None:
-        with suppress(Exception):
-            q.enqueue_bulk(agent.bank_id, trigger="api")
-    else:
-        log.info("agent %s registered; indexing waits for the queue", agent.slug)
-    return info
+    _finish_agent_creation(agent)
+    return _agent_info(agent)
 
 
 @app.get("/api/agents/{slug}", include_in_schema=False)
@@ -2174,11 +2171,19 @@ async def api_agent_chat_upload(
 
 
 # --------------------------------------------- agent subagent listing (MN-44)
+# ------------------------------------------------ and subagent launch (MN-45)
 #
 # Read-only, best-effort display: what `.claude/agents/*.md` this agent's own
 # folder happens to carry. No validation beyond "do not crash on a malformed
 # or missing frontmatter block" — this never blocks agent creation/use, it is
 # purely informational for the (Phase B) console.
+#
+# MN-45 Phase C adds one write action on top of that listing: promote one of
+# those `.claude/agents/*.md` files into a brand-new, top-level, full-fledged
+# agent (`owns_root=True`, its own folder and bank — same machinery MN-40
+# built, not a lightweight or nested thing) plus an empty chat record ready
+# to open. Nothing here spawns a `claude` process — `create_chat` stays lazy,
+# exactly like every other chat creation in this codebase.
 
 _AGENT_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?\r?\n)---\r?\n", re.DOTALL)
 _AGENT_FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
@@ -2244,6 +2249,82 @@ def _read_agent_subagents(root: Path) -> list[dict[str, Any]]:
 def api_agent_subagents(slug: str) -> dict:
     agent = _resolve_agent(slug)
     return {"subagents": _read_agent_subagents(agent.root)}
+
+
+def _find_agent_subagent_path(root: Path, name: str) -> Path | None:
+    """Locate one `.claude/agents/*.md` under ``root`` by the same display
+    name `_read_agent_subagents` shows (``name:`` frontmatter, else the
+    filename stem) — so the name a launch request names is exactly the name
+    the listing showed."""
+    agents_dir = Path(root) / ".claude" / "agents"
+    if not agents_dir.is_dir():
+        return None
+    for path in sorted(agents_dir.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fields = _parse_agent_frontmatter(text)
+        if (fields.get("name") or path.stem) == name:
+            return path
+    return None
+
+
+def _strip_agent_frontmatter(text: str) -> str:
+    """The prose body of a `.claude/agents/*.md` file, with its YAML
+    frontmatter block (if any) removed — reuses `_parse_agent_frontmatter`'s
+    own regex so the two never disagree about where the block ends."""
+    match = _AGENT_FRONTMATTER_RE.match(text)
+    return (text[match.end():] if match else text).strip()
+
+
+def _finish_agent_creation(agent: agent_registry.Agent) -> None:
+    """The tail shared by every path that registers a brand-new agent
+    (`POST /api/agents`, subagent launch below): publish the new bank and
+    queue its initial index."""
+    hub.publish("bank_added", {"bank": _bank_info(registry.get(agent.bank_id))}, agent.bank_id)
+    q = _queue()
+    if q is not None:
+        with suppress(Exception):
+            q.enqueue_bulk(agent.bank_id, trigger="api")
+    else:
+        log.info("agent %s registered; indexing waits for the queue", agent.slug)
+
+
+@app.post(
+    "/api/agents/{slug}/subagents/{name}/launch", status_code=201, include_in_schema=False
+)
+def api_launch_subagent(slug: str, name: str) -> dict:
+    """Promote a subagent definition into a real, top-level agent + an empty
+    chat ready to open. See the module note above this section."""
+    agent = _resolve_agent(slug)
+    path = _find_agent_subagent_path(agent.root, name)
+    if path is None:
+        raise ApiError(
+            "subagent_not_found", f"no subagent {name!r} on agent {slug!r}", slug=slug, name=name
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ApiError(
+            "subagent_not_found", f"could not read {path.name}: {exc}", slug=slug, name=name
+        ) from exc
+
+    fields = _parse_agent_frontmatter(text)
+    new_name = fields.get("name") or path.stem
+    claude_md = _strip_agent_frontmatter(text)
+
+    try:
+        new_agent = agent_registry.create(new_name, claude_md=claude_md)
+    except agent_registry.AgentExists as exc:
+        raise ApiError("agent_exists", str(exc)) from exc
+    except BankExists as exc:
+        raise ApiError("bank_exists", str(exc)) from exc
+
+    _finish_agent_creation(new_agent)
+    chat = agent_registry.create_chat(new_agent.slug)
+    log.info("launched subagent %r of agent %s as new agent %s", name, slug, new_agent.slug)
+    return {"agent": _agent_info(new_agent), "chat": chat}
 
 
 # ------------------------------------------------- agent <-> catalog links (MN-48)

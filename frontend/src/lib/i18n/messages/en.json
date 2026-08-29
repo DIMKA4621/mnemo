@@ -383,7 +383,11 @@
       "general": {
         "savedNote": "Settings saved.",
         "subagentsTitle": "Subagents",
-        "subagentsEmpty": "No .claude/agents/*.md files in this agent's own folder."
+        "subagentsEmpty": "No .claude/agents/*.md files in this agent's own folder.",
+        "subagentLaunchBtn": "Turn into agent",
+        "subagentLaunching": "Turning into agent…",
+        "subagentLaunchedNote": "Agent «{name}» created and opened.",
+        "subagentLaunchError": "Could not turn «{name}» into an agent: {message}"
       },
       "backend": {
         "savedNote": "Backend setting saved.",

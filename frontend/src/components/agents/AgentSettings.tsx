@@ -7,6 +7,7 @@ import { AgentGeneralTab } from "./AgentGeneralTab";
 import { AgentBackendTab } from "./AgentBackendTab";
 import { AgentLinksTab } from "./AgentLinksTab";
 import type { AgentInfo } from "@/lib/api/agents";
+import type { ChatInfo } from "@/lib/api/agentChats";
 
 /** What a Save-gated tab (Загальне, Бекенд) hands the shared footer button —
  *  mirrors `SettingsTabs.tsx`'s `SectionController` (same idea: each tab
@@ -29,6 +30,9 @@ type TabId = "general" | "backend" | "links";
 interface AgentSettingsProps {
   agent: AgentInfo;
   onClose: () => void;
+  /** MN-45 Phase C — bubbles a successful subagent launch (General tab) up
+   *  to the page, which owns navigation/selection. */
+  onLaunched?: (agent: AgentInfo, chat: ChatInfo, message: string) => void;
 }
 
 /**
@@ -43,7 +47,7 @@ interface AgentSettingsProps {
  * leaving "MCP"/"Skills" in English was already an inconsistency in the
  * mockup this fixes.
  */
-export function AgentSettings({ agent, onClose }: AgentSettingsProps) {
+export function AgentSettings({ agent, onClose, onLaunched }: AgentSettingsProps) {
   const t = useT();
   const [active, setActive] = useState<TabId>("general");
   const [controller, setController] = useState<AgentSectionController | null>(null);
@@ -74,7 +78,7 @@ export function AgentSettings({ agent, onClose }: AgentSettingsProps) {
       </div>
 
       <div className="ags-body">
-        {active === "general" && <AgentGeneralTab agent={agent} onController={setController} />}
+        {active === "general" && <AgentGeneralTab agent={agent} onController={setController} onLaunched={onLaunched} />}
         {active === "backend" && <AgentBackendTab agent={agent} onController={setController} />}
         {active === "links" && <AgentLinksTab agent={agent} />}
       </div>
