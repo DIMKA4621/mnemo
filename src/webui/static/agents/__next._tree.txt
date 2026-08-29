@@ -3,5 +3,5 @@
 :HL["/ui/_next/static/chunks/1kog3kw8xl-gr.css","style"]
 :HL["/ui/_next/static/chunks/42x_0tvgvtycd.css","style"]
 :HL["/ui/_next/static/chunks/2a4v9hk6wqecr.css","style"]
-:HL["/ui/_next/static/chunks/3ibroyxcqgn9k.css","style"]
+:HL["/ui/_next/static/chunks/2qcz0x2dt-rd-.css","style"]
 0:{"tree":{"name":"","param":null,"prefetchHints":4176,"slots":{"children":{"name":"agents","param":null,"prefetchHints":4192,"slots":{"children":{"name":"__PAGE__","param":null,"prefetchHints":4256,"slots":null}}}}},"staleTime":300,"buildId":"mnemo-console"}

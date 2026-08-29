@@ -697,18 +697,46 @@ async def _hook_agent_subagent_endpoint() -> None:
     chat_id = chat["chat_id"]
     other_chat_id = "some-other-chat-id"
     token = "hook-endpoint-" + uuid.uuid4().hex
-    _register_fake_live_session(agent.slug, chat_id, token)
+    session = _register_fake_live_session(agent.slug, chat_id, token)
+
+    # MN-45b: a real WS subscriber queue on the fake session, so this test
+    # also exercises `record_subagent_event`'s broadcast, not just its
+    # persistence -- `_deliver` needs a bound loop to schedule delivery on.
+    agent_runtime.bind_loop(asyncio.get_running_loop())
+    queue: asyncio.Queue = asyncio.Queue()
+    with session.lock:
+        session.subscribers["hook-test-sub"] = queue
 
     try:
         req, scope = _fake_request(f"/hooks/agents/{agent.slug}/{chat_id}/subagent")
         scope[api.AGENT_SESSION_SCOPE_KEY] = chat_id  # what auth_middleware would set
 
+        hook_body = json.dumps(
+            {"hook_event_name": "SubagentStart", "agent_id": "hook-agent-1"}
+        ).encode("utf-8")
+
         async def _receive():
-            return {"type": "http.request", "body": b"{}", "more_body": False}
+            return {"type": "http.request", "body": hook_body, "more_body": False}
 
         req = req.__class__(scope, _receive)
         result = await api.hook_agent_subagent(req, agent.slug, chat_id)
         check("hook endpoint: matching chat_id -> accepted (empty ack)", result == {}, repr(result))
+
+        persisted = agent_registry.read_subagent_events(agent.root, chat_id)
+        check(
+            "hook endpoint: persists the event to the subagents.jsonl sidecar (MN-45b)",
+            len(persisted) == 1 and persisted[0].get("agent_id") == "hook-agent-1",
+            repr(persisted),
+        )
+
+        envelope = await asyncio.wait_for(queue.get(), timeout=2.0)
+        check(
+            "hook endpoint: broadcasts a subagent_event envelope over the chat's WS channel",
+            envelope.get("type") == "subagent_event"
+            and envelope.get("agent_id") == "hook-agent-1"
+            and envelope.get("hook_event_name") == "SubagentStart",
+            repr(envelope),
+        )
 
         # The token resolved to `chat_id`, but the URL names a DIFFERENT
         # chat_id -- the confused-deputy case `hook_agent_subagent` itself
@@ -729,11 +757,236 @@ async def _hook_agent_subagent_endpoint() -> None:
                 f"code={exc.code} status={exc.status}",
             )
     finally:
+        agent_runtime.bind_loop(None)
         _drop_fake_live_session(chat_id, token)
 
 
 def test_hook_agent_subagent_endpoint() -> None:
     asyncio.run(_hook_agent_subagent_endpoint())
+
+
+# ------------------------------------------ 45b subagent event persistence
+#
+# `record_subagent_event`'s two effects (sidecar append, WS broadcast),
+# `agent_registry`'s sidecar path/reader, and the initial-load GET endpoint
+# -- exercised directly, no real `claude` process or hook POST involved
+# (the hook wire itself is `test_hook_agent_subagent_endpoint`, above).
+
+
+def test_subagents_sidecar() -> None:
+    agent = _make_agent("subagents-sidecar")
+    chat = agent_registry.create_chat(agent.slug)
+    chat_id = chat["chat_id"]
+
+    check(
+        "read_subagent_events: no sidecar yet -> empty list, not an error",
+        agent_registry.read_subagent_events(agent.root, chat_id) == [],
+    )
+
+    # Via the real write path (`record_subagent_event`), not a hand-rolled
+    # file write -- Start then Stop, one line each, never merged.
+    agent_runtime.record_subagent_event(
+        agent.slug, chat_id, {"hook_event_name": "SubagentStart", "agent_id": "s1"},
+    )
+    agent_runtime.record_subagent_event(
+        agent.slug, chat_id, {"hook_event_name": "SubagentStop", "agent_id": "s1"},
+    )
+
+    sidecar_path = agent_registry.subagents_sidecar_path(agent.root, chat_id)
+    check("subagents_sidecar_path: file created on disk", sidecar_path.is_file())
+    lines = sidecar_path.read_text(encoding="utf-8").splitlines()
+    check("subagents.jsonl: one line per event, Start/Stop not merged", len(lines) == 2, repr(lines))
+
+    events = agent_registry.read_subagent_events(agent.root, chat_id)
+    check(
+        "read_subagent_events: round-trips both events in file order",
+        [e["hook_event_name"] for e in events] == ["SubagentStart", "SubagentStop"],
+        repr(events),
+    )
+    check(
+        "record_subagent_event: adds a server-side received_at the hook payload didn't carry",
+        all("received_at" in e for e in events),
+        repr(events),
+    )
+
+    # A malformed trailing line must not break the whole read.
+    with sidecar_path.open("a", encoding="utf-8") as fh:
+        fh.write("not valid json\n")
+    events2 = agent_registry.read_subagent_events(agent.root, chat_id)
+    check(
+        "read_subagent_events: a malformed line is skipped, not raised",
+        len(events2) == 2,
+        repr(events2),
+    )
+
+
+async def _record_subagent_event_broadcast() -> None:
+    agent = _make_agent("subagent-broadcast")
+    chat = agent_registry.create_chat(agent.slug)
+    chat_id = chat["chat_id"]
+    session = agent_runtime.Session(
+        chat_id=chat_id, agent_slug=agent.slug,
+        history_path=Path(tempfile.mktemp()), proc=None, token="broadcast-tok",
+    )
+    agent_runtime.bind_loop(asyncio.get_running_loop())
+    with agent_runtime._sessions_lock:
+        agent_runtime._sessions[chat_id] = session
+        agent_runtime._session_tokens[session.token] = chat_id
+
+    queue: asyncio.Queue = asyncio.Queue()
+    with session.lock:
+        session.subscribers["sub-1"] = queue
+
+    try:
+        event = agent_runtime.record_subagent_event(
+            agent.slug, chat_id,
+            {"hook_event_name": "SubagentStart", "agent_id": "abc123", "agent_type": "tester"},
+        )
+        check("record_subagent_event: returns the event with received_at added", "received_at" in event, repr(event))
+
+        item = await asyncio.wait_for(queue.get(), timeout=2.0)
+        check(
+            "record_subagent_event: broadcasts a subagent_event envelope to the chat's WS subscribers",
+            item.get("type") == "subagent_event"
+            and item.get("agent_id") == "abc123"
+            and item.get("hook_event_name") == "SubagentStart",
+            repr(item),
+        )
+
+        events_on_disk = agent_registry.read_subagent_events(agent.root, chat_id)
+        check(
+            "record_subagent_event: persisted to the subagents.jsonl sidecar",
+            len(events_on_disk) == 1 and events_on_disk[0]["agent_id"] == "abc123",
+            repr(events_on_disk),
+        )
+    finally:
+        agent_runtime.bind_loop(None)
+        with agent_runtime._sessions_lock:
+            agent_runtime._sessions.pop(chat_id, None)
+            agent_runtime._session_tokens.pop(session.token, None)
+
+
+def test_record_subagent_event_broadcast() -> None:
+    asyncio.run(_record_subagent_event_broadcast())
+
+
+def test_record_subagent_event_never_raises() -> None:
+    """Reviewer-caught gap: the docstring promises a persistence OR
+    broadcast failure is "logged and swallowed, never raised" -- originally
+    only the persist block had a try/except. Both failure modes are
+    exercised here, independently, and neither may propagate."""
+
+    # Persist-path failure: `agent_registry.get` raises `AgentNotFound`
+    # internally for an unknown slug -- must not reach the caller.
+    try:
+        event = agent_runtime.record_subagent_event(
+            "no-such-agent-slug-at-all", "no-such-chat-id",
+            {"hook_event_name": "SubagentStart", "agent_id": "x"},
+        )
+        ok = isinstance(event, dict) and "received_at" in event
+        detail = repr(event)
+    except Exception as exc:  # noqa: BLE001 - this is exactly what must not happen
+        ok, detail = False, f"raised {exc!r}"
+    check("record_subagent_event: unknown agent slug (persist failure) does not raise", ok, detail)
+
+    # Broadcast-path failure: a live session exists, but `_deliver` itself
+    # throws -- the specific gap the reviewer flagged (no guard around the
+    # session lookup / lock / `_deliver` call).
+    agent = _make_agent("subagent-broadcast-failure")
+    chat = agent_registry.create_chat(agent.slug)
+    chat_id = chat["chat_id"]
+    session = agent_runtime.Session(
+        chat_id=chat_id, agent_slug=agent.slug,
+        history_path=Path(tempfile.mktemp()), proc=None, token="broadcast-fail-tok",
+    )
+    with agent_runtime._sessions_lock:
+        agent_runtime._sessions[chat_id] = session
+        agent_runtime._session_tokens[session.token] = chat_id
+    with session.lock:
+        session.subscribers["doomed-sub"] = None  # type: ignore[assignment] - value is never read, `_deliver` is stubbed below
+
+    real_deliver = agent_runtime._deliver
+
+    def _boom(subs, item):  # noqa: ARG001 - signature must match `_deliver`
+        raise RuntimeError("simulated broadcast failure")
+
+    agent_runtime._deliver = _boom
+    try:
+        event2 = agent_runtime.record_subagent_event(
+            agent.slug, chat_id,
+            {"hook_event_name": "SubagentStart", "agent_id": "y"},
+        )
+        ok2 = isinstance(event2, dict) and "received_at" in event2
+        detail2 = repr(event2)
+    except Exception as exc:  # noqa: BLE001 - this is exactly what must not happen
+        ok2, detail2 = False, f"raised {exc!r}"
+    finally:
+        agent_runtime._deliver = real_deliver
+        with agent_runtime._sessions_lock:
+            agent_runtime._sessions.pop(chat_id, None)
+            agent_runtime._session_tokens.pop(session.token, None)
+    check("record_subagent_event: a broadcast failure does not raise", ok2, detail2)
+
+    # The two failure paths are independent: persistence must still have
+    # succeeded even though the broadcast blew up right after it.
+    persisted = agent_registry.read_subagent_events(agent.root, chat_id)
+    check(
+        "record_subagent_event: persistence still succeeds even when broadcast fails",
+        len(persisted) == 1 and persisted[0].get("agent_id") == "y",
+        repr(persisted),
+    )
+
+
+def test_agent_chat_subagents_endpoint() -> None:
+    from src import api  # noqa: PLC0415
+
+    agent = _make_agent("chat-subagents-endpoint")
+    chat = agent_registry.create_chat(agent.slug)
+    chat_id = chat["chat_id"]
+
+    empty = api.api_agent_chat_subagents(agent.slug, chat_id)
+    check(
+        "GET chat subagents: no sidecar yet -> empty list, not an error",
+        empty == {"events": []},
+        repr(empty),
+    )
+
+    agent_runtime.record_subagent_event(
+        agent.slug, chat_id, {"hook_event_name": "SubagentStart", "agent_id": "g1"},
+    )
+    result = api.api_agent_chat_subagents(agent.slug, chat_id)
+    check(
+        "GET chat subagents: returns the persisted event",
+        len(result["events"]) == 1 and result["events"][0]["agent_id"] == "g1",
+        repr(result),
+    )
+
+    try:
+        api.api_agent_chat_subagents(agent.slug, "no-such-chat")
+        check("GET chat subagents: 404s a bad chat_id", False, "no exception raised")
+    except api.ApiError as exc:
+        check(
+            "GET chat subagents: 404s a bad chat_id",
+            exc.code == "chat_not_found" and exc.status == 404,
+            f"code={exc.code} status={exc.status}",
+        )
+
+    try:
+        api.api_agent_chat_subagents("no-such-agent", chat_id)
+        check("GET chat subagents: 404s a bad agent slug", False, "no exception raised")
+    except api.ApiError as exc:
+        check(
+            "GET chat subagents: 404s a bad agent slug",
+            exc.code == "agent_not_found" and exc.status == 404,
+            f"code={exc.code} status={exc.status}",
+        )
+
+    routes = {r.path for r in api.app.routes if hasattr(r, "path")}
+    check(
+        "the chat subagents route is registered",
+        "/api/agents/{slug}/chats/{chat_id}/subagents" in routes,
+        repr(sorted(p for p in routes if "subagent" in p)),
+    )
 
 
 # --------------------------------------------------- 45a mcp_agents.py tools
@@ -878,9 +1131,36 @@ def test_mcp_agents_tools() -> None:
             summary,
         )
         check(
-            "session_summary: honest about not being an LLM summary (MN-45b note present)",
-            "MN-45b" in summary,
+            "session_summary: no subagent runs yet -> 'subagent runs: 0'",
+            "subagent runs: 0" in summary,
             summary,
+        )
+
+        # MN-45b: real counts from the sidecar, via the real write path --
+        # one completed Start/Stop pair plus one dangling Start (no Stop).
+        agent_runtime.record_subagent_event(
+            target.slug, target_chat_id,
+            {"hook_event_name": "SubagentStart", "agent_id": "sub-1"},
+        )
+        agent_runtime.record_subagent_event(
+            target.slug, target_chat_id,
+            {"hook_event_name": "SubagentStop", "agent_id": "sub-1"},
+        )
+        agent_runtime.record_subagent_event(
+            target.slug, target_chat_id,
+            {"hook_event_name": "SubagentStart", "agent_id": "sub-2"},
+        )
+        summary2 = call_as_caller(mcp_agents.run_session_summary, target_chat_id)
+        check(
+            "session_summary: counts real subagent runs from the sidecar",
+            "subagent runs: 2" in summary2,
+            summary2,
+        )
+        check(
+            "session_summary: a Start with no Stop reads as 'no completion signal yet', not 'running'",
+            "1 started, no completion signal yet" in summary2
+            and "currently running" not in summary2.lower(),
+            summary2,
         )
 
         # --- interrupt -------------------------------------------------------
@@ -1202,6 +1482,10 @@ def main() -> int:
     test_http_chat_endpoints()
     test_auth_middleware_agent_branch()
     test_hook_agent_subagent_endpoint()
+    test_subagents_sidecar()
+    test_record_subagent_event_broadcast()
+    test_record_subagent_event_never_raises()
+    test_agent_chat_subagents_endpoint()
     test_mcp_agents_tools()
     test_sanitize_upload_filename()
     test_agent_chat_upload_endpoint()

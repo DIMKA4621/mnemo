@@ -7,10 +7,11 @@ import "@xterm/xterm/css/xterm.css";
 import { useT } from "@/lib/i18n/hooks";
 import { useUiStore } from "@/lib/store/ui";
 import { useTokenStore } from "@/lib/store/token";
-import { uploadChatFile } from "@/lib/api/agentChats";
+import { getSubagentEvents, uploadChatFile, type SubagentEvent } from "@/lib/api/agentChats";
 import type { AgentInfo } from "@/lib/api/agents";
 import type { ThemeMode } from "@/lib/theme/design-tokens";
 import { tokensFor } from "@/lib/theme/design-tokens";
+import { SubagentPanel } from "./SubagentPanel";
 
 interface ChatConsoleProps {
   agent: AgentInfo;
@@ -121,6 +122,23 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
   const [attachment, setAttachment] = useState<{ name: string } | null>(null);
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [subagentEvents, setSubagentEvents] = useState<SubagentEvent[]>([]);
+
+  // MN-45b: initial load only — new events after mount arrive live over the
+  // same WS connection below (`subagent_event` envelope), never a second
+  // poll of this endpoint. Best-effort: a failed fetch just leaves the
+  // panel empty rather than surfacing a banner over the terminal.
+  useEffect(() => {
+    let cancelled = false;
+    getSubagentEvents(agent.slug, chatId)
+      .then((res) => {
+        if (!cancelled) setSubagentEvents(res.events);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [agent.slug, chatId]);
 
   useEffect(() => {
     const container = containerRef.current;
@@ -176,7 +194,13 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
 
       socket.onmessage = (event) => {
         if (ws !== socket) return;
-        let envelope: { type: string; data?: string; message?: string; code?: number };
+        let envelope: {
+          type: string;
+          data?: string;
+          message?: string;
+          code?: number;
+          [key: string]: unknown;
+        };
         try {
           envelope = JSON.parse(event.data);
         } catch {
@@ -196,6 +220,11 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
           case "error":
             setStatus("error");
             setErrorMessage(envelope.message ?? null);
+            break;
+          case "subagent_event":
+            // `SubagentEvent` carries an index signature, so the leftover
+            // `type` field here is harmless — never read by `SubagentPanel`.
+            setSubagentEvents((prev) => [...prev, envelope as unknown as SubagentEvent]);
             break;
         }
       };
@@ -323,6 +352,8 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
           {statusLabel[status]}
         </span>
       </div>
+
+      <SubagentPanel events={subagentEvents} />
 
       {status === "error" && errorMessage && (
         <div className="cc-banner cc-banner-error">{t("agents.console.errorBanner", { message: errorMessage })}</div>

@@ -243,13 +243,25 @@ def run_session_summary(chat_id: str, n_chars: int = 4000) -> str:
     live_by_id = {s["chat_id"]: s for s in agent_runtime.list_live_sessions()}
     alive = chat_id in live_by_id and live_by_id[chat_id]["alive"]
 
+    # MN-45b: real counts from the `subagents.jsonl` sidecar, not a
+    # placeholder. "started, no completion signal yet" rather than
+    # "running" — a crashed subagent never sends a Stop event, so this
+    # can go stale; see `agent_runtime.record_subagent_event`'s docstring.
+    events = agent_registry.read_subagent_events(agent.root, chat_id)
+    started = [e for e in events if e.get("hook_event_name") == "SubagentStart"]
+    stopped_ids = {
+        e.get("agent_id") for e in events if e.get("hook_event_name") == "SubagentStop"
+    }
+    pending = sum(1 for e in started if e.get("agent_id") not in stopped_ids)
+    subagent_line = f"subagent runs: {len(started)}"
+    if pending:
+        subagent_line += f" ({pending} started, no completion signal yet)"
+
     lines = [
         f"[mnemo-agents · {agent.slug} · chat={chat_id}]",
         f"created_at={chat.get('created_at') or '?'}  "
         f"last_active_at={chat.get('last_active_at') or '?'}  alive={alive}",
-        # Subagent-run counting lands in MN-45b's `subagents.jsonl` sidecar —
-        # honestly 0 for now, not a guess dressed up as a real count.
-        "subagent runs: 0 (subagent event tracking lands in MN-45b)",
+        subagent_line,
     ]
     history_path = agent_registry.chat_history_path(agent.root, chat_id)
     try:

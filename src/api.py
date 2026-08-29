@@ -2055,6 +2055,23 @@ def api_delete_chat(slug: str, chat_id: str) -> dict:
     return {"ok": True}
 
 
+# --------------------------------------------- agent chat subagent runs (MN-45b)
+#
+# Initial-load counterpart to the live `subagent_event` WS envelope
+# (`ws_agent_chat`, below): a freshly-opened `ChatConsole` reads this once on
+# mount to show subagent-run history without waiting for a new live hook
+# event. Distinct from `/api/agents/{slug}/subagents` above (MN-44), which
+# lists `.claude/agents/*.md` DEFINITIONS on disk — this one lists actual
+# observed subagent RUNS for one specific chat session.
+
+
+@app.get("/api/agents/{slug}/chats/{chat_id}/subagents", include_in_schema=False)
+def api_agent_chat_subagents(slug: str, chat_id: str) -> dict:
+    agent = _resolve_agent(slug)
+    _resolve_chat(slug, chat_id)
+    return {"events": agent_registry.read_subagent_events(agent.root, chat_id)}
+
+
 # ---------------------------------------------- agent chat file upload (MN-44)
 #
 # Lets the (Phase B) chat console accept a dropped file: save it under this
@@ -4128,13 +4145,12 @@ async def hook_agent_subagent(request: Request, slug: str, chat_id: str) -> dict
     with it" reasoning `/mcp`'s bank routing already applies (see
     `mcp_server.py`'s module docstring).
 
-    **Runtime plumbing only (MN-45a).** This proves the wire is live,
-    authenticated, and correctly scoped to one chat — it accepts and
-    acknowledges every SubagentStart/Stop event but does not yet persist or
-    broadcast them anywhere. Storing them (a `subagents.jsonl` sidecar) and
-    fanning them out over this chat's existing WebSocket channel as a new
-    `subagent_event` envelope for the console to render is MN-45b's job, not
-    this one's.
+    **Persists and broadcasts (MN-45b).** Proven live and correctly scoped
+    to one chat by MN-45a; this phase wires the event into
+    `agent_runtime.record_subagent_event`, which appends it to this chat's
+    `subagents.jsonl` sidecar and fans it out over this chat's existing
+    WebSocket channel as a new `subagent_event` envelope for the console to
+    render — see that function's docstring for the full contract.
     """
     authed_chat_id = request.scope.get(AGENT_SESSION_SCOPE_KEY)
     if authed_chat_id != chat_id:
@@ -4142,11 +4158,17 @@ async def hook_agent_subagent(request: Request, slug: str, chat_id: str) -> dict
                        "this token does not authorize this chat_id")
     body: dict[str, Any] = {}
     with suppress(Exception):
-        body = await request.json()
+        parsed = await request.json()
+        if isinstance(parsed, dict):
+            body = parsed
+        # A non-dict JSON body (list/string/number) is not a real CC hook
+        # payload -- `body` stays `{}` rather than something `.get()` (here
+        # and in `record_subagent_event`) would raise on.
     log.info(
         "subagent hook: agent=%s chat=%s event=%s agent_id=%s",
         slug, chat_id, body.get("hook_event_name"), body.get("agent_id"),
     )
+    agent_runtime.record_subagent_event(slug, chat_id, body)
     # An empty JSON-RPC-adjacent object is a valid, no-op hook response (the
     # same JSON output format command hooks use; SubagentStart/Stop have
     # limited decision control, so there is nothing to say here yet).

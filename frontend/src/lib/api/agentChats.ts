@@ -55,3 +55,30 @@ export interface SubagentInfo {
 export function getSubagents(slug: string): Promise<{ subagents: SubagentInfo[] }> {
   return api(`/api/agents/${encodeURIComponent(slug)}/subagents`);
 }
+
+/** One `SubagentStart`/`SubagentStop` hook event, as persisted by
+ *  `agent_registry.subagents_sidecar_path` and broadcast by
+ *  `agent_runtime.record_subagent_event` (MN-45b) — distinct from
+ *  `SubagentInfo` above, which lists `.claude/agents/*.md` DEFINITIONS, not
+ *  observed runs. The server only adds `received_at`; everything else is
+ *  whatever the `claude` CLI's own hook payload carried, so this stays a
+ *  loose bag of known-useful fields plus an index signature for the rest
+ *  rather than a strict schema. */
+export interface SubagentEvent {
+  hook_event_name?: string;
+  agent_id?: string;
+  agent_type?: string;
+  subagent_type?: string;
+  last_assistant_message?: string;
+  received_at?: string;
+  [key: string]: unknown;
+}
+
+export function getSubagentEvents(
+  slug: string,
+  chatId: string,
+): Promise<{ events: SubagentEvent[] }> {
+  return api(
+    `/api/agents/${encodeURIComponent(slug)}/chats/${encodeURIComponent(chatId)}/subagents`,
+  );
+}

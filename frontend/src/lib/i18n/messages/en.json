@@ -315,7 +315,12 @@
       "dropHint": "Drop a file to attach it",
       "attachTitle": "Attach a file",
       "clearAttachment": "Remove attachment",
-      "uploading": "Uploading…"
+      "uploading": "Uploading…",
+      "subagents": {
+        "label": "Subagent runs",
+        "pending": "started — no completion signal yet",
+        "done": "done"
+      }
     },
     "wizard": {
       "title": "Add agent",

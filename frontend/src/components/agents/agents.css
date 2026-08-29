@@ -400,6 +400,67 @@
 .cc-uploading { color: var(--fg-mute); font-size: 11.5px; }
 .cc-upload-error { color: var(--err); font-size: 11.5px; }
 
+/* ---- subagent runs panel (SubagentPanel.tsx, MN-45b) --------------------
+ * Deliberately secondary to the terminal below it: a slim strip, not a
+ * second pane — see the module docstring. Renders nothing (no element at
+ * all) when there are no runs yet, so a chat with no subagents pays no
+ * layout cost for this. */
+
+.sa-panel {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+
+.sa-panel-label {
+  flex: none;
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.sa-panel-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.sa-run {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-pane);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sa-run.is-done { color: var(--fg-dim); }
+.sa-run.is-pending { color: var(--fg); }
+
+.sa-run-type { font-family: var(--mono); font-weight: 600; }
+.sa-run-status { color: var(--fg-mute); }
+.sa-run-summary {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-mute);
+  border-left: 1px solid var(--line);
+  padding-left: 6px;
+}
+
 /* Ported verbatim from the mockup's `.ac-attach-chip`/`.ac-icon-btn`
  * (`.claude/scratch/agents-console-mockup/index.html`) — the one piece of
  * its input bar that survives, since MN-44's own file-attach chip is the

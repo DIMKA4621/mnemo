@@ -67,6 +67,7 @@ import time
 import uuid
 from contextlib import suppress
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -196,6 +197,18 @@ _loop: asyncio.AbstractEventLoop | None = None
 # itself (module docstring), guarded by the same `_sessions_lock` rather than
 # a second lock, since the two dicts change together or not at all.
 _session_tokens: dict[str, str] = {}
+
+# MN-45b: guards appends to any chat's `subagents.jsonl` sidecar
+# (`agent_registry.subagents_sidecar_path`). One lock for every chat rather
+# than one per chat_id — subagent hook events are low-frequency (a handful
+# per chat, not a per-keystroke hot path like `_publish_output`'s
+# `session.lock`), so the simplicity of a single lock costs nothing
+# measurable and needs no per-chat bookkeeping to leak. Deliberately
+# independent of any one `Session`'s own `lock`: a hook event must still be
+# persisted even in the (accepted-as-unlikely, see `record_subagent_event`)
+# case where the live session has already been finalized and removed from
+# `_sessions` by the time its last `SubagentStop` arrives.
+_subagent_sidecar_lock = threading.Lock()
 
 
 def bind_loop(loop: asyncio.AbstractEventLoop | None) -> None:
@@ -399,6 +412,64 @@ def _publish_output(session: Session, chunk: str) -> None:
                 session._history_fh.flush()
         subs = list(session.subscribers.values())
     _deliver(subs, {"type": "output", "data": chunk})
+
+
+def _iso_now() -> str:
+    # Same shape as `agent_registry._now_iso` (timespec="seconds") — kept as
+    # its own copy rather than importing that private helper across a module
+    # boundary, matching how each module already owns its own timestamp
+    # convention (`Session.created_at` here uses `time.time()` instead, for
+    # a different reason: it is compared/sorted in-process, never persisted).
+    return datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
+
+
+def record_subagent_event(agent_slug: str, chat_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    """Persist one `SubagentStart`/`SubagentStop` hook event (MN-45b) to this
+    chat's `subagents.jsonl` sidecar (`agent_registry.subagents_sidecar_path`)
+    and broadcast it to every live WS subscriber of this chat, as a new
+    `subagent_event` envelope delivered over the SAME per-chat channel
+    `_publish_output`/`_finalize_session` already use — no second broadcast
+    path, no new WebSocket.
+
+    Called from `api.py`'s `hook_agent_subagent`, which has already verified
+    (via `auth_middleware` + its own chat_id cross-check) that this event
+    really is for this chat. ``payload`` is the raw hook JSON body verbatim
+    — whatever fields the `claude` CLI's own `SubagentStart`/`SubagentStop`
+    hook sent (confirmed live by the MN-45a gate spike to include a stable
+    `agent_id` correlating the pair) — this function only adds
+    ``received_at``, a server-side timestamp the hook payload itself does
+    not carry.
+
+    Best-effort by design: a persistence or broadcast failure is logged and
+    swallowed, never raised. `SubagentStart`/`SubagentStop` hooks have very
+    limited ability to act on a non-2xx response anyway, and a hook POST
+    failing must never be what breaks the parent session's own Task-tool
+    call.
+    """
+    event: dict[str, Any] = dict(payload)
+    event["received_at"] = _iso_now()
+
+    try:
+        agent = agent_registry.get(agent_slug)
+        path = agent_registry.subagents_sidecar_path(agent.root, chat_id)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(event, ensure_ascii=False)
+        with _subagent_sidecar_lock, path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+    except Exception:  # noqa: BLE001 - a hook event must never fail its caller
+        log.exception("failed to persist subagent event for chat %s", chat_id)
+
+    try:
+        with _sessions_lock:
+            session = _sessions.get(chat_id)
+        if session is not None:
+            with session.lock:
+                subs = list(session.subscribers.values())
+            _deliver(subs, {"type": "subagent_event", **event})
+    except Exception:  # noqa: BLE001 - same "must never fail its caller" as the persist block above
+        log.exception("failed to broadcast subagent event for chat %s", chat_id)
+
+    return event
 
 
 def _finalize_session(session: Session) -> None:

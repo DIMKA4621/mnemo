@@ -1134,6 +1134,43 @@ def chat_history_path(root: Path, chat_id: str) -> Path:
     return chat_dir(root, chat_id) / "history.log"
 
 
+def subagents_sidecar_path(root: Path, chat_id: str) -> Path:
+    """Append-only JSONL log of `SubagentStart`/`SubagentStop` hook events
+    for one chat (MN-45b) — one JSON object per line, one line per hook
+    event `agent_runtime.record_subagent_event` receives. The Start and the
+    later Stop each get their own line, matching `history.log`'s
+    append-only shape rather than merging the pair into one record. Owned
+    here for the same reason `chat_history_path` is (the storage layer
+    decides the path); written to by `agent_runtime.py`, read back by
+    `read_subagent_events` below and by `api.py`'s subagent-events GET
+    route."""
+    return chat_dir(root, chat_id) / "subagents.jsonl"
+
+
+def read_subagent_events(root: Path, chat_id: str) -> list[dict[str, Any]]:
+    """Parse this chat's `subagents.jsonl` sidecar into a list of event
+    dicts, in file order. No sidecar yet (no subagent has run in this chat)
+    is an empty list, not an error — the same "absent means nothing yet"
+    convention `api.py`'s `_read_agent_subagents` uses for a missing
+    `.claude/agents/` folder. A line that fails to parse is skipped rather
+    than raised — one bad line must not fail the whole listing."""
+    path = subagents_sidecar_path(root, chat_id)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    events: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            events.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return events
+
+
 def _default_chats_doc() -> dict:
     return {"version": CHATS_VERSION, "chats": []}
 
