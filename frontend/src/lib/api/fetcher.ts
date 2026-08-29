@@ -1,12 +1,18 @@
 import { useTokenStore } from "../store/token";
 
-/** Contract 9.2: a single error envelope for every `/api` endpoint. */
+/** Contract 9.2: a single error envelope for every `/api` endpoint.
+ *
+ * `detail` is `Record<string, unknown> | null`, not `string`: the backend's
+ * `ApiError.__init__(self, code, message, **detail)` (`src/api.py`) always
+ * sends a JSON object (e.g. `stale_target`'s `{tag, latest_tag}`), never a
+ * bare string — Settings' self-update flow (MN-36) is the first caller that
+ * actually reads a field off it (`update.confirm.staleTarget`'s `latest_tag`). */
 export class ApiError extends Error {
   code: string;
-  detail: string | null;
+  detail: Record<string, unknown> | null;
   httpStatus: number;
 
-  constructor(code: string, message: string, detail: string | null, httpStatus: number) {
+  constructor(code: string, message: string, detail: Record<string, unknown> | null, httpStatus: number) {
     super(message);
     this.name = "ApiError";
     this.code = code;
@@ -61,12 +67,12 @@ export async function api<T = unknown>(path: string, options?: ApiOptions): Prom
     try {
       payload = JSON.parse(text);
     } catch {
-      throw new ApiError("internal", "invalid JSON from server", text.slice(0, 200), response.status);
+      throw new ApiError("internal", "invalid JSON from server", { raw: text.slice(0, 200) }, response.status);
     }
   }
 
   if (!response.ok) {
-    const box = (payload as { error?: { code?: string; message?: string; detail?: string } } | null)
+    const box = (payload as { error?: { code?: string; message?: string; detail?: Record<string, unknown> } } | null)
       ?.error || {};
     const err = new ApiError(
       box.code || "internal",

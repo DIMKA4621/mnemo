@@ -58,4 +58,7 @@ export const queryKeys = {
   doctor: {
     all: ["doctor"] as const,
   },
+  autostart: {
+    all: ["autostart"] as const,
+  },
 };

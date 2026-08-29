@@ -2,7 +2,9 @@ import type { QueryClient } from "@tanstack/react-query";
 import { queryClient } from "../query/client";
 import { queryKeys } from "../query/keys";
 import { useIndexProgressStore } from "../store/index-progress";
+import { useUpdateModalStore } from "../store/update-modal";
 import type { StatusResult, TreeResult } from "../api/memory";
+import type { UpdateApplyState, UpdateStatusResult } from "../api/settings";
 
 /** Contract 9.7's envelope shape. */
 export interface WsEnvelope<T = Record<string, unknown>> {
@@ -156,9 +158,119 @@ const handlers: Record<string, Handler> = {
   bank_removed: (_envelope, qc) => qc.invalidateQueries({ queryKey: queryKeys.banks.all }),
   bank_status: (_envelope, qc) => qc.invalidateQueries({ queryKey: queryKeys.banks.all }),
 
-  // Self-update — machine-level, bank_id is always null. Phase 4 (Settings).
-  update_progress: () => {},
-  update_auto_pending: () => {},
+  // Self-update — machine-level, bank_id is always null. A faster preview of
+  // download/venv while the OLD process is still alive to send it (contract:
+  // `engine_update._emit_progress`) — `GET /api/update/status` polling
+  // (`useUpdateProgressPolling`, active only while `UpdateModal`'s phase is
+  // `'progress'`) is the actual source of truth once the switch severs this
+  // socket. Ported from the vanilla console's `onUpdateProgress`
+  // (`update.js`): direct `setQueryData` patches, never `invalidateQueries`
+  // — this can fire faster than a round-trip refetch would keep up with.
+  update_progress: (envelope, qc) => {
+    const data = envelope.data as {
+      step?: UpdateApplyState["step"];
+      tag?: string;
+      detail?: string | null;
+      error?: string | null;
+    };
+
+    // A stale/duplicate broadcast for a cycle that has already resolved —
+    // observed live against `devserver.py`'s fixture: `_force_disconnect_
+    // all()` severs every socket right as `state` becomes `"switching"`,
+    // the client's own reconnect fires a fresh `hello`, and `hello`'s
+    // "resync everything" `invalidateQueries()` (this file's own handler,
+    // above) races the in-flight `update_progress` this same reconnect can
+    // still be mid-delivery of. Whichever lands second must never regress
+    // an outcome the OTHER one (or `useUpdateProgressPolling`) already
+    // recorded — `GET /api/update/status` is the one source of truth once
+    // staging hands off (see this handler's own docstring), so once this
+    // cache already holds a terminal state for the SAME tag, a WS message
+    // about that tag is a no-op here.
+    const before = qc.getQueryData<UpdateStatusResult>(queryKeys.updateStatus.all);
+    const alreadyTerminal =
+      !!before &&
+      before.apply.tag === data.tag &&
+      (before.apply.state === "done" || before.apply.state === "failed" || before.apply.state === "rolled_back");
+    if (alreadyTerminal) return;
+
+    const wasAutoPending = useUpdateModalStore.getState().phase === "auto-pending";
+
+    qc.setQueryData<UpdateStatusResult>(queryKeys.updateStatus.all, (old) => {
+      if (!old) return old;
+      return {
+        ...old,
+        // There is no "settled" event on `update_auto_pending` (see
+        // `UpdateModal`'s docstring) — progress arriving at all, while a
+        // countdown was pending, IS that signal, so it is cleared here.
+        auto: old.auto.pending ? { ...old.auto, pending: null } : old.auto,
+        apply: {
+          ...old.apply,
+          tag: data.tag ?? old.apply.tag,
+          step: data.step ?? old.apply.step,
+          detail: data.detail ?? null,
+          state: data.step === "failed" ? "failed" : data.step === "done" ? "switching" : "staging",
+          error: data.step === "failed" ? (data.error ?? null) : old.apply.error,
+        },
+      };
+    });
+
+    if (wasAutoPending) {
+      useUpdateModalStore.getState().setPhase("progress");
+      useUpdateModalStore.getState().setEverSwitching(false);
+    }
+    // Staging finished; the backend's very next move is to set
+    // state="switching" and hand off to the detached `update-apply`, which
+    // stops THIS process — nothing more will arrive over this socket for
+    // this cycle, so the transition is reflected locally rather than
+    // waiting for a poll to catch up on a fact the backend's own code
+    // guarantees.
+    if (data.step === "done") {
+      useUpdateModalStore.getState().setEverSwitching(true);
+    }
+    // Staging itself failed — always pre-switch (staging never touches
+    // `current`), so this is authoritative and does not need a poll to
+    // confirm it. `wasAutoPending` covers the countdown-settled-into-failure
+    // case, where the phase transition above just landed on `'progress'`.
+    if (data.step === "failed" && (wasAutoPending || useUpdateModalStore.getState().phase === "progress")) {
+      useUpdateModalStore.getState().setPhase("terminal");
+    }
+  },
+
+  // Unattended auto-apply's own countdown (contract: the `"auto"` block of
+  // `GET /api/update/status`) — a genuinely separate entry point from the
+  // confirm dialog above, armed by the checker's background tick.
+  update_auto_pending: (envelope, qc) => {
+    const data = envelope.data as { phase?: "started" | "cancelled"; tag?: string; deadline?: string; seconds?: number };
+
+    if (data.phase === "started") {
+      qc.setQueryData<UpdateStatusResult>(queryKeys.updateStatus.all, (old) =>
+        old
+          ? {
+              ...old,
+              auto: {
+                ...old.auto,
+                pending: { tag: data.tag ?? "", deadline: data.deadline ?? "", seconds_left: data.seconds ?? 0 },
+              },
+            }
+          : old,
+      );
+      // Never steals the screen from something already open — an apply
+      // already running or a dialog the user opened outranks a countdown by
+      // construction (the backend never arms one while an apply is mid-flight).
+      if (useUpdateModalStore.getState().phase === "idle") {
+        useUpdateModalStore.getState().setPhase("auto-pending");
+        useUpdateModalStore.getState().setEverSwitching(false);
+        useUpdateModalStore.getState().setAutoPendingError(null);
+      }
+    } else if (data.phase === "cancelled") {
+      qc.setQueryData<UpdateStatusResult>(queryKeys.updateStatus.all, (old) =>
+        old ? { ...old, auto: { ...old.auto, pending: null } } : old,
+      );
+      if (useUpdateModalStore.getState().phase === "auto-pending") {
+        useUpdateModalStore.getState().setPhase("idle");
+      }
+    }
+  },
 
   // A live query just happened — Phase 3 (Journal live feed).
   query: (_envelope, qc) => qc.invalidateQueries({ queryKey: queryKeys.logs.all }),

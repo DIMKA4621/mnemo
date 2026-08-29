@@ -5,6 +5,8 @@ import { usePathname } from "next/navigation";
 import { useUiStore } from "@/lib/store/ui";
 import { useT } from "@/lib/i18n/hooks";
 import { AgentsIcon, CollapseIcon, JournalIcon, MemoryIcon, SettingsIcon } from "@/components/common/icons";
+import { useStatus } from "@/hooks/useMemoryQueries";
+import { UpdateBanner } from "@/components/settings/UpdateBanner";
 import { WsStatusIndicator } from "./WsStatusIndicator";
 
 const NAV_ITEMS = [
@@ -67,22 +69,36 @@ export function Sidebar() {
   );
 }
 
+/** A local build's tag carries its base release plus a lowercase "l" marker
+ *  (`v3.0.1l`) — see `UpdateBanner.tsx`'s `baseVersionTag` for the same
+ *  scheme applied to a comparison instead of a display class. */
+function isLocalBuildTag(tag: string | null | undefined): boolean {
+  return !!tag && /\dl$/.test(tag);
+}
+
 /**
  * The machine's own facts (connection state, provider, version) — same spot
- * the vanilla console used (`shell.js`'s `sb-foot`). Provider/version are
- * not wired to `GET /api/status` yet (that lands with the Memory/Settings
- * pages in Phases 2-4); the WS connection dot+label is real in Phase 1, so
- * the shell's own infra is visibly working end to end. The topbar carries
- * only language + theme (user decision, 2026-08-29) — connection state
- * lives here, not duplicated there.
+ * the vanilla console used (`shell.js`'s `sb-foot`), now wired to the real
+ * `GET /api/status` cache `useStatus()` already polls every 15s for the
+ * Memory page, so this costs no extra request. The self-update banner
+ * mounts here too — it is a footer-level fact ("something needs your
+ * attention about this machine"), not tied to the Settings page.
  */
 function SidebarFooter() {
+  const statusQuery = useStatus();
+  const svc = statusQuery.data?.service;
+
   return (
     <div className="sb-foot" id="sb-foot">
-      <WsStatusIndicator />
-      <span className="sep">·</span>
-      <span className="txt">—</span>
-      <span className="ver">—</span>
+      <div className="sb-foot-row">
+        <WsStatusIndicator />
+        <span className="sep">·</span>
+        <span className="txt">{svc?.provider ?? "—"}</span>
+        <span className={`ver${isLocalBuildTag(svc?.version) ? " is-local-build" : ""}`}>
+          {svc?.version ?? "—"}
+        </span>
+      </div>
+      <UpdateBanner />
     </div>
   );
 }
