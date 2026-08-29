@@ -20,6 +20,13 @@ const nextConfig: NextConfig = {
   // (the committed output that ships to `src/webui/static/`); `next dev`
   // never runs `output: 'export'`, so the two never actually conflict.
   ...(isDev ? {} : { output: "export" as const }),
+  // A static export is committed wholesale (`src/webui/static/`), not served
+  // with ISR/revalidation, so there is no reason for the buildId baked into
+  // every HTML file's asset paths to be a fresh random string each build —
+  // that randomness is the only thing that would make two builds of
+  // identical source produce a byte-different `out/`, which breaks a
+  // rebuild-and-diff CI guard even with zero real code changes.
+  generateBuildId: async () => "mnemo-console",
   basePath: "/ui",
   trailingSlash: true,
   images: {
