@@ -1501,10 +1501,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_static(self, path: str) -> None:
         rel = unquote(path[len("/ui"):]).lstrip("/")
-        if not rel:
-            rel = "index.html"
-        target = (STATIC_DIR / rel).resolve()
-        if not str(target).startswith(str(STATIC_DIR.resolve())) or not target.is_file():
+        target = (STATIC_DIR / rel).resolve() if rel else STATIC_DIR.resolve()
+        if not str(target).startswith(str(STATIC_DIR.resolve())):
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        # Mirrors the real mount's `StaticFiles(..., html=True)`: a request
+        # for a directory (the bare root, or any of the exported app's
+        # nested routes — `/ui/settings/` resolves to a directory now that
+        # each route is its own `out/<route>/index.html`, not one shared
+        # `index.html` with in-DOM tab switching) resolves to that
+        # directory's own `index.html`, not a 404.
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_file():
             self._send(404, b"not found", "text/plain; charset=utf-8")
             return
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
