@@ -290,7 +290,8 @@
     "tree": {
       "loading": "Loading…",
       "empty": "No agents yet — \"＋ Add agent\" creates the first one.",
-      "noChats": "No chats yet — select this agent to start one."
+      "noChats": "No chats yet — select this agent to start one.",
+      "settingsTitle": "Agent settings"
     },
     "workspace": {
       "selectHint": "Select an agent on the left, or create a new one.",
@@ -345,6 +346,49 @@
       "reading": "reading…",
       "noSubdirs": "no subdirectories",
       "chooseBtn": "Choose this folder"
+    },
+    "settings": {
+      "title": "⚙ Agent settings",
+      "save": "Save",
+      "loading": "Loading…",
+      "tabs": {
+        "general": "General",
+        "backend": "Backend",
+        "links": "MCP / Skills / Rules"
+      },
+      "general": {
+        "savedNote": "Settings saved."
+      },
+      "backend": {
+        "savedNote": "Backend setting saved.",
+        "savedHint": "Saved in this agent's own launch.json — per-agent, not a machine setting.",
+        "invalidNote": "This agent's launch.json is invalid: {error}"
+      }
+    },
+    "links": {
+      "hint": "Attached from the registry — each subsection shows only what's already attached to this agent. The name and template variable values can be changed only for this agent, not in the registry.",
+      "editBtn": "Change",
+      "doneBtn": "Done",
+      "empty": "Nothing attached.",
+      "addBtn": "+ Add",
+      "detachTitle": "Detach from agent",
+      "detachedNote": "Detached «{name}».",
+      "attachedNote": "Added «{name}» to «{agent}».",
+      "missingFromRegistry": "removed from the registry",
+      "error": {
+        "nameTaken": "Another entry named {name} is already attached in this category"
+      },
+      "pick": {
+        "title": "Attach {category} from the registry",
+        "ariaLabel": "Attach a registry entry to this agent",
+        "empty": "Nothing available — everything is already attached, or the registry is empty.",
+        "nameLabel": "Name for this agent",
+        "varsLabel": "Variable values (this agent only)",
+        "varPlaceholder": "value",
+        "varUnset": "not set",
+        "back": "Back",
+        "submit": "Attach to agent"
+      }
     }
   },
   "journal": {

@@ -342,6 +342,17 @@ CATALOG: list[dict[str, Any]] = [
 ]
 
 
+def _catalog_used_by(entry_id: str) -> list[str]:
+    """Agent slugs whose `links` reference this catalog entry — mirrors
+    `api._catalog_used_by` / `agent_registry.catalog_entry_used_by` (MN-48),
+    computed here off the fixture `AGENTS[].links` instead of `links.json`."""
+    with _lock:
+        return [
+            a["slug"] for a in AGENTS
+            if any(link["entry_id"] == entry_id for links in a["links"].values() for link in links)
+        ]
+
+
 def _catalog_entry_info(entry: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": entry["id"],
@@ -350,9 +361,7 @@ def _catalog_entry_info(entry: dict[str, Any]) -> dict[str, Any]:
         "content": entry["content"],
         "created_at": entry["created_at"],
         "vars": _catalog_vars(entry["content"]) if entry["category"] == "mcp" else [],
-        # No agent/links fixture exists yet (Phase B, not landed) — static 0
-        # until one does, mirroring the real `used_by_count` shape.
-        "used_by_count": 0,
+        "used_by_count": len(_catalog_used_by(entry["id"])),
     }
 
 
@@ -430,6 +439,16 @@ AGENTS: list[dict[str, Any]] = [
         "bank_id": "agent_debug_assistant",
         "bank_name": "Дебаг-асистент проєкту",
         "launch": {"mode": "standard"},
+        "claude_md": "# CLAUDE.md\n\nTriages failing tests and stack traces for this project. "
+        "Prefers reading logs before proposing a fix.\n",
+        # Pre-attached in every category (MN-48, Фаза C) — an existing case
+        # to render/edit/detach without an attach round-trip first; the
+        # other two fixture agents start empty to exercise that state too.
+        "links": {
+            "mcp": [{"entry_id": "mcp_a1b2c3d4e5f6", "name": "mnemo-memory", "vars": {}}],
+            "skill": [{"entry_id": "skill_d4e5f6a1b2c3", "name": "keyboard-layout", "vars": {}}],
+            "rule": [{"entry_id": "rule_f6a1b2c3d4e5", "name": "v3-build.md", "vars": {}}],
+        },
     },
     {
         "slug": "release-manager",
@@ -440,6 +459,8 @@ AGENTS: list[dict[str, Any]] = [
         "bank_id": "agent_release_manager",
         "bank_name": "Реліз-менеджер",
         "launch": {"mode": "custom", "host": "127.0.0.1", "port": 8790, "model": "claude-sonnet-5"},
+        "claude_md": "# CLAUDE.md\n\nCuts draft releases from master and posts changelogs.\n",
+        "links": {"mcp": [], "skill": [], "rule": []},
     },
     {
         "slug": "ui-tester",
@@ -450,6 +471,8 @@ AGENTS: list[dict[str, Any]] = [
         "bank_id": "agent_ui_tester",
         "bank_name": "Тестувальник UI",
         "launch": {"mode": "standard"},
+        "claude_md": "# CLAUDE.md\n\nDrives the browser through chrome-devtools-mnemo and reports regressions.\n",
+        "links": {"mcp": [], "skill": [], "rule": []},
     },
 ]
 
@@ -457,6 +480,30 @@ AGENTS: list[dict[str, Any]] = [
 def _find_agent(slug: str) -> dict[str, Any] | None:
     with _lock:
         return next((a for a in AGENTS if a["slug"] == slug), None)
+
+
+def _norm_link_name(name: str) -> str:
+    return name.strip().casefold()
+
+
+def _link_info(category: str, link: dict[str, Any]) -> dict[str, Any]:
+    return {"entry_id": link["entry_id"], "category": category, "name": link["name"], "vars": dict(link.get("vars") or {})}
+
+
+def _agent_info(agent: dict[str, Any]) -> dict[str, Any]:
+    """The one agent shape `/api/agents`/`/api/agents/{slug}` return — mirrors
+    the real `api._agent_info()` exactly. `claude_md`/`links` are fixture-only
+    bookkeeping (their own endpoints serve those), never part of this shape."""
+    return {
+        "slug": agent["slug"],
+        "name": agent["name"],
+        "root": agent["root"],
+        "owns_root": agent["owns_root"],
+        "created_at": agent["created_at"],
+        "bank_id": agent["bank_id"],
+        "bank_name": agent["bank_name"],
+        "launch": dict(agent["launch"]),
+    }
 
 
 # Adoption-preview demo: one path in `FS_FIXTURE` that already looks like an
@@ -1483,7 +1530,15 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path.startswith("/api/agents/"):
-            slug_ref = unquote(parsed.path[len("/api/agents/"):])
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 4 and parts[1] == "links":
+                self.delete_agent_link(parts[0], parts[2], parts[3])
+                return
+            if len(parts) != 1:
+                self.fail(404, "internal", "no route " + parsed.path)
+                return
+            slug_ref = parts[0]
             with _lock:
                 before = len(AGENTS)
                 AGENTS[:] = [a for a in AGENTS if a["slug"] != slug_ref]
@@ -1563,6 +1618,24 @@ class Handler(BaseHTTPRequestHandler):
             self.patch_catalog_entry(unquote(parsed.path[len("/api/catalog/"):]), body)
             return
 
+        if parsed.path.startswith("/api/agents/"):
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self.fail(422, "validation_error", "body is not valid JSON")
+                return
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 1:
+                self.patch_agent(parts[0], body)
+                return
+            if len(parts) == 4 and parts[1] == "links":
+                self.patch_agent_link(parts[0], parts[2], parts[3], body)
+                return
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+
         if not parsed.path.startswith("/api/banks/"):
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -1622,6 +1695,27 @@ class Handler(BaseHTTPRequestHandler):
             with _lock:
                 agent["launch"] = normalized
             self.json_out(200, dict(normalized))
+            return
+
+        if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/claude-md"):
+            slug_ref = unquote(parsed.path[len("/api/agents/"): -len("/claude-md")].rstrip("/"))
+            agent = _find_agent(slug_ref)
+            if agent is None:
+                self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self.fail(422, "validation_error", "body is not valid JSON")
+                return
+            content = body.get("content")
+            if not isinstance(content, str):
+                self.fail(422, "validation_error", "'content' must be a string")
+                return
+            with _lock:
+                agent["claude_md"] = content
+            self.json_out(200, {"content": content})
             return
 
         if parsed.path != "/api/settings":
@@ -1706,6 +1800,14 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/agents":
             self.post_agent(body)
+            return
+        if parsed.path.startswith("/api/agents/") and "/links/" in parsed.path:
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 3 and parts[1] == "links":
+                self.post_agent_link(parts[0], parts[2], body)
+                return
+            self.fail(404, "internal", "no route " + parsed.path)
             return
         if parsed.path == "/api/autostart":
             if "enabled" not in body:
@@ -2037,21 +2139,38 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/agents":
             with _lock:
-                agents = [dict(a) for a in AGENTS]
+                agents = [_agent_info(a) for a in AGENTS]
             self.json_out(200, {"agents": agents})
             return
 
         if path.startswith("/api/agents/"):
-            rest = path[len("/api/agents/"):]
-            wants_launch = rest.endswith("/launch")
-            if wants_launch:
-                rest = rest[: -len("/launch")]
-            slug_ref = unquote(rest)
+            rest = unquote(path[len("/api/agents/"):])
+            parts = rest.split("/")
+            slug_ref = parts[0]
             agent = _find_agent(slug_ref)
             if agent is None:
                 self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
                 return
-            self.json_out(200, dict(agent["launch"]) if wants_launch else dict(agent))
+
+            if len(parts) == 1:
+                self.json_out(200, _agent_info(agent))
+                return
+            if parts[1:] == ["launch"]:
+                self.json_out(200, dict(agent["launch"]))
+                return
+            if parts[1:] == ["claude-md"]:
+                self.json_out(200, {"content": agent["claude_md"]})
+                return
+            if parts[1:] == ["links"]:
+                with _lock:
+                    links = {
+                        category: [_link_info(category, link) for link in agent["links"][category]]
+                        for category in ("mcp", "skill", "rule")
+                    }
+                self.json_out(200, links)
+                return
+
+            self.fail(404, "internal", "no route " + path)
             return
 
         self.fail(404, "internal", "no route " + path)
@@ -2173,10 +2292,176 @@ class Handler(BaseHTTPRequestHandler):
                 "bank_id": f"agent_{slug.replace('-', '_')}",
                 "bank_name": name,
                 "launch": {"mode": "standard"},
+                "claude_md": claude_md if isinstance(claude_md, str) else "",
+                "links": {"mcp": [], "skill": [], "rule": []},
             }
             AGENTS.append(agent)
-        _ = claude_md  # fixture has no filesystem to write it to — accepted, not stored
-        self.json_out(201, dict(agent))
+        self.json_out(201, _agent_info(agent))
+
+    def patch_agent(self, slug: str, body: dict) -> None:
+        """`PATCH /api/agents/{slug}` — rename (MN-48). `slug`/`root` never
+        move, only `name` — mirrors `agent_registry.rename`'s own docstring:
+        `Agent.name` was never unique to begin with, so no dedup check here."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        name = body.get("name")
+        if name is None:
+            self.fail(400, "bad_request", "nothing to change", {"slug": slug})
+            return
+        clean = str(name).strip()
+        if not clean:
+            self.fail(400, "bad_request", "name must not be empty", {"slug": slug})
+            return
+        with _lock:
+            agent["name"] = clean
+        self.json_out(200, _agent_info(agent))
+
+    def post_agent_link(self, slug: str, category: str, body: dict) -> None:
+        """`POST /api/agents/{slug}/links/{category}` — attach (MN-48). Same
+        validation order as `agent_registry.attach_link`: entry exists, then
+        category matches, then not-already-attached, then name free within
+        this agent+category, then every `vars` key is one the entry
+        declares."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        if category not in ("mcp", "skill", "rule"):
+            self.fail(404, "internal", f"unknown category {category!r}")
+            return
+        entry_id = str(body.get("entry_id") or "")
+        name = str(body.get("name") or "").strip()
+        link_vars = body.get("vars") or {}
+        if not entry_id:
+            self.fail(400, "bad_request", "'entry_id' is required")
+            return
+        if not name:
+            self.fail(400, "bad_request", "name must not be empty")
+            return
+        with _lock:
+            entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+            if entry["category"] != category:
+                self.fail(400, "category_mismatch",
+                          f"catalog entry {entry_id!r} is category {entry['category']!r}, "
+                          f"not {category!r}", {"id": entry_id})
+                return
+            bucket = agent["links"][category]
+            if any(link["entry_id"] == entry_id for link in bucket):
+                self.fail(409, "link_exists",
+                          f"{entry_id!r} is already attached to agent {slug!r} in category {category!r}",
+                          {"id": entry_id})
+                return
+            clash = next(
+                (link for link in bucket if _norm_link_name(link["name"]) == _norm_link_name(name)),
+                None,
+            )
+            if clash is not None:
+                self.fail(409, "link_name_exists",
+                          f"another {category} link is already named {name!r}",
+                          {"existing_entry_id": clash["entry_id"]})
+                return
+            entry_vars = _catalog_vars(entry["content"]) if category == "mcp" else []
+            unknown = set(link_vars) - set(entry_vars)
+            if unknown:
+                self.fail(400, "unknown_var",
+                          f"unknown var(s) {sorted(unknown)} for catalog entry {entry_id!r} "
+                          f"(it declares {sorted(entry_vars)})", {"id": entry_id})
+                return
+            link = {"entry_id": entry_id, "name": name, "vars": dict(link_vars)}
+            bucket.append(link)
+        self.json_out(201, _link_info(category, link))
+
+    def patch_agent_link(self, slug: str, category: str, entry_id: str, body: dict) -> None:
+        """`PATCH /api/agents/{slug}/links/{category}/{entry_id}` — edit an
+        attached link in place (MN-48). `vars` full-replaces, never merges —
+        the catalog entry's own var set may have changed since attach."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        if category not in ("mcp", "skill", "rule"):
+            self.fail(404, "internal", f"unknown category {category!r}")
+            return
+        fields = {k: v for k, v in body.items() if k in ("name", "vars") and v is not None}
+        if not fields:
+            self.fail(400, "bad_request", "nothing to change", {"slug": slug, "id": entry_id})
+            return
+        with _lock:
+            entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+            if entry["category"] != category:
+                self.fail(400, "category_mismatch",
+                          f"catalog entry {entry_id!r} is category {entry['category']!r}, "
+                          f"not {category!r}", {"id": entry_id})
+                return
+            bucket = agent["links"][category]
+            idx = next((i for i, link in enumerate(bucket) if link["entry_id"] == entry_id), None)
+            if idx is None:
+                self.fail(404, "link_not_found",
+                          f"{entry_id!r} is not attached to agent {slug!r} in category {category!r}",
+                          {"id": entry_id})
+                return
+            current = bucket[idx]
+
+            new_name = current["name"] if "name" not in fields else str(fields["name"]).strip()
+            if not new_name:
+                self.fail(400, "bad_request", "name must not be empty", {"id": entry_id})
+                return
+            if "name" in fields:
+                clash = next(
+                    (link for j, link in enumerate(bucket)
+                     if j != idx and _norm_link_name(link["name"]) == _norm_link_name(new_name)),
+                    None,
+                )
+                if clash is not None:
+                    self.fail(409, "link_name_exists",
+                              f"another {category} link is already named {new_name!r}",
+                              {"existing_entry_id": clash["entry_id"]})
+                    return
+
+            entry_vars = _catalog_vars(entry["content"]) if category == "mcp" else []
+            new_vars = dict(current.get("vars") or {}) if "vars" not in fields else dict(fields["vars"] or {})
+            unknown = set(new_vars) - set(entry_vars)
+            if unknown:
+                self.fail(400, "unknown_var",
+                          f"unknown var(s) {sorted(unknown)} for catalog entry {entry_id!r} "
+                          f"(it declares {sorted(entry_vars)})", {"id": entry_id})
+                return
+
+            bucket[idx] = {"entry_id": entry_id, "name": new_name, "vars": new_vars}
+            updated = bucket[idx]
+        self.json_out(200, _link_info(category, updated))
+
+    def delete_agent_link(self, slug: str, category: str, entry_id: str) -> None:
+        """`DELETE /api/agents/{slug}/links/{category}/{entry_id}` — detach
+        (MN-48)."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        if category not in ("mcp", "skill", "rule"):
+            self.fail(404, "internal", f"unknown category {category!r}")
+            return
+        with _lock:
+            bucket = agent["links"][category]
+            before = len(bucket)
+            agent["links"][category] = [link for link in bucket if link["entry_id"] != entry_id]
+            removed = len(agent["links"][category]) != before
+        if not removed:
+            self.fail(404, "link_not_found",
+                      f"{entry_id!r} is not attached to agent {slug!r} in category {category!r}",
+                      {"id": entry_id})
+            return
+        self.json_out(200, {"ok": True})
 
     def post_catalog_entry(self, body: dict) -> None:
         """`POST /api/catalog` — same validation/dedup rules as `catalog.add`

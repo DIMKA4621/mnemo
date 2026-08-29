@@ -73,4 +73,10 @@ export const queryKeys = {
   agentLaunch: {
     one: (slug: string) => ["agentLaunch", slug] as const,
   },
+  agentLinks: {
+    one: (slug: string) => ["agentLinks", slug] as const,
+  },
+  agentClaudeMd: {
+    one: (slug: string) => ["agentClaudeMd", slug] as const,
+  },
 };

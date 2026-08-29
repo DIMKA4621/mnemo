@@ -1,4 +1,5 @@
 import { api } from "./fetcher";
+import type { CatalogCategory } from "./catalog";
 
 /** The agent registry (MN-40, `src/agent_registry.py`) — a folder whose
  *  `memory/` is registered as an ordinary bank, plus a `launch.json` that
@@ -95,4 +96,91 @@ export function getAgentLaunch(slug: string): Promise<LaunchConfig> {
 
 export function putAgentLaunch(slug: string, config: LaunchConfig): Promise<LaunchConfig> {
   return api(`/api/agents/${encodeURIComponent(slug)}/launch`, { method: "PUT", body: config });
+}
+
+/** MN-48. `slug`/`root` never move on a rename — only `Agent.name` does
+ *  (`agent_registry.rename`), so no caller here needs to re-key on the
+ *  result. */
+export interface PatchAgentRequest {
+  name?: string;
+}
+
+export function patchAgent(slug: string, req: PatchAgentRequest): Promise<AgentInfo> {
+  return api(`/api/agents/${encodeURIComponent(slug)}`, { method: "PATCH", body: req });
+}
+
+export function getClaudeMd(slug: string): Promise<{ content: string }> {
+  return api(`/api/agents/${encodeURIComponent(slug)}/claude-md`);
+}
+
+export function putClaudeMd(slug: string, content: string): Promise<{ content: string }> {
+  return api(`/api/agents/${encodeURIComponent(slug)}/claude-md`, { method: "PUT", body: { content } });
+}
+
+/** One catalog entry attached to an agent — `agent_registry._link_info()`'s
+ *  shape (`src/api.py`). No embedded catalog snapshot: the caller resolves
+ *  `entry_id` against the already-cached `/api/catalog` list (pinned-copy
+ *  semantics — a link's `name`/`vars` are per-agent and never drift from an
+ *  edit to the catalog entry itself, MN-48's ticket). */
+export interface LinkInfo {
+  entry_id: string;
+  category: CatalogCategory;
+  name: string;
+  vars: Record<string, string>;
+}
+
+export interface AgentLinks {
+  mcp: LinkInfo[];
+  skill: LinkInfo[];
+  rule: LinkInfo[];
+}
+
+export function getAgentLinks(slug: string): Promise<AgentLinks> {
+  return api(`/api/agents/${encodeURIComponent(slug)}/links`);
+}
+
+export interface AttachLinkRequest {
+  entry_id: string;
+  name: string;
+  vars?: Record<string, string>;
+}
+
+export function attachLink(
+  slug: string,
+  category: CatalogCategory,
+  req: AttachLinkRequest,
+): Promise<LinkInfo> {
+  return api(`/api/agents/${encodeURIComponent(slug)}/links/${category}`, {
+    method: "POST",
+    body: req,
+  });
+}
+
+/** `vars` omitted means unchanged; `vars: {}` (present but empty) clears
+ *  every var — same distinction as the backend's `UpdateLinkRequest`. */
+export interface UpdateLinkRequest {
+  name?: string;
+  vars?: Record<string, string>;
+}
+
+export function updateLink(
+  slug: string,
+  category: CatalogCategory,
+  entryId: string,
+  req: UpdateLinkRequest,
+): Promise<LinkInfo> {
+  return api(`/api/agents/${encodeURIComponent(slug)}/links/${category}/${encodeURIComponent(entryId)}`, {
+    method: "PATCH",
+    body: req,
+  });
+}
+
+export function detachLink(
+  slug: string,
+  category: CatalogCategory,
+  entryId: string,
+): Promise<{ ok: boolean }> {
+  return api(`/api/agents/${encodeURIComponent(slug)}/links/${category}/${encodeURIComponent(entryId)}`, {
+    method: "DELETE",
+  });
 }

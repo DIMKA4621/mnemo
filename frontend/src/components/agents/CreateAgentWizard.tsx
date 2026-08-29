@@ -1,11 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Button, Input, InputNumber, Segmented } from "antd";
+import { Button, Input, Segmented } from "antd";
 import { ModalShell } from "@/components/common/ModalShell";
 import { useT } from "@/lib/i18n/hooks";
 import { useCreateAgent, usePreviewAgent, usePutAgentLaunch } from "@/hooks/useAgentMutations";
 import { FolderBrowser } from "./FolderBrowser";
+import { LaunchConfigFields } from "./LaunchConfigFields";
 import { ApiError } from "@/lib/api/fetcher";
 import type { AgentInfo, AgentPreview, LaunchConfig } from "@/lib/api/agents";
 
@@ -225,35 +226,16 @@ export function CreateAgentWizard({ open, onClose, onCreated }: CreateAgentWizar
         </>
       ) : (
         <>
-          <label className="wiz-field-label">{t("agents.wizard.backendLabel")}</label>
-          <Segmented
-            value={backendMode}
-            onChange={(v) => setBackendMode(v as "standard" | "custom")}
-            options={[
-              { label: t("agents.wizard.backendStandard"), value: "standard" },
-              { label: t("agents.wizard.backendCustom"), value: "custom" },
-            ]}
+          <LaunchConfigFields
+            mode={backendMode}
+            onModeChange={setBackendMode}
+            host={host}
+            onHostChange={setHost}
+            port={port}
+            onPortChange={setPort}
+            model={model}
+            onModelChange={setModel}
           />
-          {backendMode === "standard" ? (
-            <p className="wiz-hint">{t("agents.wizard.backendStandardHint")}</p>
-          ) : (
-            <div className="wiz-backend-fields">
-              <div className="row">
-                <div>
-                  <label className="wiz-field-label">{t("agents.wizard.hostLabel")}</label>
-                  <Input value={host} onChange={(e) => setHost(e.target.value)} />
-                </div>
-                <div>
-                  <label className="wiz-field-label">{t("agents.wizard.portLabel")}</label>
-                  <InputNumber min={1} max={65535} value={port ?? undefined} onChange={(v) => setPort(Number(v) || null)} style={{ width: "100%" }} />
-                </div>
-              </div>
-              <div>
-                <label className="wiz-field-label">{t("agents.wizard.modelLabel")}</label>
-                <Input placeholder={t("agents.wizard.modelPlaceholder")} value={model} onChange={(e) => setModel(e.target.value)} />
-              </div>
-            </div>
-          )}
           <p className="wiz-hint" style={{ marginTop: 10 }}>{t("agents.wizard.backendSavedHint")}</p>
           <p className="wiz-hint">{t("agents.wizard.linksHint")}</p>
           {submitError && <p className="modal-error">{submitError}</p>}

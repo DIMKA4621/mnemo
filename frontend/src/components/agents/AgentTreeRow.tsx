@@ -8,6 +8,7 @@ interface AgentTreeRowProps {
   expanded: boolean;
   selected: boolean;
   onToggle: () => void;
+  onOpenSettings: () => void;
 }
 
 /**
@@ -21,15 +22,19 @@ interface AgentTreeRowProps {
  * The mockup's live-activity pulse dot is dropped entirely rather than
  * always rendered "not generating" — there is no live source for it in this
  * phase, and a dot that can never turn on is a UI element promising a state
- * change that will never come from here. The ⚙ gear button is also absent:
- * it opens the agent-settings screen, which is Фаза C (blocked by MN-48) and
- * not part of this page yet.
+ * change that will never come from here.
  *
- * A single click both toggles the chat strip AND selects the agent for the
- * workspace pane — there's no separate control to click into, since there
- * are no chats to open instead.
+ * The ⚙ gear button opens the agent-settings screen (Фаза C). It sits
+ * inside the row's own click target, so it stops propagation before firing
+ * `onOpenSettings` — otherwise clicking it would also toggle the chat strip,
+ * same nesting the mockup's own CSS comment calls out (`.ag-agent-gear`:
+ * "a real, separately clickable button").
+ *
+ * A single click anywhere else in the row both toggles the chat strip AND
+ * selects the agent for the workspace pane — there's no separate control to
+ * click into, since there are no chats to open instead.
  */
-export function AgentTreeRow({ agent, expanded, selected, onToggle }: AgentTreeRowProps) {
+export function AgentTreeRow({ agent, expanded, selected, onToggle, onOpenSettings }: AgentTreeRowProps) {
   const t = useT();
 
   return (
@@ -50,6 +55,18 @@ export function AgentTreeRow({ agent, expanded, selected, onToggle }: AgentTreeR
           <span className="ag-agent-name">{agent.name}</span>
         </span>
         <span className="ag-agent-count">0</span>
+        <button
+          type="button"
+          className="ag-agent-gear"
+          title={t("agents.tree.settingsTitle")}
+          aria-label={t("agents.tree.settingsTitle")}
+          onClick={(ev) => {
+            ev.stopPropagation();
+            onOpenSettings();
+          }}
+        >
+          ⚙
+        </button>
         <span className="ag-twisty" aria-hidden="true">{expanded ? "▾" : "▸"}</span>
       </div>
       {expanded && (

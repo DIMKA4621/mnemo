@@ -4,6 +4,7 @@ import { useEffect, useState } from "react";
 import { AgentsHeader } from "./AgentsHeader";
 import { AgentTree } from "./AgentTree";
 import { AgentWorkspaceStub } from "./AgentWorkspaceStub";
+import { AgentSettings } from "./AgentSettings";
 import { CreateAgentWizard } from "./CreateAgentWizard";
 import { PaneResizer } from "@/components/common/PaneResizer";
 import { useInlineNote, InlineNote } from "@/components/common/InlineNote";
@@ -30,6 +31,11 @@ export default function AgentsPage() {
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  // Fills the same workspace pane a chat would, not a route — the ⚙ screen
+  // belongs to one agent, not to the app (mockup's `renderAgentSettings`
+  // docstring, `.claude/scratch/agents-page-mockup/app.js`, makes this call
+  // explicitly; followed here rather than re-decided, MN-42 Фаза C).
+  const [workspaceMode, setWorkspaceMode] = useState<"chat" | "settings">("chat");
   const [wizardOpen, setWizardOpen] = useState(false);
   const [note, setNote] = useInlineNote();
 
@@ -45,11 +51,18 @@ export default function AgentsPage() {
       return next;
     });
     setSelectedSlug(slug);
+    setWorkspaceMode("chat");
+  }
+
+  function openSettings(slug: string) {
+    setSelectedSlug(slug);
+    setWorkspaceMode("settings");
   }
 
   function handleCreated(agent: AgentInfo, message: string) {
     setExpanded((prev) => new Set(prev).add(agent.slug));
     setSelectedSlug(agent.slug);
+    setWorkspaceMode("chat");
     setNote(message);
   }
 
@@ -60,11 +73,15 @@ export default function AgentsPage() {
       <AgentsHeader onAdd={() => setWizardOpen(true)} />
       <div className="ag-layout" style={{ gridTemplateColumns: `${width}px 6px minmax(0, 1fr)` }}>
         <div className="ag-tree-pane">
-          <AgentTree expanded={expanded} selectedSlug={selectedSlug} onToggle={toggleAgent} />
+          <AgentTree expanded={expanded} selectedSlug={selectedSlug} onToggle={toggleAgent} onOpenSettings={openSettings} />
         </div>
         <PaneResizer onStart={beginDrag} onDrag={applyDrag} onCommit={commitDrag} />
         <div className="ag-workspace">
-          <AgentWorkspaceStub agent={selectedAgent} />
+          {workspaceMode === "settings" && selectedAgent ? (
+            <AgentSettings key={selectedAgent.slug} agent={selectedAgent} onClose={() => setWorkspaceMode("chat")} />
+          ) : (
+            <AgentWorkspaceStub agent={selectedAgent} />
+          )}
         </div>
       </div>
       <CreateAgentWizard

@@ -53,6 +53,23 @@
 .ag-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 12.5px; }
 
 .ag-agent-count { flex: none; color: var(--fg-mute); font-family: var(--mono); font-size: 11px; }
+
+/* ⚙ sits right before the disclosure chevron — a real, separately
+   clickable button (the row around it is a div, not a button, so this
+   nests without an invalid button-in-button); its own click handler stops
+   propagation before opening settings so it doesn't also toggle the row. */
+.ag-agent-gear {
+  flex: none;
+  padding: 2px 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--fg-mute);
+  font-size: 12px;
+  cursor: pointer;
+}
+.ag-agent-gear:hover { color: var(--fg); background: var(--bg-hover); border-color: var(--line); }
+
 .ag-twisty { flex: none; width: 12px; text-align: center; color: var(--fg-mute); font-family: var(--mono); font-size: 11px; }
 
 .ag-chats { padding: 0; }
@@ -129,6 +146,139 @@
 .wiz-backend-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding: 10px 11px; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: var(--radius); }
 .wiz-backend-fields .row { display: flex; gap: 8px; }
 .wiz-backend-fields .row > * { flex: 1 1 auto; }
+
+/* `.empty-hint`/`.reg-code` are also used on this route (`AgentTree`'s
+ * loading/empty states, `CreateAgentWizard`'s CLAUDE.md textarea) — ported
+ * here rather than pulled from `registry.css`, same self-containment reason
+ * as this file's header comment gives for everything else. */
+.empty-hint {
+  margin: 0;
+  padding: 16px 14px;
+  color: var(--fg-mute);
+}
+
+.reg-code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- agent settings screen (⚙ on a tree row) ---------------------------
+ * Ported from the mockup's `.ags-*` rules (`.claude/scratch/agents-page-
+ * mockup/styles.css`), same class names, same layout. */
+
+.ags-tabs { flex: none; display: flex; gap: 4px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--bg-pane); }
+.ags-tab {
+  padding: 9px 12px 8px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-mute);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ags-tab:hover { color: var(--fg); }
+.ags-tab.is-active { color: var(--fg); border-bottom-color: var(--accent); }
+
+.ags-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+}
+
+.ags-foot { flex: none; display: flex; justify-content: flex-end; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--bg-pane); }
+
+.ags-vars { display: flex; flex-direction: column; gap: 6px; padding: 0 12px 10px 33px; }
+.ags-var-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--fg-mute); }
+.ags-var-row span { flex: none; width: 130px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ags-var-row input { flex: 1 1 auto; }
+.ags-var-row code { font-family: var(--mono); color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; }
+
+/* Read-only var display under an agent's own MCP link row — no field to
+   align under any more, so the indent steps back down to the row's text. */
+.ags-vars-ro { padding: 0 12px 10px 12px; }
+
+/* The attach-picker's "still empty" hint next to an unfilled var field. */
+.ags-var-unset { flex: none; color: var(--fg-mute); font-size: 11px; white-space: nowrap; }
+
+/* ---- agent link subsections (⚙ → MCP/Skills/Rules): attached-only rows,
+   per-subsection "Change" edit toggle, detach + "+ Add" in edit mode ------ */
+
+.reg-section { margin-bottom: 18px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.reg-section-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: var(--bg-sunken); border-bottom: 1px solid var(--line);
+}
+.reg-section-head h2 { margin: 0; font-size: 12.5px; }
+.reg-section-head .cnt { font-family: var(--mono); font-size: 11px; color: var(--fg-mute); }
+
+.reg-line { border-bottom: 1px solid var(--line-sunken); }
+.reg-line:last-child { border-bottom: 0; }
+
+.reg-item-name { font-weight: 600; font-size: 12.5px; }
+.reg-item-meta { color: var(--fg-mute); font-size: 11.5px; font-family: var(--mono); margin-top: 1px; }
+
+.ags-links-sections .reg-section:last-child { margin-bottom: 0; }
+
+.ags-link-row { display: flex; align-items: center; gap: 9px; padding: 8px 12px; }
+.ags-link-text { flex: 1 1 auto; min-width: 0; }
+
+.ags-link-add {
+  display: block; width: 100%; padding: 7px 12px; margin: 0;
+  background: transparent; border: 0; border-top: 1px solid var(--line-sunken);
+  text-align: left; color: var(--accent-muted); font-size: 11.5px; cursor: pointer;
+}
+.ags-link-add:hover { color: var(--accent); background: var(--bg-hover); }
+
+/* Small square icon button — the detach (🗑) on an agent's link row. */
+.icon-btn {
+  flex: none; padding: 3px 7px; background: transparent; border: 1px solid transparent;
+  border-radius: 4px; color: var(--fg-mute); font-size: 12px; line-height: 1; cursor: pointer;
+}
+.icon-btn:hover { color: var(--err); background: var(--bg-hover); border-color: var(--line); }
+.icon-btn:disabled { opacity: .5; cursor: default; }
+
+/* ---- pick-modal (attach-from-registry) list ----------------------------- */
+
+.pick-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+.pick-row {
+  display: flex; align-items: center; width: 100%; padding: 9px 12px;
+  background: transparent; border: 0; border-bottom: 1px solid var(--line);
+  text-align: left; font: inherit; color: inherit; cursor: pointer;
+}
+.pick-row:last-child { border-bottom: 0; }
+.pick-row:hover { background: var(--bg-hover); }
+
+.pick-row-text { flex: 1 1 auto; min-width: 0; }
+.pick-row-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pick-row-meta {
+  margin-top: 2px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 /* ---- responsive: keep the agent tree from breaking narrow --------------
  * Below 940px the two columns cannot sit side by side — same fallback
