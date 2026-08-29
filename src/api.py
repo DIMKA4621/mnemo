@@ -44,6 +44,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager, contextmanager, redirect_stdout, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,7 +52,8 @@ from typing import Any, Iterable, Literal
 
 
 from fastapi import (
-    Body, FastAPI, Query, Request, Security, WebSocket, WebSocketDisconnect,
+    Body, FastAPI, File, Query, Request, Security, UploadFile, WebSocket,
+    WebSocketDisconnect,
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -387,6 +389,11 @@ _ERROR_STATUS: dict[str, int] = {
     # first WS subscriber) — mapped here too so an HTTP surface that ever
     # needs to report it agrees with the WS one.
     "too_many_sessions": 409,
+    # [NEW beyond §9.2, MN-44] `POST /api/agents/{slug}/chats/{chat_id}/
+    # upload` refused a file past `config.MAX_CHAT_UPLOAD_BYTES`. 413, the
+    # standard "request entity too large" status, rather than 400 — the
+    # request is otherwise well-formed, only its size is the problem.
+    "upload_too_large": 413,
     "internal": 500,
 }
 
@@ -2013,6 +2020,180 @@ def api_delete_chat(slug: str, chat_id: str) -> dict:
         agent_runtime.stop_session(chat_id)
     agent_registry.delete_chat(slug, chat_id)
     return {"ok": True}
+
+
+# ---------------------------------------------- agent chat file upload (MN-44)
+#
+# Lets the (Phase B) chat console accept a dropped file: save it under this
+# chat's own folder and hand back a path the frontend inserts as literal text
+# into the PTY input — the upload itself never touches `agent_runtime.py` or
+# the live session.
+
+_UPLOAD_UNSAFE_CHARS = frozenset('<>:"|?*')
+_DRIVE_ANCHOR_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _sanitize_upload_filename(name: str) -> str:
+    """Reduce a client-supplied filename to a single safe path component.
+
+    The name in a multipart upload is entirely client-controlled. Strip
+    directory separators — both `/` and `\\`, regardless of which OS the
+    browser or this host happens to run — and, only on what remains after
+    that split, drop a leading drive-letter anchor (`"C:evil.txt"` ->
+    `"evil.txt"`): the exact escape MN-48 found for link names, where
+    `Path(root) / "C:foo"` silently discards `root` because `pathlib`
+    treats a leading `X:` as a new anchor. Scoped to a real drive-letter
+    shape (one letter, then `:`, at the very start) rather than "any colon
+    anywhere" — a colon elsewhere in the name is just another character the
+    NTFS-invalid-character strip below removes on its own, no need to
+    discard everything ahead of it too. What is left is still checked for
+    containment by the caller (`resolve().is_relative_to()`, same MN-48
+    pattern) before anything is written — belt and suspenders, since a
+    sanitizer that "looks careful" was not sufficient there either.
+    """
+    name = (name or "").strip()
+    name = re.split(r"[\\/]+", name)[-1]
+    name = _DRIVE_ANCHOR_RE.sub("", name)
+    name = name.strip().strip(".")
+    cleaned = "".join(c for c in name if c not in _UPLOAD_UNSAFE_CHARS and ord(c) >= 32)
+    return cleaned or "upload"
+
+
+@app.post(
+    "/api/agents/{slug}/chats/{chat_id}/upload",
+    status_code=201,
+    include_in_schema=False,
+)
+async def api_agent_chat_upload(
+    slug: str, chat_id: str, file: UploadFile = File(...),
+) -> dict:
+    agent = _resolve_agent(slug)
+    _resolve_chat(slug, chat_id)
+
+    uploads_dir = agent_registry.chat_dir(agent.root, chat_id) / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    original_name = file.filename or "upload"
+    candidate = uploads_dir / f"{uuid.uuid4().hex}-{_sanitize_upload_filename(original_name)}"
+
+    try:
+        contained = candidate.resolve().is_relative_to(uploads_dir.resolve())
+    except (OSError, ValueError) as exc:
+        raise ApiError(
+            "bad_request", f"upload filename is not usable: {exc}", filename=original_name,
+        ) from exc
+    if not contained:
+        # Should be unreachable given `_sanitize_upload_filename` strips every
+        # separator/anchor it produces this from — kept as the same
+        # belt-and-suspenders check MN-48 uses, not the primary defense.
+        raise ApiError(
+            "bad_request",
+            "upload filename would resolve outside the chat's uploads folder",
+            filename=original_name,
+        )
+
+    written = 0
+    try:
+        with candidate.open("wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > config.MAX_CHAT_UPLOAD_BYTES:
+                    raise ApiError(
+                        "upload_too_large",
+                        f"upload exceeds the {config.MAX_CHAT_UPLOAD_BYTES}-byte limit",
+                        filename=original_name,
+                    )
+                fh.write(chunk)
+    except ApiError:
+        candidate.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        candidate.unlink(missing_ok=True)
+        raise ApiError("internal", f"could not save upload: {exc}") from exc
+    finally:
+        await file.close()
+
+    if written == 0:
+        candidate.unlink(missing_ok=True)
+        raise ApiError("bad_request", "uploaded file is empty", filename=original_name)
+
+    return {"path": str(candidate.resolve()), "filename": original_name}
+
+
+# --------------------------------------------- agent subagent listing (MN-44)
+#
+# Read-only, best-effort display: what `.claude/agents/*.md` this agent's own
+# folder happens to carry. No validation beyond "do not crash on a malformed
+# or missing frontmatter block" — this never blocks agent creation/use, it is
+# purely informational for the (Phase B) console.
+
+_AGENT_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?\r?\n)---\r?\n", re.DOTALL)
+_AGENT_FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+
+def _parse_agent_frontmatter(text: str) -> dict[str, str]:
+    """Scrape the handful of top-level fields out of a `.claude/agents/*.md`
+    YAML frontmatter block — just enough to read `name:`/`description:` back
+    for display, not a real YAML parser. Handles the one multi-line shape
+    this repo's own agent files actually use for `description` (a folded
+    block scalar, `>`, followed by indented continuation lines), joining
+    those lines with spaces. Any other structure (nested maps, lists, quoted
+    block scalars) is read as whatever its own first line contains, which is
+    a degraded-but-harmless result rather than a crash — this endpoint's
+    contract is best-effort, not a schema validator.
+    """
+    match = _AGENT_FRONTMATTER_RE.match(text)
+    if not match:
+        return {}
+    fields: dict[str, str] = {}
+    current_key: str | None = None
+    in_block = False
+    for line in match.group(1).splitlines():
+        if in_block and (line[:1] in (" ", "\t") or not line.strip()):
+            fields[current_key] = (fields.get(current_key, "") + " " + line.strip()).strip()
+            continue
+        in_block = False
+        field_match = _AGENT_FRONTMATTER_FIELD_RE.match(line)
+        if not field_match:
+            continue
+        current_key, value = field_match.group(1), field_match.group(2).strip()
+        if value in (">", "|", ">-", "|-", ">+", "|+"):
+            fields[current_key] = ""
+            in_block = True
+        else:
+            fields[current_key] = value.strip("\"'")
+    return fields
+
+
+def _read_agent_subagents(root: Path) -> list[dict[str, Any]]:
+    agents_dir = Path(root) / ".claude" / "agents"
+    if not agents_dir.is_dir():
+        return []
+    results: list[dict[str, Any]] = []
+    for path in sorted(agents_dir.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # `UnicodeDecodeError` is a `ValueError` subclass, NOT an
+            # `OSError` — a non-UTF-8 `.md` file must be skipped exactly
+            # like an unreadable one, or this "best-effort, never crashes"
+            # endpoint turns one bad file into a 500 for the whole listing.
+            continue
+        fields = _parse_agent_frontmatter(text)
+        results.append({
+            "name": fields.get("name") or path.stem,
+            "description": fields.get("description") or None,
+        })
+    return results
+
+
+@app.get("/api/agents/{slug}/subagents", include_in_schema=False)
+def api_agent_subagents(slug: str) -> dict:
+    agent = _resolve_agent(slug)
+    return {"subagents": _read_agent_subagents(agent.root)}
 
 
 # ------------------------------------------------- agent <-> catalog links (MN-48)

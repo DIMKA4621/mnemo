@@ -692,3 +692,9 @@ AGENTS_DIR: Path = USER_HOME / "agents"
 # or a UI bug forking a pile of real, paid `claude` processes — not the
 # tuned real policy (a separate future ticket, MN-46, owns that).
 MAX_LIVE_SESSIONS: int = int(os.environ.get("MNEMO_MAX_LIVE_SESSIONS", "8"))
+
+# Per-file cap for `POST /api/agents/{slug}/chats/{chat_id}/upload` (MN-44
+# Phase A). No existing upload-like endpoint in this file to match, so this
+# is a plain, sane default for a file dropped into a terminal chat — not a
+# tuned limit.
+MAX_CHAT_UPLOAD_BYTES: int = int(os.environ.get("MNEMO_MAX_CHAT_UPLOAD_BYTES", str(25 * 1024 * 1024)))

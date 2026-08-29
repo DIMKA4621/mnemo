@@ -421,12 +421,278 @@ def test_http_chat_endpoints() -> None:
     )
 
 
+# -------------------------------------------------- 44.A chat file upload
+#
+# `POST /api/agents/{slug}/chats/{chat_id}/upload` (MN-44 Phase A). Calls the
+# endpoint FUNCTION directly with a real `starlette.datastructures.UploadFile`
+# wrapping an in-memory `io.BytesIO` — same "skip uvicorn/ASGI, keep the real
+# wiring" approach as `test_http_chat_endpoints`, and no real `claude` process
+# is anywhere near this (the upload path never touches `agent_runtime.py`).
+
+
+def test_sanitize_upload_filename() -> None:
+    from src import api  # noqa: PLC0415
+
+    cases = [
+        ("notes.txt", "notes.txt"),
+        ("../../evil.txt", "evil.txt"),
+        ("..\\..\\evil.txt", "evil.txt"),
+        ("C:evil.txt", "evil.txt"),
+        ("C:\\Windows\\evil.txt", "evil.txt"),
+        ("/etc/evil.txt", "evil.txt"),
+        ("", "upload"),
+        ("   ", "upload"),
+        ('weird<>:"|?*name.txt', "weirdname.txt"),
+    ]
+    for raw, expected in cases:
+        got = api._sanitize_upload_filename(raw)
+        check(f"_sanitize_upload_filename({raw!r}) == {expected!r}", got == expected, got)
+
+
+def test_agent_chat_upload_endpoint() -> None:
+    import asyncio
+    import io
+
+    from starlette.datastructures import UploadFile
+
+    from src import api, config as config_module  # noqa: PLC0415
+
+    agent = _make_agent("chat-upload")
+    chat = agent_registry.create_chat(agent.slug)
+    uploads_dir = (agent_registry.chat_dir(agent.root, chat["chat_id"]) / "uploads").resolve()
+
+    def upload(data: bytes, filename: str):
+        return asyncio.run(
+            api.api_agent_chat_upload(agent.slug, chat["chat_id"], UploadFile(io.BytesIO(data), filename=filename))
+        )
+
+    # --- happy path ---------------------------------------------------
+    result = upload(b"hello world", "notes.txt")
+    check("upload: returns the original filename verbatim", result["filename"] == "notes.txt", repr(result))
+    saved_path = Path(result["path"])
+    check("upload: file actually saved to disk", saved_path.is_file(), str(saved_path))
+    check("upload: content round-trips byte-for-byte", saved_path.read_bytes() == b"hello world")
+    check(
+        "upload: saved under <chat>/uploads/, nowhere else",
+        saved_path.resolve().parent == uploads_dir,
+        f"{saved_path.resolve().parent} != {uploads_dir}",
+    )
+    check(
+        "upload: original filename kept as a suffix behind the uuid prefix",
+        saved_path.name.endswith("-notes.txt"),
+        saved_path.name,
+    )
+
+    # A second upload with the SAME original filename must not collide.
+    result2 = upload(b"second file", "notes.txt")
+    check(
+        "upload: repeat filename does not collide (uuid prefix disambiguates)",
+        Path(result2["path"]) != saved_path and Path(result2["path"]).is_file(),
+        result2["path"],
+    )
+    check("upload: first file untouched by the second", saved_path.read_bytes() == b"hello world")
+
+    # --- path-traversal-attempt filenames -------------------------------
+    # Every one of these must land inside `uploads_dir` — never at the
+    # literal (relative or drive-anchored) location the filename names.
+    evil_names = [
+        "../../evil.txt", "..\\..\\evil.txt", "C:evil.txt",
+        "C:\\Windows\\evil.txt", "/etc/evil.txt",
+    ]
+    for evil_name in evil_names:
+        evil_result = upload(b"pwned", evil_name)
+        evil_path = Path(evil_result["path"]).resolve()
+        check(
+            f"upload: malicious filename {evil_name!r} stays contained under uploads/",
+            evil_path.parent == uploads_dir,
+            f"escaped to {evil_path}",
+        )
+
+    # --- empty upload ----------------------------------------------------
+    try:
+        upload(b"", "empty.txt")
+        check("upload: rejects an empty file", False, "no exception raised")
+    except api.ApiError as exc:
+        check(
+            "upload: rejects an empty file",
+            exc.code == "bad_request" and exc.status == 400,
+            f"code={exc.code} status={exc.status}",
+        )
+
+    # --- over the size limit ---------------------------------------------
+    original_limit = config_module.MAX_CHAT_UPLOAD_BYTES
+    config_module.MAX_CHAT_UPLOAD_BYTES = 10
+    try:
+        try:
+            upload(b"x" * 1000, "big.bin")
+            check("upload: rejects a file over the configured size limit", False, "no exception raised")
+        except api.ApiError as exc:
+            check(
+                "upload: rejects a file over the configured size limit",
+                exc.code == "upload_too_large" and exc.status == 413,
+                f"code={exc.code} status={exc.status}",
+            )
+        leftover = list(uploads_dir.glob("*big.bin"))
+        check("upload: rejected oversized upload leaves no partial file behind", leftover == [], repr(leftover))
+    finally:
+        config_module.MAX_CHAT_UPLOAD_BYTES = original_limit
+
+    # --- 404s --------------------------------------------------------------
+    try:
+        asyncio.run(
+            api.api_agent_chat_upload(agent.slug, "no-such-chat", UploadFile(io.BytesIO(b"x"), filename="x.txt"))
+        )
+        check("upload: 404s a bad chat_id", False, "no exception raised")
+    except api.ApiError as exc:
+        check(
+            "upload: 404s a bad chat_id",
+            exc.code == "chat_not_found" and exc.status == 404,
+            f"code={exc.code} status={exc.status}",
+        )
+
+    try:
+        asyncio.run(
+            api.api_agent_chat_upload(
+                "no-such-agent", chat["chat_id"], UploadFile(io.BytesIO(b"x"), filename="x.txt")
+            )
+        )
+        check("upload: 404s a bad agent slug", False, "no exception raised")
+    except api.ApiError as exc:
+        check(
+            "upload: 404s a bad agent slug",
+            exc.code == "agent_not_found" and exc.status == 404,
+            f"code={exc.code} status={exc.status}",
+        )
+
+    check("_ERROR_STATUS: upload_too_large -> 413", api._ERROR_STATUS.get("upload_too_large") == 413)
+
+    routes = {r.path for r in api.app.routes if hasattr(r, "path")}
+    check(
+        "the chat upload route is registered",
+        "/api/agents/{slug}/chats/{chat_id}/upload" in routes,
+        repr(sorted(p for p in routes if "upload" in p)),
+    )
+
+
+# --------------------------------------------------- 44.A subagent listing
+#
+# `GET /api/agents/{slug}/subagents` (MN-44 Phase A). Exercised against both
+# an agent with no `.claude/agents/` at all (the common case) and one whose
+# `.claude/agents/` mirrors this repo's OWN hand-written agent files — those
+# real files are only ever READ here and copied into a throwaway temp agent
+# folder; nothing under this repo's actual `.claude/agents/` is touched.
+
+
+def test_agent_subagents_endpoint() -> None:
+    from src import api  # noqa: PLC0415
+
+    # No `.claude/agents/` directory at all -> {"subagents": []}, not a 404.
+    empty_agent = _make_agent("subagents-empty")
+    result = api.api_agent_subagents(empty_agent.slug)
+    check(
+        "subagents: no .claude/agents/ dir -> empty list, not an error",
+        result == {"subagents": []},
+        repr(result),
+    )
+
+    real_agent_files = sorted(
+        (Path(__file__).resolve().parent.parent / ".claude" / "agents").glob("*.md")
+    )
+    check(
+        "subagents: this repo has real agent definitions to test against",
+        len(real_agent_files) > 0,
+        "no .claude/agents/*.md found in the repo",
+    )
+
+    real_agent = _make_agent("subagents-real")
+    dest_dir = real_agent.root / ".claude" / "agents"
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    for src_path in real_agent_files:
+        (dest_dir / src_path.name).write_text(src_path.read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = api.api_agent_subagents(real_agent.slug)
+    subagents = result["subagents"]
+    check(
+        "subagents: one entry per real .md file, none skipped",
+        len(subagents) == len(real_agent_files),
+        f"got {len(subagents)}, expected {len(real_agent_files)}",
+    )
+    by_name = {s["name"]: s for s in subagents}
+    check("subagents: 'name:' read from frontmatter", "service-dev" in by_name, repr(sorted(by_name)))
+    check(
+        "subagents: multi-line folded 'description:' block scalar joined into one string",
+        bool(by_name.get("service-dev", {}).get("description"))
+        and "FastAPI" in by_name["service-dev"]["description"],
+        repr(by_name.get("service-dev")),
+    )
+
+    # Malformed / frontmatter-less file alongside the real ones: skipped
+    # gracefully (falls back to the filename stem), never a crash.
+    (dest_dir / "not-an-agent.md").write_text("just prose, no frontmatter at all\n", encoding="utf-8")
+    result2 = api.api_agent_subagents(real_agent.slug)
+    names2 = {s["name"] for s in result2["subagents"]}
+    check(
+        "subagents: a file with no frontmatter falls back to its filename stem",
+        "not-an-agent" in names2,
+        repr(sorted(names2)),
+    )
+    by_name2 = {s["name"]: s for s in result2["subagents"]}
+    check(
+        "subagents: a file with no frontmatter gets description=None, not a crash",
+        by_name2["not-an-agent"]["description"] is None,
+        repr(by_name2["not-an-agent"]),
+    )
+
+    # A file with genuinely invalid UTF-8 bytes (not just missing
+    # frontmatter): `UnicodeDecodeError` is a `ValueError`, NOT an
+    # `OSError` — must still be skipped, not turn the whole request into a
+    # 500 (reviewer-confirmed bug, fixed by widening the except clause).
+    (dest_dir / "bad-encoding.md").write_bytes(b"---\nname: bad\n---\n\xff\xfe not valid utf-8 \x80\x81")
+    result3 = api.api_agent_subagents(real_agent.slug)
+    check(
+        "subagents: an invalid-UTF-8 .md file does not 500 the whole listing",
+        isinstance(result3, dict) and "subagents" in result3,
+        repr(result3),
+    )
+    names3 = {s["name"] for s in result3["subagents"]}
+    check(
+        "subagents: the invalid-UTF-8 file itself is skipped, not listed",
+        "bad" not in names3 and "bad-encoding" not in names3,
+        repr(sorted(names3)),
+    )
+    check(
+        "subagents: every OTHER file is still listed alongside the skipped one",
+        names3 == names2,
+        f"{sorted(names3)} != {sorted(names2)}",
+    )
+
+    try:
+        api.api_agent_subagents("no-such-agent")
+        check("subagents: 404s a bad agent slug", False, "no exception raised")
+    except api.ApiError as exc:
+        check(
+            "subagents: 404s a bad agent slug",
+            exc.code == "agent_not_found" and exc.status == 404,
+            f"code={exc.code} status={exc.status}",
+        )
+
+    routes = {r.path for r in api.app.routes if hasattr(r, "path")}
+    check(
+        "the subagents route is registered",
+        "/api/agents/{slug}/subagents" in routes,
+        repr(sorted(p for p in routes if "subagent" in p)),
+    )
+
+
 def main() -> int:
     test_chat_storage()
     test_launch_translation()
     test_concurrency_ceiling()
     test_race_free_reconnect()
     test_http_chat_endpoints()
+    test_sanitize_upload_filename()
+    test_agent_chat_upload_endpoint()
+    test_agent_subagents_endpoint()
 
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
