@@ -41,6 +41,12 @@ FIXTURES = HERE / "fixtures"
 # is stable across restarts.
 DEV_TOKEN = "de7a" * 12
 
+# Set by --no-auth: the real backend is open by default (contract 9.1, unless
+# $MNEMO_API_TOKEN/require_login is set) — this mock hardcoded a token
+# unconditionally instead, which doesn't match that default. Off by default
+# so existing dev URLs/scripts built around DEV_TOKEN keep working.
+NO_AUTH = False
+
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 SERVICE_VERSION = "3.0.0-mock"
 
@@ -1138,6 +1144,8 @@ class Handler(BaseHTTPRequestHandler):
                                          "detail": detail}})
 
     def authorised(self) -> bool:
+        if NO_AUTH:
+            return True
         header = self.headers.get("Authorization", "")
         if header.startswith("Bearer "):
             return header[7:].strip() == DEV_TOKEN
@@ -1770,7 +1778,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_ws(self, query: dict) -> None:
         token = (query.get("token") or [""])[0]
-        if token != DEV_TOKEN:
+        if not NO_AUTH and token != DEV_TOKEN:
             self.fail(401, "unauthorized", "missing or invalid token")
             return
         key = self.headers.get("Sec-WebSocket-Key")
@@ -1864,12 +1872,18 @@ def main() -> None:
                         help="seconds between synthetic query events (0 = off)")
     parser.add_argument("--batch-ms", type=int, default=260,
                         help="simulated time per index batch")
+    parser.add_argument("--no-auth", action="store_true",
+                        help="skip the token check (real backend is open by "
+                             "default too, unless $MNEMO_API_TOKEN/require_login "
+                             "is set) - this mock otherwise always requires one")
     args = parser.parse_args()
 
     if args.host not in ("127.0.0.1", "::1", "localhost"):
         raise SystemExit("dev server binds loopback only")
 
     Handler.batch_ms = args.batch_ms
+    global NO_AUTH
+    NO_AUTH = args.no_auth
 
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=_auto_pending_scheduler, daemon=True).start()
@@ -1879,7 +1893,10 @@ def main() -> None:
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.daemon_threads = True
     print(f"mock backend on http://{args.host}:{args.port}", flush=True)
-    print(f"open  http://{args.host}:{args.port}/ui/?token={DEV_TOKEN}", flush=True)
+    if args.no_auth:
+        print(f"open  http://{args.host}:{args.port}/ui/  (no token required)", flush=True)
+    else:
+        print(f"open  http://{args.host}:{args.port}/ui/?token={DEV_TOKEN}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
