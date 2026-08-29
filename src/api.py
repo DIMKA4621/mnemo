@@ -61,8 +61,8 @@ from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import (
-    agent_registry, config, engine_update, presets, registry, servicelog,
-    settings, store,
+    agent_registry, catalog, config, engine_update, presets, registry,
+    servicelog, settings, store,
 )
 from .config import TOP_K
 from .providers import EmbeddingUnavailable, forget_providers, get_provider
@@ -347,6 +347,25 @@ _ERROR_STATUS: dict[str, int] = {
     # 500: this is a well-formed request describing a document that does not
     # meet the schema, not a server fault.
     "invalid_launch_config": 400,
+    # [NEW beyond §9.2, MN-41] No catalog entry matches the given id — same
+    # shape as `bank_not_found` / `agent_not_found`.
+    "catalog_entry_not_found": 404,
+    # [NEW beyond §9.2, MN-41] `content` fails validation for its category:
+    # empty, or not valid JSON for an `mcp` entry. 400, not 422: this is
+    # domain validation on a field's own value, not a malformed request body.
+    "invalid_catalog_entry": 400,
+    # [NEW beyond §9.2, MN-41] Either an explicit rename collides with
+    # another entry in the same category, or — for `mcp` — the content
+    # canonicalises to a config another entry already carries. 409, same
+    # family as `bank_exists`/`agent_exists`: the request is well-formed, it
+    # just conflicts with what is already registered.
+    "catalog_entry_exists": 409,
+    # [NEW beyond §9.2, MN-41] `DELETE /api/catalog/{id}` refused: at least
+    # one agent still references this entry. No force-delete — the response
+    # lists every referencing agent so the caller can detach first, same
+    # "show the blocker, let the human decide" shape as
+    # `orphan_cleanup_refused`.
+    "entry_in_use": 409,
     "internal": 500,
 }
 
@@ -1869,6 +1888,134 @@ def api_agent_launch_save(slug: str, payload: dict = Body(...)) -> dict:
         return agent_registry.write_launch_config(agent.root, payload)
     except agent_registry.InvalidLaunchConfig as exc:
         raise ApiError("invalid_launch_config", str(exc), slug=slug) from exc
+
+
+# -------------------------------------------------------- catalog (MN-41)
+#
+# The general MCP/Skills/Rules registry (`catalog.py`) — a flat, agent-
+# agnostic store a human adds entries to by hand, independent of any agent
+# (package-manager-cache shaped, per the ticket). `catalog.py` owns the
+# storage rules (id/name shape, JSON validation, `mcp`-config dedup); this
+# section is only the HTTP shape around it, same style as the bank/agent
+# endpoints above (`_resolve_bank`/`_resolve_agent` -> `_resolve_catalog_entry`).
+#
+# `catalog.py` never imports `agent_registry` (see its module docstring) —
+# whether an entry is still referenced by an agent is answered by
+# `_catalog_used_by` below, a **guarded call** rather than a hard dependency:
+# MN-42 has not yet added the actual attach/detach link storage to
+# `agent_registry.Agent`, so `catalog_entry_used_by` may not exist on that
+# module at all. Same shape as `_queue()`'s guarded import ahead of phase 3 —
+# a missing capability answers "nothing uses this" rather than a 500.
+
+
+class CreateCatalogEntryRequest(BaseModel):
+    category: Literal["mcp", "skill", "rule"]
+    name: str
+    content: str
+
+
+class UpdateCatalogEntryRequest(BaseModel):
+    """Editable fields of a catalog entry. Omitted means unchanged.
+
+    ``category`` is absent on purpose: it is fixed at creation (see
+    `catalog.py`'s module docstring) — changing it after the fact would
+    upend the JSON/dedup rules, which apply to `mcp` only.
+    """
+
+    name: str | None = None
+    content: str | None = None
+
+
+def _resolve_catalog_entry(entry_id: str) -> catalog.CatalogEntry:
+    try:
+        return catalog.get(entry_id)
+    except catalog.EntryNotFound as exc:
+        raise ApiError("catalog_entry_not_found", str(exc), id=entry_id) from exc
+
+
+def _entry_info(entry: catalog.CatalogEntry) -> dict:
+    """The one catalog-entry shape the API returns."""
+    return {
+        "id": entry.id,
+        "category": entry.category,
+        "name": entry.name,
+        "content": entry.content,
+        "created_at": entry.created_at,
+        "vars": entry.vars,
+    }
+
+
+def _catalog_used_by(entry_id: str) -> list[str]:
+    """Agent slugs that reference this catalog entry — `[]` until MN-42 adds
+    the link storage `agent_registry.catalog_entry_used_by` would read (see
+    the section banner above for why this is a guarded call, not an import)."""
+    finder = getattr(agent_registry, "catalog_entry_used_by", None)
+    if finder is None:
+        return []
+    try:
+        return list(finder(entry_id))
+    except Exception:  # noqa: BLE001
+        # A future finder's own bug must not turn "delete this entry" into a
+        # 500 — treat it the same as "the capability isn't there yet".
+        log.exception("catalog_entry_used_by(%r) failed", entry_id)
+        return []
+
+
+@app.get("/api/catalog", include_in_schema=False)
+def api_catalog(category: Literal["mcp", "skill", "rule"] | None = None) -> dict:
+    return {"entries": [_entry_info(e) for e in catalog.list_entries(category)]}
+
+
+@app.post("/api/catalog", status_code=201, include_in_schema=False)
+def api_create_catalog_entry(req: CreateCatalogEntryRequest) -> dict:
+    try:
+        entry = catalog.add(req.category, req.name, req.content)
+    except catalog.InvalidCatalogEntry as exc:
+        raise ApiError("invalid_catalog_entry", str(exc)) from exc
+    except catalog.EntryExists as exc:
+        raise ApiError(
+            "catalog_entry_exists", str(exc), existing_id=exc.existing_id
+        ) from exc
+    return _entry_info(entry)
+
+
+@app.get("/api/catalog/{entry_id}", include_in_schema=False)
+def api_catalog_entry(entry_id: str) -> dict:
+    return _entry_info(_resolve_catalog_entry(entry_id))
+
+
+@app.patch("/api/catalog/{entry_id}", include_in_schema=False)
+def api_patch_catalog_entry(entry_id: str, req: UpdateCatalogEntryRequest) -> dict:
+    _resolve_catalog_entry(entry_id)  # 404 before touching anything
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise ApiError("bad_request", "nothing to change", id=entry_id)
+    try:
+        entry = catalog.update(entry_id, **fields)
+    except catalog.EntryNotFound as exc:
+        raise ApiError("catalog_entry_not_found", str(exc), id=entry_id) from exc
+    except catalog.InvalidCatalogEntry as exc:
+        raise ApiError("invalid_catalog_entry", str(exc)) from exc
+    except catalog.EntryExists as exc:
+        raise ApiError(
+            "catalog_entry_exists", str(exc), existing_id=exc.existing_id
+        ) from exc
+    return _entry_info(entry)
+
+
+@app.delete("/api/catalog/{entry_id}", include_in_schema=False)
+def api_remove_catalog_entry(entry_id: str) -> dict:
+    entry = _resolve_catalog_entry(entry_id)
+    used_by = _catalog_used_by(entry.id)
+    if used_by:
+        raise ApiError(
+            "entry_in_use",
+            f"{entry.name!r} is still used by {len(used_by)} agent(s)",
+            id=entry.id, agents=used_by,
+        )
+    catalog.remove(entry.id)
+    log.info("removed catalog entry %s (%s)", entry.id, entry.category)
+    return {"ok": True}
 
 
 # ------------------------------------------- filesystem browse (bank picker)
