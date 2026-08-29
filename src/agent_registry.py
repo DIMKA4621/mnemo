@@ -1134,6 +1134,19 @@ def chat_history_path(root: Path, chat_id: str) -> Path:
     return chat_dir(root, chat_id) / "history.log"
 
 
+def chat_resize_log_path(root: Path, chat_id: str) -> Path:
+    """Append-only JSONL sidecar (MN-49) of terminal-resize markers for one
+    chat — one ``{"offset": ..., "rows": ..., "cols": ...}`` line per resize,
+    ``offset`` a character index into `chat_history_path`'s file at the
+    instant it happened. Lets replay reconstruct the terminal width a given
+    slice of `history.log` was actually written for, instead of rendering
+    the whole file at whatever size the replaying terminal currently is.
+    Same "sibling file under `chat_dir`" convention as `chat_history_path`
+    and `subagents_sidecar_path` — no separate cleanup path, `delete_chat`'s
+    existing `rmtree` already removes it."""
+    return chat_dir(root, chat_id) / "resize.log"
+
+
 def subagents_sidecar_path(root: Path, chat_id: str) -> Path:
     """Append-only JSONL log of `SubagentStart`/`SubagentStop` hook events
     for one chat (MN-45b) — one JSON object per line, one line per hook

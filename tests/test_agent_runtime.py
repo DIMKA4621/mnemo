@@ -536,7 +536,10 @@ async def _race_free_reconnect() -> tuple[bool, str]:
 
     async def subscriber_worker() -> None:
         while not stop.is_set():
-            sub_id, queue, replay = agent_runtime._subscribe(session)
+            sub_id, queue, replay_segments = agent_runtime._subscribe(session)
+            replay = "".join(
+                seg["data"] for seg in replay_segments if seg["type"] == "output"
+            )
             drained: list[str] = []
             try:
                 while True:
@@ -577,6 +580,232 @@ async def _race_free_reconnect() -> tuple[bool, str]:
 def test_race_free_reconnect() -> None:
     ok, detail = asyncio.run(_race_free_reconnect())
     check("reconnect: every subscriber capture is an exact prefix of history (no loss/dup)", ok, detail)
+
+
+# --------------------------------------------------- 49 resize-marker replay
+
+
+def _write_resize_log(path: Path, markers: list[dict]) -> None:
+    with path.open("a", encoding="utf-8") as fh:
+        for marker in markers:
+            fh.write(json.dumps(marker) + "\n")
+
+
+def test_replay_segments_interleaving() -> None:
+    text = "0123456789"
+
+    # (a) no resize markers at all -> exactly one output segment, whole text.
+    no_markers_path = Path(tempfile.mktemp(prefix="mnemo-resize-a-"))
+    segs = agent_runtime._replay_segments(text, no_markers_path)
+    check(
+        "replay segments: no markers -> one output segment with the whole text",
+        segs == [{"type": "output", "data": text}],
+        repr(segs),
+    )
+
+    # (b) one resize mid-stream -> output, resize, output.
+    mid_path = Path(tempfile.mktemp(prefix="mnemo-resize-b-"))
+    _write_resize_log(mid_path, [{"offset": 5, "rows": 30, "cols": 100}])
+    segs = agent_runtime._replay_segments(text, mid_path)
+    check(
+        "replay segments: resize mid-stream -> output/resize/output",
+        segs == [
+            {"type": "output", "data": "01234"},
+            {"type": "resize", "rows": 30, "cols": 100},
+            {"type": "output", "data": "56789"},
+        ],
+        repr(segs),
+    )
+
+    # (c) resize at offset 0 (before any output) -> resize first, then output.
+    start_path = Path(tempfile.mktemp(prefix="mnemo-resize-c-"))
+    _write_resize_log(start_path, [{"offset": 0, "rows": 24, "cols": 80}])
+    segs = agent_runtime._replay_segments(text, start_path)
+    check(
+        "replay segments: resize at offset 0 -> resize, then one output",
+        segs == [
+            {"type": "resize", "rows": 24, "cols": 80},
+            {"type": "output", "data": text},
+        ],
+        repr(segs),
+    )
+
+    # (d) resize at the very end (offset == len(text)) -> output, then a
+    # trailing resize with NO following empty output segment.
+    end_path = Path(tempfile.mktemp(prefix="mnemo-resize-d-"))
+    _write_resize_log(end_path, [{"offset": len(text), "rows": 40, "cols": 120}])
+    segs = agent_runtime._replay_segments(text, end_path)
+    check(
+        "replay segments: resize at the end -> output, resize, no trailing empty output",
+        segs == [
+            {"type": "output", "data": text},
+            {"type": "resize", "rows": 40, "cols": 120},
+        ],
+        repr(segs),
+    )
+
+    # a malformed marker line must not break the whole replay.
+    bad_path = Path(tempfile.mktemp(prefix="mnemo-resize-bad-"))
+    bad_path.write_text(
+        '{"offset": 3, "rows": 10, "cols": 20}\nnot json\n{"rows": 1}\n',
+        encoding="utf-8",
+    )
+    segs = agent_runtime._replay_segments(text, bad_path)
+    check(
+        "replay segments: a malformed marker line is skipped, not fatal",
+        segs == [
+            {"type": "output", "data": "012"},
+            {"type": "resize", "rows": 10, "cols": 20},
+            {"type": "output", "data": "3456789"},
+        ],
+        repr(segs),
+    )
+
+    # two resize markers at the same offset (no output arrived between them)
+    # -> back-to-back resize segments, no empty output segment wedged
+    # between them.
+    dup_path = Path(tempfile.mktemp(prefix="mnemo-resize-dup-"))
+    _write_resize_log(
+        dup_path,
+        [
+            {"offset": 5, "rows": 10, "cols": 20},
+            {"offset": 5, "rows": 15, "cols": 25},
+        ],
+    )
+    segs = agent_runtime._replay_segments(text, dup_path)
+    check(
+        "replay segments: two markers at the same offset -> back-to-back resizes",
+        segs == [
+            {"type": "output", "data": "01234"},
+            {"type": "resize", "rows": 10, "cols": 20},
+            {"type": "resize", "rows": 15, "cols": 25},
+            {"type": "output", "data": "56789"},
+        ],
+        repr(segs),
+    )
+
+
+class _FakeResizeProc:
+    def __init__(self) -> None:
+        self.resizes: list[tuple[int, int]] = []
+
+    def setwinsize(self, rows: int, cols: int) -> None:
+        self.resizes.append((rows, cols))
+
+
+def test_resize_writes_marker() -> None:
+    hist_dir = Path(tempfile.mkdtemp(prefix="mnemo agent-runtime resize "))
+    hist_path = hist_dir / "history.log"
+    hist_path.write_text("hello world", encoding="utf-8")
+
+    proc = _FakeResizeProc()
+    chat_id = "resize-marker-test"
+    session = agent_runtime.Session(
+        chat_id=chat_id, agent_slug="resize-agent",
+        history_path=hist_path, proc=proc, token="resize-token",
+    )
+    agent_runtime._sessions[chat_id] = session
+    try:
+        ok = agent_runtime.resize(chat_id, 40, 120)
+        check("resize: reports success", ok is True)
+        check(
+            "resize: forwards to the pty handle",
+            proc.resizes == [(40, 120)],
+            repr(proc.resizes),
+        )
+
+        resize_log_path = hist_path.parent / "resize.log"
+        check("resize: writes the sidecar file", resize_log_path.exists())
+        lines = resize_log_path.read_text(encoding="utf-8").splitlines()
+        check("resize: exactly one marker line", len(lines) == 1, repr(lines))
+        marker = json.loads(lines[0])
+        check(
+            "resize: marker offset matches history.log's char length at write time",
+            marker == {"offset": len("hello world"), "rows": 40, "cols": 120},
+            repr(marker),
+        )
+
+        # More output arrives after the resize, then subscribing must split
+        # the replay around the recorded offset.
+        with session.lock:
+            hist_path.write_text("hello world MORE", encoding="utf-8")
+        sub_id, _queue, segs = agent_runtime._subscribe(session)
+        with session.lock:
+            session.subscribers.pop(sub_id, None)
+        check(
+            "resize: a live _subscribe reflects the recorded marker",
+            segs == [
+                {"type": "output", "data": "hello world"},
+                {"type": "resize", "rows": 40, "cols": 120},
+                {"type": "output", "data": " MORE"},
+            ],
+            repr(segs),
+        )
+    finally:
+        agent_runtime._sessions.pop(chat_id, None)
+
+    # unknown / dead chat_id -> False, no crash.
+    check(
+        "resize: unknown chat_id returns False",
+        agent_runtime.resize("no-such-chat", 10, 10) is False,
+    )
+
+
+def test_resize_survives_history_read_failure() -> None:
+    """Reviewer-flagged regression check: a failure reading `history.log`
+    (deleted, permissions, a race with chat deletion) must never skip or
+    delay `setwinsize` — `resize()` still has to apply the resize and
+    report success, it just cannot record a replay marker for it."""
+    proc = _FakeResizeProc()
+    chat_id = "resize-history-missing-test"
+    missing_history_path = Path(tempfile.mktemp(prefix="mnemo-resize-missing-"))
+    session = agent_runtime.Session(
+        chat_id=chat_id, agent_slug="resize-agent",
+        history_path=missing_history_path, proc=proc, token="resize-missing-token",
+    )
+    agent_runtime._sessions[chat_id] = session
+    try:
+        ok = agent_runtime.resize(chat_id, 50, 150)
+        check(
+            "resize: setwinsize still applied when history.log is missing/unreadable",
+            ok is True and proc.resizes == [(50, 150)],
+            f"ok={ok} resizes={proc.resizes}",
+        )
+        resize_log_path = missing_history_path.parent / "resize.log"
+        check(
+            "resize: no marker written (and no crash) when the offset read fails",
+            not resize_log_path.exists(),
+        )
+    finally:
+        agent_runtime._sessions.pop(chat_id, None)
+
+
+def test_resize_log_path_uses_registry_helper() -> None:
+    """MN-49 review nit: `resize()`/`_subscribe()` must resolve the sidecar
+    path through `agent_registry.chat_resize_log_path` (the actual owner of
+    the "resize.log" filename) for a real, spawned session — not hand-derive
+    it a second time — whenever `Session.agent_root` is known."""
+    agent = _make_agent("resize-path-wiring")
+    chat_id = "resize-path-wiring-chat"
+    session = agent_runtime.Session(
+        chat_id=chat_id, agent_slug=agent.slug,
+        history_path=agent_registry.chat_history_path(agent.root, chat_id),
+        proc=None, token="resize-path-wiring-token", agent_root=agent.root,
+    )
+    check(
+        "resize log path: matches agent_registry.chat_resize_log_path for a spawned-shaped session",
+        agent_runtime._resize_log_path(session)
+        == agent_registry.chat_resize_log_path(agent.root, chat_id),
+    )
+
+    # No `agent_root` (a directly-constructed test session) -> the documented
+    # fallback, still identical in practice since both live in `chat_dir`.
+    session.agent_root = None
+    check(
+        "resize log path: falls back to the hand-derived sibling when agent_root is unset",
+        agent_runtime._resize_log_path(session)
+        == session.history_path.parent / "resize.log",
+    )
 
 
 # ---------------------------------------------------- 43.4 HTTP lifecycle
@@ -1661,6 +1890,10 @@ def main() -> int:
     test_concurrency_ceiling()
     test_session_limit_visibility()
     test_race_free_reconnect()
+    test_replay_segments_interleaving()
+    test_resize_writes_marker()
+    test_resize_survives_history_read_failure()
+    test_resize_log_path_uses_registry_helper()
     test_http_chat_endpoints()
     test_auth_middleware_agent_branch()
     test_hook_agent_subagent_endpoint()

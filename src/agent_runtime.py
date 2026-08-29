@@ -188,6 +188,15 @@ class Session:
     # in the token map) so `_finalize_session` can remove its own entry by
     # value without a reverse lookup.
     token: str
+    # MN-49: the owning agent's root, so `_resize_log_path` can call
+    # `agent_registry.chat_resize_log_path` (the actual owner of the
+    # "resize.log" filename) instead of hand-deriving the sibling path from
+    # `history_path`. Set by `_spawn_session`; `None` on a `Session` built
+    # directly (tests only — a real session is always spawned), in which
+    # case `_resize_log_path` falls back to the equivalent hand-derived
+    # path rather than requiring every such test to also thread an
+    # `agent.root` through.
+    agent_root: Path | None = None
     # Guards `history_path`'s append handle and `subscribers` together — see
     # the module docstring's "race-free reconnect" note. Never held across a
     # blocking PTY read; only around the short append+fan-out in
@@ -563,7 +572,7 @@ def _spawn_session(agent: agent_registry.Agent, chat_id: str) -> Session:
     try:
         session = Session(
             chat_id=chat_id, agent_slug=agent.slug, history_path=history_path,
-            proc=proc, token=session_token,
+            proc=proc, token=session_token, agent_root=agent.root,
         )
         session._history_fh = history_path.open("a", encoding="utf-8")
         _sessions[chat_id] = session
@@ -594,28 +603,79 @@ def _spawn_session(agent: agent_registry.Agent, chat_id: str) -> Session:
     return session
 
 
-def _subscribe(session: Session) -> tuple[str, "asyncio.Queue[dict[str, Any]]", str]:
-    """Register a new subscriber and read replay text, atomically under
-    `session.lock` — see the module docstring's "race-free reconnect" note.
-    Returns ``(sub_id, queue, replay_text)``."""
+def _resize_log_path(session: Session) -> Path:
+    """The `resize.log` sidecar (MN-49) for ``session``, via the registry's
+    own `chat_resize_log_path` when `session.agent_root` is known (every
+    real, spawned session), else the equivalent path hand-derived from
+    `history_path` — see the `Session.agent_root` field comment for why a
+    fallback exists at all."""
+    if session.agent_root is not None:
+        return agent_registry.chat_resize_log_path(session.agent_root, session.chat_id)
+    return session.history_path.parent / "resize.log"
+
+
+def _replay_segments(text: str, resize_log_path: Path) -> list[dict[str, Any]]:
+    """Interleave `history.log`'s ``text`` with the resize markers recorded
+    in ``resize_log_path`` (MN-49), producing an ordered list of
+    ``{"type": "output", "data": ...}`` / ``{"type": "resize", "rows":
+    ..., "cols": ...}`` segments a client can replay in order to reconstruct
+    the terminal-width changes that happened while the chat was unattended.
+
+    No markers at all (old chat, or a chat that was never resized) degenerate
+    to exactly one ``output`` segment holding the whole text — byte-for-byte
+    the pre-MN-49 behavior."""
+    markers: list[dict[str, Any]] = []
+    with suppress(OSError):
+        raw = resize_log_path.read_text(encoding="utf-8", errors="replace")
+        for line in raw.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            with suppress(json.JSONDecodeError, ValueError, TypeError):
+                markers.append(json.loads(line))
+
+    segments: list[dict[str, Any]] = []
+    prev = 0
+    for marker in markers:
+        try:
+            offset, rows, cols = int(marker["offset"]), marker["rows"], marker["cols"]
+        except (KeyError, TypeError, ValueError):
+            continue  # one malformed marker line must not break the whole replay
+        if offset > prev:
+            segments.append({"type": "output", "data": text[prev:offset]})
+        segments.append({"type": "resize", "rows": rows, "cols": cols})
+        prev = offset
+    if prev < len(text) or not segments:
+        segments.append({"type": "output", "data": text[prev:]})
+    return segments
+
+
+def _subscribe(
+    session: Session,
+) -> tuple[str, "asyncio.Queue[dict[str, Any]]", list[dict[str, Any]]]:
+    """Register a new subscriber and read the replay segments, atomically
+    under `session.lock` — see the module docstring's "race-free reconnect"
+    note. Returns ``(sub_id, queue, replay_segments)`` — an ordered list of
+    ``output``/``resize`` segments (MN-49) reconstructing any terminal-width
+    changes that happened while nobody was watching; see
+    `_replay_segments`."""
     queue: "asyncio.Queue[dict[str, Any]]" = asyncio.Queue()
     sub_id = uuid.uuid4().hex
     with session.lock:
-        replay_text = ""
+        text = ""
         with suppress(OSError):
-            replay_text = session.history_path.read_text(
-                encoding="utf-8", errors="replace"
-            )
+            text = session.history_path.read_text(encoding="utf-8", errors="replace")
+        replay_segments = _replay_segments(text, _resize_log_path(session))
         session.subscribers[sub_id] = queue
-    return sub_id, queue, replay_text
+    return sub_id, queue, replay_segments
 
 
 def ensure_and_subscribe(
     slug: str, chat_id: str
-) -> tuple[str, "asyncio.Queue[dict[str, Any]]", str]:
+) -> tuple[str, "asyncio.Queue[dict[str, Any]]", list[dict[str, Any]]]:
     """The one entry point the WS route needs: make sure a live session for
     ``(slug, chat_id)`` exists (spawning it on first use), then subscribe to
-    it. Returns ``(sub_id, queue, replay_text)``.
+    it. Returns ``(sub_id, queue, replay_segments)`` — see `_subscribe`.
 
     Raises `agent_registry.AgentNotFound`, `agent_registry.ChatNotFound`
     (the chat record must already exist — created via `POST
@@ -653,14 +713,51 @@ def send_input(chat_id: str, data: str) -> bool:
 
 
 def resize(chat_id: str, rows: int, cols: int) -> bool:
+    """Resize the live PTY, and best-effort record a marker (MN-49) so a
+    future replay can reconstruct which terminal width each slice of
+    `history.log` was actually written for — without it, a replay renders
+    the whole file at whatever size the replaying terminal currently is,
+    garbling any segment written before a live resize (its absolute ANSI
+    cursor-position codes targeted a width the replaying terminal no longer
+    has).
+
+    `setwinsize` — and the return value it determines — is deliberately
+    independent of the marker write below, in its own `suppress` block: a
+    failure to read `history.log` or write `resize.log` (deleted history,
+    disk full, a race with chat deletion) must never skip or delay the
+    actual resize. The live PTY has to track the browser's xterm size
+    regardless of whether the marker could be recorded — the frontend
+    resizes its own terminal client-side unconditionally, so a resize this
+    function silently dropped would leave the PTY emitting output at the
+    OLD width against a terminal the browser already thinks is the NEW
+    width, exactly the corruption class this ticket exists to fix.
+
+    The offset read and the marker write still happen under `session.lock`
+    — the SAME lock `_publish_output` holds while appending to
+    `_history_fh` — so the recorded offset, when it succeeds, is exact
+    relative to what is already on disk at that instant.
+    """
     with _sessions_lock:
         session = _sessions.get(chat_id)
     if session is None or not session.alive:
         return False
+
+    resized = False
     with suppress(Exception):
         session.proc.setwinsize(rows, cols)
-        return True
-    return False
+        resized = True
+
+    with suppress(Exception):
+        with session.lock:
+            offset = len(
+                session.history_path.read_text(encoding="utf-8", errors="replace")
+            )
+            resize_log_path = _resize_log_path(session)
+            marker = json.dumps({"offset": offset, "rows": rows, "cols": cols})
+            with resize_log_path.open("a", encoding="utf-8") as fh:
+                fh.write(marker + "\n")
+
+    return resized
 
 
 def stop_session(chat_id: str, timeout: float = 10.0) -> bool:

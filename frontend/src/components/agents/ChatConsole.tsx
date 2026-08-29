@@ -216,6 +216,8 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
           code?: string;
           count?: number;
           limit?: number;
+          rows?: number;
+          cols?: number;
           [key: string]: unknown;
         };
         try {
@@ -227,7 +229,23 @@ export function ChatConsole({ agent, chatId }: ChatConsoleProps) {
           case "output":
             term.write(envelope.data ?? "");
             break;
+          case "resize":
+            // Replayed history was written against the terminal size at the
+            // time it happened — a mid-conversation browser resize means an
+            // earlier segment's absolute ANSI cursor codes only interpret
+            // correctly if the terminal is temporarily presented at that
+            // historical size, not the browser's current one. `fit.fit()`
+            // would just re-measure the current container and defeat this.
+            if (typeof envelope.rows === "number" && typeof envelope.cols === "number") {
+              term.resize(envelope.cols, envelope.rows);
+            }
+            break;
           case "replay_done":
+            // Replay may have left the terminal at a stale historical size
+            // from the last `resize` marker above — restore it to the
+            // browser's actual current size before flipping to "live".
+            fit.fit();
+            sendResize(socket);
             setStatus("live");
             break;
           case "exited":

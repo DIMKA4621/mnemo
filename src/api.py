@@ -4127,9 +4127,12 @@ async def ws_agent_chat(
     Same gate as `/ws` above — same reasoning (`_api_gated()`), same
     query-string token (a browser cannot set headers on a WS handshake).
     Envelopes (§43.3): server -> client is one of ``output`` (a chunk of PTY
-    output), ``replay_done`` (history replay finished, live output follows),
-    ``exited`` (the process terminated), ``error``; client -> server is
-    ``input`` (keystrokes) or ``resize`` (terminal dimensions).
+    output), ``resize`` (MN-49, replay-only — reconstructs a historical
+    terminal-width change that happened while nobody was watching; never
+    sent during live streaming, where a resize only ever flows client ->
+    server), ``replay_done`` (history replay finished, live output
+    follows), ``exited`` (the process terminated), ``error``; client ->
+    server is ``input`` (keystrokes) or ``resize`` (terminal dimensions).
 
     Connecting spawns the real process on the FIRST subscriber for this
     ``chat_id`` (`agent_runtime.ensure_and_subscribe`) — cheap for every
@@ -4144,7 +4147,7 @@ async def ws_agent_chat(
     await websocket.accept()
 
     try:
-        sub_id, queue, replay_text = agent_runtime.ensure_and_subscribe(slug, chat_id)
+        sub_id, queue, replay_segments = agent_runtime.ensure_and_subscribe(slug, chat_id)
     except agent_registry.AgentNotFound as exc:
         await websocket.send_json({"type": "error", "message": str(exc)})
         await websocket.close(code=1008)
@@ -4179,8 +4182,8 @@ async def ws_agent_chat(
         await websocket.close(code=1011)
         return
 
-    if replay_text:
-        await websocket.send_json({"type": "output", "data": replay_text})
+    for segment in replay_segments:
+        await websocket.send_json(segment)
     await websocket.send_json({"type": "replay_done"})
 
     async def pump_queue() -> None:

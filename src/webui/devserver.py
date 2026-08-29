@@ -1245,8 +1245,8 @@ _clients_lock = threading.Lock()
 
 _WS_AGENT_CHAT_RE = re.compile(r"^/ws/agents/([^/]+)/chats/([^/]+)$")
 
-# chat_id -> {"history": str, "subscribers": list[WSClient], "started": bool,
-#             "buffer": str, "stopped": bool}
+# chat_id -> {"history": str, "resize_markers": list[dict], "subscribers":
+#             list[WSClient], "started": bool, "buffer": str, "stopped": bool}
 _CHAT_SESSIONS: dict[str, dict[str, Any]] = {}
 _chat_sessions_lock = threading.Lock()
 
@@ -1256,23 +1256,64 @@ _FAKE_CLAUDE_BANNER = (
 )
 
 
-def _chat_ws_subscribe(chat_id: str, client: WSClient) -> str:
-    """Register `client` as a live viewer of `chat_id` and return whatever
-    output has already accumulated (the replay text) — mirrors
-    `agent_runtime.ensure_and_subscribe`'s lazy-spawn-on-first-subscriber
-    contract: the fake banner is only queued the very first time anyone
-    connects to this chat, never on a later reconnect."""
+def _chat_ws_replay_segments(history: str, resize_markers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Interleave `history` with `resize_markers` (MN-49) into an ordered
+    list of `output`/`resize` segments — mirrors `agent_runtime.
+    _replay_segments`. No markers at all degenerates to exactly one
+    `output` segment holding the whole text, same as before MN-49."""
+    segments: list[dict[str, Any]] = []
+    prev = 0
+    for marker in resize_markers:
+        offset = marker["offset"]
+        if offset > prev:
+            segments.append({"type": "output", "data": history[prev:offset]})
+        segments.append({"type": "resize", "rows": marker["rows"], "cols": marker["cols"]})
+        prev = offset
+    if prev < len(history) or not segments:
+        segments.append({"type": "output", "data": history[prev:]})
+    return segments
+
+
+def _chat_ws_subscribe(chat_id: str, client: WSClient) -> list[dict[str, Any]]:
+    """Register `client` as a live viewer of `chat_id` and return the replay
+    segments accumulated so far (MN-49) — mirrors `agent_runtime.
+    ensure_and_subscribe`'s lazy-spawn-on-first-subscriber contract: the
+    fake banner is only queued the very first time anyone connects to this
+    chat, never on a later reconnect."""
     with _chat_sessions_lock:
         session = _CHAT_SESSIONS.setdefault(
-            chat_id, {"history": "", "subscribers": [], "started": False, "buffer": "", "stopped": False},
+            chat_id,
+            {
+                "history": "",
+                "resize_markers": [],
+                "subscribers": [],
+                "started": False,
+                "buffer": "",
+                "stopped": False,
+            },
         )
         session["subscribers"].append(client)
         first = not session["started"]
         session["started"] = True
-        replay = session["history"]
+        replay = _chat_ws_replay_segments(session["history"], session["resize_markers"])
     if first:
         threading.Thread(target=_chat_ws_spawn, args=(chat_id,), daemon=True).start()
     return replay
+
+
+def _chat_ws_handle_resize(chat_id: str, rows: int, cols: int) -> None:
+    """Record a resize marker at the current end of `history` (MN-49) so a
+    later reconnect's replay can reproduce this width change — lets
+    `ChatConsole.tsx`'s new `resize` replay branch actually be exercised in
+    dev mode by resizing the browser mid-chat, then reconnecting (e.g.
+    reopening the chat tab)."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session is None or session["stopped"]:
+            return
+        session["resize_markers"].append(
+            {"offset": len(session["history"]), "rows": rows, "cols": cols}
+        )
 
 
 def _chat_ws_unsubscribe(chat_id: str, client: WSClient) -> None:
@@ -3033,11 +3074,11 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
 
-        replay_text = _chat_ws_subscribe(chat_id, client)
+        replay_segments = _chat_ws_subscribe(chat_id, client)
         try:
             with suppress(OSError):
-                if replay_text:
-                    client.send_json({"type": "output", "data": replay_text})
+                for segment in replay_segments:
+                    client.send_json(segment)
                 client.send_json({"type": "replay_done"})
             while True:
                 frame = read_frame(self.rfile)
@@ -3059,8 +3100,10 @@ class Handler(BaseHTTPRequestHandler):
                     continue
                 if msg.get("type") == "input":
                     _chat_ws_handle_input(chat_id, str(msg.get("data", "")))
-                # "resize" is accepted and ignored — nothing in this fixture
-                # depends on terminal dimensions.
+                elif msg.get("type") == "resize":
+                    rows, cols = msg.get("rows"), msg.get("cols")
+                    if isinstance(rows, int) and isinstance(cols, int):
+                        _chat_ws_handle_resize(chat_id, rows, cols)
         except OSError:
             pass
         finally:
