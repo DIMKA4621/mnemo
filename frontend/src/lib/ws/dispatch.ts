@@ -113,6 +113,11 @@ const handlers: Record<string, Handler> = {
   index_done: (envelope, qc) => {
     qc.invalidateQueries({ queryKey: queryKeys.banks.all });
     if (envelope.bank_id) qc.invalidateQueries({ queryKey: queryKeys.tree.bank(envelope.bank_id) });
+    // Journal's Indexing tab lives on the same `GET /api/logs` this event
+    // just added a row to (a `prune` task always emits `index_done(kind=
+    // "prune")` right after, so this alone covers prune's row too — see
+    // `workqueue.py` around its `_emit("prune", ...)` call).
+    qc.invalidateQueries({ queryKey: queryKeys.logs.all });
     const data = envelope.data as { path?: string };
     if (envelope.bank_id && data.path) {
       useIndexProgressStore.getState().clear(envelope.bank_id, data.path);
@@ -120,6 +125,7 @@ const handlers: Record<string, Handler> = {
   },
   index_error: (envelope, qc) => {
     qc.invalidateQueries({ queryKey: queryKeys.banks.all });
+    qc.invalidateQueries({ queryKey: queryKeys.logs.all });
     const data = envelope.data as { path?: string };
     if (envelope.bank_id && data.path) {
       useIndexProgressStore.getState().clear(envelope.bank_id, data.path);

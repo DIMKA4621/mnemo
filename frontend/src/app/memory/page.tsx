@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
+import { useSearchParams } from "next/navigation";
 import { MemoryPageHeader } from "@/components/memory/MemoryPageHeader";
 import { RebuildPendingBanner } from "@/components/memory/RebuildPendingBanner";
 import { BankList } from "@/components/memory/BankList";
@@ -25,7 +26,22 @@ import "@/components/common/dialogs.css";
  */
 type MobPane = "banks" | "tree" | "file";
 
+/**
+ * `useSearchParams()` bails a statically-exported page out of prerendering
+ * up to the nearest `<Suspense>` boundary (Next 16, App Router) — required
+ * even though this page needs no server-rendered value from it, purely to
+ * satisfy the static-export build. See `MemoryPageInner`'s deep-link effect
+ * for the one thing that hook is actually for.
+ */
 export default function MemoryPage() {
+  return (
+    <Suspense fallback={null}>
+      <MemoryPageInner />
+    </Suspense>
+  );
+}
+
+function MemoryPageInner() {
   const t = useT();
   const widths = usePaneWidthsStore((s) => s.widths);
   const hydratePaneWidths = usePaneWidthsStore((s) => s.hydrate);
@@ -59,6 +75,33 @@ export default function MemoryPage() {
     setSelectedFilePath(path);
     setMobPane("file");
   }
+
+  // Deep-link from Журнал's "Відкрити файл" (`?bank=<id>&path=<path>`),
+  // applied once on mount only — a later change to the query string (e.g.
+  // another Журнал click while this page stays mounted) is deliberately
+  // not re-applied (MN-35 plan). No loading-race guard is needed: neither
+  // `selectBank` nor `FileTree`/`useTree` validates that the bank id
+  // exists, so an unknown id just leaves the Файли pane in its normal
+  // "loading" empty state instead of crashing.
+  //
+  // This is the blessed "subscribe to an external system" effect shape
+  // (react.dev: syncing FROM the browser's URL, not deriving state that
+  // render could compute on its own) — `set-state-in-effect` still flags
+  // any setState reached from an effect body regardless of source, hence
+  // the disable rather than a restructure.
+  const searchParams = useSearchParams();
+  const deepLinkApplied = useRef(false);
+  useEffect(() => {
+    if (deepLinkApplied.current) return;
+    deepLinkApplied.current = true;
+    const bankId = searchParams.get("bank");
+    if (!bankId) return;
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    selectBank(bankId);
+    const path = searchParams.get("path");
+    if (path) selectFile(path);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fire once on mount, by design
+  }, []);
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>

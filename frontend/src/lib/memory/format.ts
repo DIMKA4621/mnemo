@@ -7,6 +7,12 @@ export function fmtBytes(n: number | null | undefined): string {
   return `${(n / 1048576).toFixed(1)} MiB`;
 }
 
+export function fmtMs(n: number | null | undefined): string {
+  if (n == null) return "—";
+  if (n < 1000) return `${n.toFixed(1)} ms`;
+  return `${(n / 1000).toFixed(2)} s`;
+}
+
 export function fmtDateTime(iso: string | null | undefined): string {
   if (!iso) return "—";
   const d = new Date(iso);

@@ -305,7 +305,11 @@
       "rebuildTitle": "Full bank rebuild",
       "pruneTitle": "Removed from index",
       "syncTitle": "Index sync",
-      "errorStatus": "error"
+      "errorStatus": "error",
+      "result": {
+        "ok": "ok",
+        "skipped": "skipped"
+      }
     },
     "hit": {
       "openFile": "Open file",

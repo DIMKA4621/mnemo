@@ -305,7 +305,11 @@
       "rebuildTitle": "Повна перебудова банку",
       "pruneTitle": "Зняття з індексу",
       "syncTitle": "Синхронізація індексу",
-      "errorStatus": "помилка"
+      "errorStatus": "помилка",
+      "result": {
+        "ok": "готово",
+        "skipped": "пропущено"
+      }
     },
     "hit": {
       "openFile": "Відкрити файл",
