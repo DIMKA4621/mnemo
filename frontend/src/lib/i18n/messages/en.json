@@ -767,10 +767,21 @@
         "noRoot": "root missing"
       },
       "count": {
-        "projects": "{n, plural, one {# project} other {# projects}}"
+        "projects": "{n, plural, one {# project} other {# projects}}",
+        "attempts": "{n, plural, one {# attempt} other {# attempts}}"
       },
       "wiring": {
         "allCurrent": "all current"
+      },
+      "autoBlacklist": {
+        "sectionLabel": "Auto-update blacklist",
+        "sectionNote": "Tags the unattended auto-update checker tried and either gave up on, or is still retrying after a failure. Manual updates are unaffected — this is diagnostic only.",
+        "blacklistedTitle": "Blacklisted",
+        "retryingTitle": "Retrying",
+        "lastFailed": "last failed {date}",
+        "nextRetry": "next retry {date}",
+        "permanentNote": "gave up — will not be offered again automatically",
+        "noError": "no error recorded"
       },
       "orphans": {
         "unavailableTitle": "List unavailable",

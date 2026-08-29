@@ -711,6 +711,17 @@ _UPDATE_STATE: dict[str, Any] = {
         {"tag": "v3.0.0", "installed_at": "2026-07-01T10:00:00+03:00",
          "commit": "def5678", "status": "previous"},
     ],
+    # MN-47: one permanently-blacklisted tag and one still within its retry
+    # window, so the Maintenance tab's blacklist section is reachable in dev
+    # without simulating any real auto-apply failures first.
+    "blacklist": [
+        {"tag": "v3.1.2", "attempts": 2, "blacklisted": True,
+         "last_error": "Health check failed after switching: backend did not come up within 30s",
+         "last_failed_at": "2026-08-19T11:20:00+03:00", "next_retry_at": None},
+        {"tag": "v3.1.4", "attempts": 1, "blacklisted": False,
+         "last_error": "Rollback: import error in embed_server after switching",
+         "last_failed_at": "2026-08-27T09:11:00+03:00", "next_retry_at": "2026-08-27T10:11:00+03:00"},
+    ],
 }
 
 
@@ -764,7 +775,7 @@ def _auto_status_view() -> dict:
     return {
         "enabled": bool(_SETTINGS.get("auto_update", True)),
         "pending": pending,
-        "blacklist": [],
+        "blacklist": list(_UPDATE_STATE.get("blacklist", [])),
     }
 
 
