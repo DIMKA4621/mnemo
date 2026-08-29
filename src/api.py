@@ -60,7 +60,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, engine_update, presets, registry, servicelog, settings, store
+from . import (
+    agent_registry, config, engine_update, presets, registry, servicelog,
+    settings, store,
+)
 from .config import TOP_K
 from .providers import EmbeddingUnavailable, forget_providers, get_provider
 from .registry import AmbiguousBankRef, Bank, BankExists, BankNotFound
@@ -328,6 +331,22 @@ _ERROR_STATUS: dict[str, int] = {
     # request targets does not exist right now, same shape as any other
     # "the thing you named is not there" response.
     "auto_not_pending": 404,
+    # [NEW beyond §9.2, MN-40] No agent matches the slug — same shape as
+    # `bank_not_found`.
+    "agent_not_found": 404,
+    # [NEW beyond §9.2, MN-40] `create()` refused: the target folder already
+    # exists and is not empty. The fix is `adopt`, not a retry of `create`.
+    "agent_exists": 409,
+    # [NEW beyond §9.2, MN-40] `POST /api/agents` targets a non-empty folder
+    # without `confirm_adopt=true`. The response carries the same preview the
+    # console would show before asking — same shape as `orphan_cleanup_refused`
+    # only accepting ids it just displayed.
+    "adoption_confirmation_required": 409,
+    # [NEW beyond §9.2, MN-40] `launch.json` — supplied in the request body,
+    # or already on disk for an existing agent — fails validation. 400, not
+    # 500: this is a well-formed request describing a document that does not
+    # meet the schema, not a server fault.
+    "invalid_launch_config": 400,
     "internal": 500,
 }
 
@@ -1702,6 +1721,154 @@ def _unlink_index(bank: Bank) -> tuple[int, list[Path]]:
         except OSError:
             failed.append(candidate)
     return removed, failed
+
+
+# --------------------------------------------------------- agents (MN-40)
+#
+# Backend for Agents-design.md §1/§2: an agent is a folder (`agent_registry.
+# Agent`) whose `memory/` is registered as an ordinary bank — the same
+# `registry.add()` call `api_add_bank` above makes, just without the console's
+# confirmation dialog. `agent_registry` owns the storage rules (folder shape,
+# launch.json validation, the owns_root delete safety net); this section is
+# only the HTTP shape around it, mirroring the bank endpoints' style
+# (`_resolve_bank`/`_bank_info` -> `_resolve_agent`/`_agent_info`).
+
+
+class AgentPreviewRequest(BaseModel):
+    root: str
+
+
+class AgentCreateRequest(BaseModel):
+    name: str
+    root: str | None = None
+    claude_md: str | None = None
+    # Adopting a non-empty folder without this set to true gets a 409
+    # (`adoption_confirmation_required`) carrying the same preview the console
+    # would show before asking — one endpoint, a flag instead of two.
+    confirm_adopt: bool = False
+
+
+def _resolve_agent(slug: str) -> agent_registry.Agent:
+    try:
+        return agent_registry.get(slug)
+    except agent_registry.AgentNotFound as exc:
+        raise ApiError("agent_not_found", str(exc), slug=slug) from exc
+
+
+def _agent_info(agent: agent_registry.Agent) -> dict:
+    """The one agent shape the API returns."""
+    bank_id = agent.bank_id
+    bank_name = None
+    with suppress(BankNotFound):
+        bank_name = registry.get(bank_id).name
+    try:
+        launch = agent_registry.read_launch_config(agent.root)
+    except agent_registry.InvalidLaunchConfig as exc:
+        # A listing must not go down because one agent's launch.json was
+        # hand-edited into something invalid — report it inline instead.
+        launch = {"error": str(exc)}
+    return {
+        "slug": agent.slug,
+        "name": agent.name,
+        "root": agent.root.as_posix(),
+        "owns_root": agent.owns_root,
+        "created_at": agent.created_at,
+        "bank_id": bank_id,
+        "bank_name": bank_name,
+        "launch": launch,
+    }
+
+
+@app.get("/api/agents", include_in_schema=False)
+def api_agents() -> dict:
+    return {"agents": [_agent_info(a) for a in agent_registry.list_agents()]}
+
+
+@app.post("/api/agents/preview", include_in_schema=False)
+def api_agent_preview(req: AgentPreviewRequest) -> dict:
+    """Dry-run inspection of a candidate folder. Never writes anything."""
+    return agent_registry.preview_adopt(req.root)
+
+
+@app.post("/api/agents", status_code=201, include_in_schema=False)
+def api_create_agent(req: AgentCreateRequest) -> dict:
+    name = req.name.strip()
+    if not name:
+        raise ApiError("bad_request", "'name' cannot be empty")
+
+    if req.root is not None:
+        raw = Path(req.root)
+        if not raw.is_absolute():
+            raise ApiError("bad_request", "потрібен абсолютний шлях", root=req.root)
+        resolved = raw.expanduser().resolve()
+        preview = agent_registry.preview_adopt(resolved)
+        if preview["root_exists"] and not preview["empty"] and not req.confirm_adopt:
+            raise ApiError(
+                "adoption_confirmation_required",
+                f"{resolved} is not empty — confirm adoption to proceed",
+                root=req.root,
+                preview=preview,
+            )
+        if preview["root_exists"] and not preview["empty"]:
+            try:
+                agent = agent_registry.adopt(resolved, name, claude_md=req.claude_md)
+            except BankExists as exc:
+                raise ApiError("bank_exists", str(exc), root=req.root) from exc
+        else:
+            try:
+                agent = agent_registry.create(name, root=resolved, claude_md=req.claude_md)
+            except agent_registry.AgentExists as exc:
+                raise ApiError("agent_exists", str(exc), root=req.root) from exc
+            except BankExists as exc:
+                raise ApiError("bank_exists", str(exc), root=req.root) from exc
+    else:
+        try:
+            agent = agent_registry.create(name, claude_md=req.claude_md)
+        except agent_registry.AgentExists as exc:
+            raise ApiError("agent_exists", str(exc)) from exc
+        except BankExists as exc:
+            raise ApiError("bank_exists", str(exc)) from exc
+
+    info = _agent_info(agent)
+    hub.publish("bank_added", {"bank": _bank_info(registry.get(agent.bank_id))}, agent.bank_id)
+    q = _queue()
+    if q is not None:
+        with suppress(Exception):
+            q.enqueue_bulk(agent.bank_id, trigger="api")
+    else:
+        log.info("agent %s registered; indexing waits for the queue", agent.slug)
+    return info
+
+
+@app.get("/api/agents/{slug}", include_in_schema=False)
+def api_agent(slug: str) -> dict:
+    return _agent_info(_resolve_agent(slug))
+
+
+@app.delete("/api/agents/{slug}", include_in_schema=False)
+def api_remove_agent(slug: str) -> dict:
+    agent = _resolve_agent(slug)
+    agent_registry.delete(agent.slug)
+    log.info("removed agent %s (owns_root=%s)", agent.slug, agent.owns_root)
+    return {"ok": True}
+
+
+@app.get("/api/agents/{slug}/launch", include_in_schema=False)
+def api_agent_launch(slug: str) -> dict:
+    agent = _resolve_agent(slug)
+    try:
+        return agent_registry.read_launch_config(agent.root)
+    except agent_registry.InvalidLaunchConfig as exc:
+        raise ApiError("invalid_launch_config", str(exc), slug=slug) from exc
+
+
+@app.put("/api/agents/{slug}/launch", include_in_schema=False)
+def api_agent_launch_save(slug: str, payload: dict = Body(...)) -> dict:
+    agent = _resolve_agent(slug)
+    try:
+        return agent_registry.write_launch_config(agent.root, payload)
+    except agent_registry.InvalidLaunchConfig as exc:
+        raise ApiError("invalid_launch_config", str(exc), slug=slug) from exc
 
 
 # ------------------------------------------- filesystem browse (bank picker)

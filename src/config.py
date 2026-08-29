@@ -678,3 +678,11 @@ UPDATE_TARBALL_URL_TEMPLATE: str | None = os.environ.get(
 ENGINE_VERSION_SIZE_BYTES: int = 300_000_000
 MODEL_DOWNLOAD_SIZE_BYTES: int = 2_200_000_000
 INSTALL_DISK_BUFFER_BYTES: int = 500_000_000
+
+# --- agents (N) ----------------------------------  service-dev
+
+# Default parent for a created (not adopted) agent's folder: `<AGENTS_DIR>/
+# <slug>`. Same "plain USER_HOME constant" shape as MODEL_CACHE/VERSIONS_DIR
+# above — USER_HOME has no independent relocation override, so nothing here
+# needs the STATE_DIR-style live accessor.
+AGENTS_DIR: Path = USER_HOME / "agents"
