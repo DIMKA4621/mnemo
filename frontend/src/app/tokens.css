@@ -1,0 +1,281 @@
+/* CSS custom properties for the native (non-AntD) elements that have no AntD
+ * equivalent: chunk-boundary overlay lines, pill status badges, the pane
+ * resizer, and the journal live-event flash. AntD-rendered components read
+ * the same palette through `ConfigProvider` (`src/lib/theme/antd-theme.ts`);
+ * both consume `src/lib/theme/design-tokens.ts` as their source of truth —
+ * kept as a literal CSS mirror here (not generated) because these variables
+ * change rarely and a static file is easier to diff against that source.
+ */
+
+:root {
+  --bg: #14161a;
+  --bg-pane: #1b1e24;
+  --bg-sunken: #101216;
+  --bg-hover: #23272f;
+  --line: #2c313a;
+  --line-sunken: #191c22;
+  --line-table: #23262c;
+  --fg: #dfe3ea;
+  --fg-dim: #949cab;
+  --fg-mute: #8d97a8;
+  --accent: #6aa8ff;
+  --accent-muted: #7fa2d5;
+  --ok: #4bbf7a;
+  --busy: #e0a94a;
+  --idle: #7b8494;
+  --err: #e2685f;
+  --radius: 6px;
+  --mono: ui-monospace, "Cascadia Mono", "Consolas", "DejaVu Sans Mono", monospace;
+  --sans: ui-sans-serif, "Segoe UI", system-ui, sans-serif;
+
+  --btn-bg: #2a2f38;
+  --btn-bg-hover: #333a45;
+  --btn-border-hover: #3d444f;
+
+  --sel-bg: #232c3a;
+  --sel-fg: #cfe1ff;
+  --seg-active-bg: #2f3742;
+
+  --badge-git-fg: #9ecb8a;
+  --badge-git-border: #35482f;
+  --badge-git-bg: #212b1e;
+  --badge-off-fg: #d0a0a0;
+  --badge-off-border: #4a3030;
+  --badge-off-bg: #2c2020;
+  --badge-frozen-fg: #8fc6dd;
+  --badge-frozen-border: #2f4756;
+  --badge-frozen-bg: #1b2a33;
+  --badge-ready-fg: #8ee0ac;
+  --badge-ready-border: #2e4d3a;
+  --badge-ready-bg: #1c2b23;
+  --badge-indexing-fg: #f0c37a;
+  --badge-indexing-border: #574427;
+  --badge-indexing-bg: #2e2618;
+  --badge-empty-fg: #9fb2cc;
+  --badge-empty-border: #33415a;
+  --badge-empty-bg: #1d2531;
+
+  --danger-bg: #3a2020;
+  --danger-border: #5a2f2c;
+  --danger-fg: #f3c3bf;
+  --warn-bg: #2e2618;
+  --warn-border: #574427;
+  --warn-fg: #f0c37a;
+
+  --sidebar-w: 208px;
+  --sidebar-rail: 52px;
+
+  --track-bg: #2a2f38;
+
+  --btn-primary-bg: #2c4d7d;
+  --btn-primary-border: #3a5f95;
+  --btn-primary-fg: #e8f0fb;
+  --btn-primary-bg-hover: #35598e;
+  --btn-primary-border-hover: #47709f;
+
+  --btn-danger-bg: #6d2e2a;
+  --btn-danger-border: #8a3d38;
+  --btn-danger-fg: #f7dedb;
+  --btn-danger-bg-hover: #7d3631;
+  --btn-danger-border-hover: #9c4741;
+
+  --danger-bg-soft: #33201f;
+  --danger-fg-strong: #f0aaa3;
+  --danger-fg-soft: #eda9a3;
+  --menu-danger-fg: #f0958c;
+
+  --success-bg: #1d2b21;
+  --success-border: #2e4d3a;
+  --success-fg: #a9dcbc;
+
+  --shadow-card: 0 18px 40px rgba(0, 0, 0, .38);
+  --shadow-modal: 0 18px 40px rgba(0, 0, 0, .45);
+  --shadow-menu: 0 8px 22px rgba(0, 0, 0, .45);
+  --overlay: rgba(8, 9, 12, .62);
+
+  --chunk-line: #3c536f;
+  --flash-bg: #2a3b2c;
+}
+
+:root[data-theme="light"] {
+  --bg: #f2f3f6;
+  --bg-pane: #ffffff;
+  --bg-sunken: #e9ebef;
+  --bg-hover: #e4e7ec;
+  --line: #d7dbe2;
+  --line-sunken: #e6e9ee;
+  --line-table: #e8ebef;
+  --fg: #1b1f27;
+  --fg-dim: #545c69;
+  --fg-mute: #5a6676;
+  --accent: #2c66c9;
+  --accent-muted: #406199;
+  --ok: #2f9257;
+  --busy: #9d6c0c;
+  --idle: #7b8494;
+  --err: #c4423a;
+
+  --btn-bg: #f4f5f8;
+  --btn-bg-hover: #e9ecf1;
+  --btn-border-hover: #c5cbd5;
+
+  --sel-bg: #e2ebfb;
+  --sel-fg: #17417e;
+  --seg-active-bg: #e2e5eb;
+
+  --badge-git-fg: #3d6b2c;
+  --badge-git-border: #c3dcb6;
+  --badge-git-bg: #eef7ea;
+  --badge-off-fg: #8f3a35;
+  --badge-off-border: #e2bcb9;
+  --badge-off-bg: #fbeeed;
+  --badge-frozen-fg: #1d6b8a;
+  --badge-frozen-border: #b6d7e4;
+  --badge-frozen-bg: #eaf5fa;
+  --badge-ready-fg: #22703f;
+  --badge-ready-border: #b9debe;
+  --badge-ready-bg: #ecf8ef;
+  --badge-indexing-fg: #8a6209;
+  --badge-indexing-border: #e5d3a4;
+  --badge-indexing-bg: #fdf6e5;
+  --badge-empty-fg: #3d5580;
+  --badge-empty-border: #c3cfe4;
+  --badge-empty-bg: #eef2f9;
+
+  --danger-bg: #fbeceb;
+  --danger-border: #e6bfbc;
+  --danger-fg: #97302a;
+  --warn-bg: #fdf4e3;
+  --warn-border: #e6d3a8;
+  --warn-fg: #8a6209;
+
+  --track-bg: #e4e7ec;
+
+  --btn-primary-bg: #2f6fe0;
+  --btn-primary-border: #2559bd;
+  --btn-primary-fg: #ffffff;
+  --btn-primary-bg-hover: #2559bd;
+  --btn-primary-border-hover: #1f4a9e;
+
+  --btn-danger-bg: #d1453a;
+  --btn-danger-border: #b23a30;
+  --btn-danger-fg: #ffffff;
+  --btn-danger-bg-hover: #b23a30;
+  --btn-danger-border-hover: #9c322a;
+
+  --danger-bg-soft: #f7e3e1;
+  --danger-fg-strong: #7a281f;
+  --danger-fg-soft: #9c473d;
+  --menu-danger-fg: #b23a30;
+
+  --success-bg: #e4f7ec;
+  --success-border: #a9e0bf;
+  --success-fg: #1f6b3f;
+
+  --shadow-card: 0 12px 28px rgba(30, 41, 59, .12);
+  --shadow-modal: 0 16px 34px rgba(30, 41, 59, .16);
+  --shadow-menu: 0 6px 16px rgba(30, 41, 59, .16);
+  --overlay: rgba(30, 34, 44, .4);
+
+  --chunk-line: #a9c6e8;
+  --flash-bg: #dff3e4;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font: 13px/1.5 var(--sans);
+}
+
+button, input, select { font: inherit; color: inherit; }
+button { cursor: pointer; }
+input[type="checkbox"] { accent-color: var(--accent); }
+input[type="checkbox"]:disabled { accent-color: var(--fg-mute); cursor: default; }
+
+h2 {
+  margin: 0;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+  color: var(--fg-dim);
+}
+
+.mnemo-muted { color: var(--fg-mute); }
+
+.mnemo-empty-hint {
+  margin: 0;
+  padding: 16px 14px;
+  color: var(--fg-mute);
+}
+
+::-webkit-scrollbar { width: 10px; height: 10px; }
+::-webkit-scrollbar-thumb { background: var(--line); border: 3px solid transparent; background-clip: content-box; border-radius: 8px; }
+
+/* Inline SVG icons (sidebar nav, theme/lang toggles) share one default so
+   every icon file only needs a `<path>`, never its own stroke width or
+   fill declaration. Omitting this was a real Phase 1 bug caught live: every
+   icon rendered as a giant filled black block instead of a 16px outline. */
+svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+/* ---- pill status badges (native — AntD Tag defaults to a different shape,
+   see the reskin checklist in the Phase 1 charter: pill radius is reserved
+   for status badges only). ---- */
+
+.mnemo-badge {
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  color: var(--fg-dim);
+  white-space: nowrap;
+  display: inline-block;
+}
+
+.mnemo-badge-git    { color: var(--badge-git-fg); border-color: var(--badge-git-border); background: var(--badge-git-bg); }
+.mnemo-badge-nogit   { color: var(--badge-empty-fg); border-color: var(--badge-empty-border); background: var(--badge-empty-bg); }
+.mnemo-badge-off     { color: var(--badge-off-fg); border-color: var(--badge-off-border); background: var(--badge-off-bg); }
+.mnemo-badge-frozen  { color: var(--badge-frozen-fg); border-color: var(--badge-frozen-border); background: var(--badge-frozen-bg); }
+.mnemo-badge-ready    { color: var(--badge-ready-fg); border-color: var(--badge-ready-border); background: var(--badge-ready-bg); }
+.mnemo-badge-indexing { color: var(--badge-indexing-fg); border-color: var(--badge-indexing-border); background: var(--badge-indexing-bg); }
+.mnemo-badge-empty    { color: var(--badge-empty-fg); border-color: var(--badge-empty-border); background: var(--badge-empty-bg); }
+
+/* ---- chunk-boundary overlay lines (Phase 2, wired up here so the token
+   exists from the start) ---- */
+.mnemo-chunk-line { border-top: 1px dashed var(--chunk-line); }
+
+/* ---- draggable pane resizer ---- */
+.mnemo-pane-resizer {
+  position: relative;
+  cursor: col-resize;
+  background: var(--line);
+}
+.mnemo-pane-resizer::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -3px;
+  right: -3px;
+}
+.mnemo-pane-resizer:hover,
+body.is-resizing-pane .mnemo-pane-resizer { background: var(--accent); }
+/* Set on `<body>` for the whole drag gesture — listeners live on `document`
+   (`components/common/PaneResizer.tsx`), so a fast mouse movement slipping
+   off the 6px track mid-drag never drops the resize. */
+body.is-resizing-pane { cursor: col-resize; user-select: none; }
+
+/* ---- journal live-event flash ---- */
+.mnemo-flash { background: var(--flash-bg); }

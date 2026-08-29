@@ -1,0 +1,185 @@
+/* Shared widget classes inside Памʼять's AntD `Modal`-based dialogs (bank
+ * picker, token panel, removal). Ported from the pre-cutover vanilla
+ * console's `overlays.css` — only the outer `.modal`/`.modal-box` frame is
+ * dropped, since `ModalShell` delegates that chrome to AntD's own `Modal`. */
+
+.fs-label {
+  display: block;
+  margin: 8px 0 6px;
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+
+.chip {
+  font: inherit;
+  font-size: 12px;
+  font-family: var(--mono);
+  padding: 2px 8px;
+  color: var(--fg-dim);
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  cursor: pointer;
+}
+.chip:hover { color: var(--fg); border-color: var(--btn-border-hover); background: var(--bg-hover); }
+
+.fs-list p { margin: 0; padding: 10px 11px; font-size: 12px; }
+
+.fs-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 11px;
+  font: inherit;
+  font-size: 12.5px;
+  text-align: left;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line-sunken);
+  cursor: pointer;
+}
+.fs-row:hover { background: var(--bg-hover); }
+.fs-row:focus-visible { outline: 1px solid var(--accent); outline-offset: -1px; }
+.fs-row.is-up { color: var(--fg-dim); font-family: var(--mono); }
+
+.fs-row .fs-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.fs-hint { margin: 4px 0 0; color: var(--fg-dim); font-size: 12px; }
+.fs-warn { color: var(--busy); }
+
+.fs-init-row { display: flex; align-items: center; gap: 7px; margin-top: 8px; }
+.fs-init-row:has(input:disabled) { opacity: .6; }
+
+.modal-error {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  background: var(--danger-bg);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
+  color: var(--danger-fg);
+  font-size: 12px;
+  font-family: var(--mono);
+}
+
+/* ---- removal dialog -------------------------------------------------------- */
+
+.rm-lead { margin: 0; }
+
+.rm-effects {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 8px 0 4px;
+}
+.rm-effects dt {
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.rm-effects dt.is-loss { color: var(--err); }
+.rm-effects dt.is-safe { color: var(--ok); }
+.rm-effects dd { margin: 0; color: var(--fg-dim); }
+.rm-effects code { font-family: var(--mono); color: var(--fg); word-break: break-all; }
+
+.rm-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 7px;
+  padding: 7px 9px;
+  margin-top: 8px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.rm-check input { margin: 2px 0 0; flex: 0 0 auto; }
+.rm-check:has(input:disabled) { opacity: .6; }
+
+/* ---- bank token panel ------------------------------------------------------- */
+
+.tok-row { display: flex; gap: 8px; margin-top: 4px; }
+
+.tok-note { margin: 6px 0 0; color: var(--fg-mute); font-size: 12px; line-height: 1.55; }
+.tok-lead { margin: 6px 0 0; color: var(--fg-dim); font-size: 12px; line-height: 1.55; }
+
+.tok-note code,
+.tok-lead code {
+  padding: 0 4px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.tok-ok {
+  margin: 8px 0 0;
+  padding: 7px 9px;
+  background: var(--success-bg);
+  border: 1px solid var(--success-border);
+  border-radius: var(--radius);
+  color: var(--success-fg);
+  font-size: 12px;
+}
+
+.tok-tabs { margin-top: 8px; }
+
+.tok-caption {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 8px;
+  color: var(--fg-mute);
+  font-size: 12px;
+}
+.tok-caption span { flex: 1 1 auto; min-width: 0; }
+
+.tok-code {
+  margin: 4px 0 0;
+  padding: 8px 10px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--fg);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.tok-confirm {
+  margin-top: 8px;
+  padding: 10px 11px;
+  background: var(--danger-bg-soft);
+  border: 1px solid var(--danger-border);
+  border-radius: var(--radius);
+}
+.tok-confirm-text { margin: 0 0 9px; color: var(--danger-fg); font-size: 12px; line-height: 1.55; }
+.tok-confirm-row { display: flex; justify-content: flex-end; gap: 8px; }
+
+.tok-copysink {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  border: none;
+  opacity: 0;
+  pointer-events: none;
+}

@@ -44,6 +44,7 @@ import re
 import secrets
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager, contextmanager, redirect_stdout, suppress
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -51,7 +52,8 @@ from typing import Any, Iterable, Literal
 
 
 from fastapi import (
-    Body, FastAPI, Query, Request, Security, WebSocket, WebSocketDisconnect,
+    Body, FastAPI, File, Query, Request, Security, UploadFile, WebSocket,
+    WebSocketDisconnect,
 )
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
@@ -60,7 +62,10 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import config, engine_update, presets, registry, servicelog, settings, store
+from . import (
+    agent_registry, agent_runtime, catalog, config, engine_update, presets,
+    registry, servicelog, settings, store,
+)
 from .config import TOP_K
 from .providers import EmbeddingUnavailable, forget_providers, get_provider
 from .registry import AmbiguousBankRef, Bank, BankExists, BankNotFound
@@ -250,6 +255,19 @@ _MCP_401 = (
     "no bank to resolve to — and belongs on /mcp-admin or /mcp-tools."
 )
 
+# What a caller who reached `/mcp-agents` or `/hooks/agents/*` with the wrong
+# kind of credential (MN-45a) needs to read. This token is minted fresh per
+# live chat session and never survives a service restart or that chat
+# ending — unlike the other 401s above, "your token is simply stale" is the
+# common case here, not a typo.
+_AGENT_SESSION_401 = (
+    "this token is not a live agent-session token. These are minted per "
+    "live chat and last only as long as that chat's real `claude` process — "
+    "a service restart, or the chat ending, invalidates it. If this chat is "
+    "still open, reconnecting its terminal spawns a fresh session with a "
+    "fresh token."
+)
+
 # Same, for a URL that still carries the old `/mcp/<bank>` segment. Checked
 # before auth on purpose: the commonest way to arrive here is a config written
 # against the previous shape, whose token is *valid* — telling that caller
@@ -328,6 +346,71 @@ _ERROR_STATUS: dict[str, int] = {
     # request targets does not exist right now, same shape as any other
     # "the thing you named is not there" response.
     "auto_not_pending": 404,
+    # [NEW beyond §9.2, MN-40] No agent matches the slug — same shape as
+    # `bank_not_found`.
+    "agent_not_found": 404,
+    # [NEW beyond §9.2, MN-40] `create()` refused: the target folder already
+    # exists and is not empty. The fix is `adopt`, not a retry of `create`.
+    "agent_exists": 409,
+    # [NEW beyond §9.2, MN-40] `POST /api/agents` targets a non-empty folder
+    # without `confirm_adopt=true`. The response carries the same preview the
+    # console would show before asking — same shape as `orphan_cleanup_refused`
+    # only accepting ids it just displayed.
+    "adoption_confirmation_required": 409,
+    # [NEW beyond §9.2, MN-40] `launch.json` — supplied in the request body,
+    # or already on disk for an existing agent — fails validation. 400, not
+    # 500: this is a well-formed request describing a document that does not
+    # meet the schema, not a server fault.
+    "invalid_launch_config": 400,
+    # [NEW beyond §9.2, MN-41] No catalog entry matches the given id — same
+    # shape as `bank_not_found` / `agent_not_found`.
+    "catalog_entry_not_found": 404,
+    # [NEW beyond §9.2, MN-41] `content` fails validation for its category:
+    # empty, or not valid JSON for an `mcp` entry. 400, not 422: this is
+    # domain validation on a field's own value, not a malformed request body.
+    "invalid_catalog_entry": 400,
+    # [NEW beyond §9.2, MN-41] Either an explicit rename collides with
+    # another entry in the same category, or — for `mcp` — the content
+    # canonicalises to a config another entry already carries. 409, same
+    # family as `bank_exists`/`agent_exists`: the request is well-formed, it
+    # just conflicts with what is already registered.
+    "catalog_entry_exists": 409,
+    # [NEW beyond §9.2, MN-41] `DELETE /api/catalog/{id}` refused: at least
+    # one agent still references this entry. No force-delete — the response
+    # lists every referencing agent so the caller can detach first, same
+    # "show the blocker, let the human decide" shape as
+    # `orphan_cleanup_refused`.
+    "entry_in_use": 409,
+    # [NEW beyond §9.2, MN-48] `PATCH/PUT /api/agents/{slug}/...` — the
+    # linked-catalog-entry endpoints below. Same reasoning throughout as the
+    # matching bank/catalog codes above: 404 for "does not exist", 400 for
+    # "well-formed request, invalid value", 409 for "conflicts with what is
+    # already there".
+    "category_mismatch": 400,
+    "link_exists": 409,
+    "link_name_exists": 409,
+    "link_not_found": 404,
+    "unknown_var": 400,
+    "path_conflict": 409,
+    "invalid_substituted_config": 400,
+    # [NEW beyond §9.2, MN-43] No chat matches the given (agent, chat_id) —
+    # same shape as `link_not_found`.
+    "chat_not_found": 404,
+    # [NEW beyond §9.2, MN-43] The machine-wide live-session cap
+    # (`config.MAX_LIVE_SESSIONS`) is already reached. Reachable in practice
+    # only via the WS route's own error envelope (real spawns are lazy, on
+    # first WS subscriber) — mapped here too so an HTTP surface that ever
+    # needs to report it agrees with the WS one.
+    "too_many_sessions": 409,
+    # [NEW beyond §9.2, MN-44] `POST /api/agents/{slug}/chats/{chat_id}/
+    # upload` refused a file past `config.MAX_CHAT_UPLOAD_BYTES`. 413, the
+    # standard "request entity too large" status, rather than 400 — the
+    # request is otherwise well-formed, only its size is the problem.
+    "upload_too_large": 413,
+    # [NEW beyond §9.2, MN-45] `POST /api/agents/{slug}/subagents/{name}/
+    # launch` — no `.claude/agents/*.md` under the source agent matches
+    # `name` (or it could not be read). Same shape as `chat_not_found`.
+    "subagent_not_found": 404,
     "internal": 500,
 }
 
@@ -430,6 +513,13 @@ def _require_queue() -> Any:
 # there is nothing to reason about. `mcp_server`'s shim lifts it into the
 # ContextVar the tool bodies read, inside the app where that belongs.
 BANK_SCOPE_KEY = "mnemo_bank_id"
+
+# Same shape as BANK_SCOPE_KEY, one level over: what `/mcp-agents` and
+# `/hooks/agents/*` (MN-45a) resolve a presented token to — a live chat_id,
+# via `agent_runtime.resolve_session_token`, never `registry.resolve_by_token`.
+# `mcp_agents.AuthenticatedAgentSessionASGI` lifts it into `current_chat_id`
+# the same way `mcp_server`'s shim lifts BANK_SCOPE_KEY.
+AGENT_SESSION_SCOPE_KEY = "mnemo_agent_chat_id"
 
 
 def _resolve_bank(ref: str, *, require_enabled: bool = True) -> Bank:
@@ -966,6 +1056,7 @@ async def lifespan(app: FastAPI):
             _watcher.start()
 
     hub.bind(asyncio.get_running_loop())
+    agent_runtime.bind_loop(asyncio.get_running_loop())
     ping = asyncio.create_task(_ping_loop())
     _write_service_info()
     log.info("mnemo backend %s on %s:%s", SERVICE_VERSION, API_HOST, API_PORT)
@@ -992,6 +1083,12 @@ async def _shutdown(ping, q, watcher_mod) -> None:
     with suppress(asyncio.CancelledError):
         await ping
     hub.bind(None)
+    # Waits for real process termination (join with a timeout), same
+    # contract as `q.stop()` below — a live `claude` process must not be
+    # left running, unmonitored, once the backend that owns it is gone.
+    with suppress(Exception):
+        agent_runtime.stop_all()
+    agent_runtime.bind_loop(None)
     if watcher_mod is not None:
         with suppress(Exception):
             watcher_mod.stop()
@@ -1018,11 +1115,15 @@ app = FastAPI(
 # ------------------------------------------------------- auth + envelope
 
 
-_GUARDED = ("/api", "/mcp", "/mcp-tools", "/mcp-admin")
+_GUARDED = ("/api", "/mcp", "/mcp-tools", "/mcp-admin", "/mcp-agents", "/hooks/agents")
 # The faces that may take the token from the query string (§9.1). `/mcp-admin`
 # is here for the same reason as `/mcp`: an MCP client configures a URL, not
-# headers, and the admin face is reached the same way.
-_URL_TOKEN_OK = ("/mcp", "/mcp-tools", "/mcp-admin")
+# headers, and the admin face is reached the same way. `/mcp-agents` joins
+# them for MN-45a; `/hooks/agents/*` deliberately does NOT — the hook config
+# `agent_runtime._write_agent_configs` writes always carries the token as an
+# `Authorization: Bearer` header, since that surface is called by the
+# `claude` CLI's own hook machinery, never pasted into a browser or a URL bar.
+_URL_TOKEN_OK = ("/mcp", "/mcp-tools", "/mcp-admin", "/mcp-agents")
 
 
 # Declared so the OpenAPI schema carries a security scheme and `/docs` grows an
@@ -1054,7 +1155,7 @@ async def auth_middleware(request: Request, call_next):
     # once and caches it, so a rewrite made after touching it would be
     # invisible to everything downstream that asks the Request.
     path = request.scope.get("path", "") or request.url.path
-    for mount in ("/mcp", "/mcp-admin"):
+    for mount in ("/mcp", "/mcp-admin", "/mcp-agents"):
         if path == mount:
             path = mount + "/"
             request.scope["path"] = path
@@ -1125,6 +1226,15 @@ async def auth_middleware(request: Request, call_next):
                 return JSONResponse(_envelope("unauthorized", _MCP_401),
                                     status_code=401)
             request.scope[BANK_SCOPE_KEY] = bank.id
+        elif path.startswith("/mcp-agents") or path.startswith("/hooks/agents"):
+            # MN-45a's third credential kind: neither a bank token nor the
+            # service token opens this pair — only a per-session token
+            # `agent_runtime._spawn_session` minted for THIS live chat.
+            chat_id = agent_runtime.resolve_session_token(presented)
+            if chat_id is None:
+                return JSONResponse(_envelope("unauthorized", _AGENT_SESSION_401),
+                                    status_code=401)
+            request.scope[AGENT_SESSION_SCOPE_KEY] = chat_id
         elif path.startswith("/api"):
             if _api_gated() and not (
                 presented and secrets.compare_digest(presented.strip(), api_token())
@@ -1704,6 +1814,768 @@ def _unlink_index(bank: Bank) -> tuple[int, list[Path]]:
     return removed, failed
 
 
+# --------------------------------------------------------- agents (MN-40)
+#
+# Backend for Agents-design.md §1/§2: an agent is a folder (`agent_registry.
+# Agent`) whose `memory/` is registered as an ordinary bank — the same
+# `registry.add()` call `api_add_bank` above makes, just without the console's
+# confirmation dialog. `agent_registry` owns the storage rules (folder shape,
+# launch.json validation, the owns_root delete safety net); this section is
+# only the HTTP shape around it, mirroring the bank endpoints' style
+# (`_resolve_bank`/`_bank_info` -> `_resolve_agent`/`_agent_info`).
+
+
+class AgentPreviewRequest(BaseModel):
+    root: str
+
+
+class AgentCreateRequest(BaseModel):
+    name: str
+    root: str | None = None
+    claude_md: str | None = None
+    # Adopting a non-empty folder without this set to true gets a 409
+    # (`adoption_confirmation_required`) carrying the same preview the console
+    # would show before asking — one endpoint, a flag instead of two.
+    confirm_adopt: bool = False
+
+
+class PatchAgentRequest(BaseModel):
+    """Editable fields of a registered agent. Omitted means unchanged.
+
+    Mirrors `PatchBankRequest`: `slug`/`root` are absent on purpose — a
+    rename changes only the display name (`agent_registry.rename`).
+    """
+
+    name: str | None = None
+
+
+class ClaudeMdRequest(BaseModel):
+    content: str
+
+
+def _resolve_agent(slug: str) -> agent_registry.Agent:
+    try:
+        return agent_registry.get(slug)
+    except agent_registry.AgentNotFound as exc:
+        raise ApiError("agent_not_found", str(exc), slug=slug) from exc
+
+
+def _agent_info(agent: agent_registry.Agent) -> dict:
+    """The one agent shape the API returns."""
+    bank_id = agent.bank_id
+    bank_name = None
+    with suppress(BankNotFound):
+        bank_name = registry.get(bank_id).name
+    try:
+        launch = agent_registry.read_launch_config(agent.root)
+    except agent_registry.InvalidLaunchConfig as exc:
+        # A listing must not go down because one agent's launch.json was
+        # hand-edited into something invalid — report it inline instead.
+        launch = {"error": str(exc)}
+    return {
+        "slug": agent.slug,
+        "name": agent.name,
+        "root": agent.root.as_posix(),
+        "owns_root": agent.owns_root,
+        "created_at": agent.created_at,
+        "bank_id": bank_id,
+        "bank_name": bank_name,
+        "launch": launch,
+    }
+
+
+@app.get("/api/agents", include_in_schema=False)
+def api_agents() -> dict:
+    return {"agents": [_agent_info(a) for a in agent_registry.list_agents()]}
+
+
+@app.post("/api/agents/preview", include_in_schema=False)
+def api_agent_preview(req: AgentPreviewRequest) -> dict:
+    """Dry-run inspection of a candidate folder. Never writes anything."""
+    return agent_registry.preview_adopt(req.root)
+
+
+@app.post("/api/agents", status_code=201, include_in_schema=False)
+def api_create_agent(req: AgentCreateRequest) -> dict:
+    name = req.name.strip()
+    if not name:
+        raise ApiError("bad_request", "'name' cannot be empty")
+
+    if req.root is not None:
+        raw = Path(req.root)
+        if not raw.is_absolute():
+            raise ApiError("bad_request", "потрібен абсолютний шлях", root=req.root)
+        resolved = raw.expanduser().resolve()
+        preview = agent_registry.preview_adopt(resolved)
+        if preview["root_exists"] and not preview["empty"] and not req.confirm_adopt:
+            raise ApiError(
+                "adoption_confirmation_required",
+                f"{resolved} is not empty — confirm adoption to proceed",
+                root=req.root,
+                preview=preview,
+            )
+        if preview["root_exists"] and not preview["empty"]:
+            try:
+                agent = agent_registry.adopt(resolved, name, claude_md=req.claude_md)
+            except BankExists as exc:
+                raise ApiError("bank_exists", str(exc), root=req.root) from exc
+        else:
+            try:
+                agent = agent_registry.create(name, root=resolved, claude_md=req.claude_md)
+            except agent_registry.AgentExists as exc:
+                raise ApiError("agent_exists", str(exc), root=req.root) from exc
+            except BankExists as exc:
+                raise ApiError("bank_exists", str(exc), root=req.root) from exc
+    else:
+        try:
+            agent = agent_registry.create(name, claude_md=req.claude_md)
+        except agent_registry.AgentExists as exc:
+            raise ApiError("agent_exists", str(exc)) from exc
+        except BankExists as exc:
+            raise ApiError("bank_exists", str(exc)) from exc
+
+    _finish_agent_creation(agent)
+    return _agent_info(agent)
+
+
+@app.get("/api/agents/{slug}", include_in_schema=False)
+def api_agent(slug: str) -> dict:
+    return _agent_info(_resolve_agent(slug))
+
+
+@app.delete("/api/agents/{slug}", include_in_schema=False)
+def api_remove_agent(slug: str) -> dict:
+    agent = _resolve_agent(slug)
+    agent_registry.delete(agent.slug)
+    log.info("removed agent %s (owns_root=%s)", agent.slug, agent.owns_root)
+    return {"ok": True}
+
+
+@app.get("/api/agents/{slug}/launch", include_in_schema=False)
+def api_agent_launch(slug: str) -> dict:
+    agent = _resolve_agent(slug)
+    try:
+        return agent_registry.read_launch_config(agent.root)
+    except agent_registry.InvalidLaunchConfig as exc:
+        raise ApiError("invalid_launch_config", str(exc), slug=slug) from exc
+
+
+@app.put("/api/agents/{slug}/launch", include_in_schema=False)
+def api_agent_launch_save(slug: str, payload: dict = Body(...)) -> dict:
+    agent = _resolve_agent(slug)
+    try:
+        return agent_registry.write_launch_config(agent.root, payload)
+    except agent_registry.InvalidLaunchConfig as exc:
+        raise ApiError("invalid_launch_config", str(exc), slug=slug) from exc
+
+
+@app.patch("/api/agents/{slug}", include_in_schema=False)
+def api_patch_agent(slug: str, req: PatchAgentRequest) -> dict:
+    """Rename an agent. Mirrors `PATCH /api/banks/{id}`'s shape; unlike that
+    endpoint, there is no cross-entry name collision to guard against — see
+    `agent_registry.rename`."""
+    agent = _resolve_agent(slug)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise ApiError("bad_request", "nothing to change", slug=slug)
+    try:
+        updated = agent_registry.rename(agent.slug, fields["name"])
+    except agent_registry.AgentNotFound as exc:
+        raise ApiError("agent_not_found", str(exc), slug=slug) from exc
+    except ValueError as exc:
+        raise ApiError("bad_request", str(exc), slug=slug) from exc
+    log.info("renamed agent %s -> %r", updated.slug, updated.name)
+    return _agent_info(updated)
+
+
+@app.get("/api/agents/{slug}/claude-md", include_in_schema=False)
+def api_agent_claude_md(slug: str) -> dict:
+    agent = _resolve_agent(slug)
+    return {"content": agent_registry.read_claude_md(agent.root)}
+
+
+@app.put("/api/agents/{slug}/claude-md", include_in_schema=False)
+def api_agent_claude_md_save(slug: str, req: ClaudeMdRequest) -> dict:
+    agent = _resolve_agent(slug)
+    agent_registry.write_claude_md(agent.root, req.content)
+    return {"content": req.content}
+
+
+# --------------------------------------------------------- agent chats (MN-43)
+#
+# Lifecycle only — list/create/get/delete a chat *record*. The live PTY
+# process itself is owned by `agent_runtime.py` and is never touched here:
+# it spawns lazily on the first WebSocket subscriber
+# (`/ws/agents/{slug}/chats/{chat_id}`, below), which is exactly why
+# `POST` here is cheap and does not itself start `claude`.
+
+
+class CreateChatRequest(BaseModel):
+    title: str | None = None
+
+
+def _resolve_chat(slug: str, chat_id: str) -> dict:
+    try:
+        return agent_registry.get_chat(slug, chat_id)
+    except agent_registry.ChatNotFound as exc:
+        raise ApiError("chat_not_found", str(exc), slug=slug, chat_id=chat_id) from exc
+
+
+@app.get("/api/agents/{slug}/chats", include_in_schema=False)
+def api_agent_chats(slug: str) -> dict:
+    _resolve_agent(slug)
+    return {"chats": agent_registry.list_chats(slug)}
+
+
+@app.post("/api/agents/{slug}/chats", status_code=201, include_in_schema=False)
+def api_create_chat(slug: str, req: CreateChatRequest) -> dict:
+    _resolve_agent(slug)
+    return agent_registry.create_chat(slug, title=req.title)
+
+
+@app.get("/api/agents/{slug}/chats/{chat_id}", include_in_schema=False)
+def api_agent_chat(slug: str, chat_id: str) -> dict:
+    _resolve_agent(slug)
+    return _resolve_chat(slug, chat_id)
+
+
+@app.delete("/api/agents/{slug}/chats/{chat_id}", include_in_schema=False)
+def api_delete_chat(slug: str, chat_id: str) -> dict:
+    _resolve_agent(slug)
+    _resolve_chat(slug, chat_id)
+    # Best-effort: a live session is stopped before the record and its
+    # `chats/<id>/` folder disappear, so a still-running `claude` process
+    # never outlives the storage its own history.log was writing into.
+    with suppress(Exception):
+        agent_runtime.stop_session(chat_id)
+    agent_registry.delete_chat(slug, chat_id)
+    return {"ok": True}
+
+
+# --------------------------------------------- agent chat subagent runs (MN-45b)
+#
+# Initial-load counterpart to the live `subagent_event` WS envelope
+# (`ws_agent_chat`, below): a freshly-opened `ChatConsole` reads this once on
+# mount to show subagent-run history without waiting for a new live hook
+# event. Distinct from `/api/agents/{slug}/subagents` above (MN-44), which
+# lists `.claude/agents/*.md` DEFINITIONS on disk — this one lists actual
+# observed subagent RUNS for one specific chat session.
+
+
+@app.get("/api/agents/{slug}/chats/{chat_id}/subagents", include_in_schema=False)
+def api_agent_chat_subagents(slug: str, chat_id: str) -> dict:
+    agent = _resolve_agent(slug)
+    _resolve_chat(slug, chat_id)
+    return {"events": agent_registry.read_subagent_events(agent.root, chat_id)}
+
+
+# ---------------------------------------------- agent chat file upload (MN-44)
+#
+# Lets the (Phase B) chat console accept a dropped file: save it under this
+# chat's own folder and hand back a path the frontend inserts as literal text
+# into the PTY input — the upload itself never touches `agent_runtime.py` or
+# the live session.
+
+_UPLOAD_UNSAFE_CHARS = frozenset('<>:"|?*')
+_DRIVE_ANCHOR_RE = re.compile(r"^[A-Za-z]:")
+
+
+def _sanitize_upload_filename(name: str) -> str:
+    """Reduce a client-supplied filename to a single safe path component.
+
+    The name in a multipart upload is entirely client-controlled. Strip
+    directory separators — both `/` and `\\`, regardless of which OS the
+    browser or this host happens to run — and, only on what remains after
+    that split, drop a leading drive-letter anchor (`"C:evil.txt"` ->
+    `"evil.txt"`): the exact escape MN-48 found for link names, where
+    `Path(root) / "C:foo"` silently discards `root` because `pathlib`
+    treats a leading `X:` as a new anchor. Scoped to a real drive-letter
+    shape (one letter, then `:`, at the very start) rather than "any colon
+    anywhere" — a colon elsewhere in the name is just another character the
+    NTFS-invalid-character strip below removes on its own, no need to
+    discard everything ahead of it too. What is left is still checked for
+    containment by the caller (`resolve().is_relative_to()`, same MN-48
+    pattern) before anything is written — belt and suspenders, since a
+    sanitizer that "looks careful" was not sufficient there either.
+    """
+    name = (name or "").strip()
+    name = re.split(r"[\\/]+", name)[-1]
+    name = _DRIVE_ANCHOR_RE.sub("", name)
+    name = name.strip().strip(".")
+    cleaned = "".join(c for c in name if c not in _UPLOAD_UNSAFE_CHARS and ord(c) >= 32)
+    return cleaned or "upload"
+
+
+@app.post(
+    "/api/agents/{slug}/chats/{chat_id}/upload",
+    status_code=201,
+    include_in_schema=False,
+)
+async def api_agent_chat_upload(
+    slug: str, chat_id: str, file: UploadFile = File(...),
+) -> dict:
+    agent = _resolve_agent(slug)
+    _resolve_chat(slug, chat_id)
+
+    uploads_dir = agent_registry.chat_dir(agent.root, chat_id) / "uploads"
+    uploads_dir.mkdir(parents=True, exist_ok=True)
+
+    original_name = file.filename or "upload"
+    candidate = uploads_dir / f"{uuid.uuid4().hex}-{_sanitize_upload_filename(original_name)}"
+
+    try:
+        contained = candidate.resolve().is_relative_to(uploads_dir.resolve())
+    except (OSError, ValueError) as exc:
+        raise ApiError(
+            "bad_request", f"upload filename is not usable: {exc}", filename=original_name,
+        ) from exc
+    if not contained:
+        # Should be unreachable given `_sanitize_upload_filename` strips every
+        # separator/anchor it produces this from — kept as the same
+        # belt-and-suspenders check MN-48 uses, not the primary defense.
+        raise ApiError(
+            "bad_request",
+            "upload filename would resolve outside the chat's uploads folder",
+            filename=original_name,
+        )
+
+    written = 0
+    try:
+        with candidate.open("wb") as fh:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                written += len(chunk)
+                if written > config.MAX_CHAT_UPLOAD_BYTES:
+                    raise ApiError(
+                        "upload_too_large",
+                        f"upload exceeds the {config.MAX_CHAT_UPLOAD_BYTES}-byte limit",
+                        filename=original_name,
+                    )
+                fh.write(chunk)
+    except ApiError:
+        candidate.unlink(missing_ok=True)
+        raise
+    except OSError as exc:
+        candidate.unlink(missing_ok=True)
+        raise ApiError("internal", f"could not save upload: {exc}") from exc
+    finally:
+        await file.close()
+
+    if written == 0:
+        candidate.unlink(missing_ok=True)
+        raise ApiError("bad_request", "uploaded file is empty", filename=original_name)
+
+    return {"path": str(candidate.resolve()), "filename": original_name}
+
+
+# --------------------------------------------- agent subagent listing (MN-44)
+# ------------------------------------------------ and subagent launch (MN-45)
+#
+# Read-only, best-effort display: what `.claude/agents/*.md` this agent's own
+# folder happens to carry. No validation beyond "do not crash on a malformed
+# or missing frontmatter block" — this never blocks agent creation/use, it is
+# purely informational for the (Phase B) console.
+#
+# MN-45 Phase C adds one write action on top of that listing: promote one of
+# those `.claude/agents/*.md` files into a brand-new, top-level, full-fledged
+# agent (`owns_root=True`, its own folder and bank — same machinery MN-40
+# built, not a lightweight or nested thing) plus an empty chat record ready
+# to open. Nothing here spawns a `claude` process — `create_chat` stays lazy,
+# exactly like every other chat creation in this codebase.
+
+_AGENT_FRONTMATTER_RE = re.compile(r"\A---\r?\n(.*?\r?\n)---\r?\n", re.DOTALL)
+_AGENT_FRONTMATTER_FIELD_RE = re.compile(r"^([A-Za-z0-9_-]+):\s*(.*)$")
+
+
+def _parse_agent_frontmatter(text: str) -> dict[str, str]:
+    """Scrape the handful of top-level fields out of a `.claude/agents/*.md`
+    YAML frontmatter block — just enough to read `name:`/`description:` back
+    for display, not a real YAML parser. Handles the one multi-line shape
+    this repo's own agent files actually use for `description` (a folded
+    block scalar, `>`, followed by indented continuation lines), joining
+    those lines with spaces. Any other structure (nested maps, lists, quoted
+    block scalars) is read as whatever its own first line contains, which is
+    a degraded-but-harmless result rather than a crash — this endpoint's
+    contract is best-effort, not a schema validator.
+    """
+    match = _AGENT_FRONTMATTER_RE.match(text)
+    if not match:
+        return {}
+    fields: dict[str, str] = {}
+    current_key: str | None = None
+    in_block = False
+    for line in match.group(1).splitlines():
+        if in_block and (line[:1] in (" ", "\t") or not line.strip()):
+            fields[current_key] = (fields.get(current_key, "") + " " + line.strip()).strip()
+            continue
+        in_block = False
+        field_match = _AGENT_FRONTMATTER_FIELD_RE.match(line)
+        if not field_match:
+            continue
+        current_key, value = field_match.group(1), field_match.group(2).strip()
+        if value in (">", "|", ">-", "|-", ">+", "|+"):
+            fields[current_key] = ""
+            in_block = True
+        else:
+            fields[current_key] = value.strip("\"'")
+    return fields
+
+
+def _read_agent_subagents(root: Path) -> list[dict[str, Any]]:
+    agents_dir = Path(root) / ".claude" / "agents"
+    if not agents_dir.is_dir():
+        return []
+    results: list[dict[str, Any]] = []
+    for path in sorted(agents_dir.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            # `UnicodeDecodeError` is a `ValueError` subclass, NOT an
+            # `OSError` — a non-UTF-8 `.md` file must be skipped exactly
+            # like an unreadable one, or this "best-effort, never crashes"
+            # endpoint turns one bad file into a 500 for the whole listing.
+            continue
+        fields = _parse_agent_frontmatter(text)
+        results.append({
+            "name": fields.get("name") or path.stem,
+            "description": fields.get("description") or None,
+        })
+    return results
+
+
+@app.get("/api/agents/{slug}/subagents", include_in_schema=False)
+def api_agent_subagents(slug: str) -> dict:
+    agent = _resolve_agent(slug)
+    return {"subagents": _read_agent_subagents(agent.root)}
+
+
+def _find_agent_subagent_path(root: Path, name: str) -> Path | None:
+    """Locate one `.claude/agents/*.md` under ``root`` by the same display
+    name `_read_agent_subagents` shows (``name:`` frontmatter, else the
+    filename stem) — so the name a launch request names is exactly the name
+    the listing showed."""
+    agents_dir = Path(root) / ".claude" / "agents"
+    if not agents_dir.is_dir():
+        return None
+    for path in sorted(agents_dir.glob("*.md")):
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        fields = _parse_agent_frontmatter(text)
+        if (fields.get("name") or path.stem) == name:
+            return path
+    return None
+
+
+def _strip_agent_frontmatter(text: str) -> str:
+    """The prose body of a `.claude/agents/*.md` file, with its YAML
+    frontmatter block (if any) removed — reuses `_parse_agent_frontmatter`'s
+    own regex so the two never disagree about where the block ends."""
+    match = _AGENT_FRONTMATTER_RE.match(text)
+    return (text[match.end():] if match else text).strip()
+
+
+def _finish_agent_creation(agent: agent_registry.Agent) -> None:
+    """The tail shared by every path that registers a brand-new agent
+    (`POST /api/agents`, subagent launch below): publish the new bank and
+    queue its initial index."""
+    hub.publish("bank_added", {"bank": _bank_info(registry.get(agent.bank_id))}, agent.bank_id)
+    q = _queue()
+    if q is not None:
+        with suppress(Exception):
+            q.enqueue_bulk(agent.bank_id, trigger="api")
+    else:
+        log.info("agent %s registered; indexing waits for the queue", agent.slug)
+
+
+@app.post(
+    "/api/agents/{slug}/subagents/{name}/launch", status_code=201, include_in_schema=False
+)
+def api_launch_subagent(slug: str, name: str) -> dict:
+    """Promote a subagent definition into a real, top-level agent + an empty
+    chat ready to open. See the module note above this section."""
+    agent = _resolve_agent(slug)
+    path = _find_agent_subagent_path(agent.root, name)
+    if path is None:
+        raise ApiError(
+            "subagent_not_found", f"no subagent {name!r} on agent {slug!r}", slug=slug, name=name
+        )
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ApiError(
+            "subagent_not_found", f"could not read {path.name}: {exc}", slug=slug, name=name
+        ) from exc
+
+    fields = _parse_agent_frontmatter(text)
+    new_name = fields.get("name") or path.stem
+    claude_md = _strip_agent_frontmatter(text)
+
+    try:
+        new_agent = agent_registry.create(new_name, claude_md=claude_md)
+    except agent_registry.AgentExists as exc:
+        raise ApiError("agent_exists", str(exc)) from exc
+    except BankExists as exc:
+        raise ApiError("bank_exists", str(exc)) from exc
+
+    _finish_agent_creation(new_agent)
+    chat = agent_registry.create_chat(new_agent.slug)
+    log.info("launched subagent %r of agent %s as new agent %s", name, slug, new_agent.slug)
+    return {"agent": _agent_info(new_agent), "chat": chat}
+
+
+# ------------------------------------------------- agent <-> catalog links (MN-48)
+#
+# Attach/detach a catalog entry to an agent's `.mcp.json` / `.claude/skills`
+# / `.claude/rules`, materializing write-through at attach/edit/detach time
+# (`agent_registry.py`'s module docstring on `links.json` explains why: the
+# Claude Code CLI reads those files itself at agent start, mnemo does not
+# intercept that read). This section is only the HTTP shape around
+# `agent_registry.attach_link`/`update_link`/`detach_link`/`list_links` —
+# same style as every other resource in this file.
+#
+# Editing a catalog entry after it is attached deliberately does NOT
+# refresh what was already materialized (pinned-copy semantics, MN-48's
+# ticket) — nothing here tries to "fix" that; drift is out of scope by
+# design.
+
+
+class AttachLinkRequest(BaseModel):
+    entry_id: str
+    name: str
+    vars: dict[str, str] = Field(default_factory=dict)
+
+
+class UpdateLinkRequest(BaseModel):
+    """Editable fields of a link. Omitted means unchanged; `vars: {}`
+    (present but empty) is a deliberate "clear every var", distinct from
+    omitting `vars` entirely — see the filtering below."""
+
+    name: str | None = None
+    vars: dict[str, str] | None = None
+
+
+@app.get("/api/agents/{slug}/links", include_in_schema=False)
+def api_agent_links(slug: str) -> dict:
+    _resolve_agent(slug)  # 404 before touching anything
+    return agent_registry.list_links(slug)
+
+
+@app.post("/api/agents/{slug}/links/{category}", status_code=201, include_in_schema=False)
+def api_attach_link(
+    slug: str, category: Literal["mcp", "skill", "rule"], req: AttachLinkRequest
+) -> dict:
+    _resolve_agent(slug)
+    try:
+        link = agent_registry.attach_link(slug, category, req.entry_id, req.name, req.vars)
+    except catalog.EntryNotFound as exc:
+        raise ApiError("catalog_entry_not_found", str(exc), id=req.entry_id) from exc
+    except agent_registry.CategoryMismatch as exc:
+        raise ApiError("category_mismatch", str(exc), id=req.entry_id) from exc
+    except agent_registry.LinkExists as exc:
+        raise ApiError("link_exists", str(exc), id=req.entry_id) from exc
+    except agent_registry.LinkNameExists as exc:
+        raise ApiError(
+            "link_name_exists", str(exc), existing_entry_id=exc.existing_entry_id
+        ) from exc
+    except agent_registry.UnknownLinkVar as exc:
+        raise ApiError("unknown_var", str(exc), id=req.entry_id) from exc
+    except agent_registry.InvalidLinkName as exc:
+        raise ApiError("bad_request", str(exc), id=req.entry_id) from exc
+    except agent_registry.LinkPathConflict as exc:
+        raise ApiError("path_conflict", str(exc), id=req.entry_id) from exc
+    except agent_registry.InvalidSubstitutedConfig as exc:
+        raise ApiError("invalid_substituted_config", str(exc), id=req.entry_id) from exc
+    log.info("attached %s link %s (%r) to agent %s", category, req.entry_id, link["name"], slug)
+    return link
+
+
+@app.patch("/api/agents/{slug}/links/{category}/{entry_id}", include_in_schema=False)
+def api_update_link(
+    slug: str, category: Literal["mcp", "skill", "rule"], entry_id: str,
+    req: UpdateLinkRequest,
+) -> dict:
+    _resolve_agent(slug)
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise ApiError("bad_request", "nothing to change", slug=slug, id=entry_id)
+    try:
+        link = agent_registry.update_link(slug, category, entry_id, **fields)
+    except catalog.EntryNotFound as exc:
+        raise ApiError("catalog_entry_not_found", str(exc), id=entry_id) from exc
+    except agent_registry.CategoryMismatch as exc:
+        raise ApiError("category_mismatch", str(exc), id=entry_id) from exc
+    except agent_registry.LinkNotFound as exc:
+        raise ApiError("link_not_found", str(exc), id=entry_id) from exc
+    except agent_registry.LinkNameExists as exc:
+        raise ApiError(
+            "link_name_exists", str(exc), existing_entry_id=exc.existing_entry_id
+        ) from exc
+    except agent_registry.UnknownLinkVar as exc:
+        raise ApiError("unknown_var", str(exc), id=entry_id) from exc
+    except agent_registry.InvalidLinkName as exc:
+        raise ApiError("bad_request", str(exc), id=entry_id) from exc
+    except agent_registry.LinkPathConflict as exc:
+        raise ApiError("path_conflict", str(exc), id=entry_id) from exc
+    except agent_registry.InvalidSubstitutedConfig as exc:
+        raise ApiError("invalid_substituted_config", str(exc), id=entry_id) from exc
+    log.info("updated %s link %s on agent %s", category, entry_id, slug)
+    return link
+
+
+@app.delete("/api/agents/{slug}/links/{category}/{entry_id}", include_in_schema=False)
+def api_detach_link(
+    slug: str, category: Literal["mcp", "skill", "rule"], entry_id: str
+) -> dict:
+    _resolve_agent(slug)
+    try:
+        agent_registry.detach_link(slug, category, entry_id)
+    except agent_registry.LinkNotFound as exc:
+        raise ApiError("link_not_found", str(exc), id=entry_id) from exc
+    log.info("detached %s link %s from agent %s", category, entry_id, slug)
+    return {"ok": True}
+
+
+# -------------------------------------------------------- catalog (MN-41)
+#
+# The general MCP/Skills/Rules registry (`catalog.py`) — a flat, agent-
+# agnostic store a human adds entries to by hand, independent of any agent
+# (package-manager-cache shaped, per the ticket). `catalog.py` owns the
+# storage rules (id/name shape, JSON validation, `mcp`-config dedup); this
+# section is only the HTTP shape around it, same style as the bank/agent
+# endpoints above (`_resolve_bank`/`_resolve_agent` -> `_resolve_catalog_entry`).
+#
+# `catalog.py` never imports `agent_registry` (see its module docstring) —
+# whether an entry is still referenced by an agent is answered by
+# `_catalog_used_by` below, a **guarded call** rather than a hard dependency,
+# same shape as `_queue()`'s guarded import ahead of phase 3: a missing
+# capability answers "nothing uses this" rather than a 500. MN-48 added the
+# finder (`agent_registry.catalog_entry_used_by`) the guard was written for,
+# so the guard itself stays — a future capability going away should degrade
+# the same way a not-yet-arrived one does, not turn into a 500.
+
+
+class CreateCatalogEntryRequest(BaseModel):
+    category: Literal["mcp", "skill", "rule"]
+    name: str
+    content: str
+
+
+class UpdateCatalogEntryRequest(BaseModel):
+    """Editable fields of a catalog entry. Omitted means unchanged.
+
+    ``category`` is absent on purpose: it is fixed at creation (see
+    `catalog.py`'s module docstring) — changing it after the fact would
+    upend the JSON/dedup rules, which apply to `mcp` only.
+    """
+
+    name: str | None = None
+    content: str | None = None
+
+
+def _resolve_catalog_entry(entry_id: str) -> catalog.CatalogEntry:
+    try:
+        return catalog.get(entry_id)
+    except catalog.EntryNotFound as exc:
+        raise ApiError("catalog_entry_not_found", str(exc), id=entry_id) from exc
+
+
+def _entry_info(entry: catalog.CatalogEntry) -> dict:
+    """The one catalog-entry shape the API returns.
+
+    ``used_by_count`` calls `_catalog_used_by` even though it is defined
+    below this function in the file — fine, both are plain module-level
+    functions resolved at call time, not at definition time, and every call
+    to `_entry_info` happens well after the module has finished loading.
+    """
+    return {
+        "id": entry.id,
+        "category": entry.category,
+        "name": entry.name,
+        "content": entry.content,
+        "created_at": entry.created_at,
+        "vars": entry.vars,
+        "used_by_count": len(_catalog_used_by(entry.id)),
+    }
+
+
+def _catalog_used_by(entry_id: str) -> list[str]:
+    """Agent slugs that reference this catalog entry via `links.json` — `[]`
+    when `agent_registry.catalog_entry_used_by` is not present (see the
+    section banner above for why this is a guarded call, not an import); as
+    of MN-48 that finder exists, so this now reports real state."""
+    finder = getattr(agent_registry, "catalog_entry_used_by", None)
+    if finder is None:
+        return []
+    try:
+        return list(finder(entry_id))
+    except Exception:  # noqa: BLE001
+        # A future finder's own bug must not turn "delete this entry" into a
+        # 500 — treat it the same as "the capability isn't there yet".
+        log.exception("catalog_entry_used_by(%r) failed", entry_id)
+        return []
+
+
+@app.get("/api/catalog", include_in_schema=False)
+def api_catalog(category: Literal["mcp", "skill", "rule"] | None = None) -> dict:
+    return {"entries": [_entry_info(e) for e in catalog.list_entries(category)]}
+
+
+@app.post("/api/catalog", status_code=201, include_in_schema=False)
+def api_create_catalog_entry(req: CreateCatalogEntryRequest) -> dict:
+    try:
+        entry = catalog.add(req.category, req.name, req.content)
+    except catalog.InvalidCatalogEntry as exc:
+        raise ApiError("invalid_catalog_entry", str(exc)) from exc
+    except catalog.EntryExists as exc:
+        raise ApiError(
+            "catalog_entry_exists", str(exc), existing_id=exc.existing_id
+        ) from exc
+    return _entry_info(entry)
+
+
+@app.get("/api/catalog/{entry_id}", include_in_schema=False)
+def api_catalog_entry(entry_id: str) -> dict:
+    return _entry_info(_resolve_catalog_entry(entry_id))
+
+
+@app.patch("/api/catalog/{entry_id}", include_in_schema=False)
+def api_patch_catalog_entry(entry_id: str, req: UpdateCatalogEntryRequest) -> dict:
+    _resolve_catalog_entry(entry_id)  # 404 before touching anything
+    fields = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not fields:
+        raise ApiError("bad_request", "nothing to change", id=entry_id)
+    try:
+        entry = catalog.update(entry_id, **fields)
+    except catalog.EntryNotFound as exc:
+        raise ApiError("catalog_entry_not_found", str(exc), id=entry_id) from exc
+    except catalog.InvalidCatalogEntry as exc:
+        raise ApiError("invalid_catalog_entry", str(exc)) from exc
+    except catalog.EntryExists as exc:
+        raise ApiError(
+            "catalog_entry_exists", str(exc), existing_id=exc.existing_id
+        ) from exc
+    return _entry_info(entry)
+
+
+@app.delete("/api/catalog/{entry_id}", include_in_schema=False)
+def api_remove_catalog_entry(entry_id: str) -> dict:
+    entry = _resolve_catalog_entry(entry_id)
+    used_by = _catalog_used_by(entry.id)
+    if used_by:
+        raise ApiError(
+            "entry_in_use",
+            f"{entry.name!r} is still used by {len(used_by)} agent(s)",
+            id=entry.id, agents=used_by,
+        )
+    catalog.remove(entry.id)
+    log.info("removed catalog entry %s (%s)", entry.id, entry.category)
+    return {"ok": True}
+
+
 # ------------------------------------------- filesystem browse (bank picker)
 #
 # A browser cannot tell a page which folder the user picked. `webkitdirectory`
@@ -2192,6 +3064,12 @@ def api_status() -> dict:
             "provider_error": provider_error,
             "priority_enabled": os.environ.get("MNEMO_QUEUE_PRIORITY", "1") != "0",
             "embed": embed,
+            # MN-46: the machine-wide live-PTY-session ceiling, made visible
+            # rather than only discoverable via a raw 409 on the WS route.
+            "live_sessions": {
+                "count": agent_runtime.live_session_count(),
+                "limit": config.MAX_LIVE_SESSIONS,
+            },
         },
         "queue": _queue_snapshot_json(),
         "banks": [_bank_info(b) for b in registry.load()],
@@ -3233,6 +4111,170 @@ async def ws_endpoint(
         hub.disconnect(websocket)
 
 
+# ------------------------------------------------------ agent chat websocket
+# (MN-43)
+
+
+@app.websocket("/ws/agents/{slug}/chats/{chat_id}")
+async def ws_agent_chat(
+    websocket: WebSocket,
+    slug: str,
+    chat_id: str,
+    token: str | None = Query(default=None),
+) -> None:
+    """Live byte-mirror of one chat's real ``claude`` PTY session.
+
+    Same gate as `/ws` above — same reasoning (`_api_gated()`), same
+    query-string token (a browser cannot set headers on a WS handshake).
+    Envelopes (§43.3): server -> client is one of ``output`` (a chunk of PTY
+    output), ``resize`` (MN-49, replay-only — reconstructs a historical
+    terminal-width change that happened while nobody was watching; never
+    sent during live streaming, where a resize only ever flows client ->
+    server), ``replay_done`` (history replay finished, live output
+    follows), ``exited`` (the process terminated), ``error``; client ->
+    server is ``input`` (keystrokes) or ``resize`` (terminal dimensions).
+
+    Connecting spawns the real process on the FIRST subscriber for this
+    ``chat_id`` (`agent_runtime.ensure_and_subscribe`) — cheap for every
+    connection after that, since the process is already running and this
+    call only subscribes. Any number of simultaneous viewers of the same
+    chat see the same live stream; closing this socket never stops the
+    process, only removes this one subscriber.
+    """
+    if _api_gated() and not _token_ok(token):
+        await websocket.close(code=1008)
+        return
+    await websocket.accept()
+
+    try:
+        sub_id, queue, replay_segments = agent_runtime.ensure_and_subscribe(slug, chat_id)
+    except agent_registry.AgentNotFound as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1008)
+        return
+    except agent_registry.ChatNotFound as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1008)
+        return
+    except agent_runtime.SessionLimitExceeded as exc:
+        # count/limit (MN-46) let the client render "N/N" and — just as
+        # important — recognize this specific rejection so it can skip the
+        # generic reconnect-backoff loop `onclose` otherwise starts: retrying
+        # against a ceiling that is still full is pointless spam.
+        await websocket.send_json(
+            {
+                "type": "error",
+                "code": "too_many_sessions",
+                "message": str(exc),
+                "count": exc.count,
+                "limit": exc.limit,
+            }
+        )
+        await websocket.close(code=1013)  # "try again later" (RFC 6455 IANA registry)
+        return
+    except agent_runtime.ClaudeNotFound as exc:
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1011)
+        return
+    except Exception as exc:  # noqa: BLE001 - a spawn failure is not our bug to hide
+        log.exception("failed to spawn/subscribe chat %s for agent %s", chat_id, slug)
+        await websocket.send_json({"type": "error", "message": str(exc)})
+        await websocket.close(code=1011)
+        return
+
+    for segment in replay_segments:
+        await websocket.send_json(segment)
+    await websocket.send_json({"type": "replay_done"})
+
+    async def pump_queue() -> None:
+        while True:
+            item = await queue.get()
+            try:
+                await websocket.send_json(item)
+            except Exception:  # noqa: BLE001 - a dead socket ends the pump, not the process
+                break
+            if item.get("type") == "exited":
+                break
+
+    pump_task = asyncio.create_task(pump_queue())
+    try:
+        while True:
+            raw = await websocket.receive_text()
+            try:
+                msg = json.loads(raw)
+            except json.JSONDecodeError:
+                continue  # same tolerance contract as `/ws` above
+            if not isinstance(msg, dict):
+                continue
+            kind = msg.get("type")
+            if kind == "input":
+                agent_runtime.send_input(chat_id, str(msg.get("data", "")))
+            elif kind == "resize":
+                with suppress(Exception):
+                    agent_runtime.resize(
+                        chat_id, int(msg.get("rows", 24)), int(msg.get("cols", 80))
+                    )
+    except WebSocketDisconnect:
+        pass
+    finally:
+        pump_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await pump_task
+        agent_runtime.unsubscribe(chat_id, sub_id)
+
+
+# ------------------------------------------------- agent subagent hook (MN-45a)
+
+
+@app.post("/hooks/agents/{slug}/{chat_id}/subagent", include_in_schema=False)
+async def hook_agent_subagent(request: Request, slug: str, chat_id: str) -> dict:
+    """The `SubagentStart`/`SubagentStop` HTTP hook target written into every
+    live chat's per-spawn `settings.json`
+    (`agent_runtime._write_agent_configs`) — confirmed live to actually fire
+    on a real Task-tool subagent run by the MN-45a gate spike
+    (`.claude/scratch/mn45-verify/gate_spike.py`, 2026-08-29) before any of
+    this endpoint existed.
+
+    Authenticated the same way as `/mcp-agents` (`auth_middleware`'s new
+    branch, `agent_runtime.resolve_session_token`) — but the middleware only
+    proves the *token* is live, not that it belongs to THIS url's chat_id, so
+    that is checked again here: a token resolves to exactly one chat_id, and
+    a request naming a different one in its path is rejected rather than
+    silently served, the same "the credential is the only address, and a
+    second thing claiming to say which chat must not be allowed to disagree
+    with it" reasoning `/mcp`'s bank routing already applies (see
+    `mcp_server.py`'s module docstring).
+
+    **Persists and broadcasts (MN-45b).** Proven live and correctly scoped
+    to one chat by MN-45a; this phase wires the event into
+    `agent_runtime.record_subagent_event`, which appends it to this chat's
+    `subagents.jsonl` sidecar and fans it out over this chat's existing
+    WebSocket channel as a new `subagent_event` envelope for the console to
+    render — see that function's docstring for the full contract.
+    """
+    authed_chat_id = request.scope.get(AGENT_SESSION_SCOPE_KEY)
+    if authed_chat_id != chat_id:
+        raise ApiError("unauthorized",
+                       "this token does not authorize this chat_id")
+    body: dict[str, Any] = {}
+    with suppress(Exception):
+        parsed = await request.json()
+        if isinstance(parsed, dict):
+            body = parsed
+        # A non-dict JSON body (list/string/number) is not a real CC hook
+        # payload -- `body` stays `{}` rather than something `.get()` (here
+        # and in `record_subagent_event`) would raise on.
+    log.info(
+        "subagent hook: agent=%s chat=%s event=%s agent_id=%s",
+        slug, chat_id, body.get("hook_event_name"), body.get("agent_id"),
+    )
+    agent_runtime.record_subagent_event(slug, chat_id, body)
+    # An empty JSON-RPC-adjacent object is a valid, no-op hook response (the
+    # same JSON output format command hooks use; SubagentStart/Stop have
+    # limited decision control, so there is nothing to say here yet).
+    return {}
+
+
 # The console's assets — `src.webui.STATIC_DIR` and nothing else from that
 # package. Mounting the package directory would put `devserver.py` (a
 # developer tool) on the request path; the static tree is the only thing the
@@ -3332,17 +4374,20 @@ def mcp_tools_reindex(
 # spawned for a Claude Code session (NFR-2). Mounted last so the /api routes
 # above are matched first. The bank travels as the path segment after /mcp.
 #
-# `/mcp-admin` is mounted BEFORE `/mcp` and is a separate path, not a bank:
-# the bank-routing shim under `/mcp` would otherwise read `admin` as a bank
-# name. Starlette matches mounts in declaration order, so the more specific
-# prefix has to be declared first.
+# `/mcp-admin` and `/mcp-agents` (MN-45a) are mounted BEFORE `/mcp` and are
+# separate paths, not banks: the bank-routing shim under `/mcp` would
+# otherwise read "admin"/"agents" as a bank name. Starlette matches mounts in
+# declaration order, so the more specific prefixes have to be declared first.
 try:
     from .mcp_admin import build_app as _build_admin
+    from .mcp_agents import build_app as _build_agents
     from .mcp_server import build_app as _build_mcp
 except ImportError:  # pragma: no cover - the SDK is a hard dep, but be honest
-    _build_admin = _build_mcp = None
+    _build_admin = _build_agents = _build_mcp = None
 if _build_admin is not None:
     app.mount("/mcp-admin", _build_admin(), name="mcp-admin")
+if _build_agents is not None:
+    app.mount("/mcp-agents", _build_agents(), name="mcp-agents")
 if _build_mcp is not None:
     app.mount("/mcp", _build_mcp(), name="mcp")
 

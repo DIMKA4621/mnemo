@@ -23,10 +23,14 @@ import base64
 import hashlib
 import json
 import mimetypes
+import re
+import secrets
 import socket
 import struct
 import threading
 import time
+import uuid
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -40,6 +44,12 @@ FIXTURES = HERE / "fixtures"
 # A real token is 48 hex chars (contract 9.1); this one is fixed so the dev URL
 # is stable across restarts.
 DEV_TOKEN = "de7a" * 12
+
+# Set by --no-auth: the real backend is open by default (contract 9.1, unless
+# $MNEMO_API_TOKEN/require_login is set) — this mock hardcoded a token
+# unconditionally instead, which doesn't match that default. Off by default
+# so existing dev URLs/scripts built around DEV_TOKEN keep working.
+NO_AUTH = False
 
 WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 SERVICE_VERSION = "3.0.0-mock"
@@ -143,9 +153,12 @@ FS_FIXTURE: dict[str, list[str]] = {
     "/home/dev/.claude/memory/logs": [],
     "/home/dev/.claude/skills": [],
     "/home/dev/notes": [],
-    "/home/dev/projects": ["mnemo", "voice-agent"],
+    "/home/dev/projects": ["mnemo", "voice-agent", "legacy-tool"],
     "/home/dev/projects/mnemo": ["docs"],
     "/home/dev/projects/mnemo/docs": [],
+    # Agents wizard's "Вказати наявну теку" adoption-preview demo — see
+    # `_AGENT_ADOPTABLE` below (MN-42 Фаза B).
+    "/home/dev/projects/legacy-tool": [],
     # `.claude/memory` here specifically, so the add-bank picker's "одразу
     # підключити проєкт (MCP)" checkbox has a second eligible target — one
     # whose fixture `init` outcome (`_mock_init_result`) is the *honest
@@ -168,6 +181,7 @@ FS_MD: dict[str, int] = {
     "/home/dev/projects": 0,
     "/home/dev/projects/mnemo": 9,
     "/home/dev/projects/mnemo/docs": 9,
+    "/home/dev/projects/legacy-tool": 5,
     "/home/dev/projects/voice-agent": 5,
     "/home/dev/projects/voice-agent/.claude": 5,
     "/home/dev/projects/voice-agent/.claude/memory": 5,
@@ -250,6 +264,414 @@ _ORPHANS: list[dict[str, Any]] = [
     },
 ]
 
+# The general MCP/Skills/Rules registry (MN-41/MN-42, `src/catalog.py`), for
+# the Реєстр page. Shaped exactly like `_entry_info()`'s response — `vars` is
+# stored pre-computed here rather than derived per request, since this is a
+# fixture and there is no `catalog.py` behind it to call.
+_VAR_RE = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
+
+
+def _catalog_vars(content: str) -> list[str]:
+    seen: dict[str, None] = {}
+    for m in _VAR_RE.finditer(content or ""):
+        seen.setdefault(m.group(1), None)
+    return list(seen)
+
+
+def _canonical_json(content: str) -> str | None:
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError, RecursionError):
+        return None
+    return json.dumps(parsed, sort_keys=True, ensure_ascii=False)
+
+
+CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "mcp_a1b2c3d4e5f6",
+        "category": "mcp",
+        "name": "mnemo-memory",
+        "content": '{\n  "type": "http",\n  "url": "http://127.0.0.1:4646/mcp"\n}',
+        "created_at": "2026-08-10T09:00:00+03:00",
+    },
+    {
+        "id": "mcp_b2c3d4e5f6a1",
+        "category": "mcp",
+        "name": "github",
+        "content": '{\n  "type": "stdio",\n  "command": "gh",\n  "args": ["mcp", "serve"]\n}',
+        "created_at": "2026-08-11T09:00:00+03:00",
+    },
+    {
+        "id": "mcp_c3d4e5f6a1b2",
+        "category": "mcp",
+        "name": "atlassian",
+        "content": '{\n  "type": "http",\n  "url": "https://mcp.atlassian.com/v1/sse",\n'
+        '  "headers": { "Authorization": "Bearer {{ATLASSIAN_API_TOKEN}}" }\n}',
+        "created_at": "2026-08-12T09:00:00+03:00",
+    },
+    {
+        "id": "skill_d4e5f6a1b2c3",
+        "category": "skill",
+        "name": "keyboard-layout",
+        "content": "Конвертує текст, набраний не в тій розкладці, між EN (QWERTY) і UA (ЙЦУКЕН). "
+        "Спрацьовує на «гібришний» текст.",
+        "created_at": "2026-08-13T09:00:00+03:00",
+    },
+    {
+        "id": "skill_e5f6a1b2c3d4",
+        "category": "skill",
+        "name": "code-review",
+        "content": "Ревʼю поточного диму на баги та можливості спрощення/перевикористання коду, "
+        "з рівнями зусиль low/medium/high.",
+        "created_at": "2026-08-14T09:00:00+03:00",
+    },
+    {
+        "id": "rule_f6a1b2c3d4e5",
+        "category": "rule",
+        "name": "v3-build.md",
+        "content": "Джерело істини для v3: чотири доки Memory-{design,requirements,implementation,"
+        "contracts}-v3.md. Ніколи не комітити/пушити самостійно, ніякого Co-Authored-By.",
+        "created_at": "2026-08-15T09:00:00+03:00",
+    },
+    {
+        "id": "rule_a1b2c3d4e5f7",
+        "category": "rule",
+        "name": "git-workflow.md",
+        "content": "Гілки, PR і релізи: нова робота — завжди нова гілка від актуального master; "
+        "реліз — завжди чернетка.",
+        "created_at": "2026-08-16T09:00:00+03:00",
+    },
+]
+
+
+def _catalog_used_by(entry_id: str) -> list[str]:
+    """Agent slugs whose `links` reference this catalog entry — mirrors
+    `api._catalog_used_by` / `agent_registry.catalog_entry_used_by` (MN-48),
+    computed here off the fixture `AGENTS[].links` instead of `links.json`."""
+    with _lock:
+        return [
+            a["slug"] for a in AGENTS
+            if any(link["entry_id"] == entry_id for links in a["links"].values() for link in links)
+        ]
+
+
+def _catalog_entry_info(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": entry["id"],
+        "category": entry["category"],
+        "name": entry["name"],
+        "content": entry["content"],
+        "created_at": entry["created_at"],
+        "vars": _catalog_vars(entry["content"]) if entry["category"] == "mcp" else [],
+        "used_by_count": len(_catalog_used_by(entry["id"])),
+    }
+
+
+def _find_catalog_entry(entry_id: str) -> dict[str, Any] | None:
+    return next((e for e in CATALOG if e["id"] == entry_id), None)
+
+
+def _norm_catalog_name(name: str) -> str:
+    return name.strip().casefold()
+
+
+def _unique_catalog_name(candidate: str, category: str, *, exclude_id: str | None = None) -> str:
+    taken = {
+        _norm_catalog_name(e["name"])
+        for e in CATALOG
+        if e["category"] == category and (exclude_id is None or e["id"] != exclude_id)
+    }
+    base = candidate.strip() or category
+    if _norm_catalog_name(base) not in taken:
+        return base
+    n = 2
+    while _norm_catalog_name(f"{base}-{n}") in taken:
+        n += 1
+    return f"{base}-{n}"
+
+
+def _find_duplicate_mcp(content: str, *, exclude_id: str | None) -> dict[str, Any] | None:
+    normalized = _canonical_json(content)
+    if normalized is None:
+        return None
+    for entry in CATALOG:
+        if entry["category"] != "mcp" or entry["id"] == exclude_id:
+            continue
+        if _canonical_json(entry["content"]) == normalized:
+            return entry
+    return None
+
+
+# --------------------------------------------------------------------------
+# agent registry fixture (MN-40 backend / MN-42 Фаза B frontend)
+# --------------------------------------------------------------------------
+#
+# Shaped exactly like `_agent_info()`'s response (`src/api.py`'s agent
+# registry section) — `launch` is the same `read_launch_config()` shape
+# (`{"mode": "standard"}` or `{"mode": "custom", "host", "port", ...}`).
+# Chats (MN-43/MN-44) live in `_CHATS` below, keyed by slug — a separate dict
+# rather than an `AGENTS[].chats` field, mirroring `agent_registry.py`'s own
+# separation of `agents.json` from each agent's `chats.json`.
+
+_AGENT_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _agent_slugify(name: str) -> str:
+    base = _AGENT_SLUG_RE.sub("-", (name or "").strip().lower()).strip("-")
+    return base or "agent"
+
+
+def _unique_agent_slug(candidate: str) -> str:
+    with _lock:
+        taken = {a["slug"] for a in AGENTS}
+    if candidate not in taken:
+        return candidate
+    n = 2
+    while f"{candidate}-{n}" in taken:
+        n += 1
+    return f"{candidate}-{n}"
+
+
+AGENTS: list[dict[str, Any]] = [
+    {
+        "slug": "debug-assistant",
+        "name": "Дебаг-асистент проєкту",
+        "root": "/home/dev/.mnemo/agents/debug-assistant",
+        "owns_root": True,
+        "created_at": "2026-08-20T09:00:00+03:00",
+        "bank_id": "agent_debug_assistant",
+        "bank_name": "Дебаг-асистент проєкту",
+        "launch": {"mode": "standard"},
+        "claude_md": "# CLAUDE.md\n\nTriages failing tests and stack traces for this project. "
+        "Prefers reading logs before proposing a fix.\n",
+        # Pre-attached in every category (MN-48, Фаза C) — an existing case
+        # to render/edit/detach without an attach round-trip first; the
+        # other two fixture agents start empty to exercise that state too.
+        "links": {
+            "mcp": [{"entry_id": "mcp_a1b2c3d4e5f6", "name": "mnemo-memory", "vars": {}}],
+            "skill": [{"entry_id": "skill_d4e5f6a1b2c3", "name": "keyboard-layout", "vars": {}}],
+            "rule": [{"entry_id": "rule_f6a1b2c3d4e5", "name": "v3-build.md", "vars": {}}],
+        },
+    },
+    {
+        "slug": "release-manager",
+        "name": "Реліз-менеджер",
+        "root": "/home/dev/.mnemo/agents/release-manager",
+        "owns_root": True,
+        "created_at": "2026-08-21T09:00:00+03:00",
+        "bank_id": "agent_release_manager",
+        "bank_name": "Реліз-менеджер",
+        "launch": {"mode": "custom", "host": "127.0.0.1", "port": 8790, "model": "claude-sonnet-5"},
+        "claude_md": "# CLAUDE.md\n\nCuts draft releases from master and posts changelogs.\n",
+        "links": {"mcp": [], "skill": [], "rule": []},
+    },
+    {
+        "slug": "ui-tester",
+        "name": "Тестувальник UI",
+        "root": "/home/dev/.mnemo/agents/ui-tester",
+        "owns_root": True,
+        "created_at": "2026-08-22T09:00:00+03:00",
+        "bank_id": "agent_ui_tester",
+        "bank_name": "Тестувальник UI",
+        "launch": {"mode": "standard"},
+        "claude_md": "# CLAUDE.md\n\nDrives the browser through chrome-devtools-mnemo and reports regressions.\n",
+        "links": {"mcp": [], "skill": [], "rule": []},
+    },
+]
+
+
+def _find_agent(slug: str) -> dict[str, Any] | None:
+    with _lock:
+        return next((a for a in AGENTS if a["slug"] == slug), None)
+
+
+# --------------------------------------------------------------------------
+# agent chats (MN-43/MN-44) — lifecycle fixture (`agent_registry.py`'s
+# `{chat_id, title, created_at, last_active_at}` shape) plus a hand-rolled
+# fake PTY session for `/ws/agents/{slug}/chats/{chat_id}`, further below
+# next to the real WebSocket plumbing.
+# --------------------------------------------------------------------------
+
+_CHATS: dict[str, list[dict[str, Any]]] = {}
+
+_AGENT_SUBAGENTS_FIXTURE: dict[str, list[dict[str, Any]]] = {
+    "debug-assistant": [
+        {"name": "test-runner", "description": "Runs pytest and summarizes failures."},
+        {"name": "log-triager", "description": None},
+    ],
+}
+
+
+def _chat_info(chat: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "chat_id": chat["chat_id"],
+        "title": chat.get("title"),
+        "created_at": chat.get("created_at", ""),
+        "last_active_at": chat.get("last_active_at", ""),
+    }
+
+
+def _find_chat(slug: str, chat_id: str) -> dict[str, Any] | None:
+    with _lock:
+        return next((c for c in _CHATS.get(slug, []) if c["chat_id"] == chat_id), None)
+
+
+# 25 MiB, mirroring `config.MAX_CHAT_UPLOAD_BYTES`'s own default — this
+# fixture has no `src/config.py` import (devserver.py is meant to run
+# standalone, stdlib-only), so the number is duplicated, not imported.
+_MAX_CHAT_UPLOAD_BYTES_FIXTURE = 25 * 1024 * 1024
+_UPLOAD_UNSAFE_CHARS_FIXTURE = frozenset('<>:"|?*')
+_UPLOAD_DRIVE_ANCHOR_RE_FIXTURE = re.compile(r"^[A-Za-z]:")
+
+
+def _sanitize_upload_filename_fixture(name: str) -> str:
+    """Same shape as `api._sanitize_upload_filename` — kept independent
+    rather than imported, since this whole module answers contract shapes
+    without depending on the real package it is standing in for."""
+    name = (name or "").strip()
+    name = re.split(r"[\\/]+", name)[-1]
+    name = _UPLOAD_DRIVE_ANCHOR_RE_FIXTURE.sub("", name)
+    name = name.strip().strip(".")
+    cleaned = "".join(c for c in name if c not in _UPLOAD_UNSAFE_CHARS_FIXTURE and ord(c) >= 32)
+    return cleaned or "upload"
+
+
+def _parse_multipart_file(content_type: str, body: bytes) -> tuple[str, bytes] | None:
+    """Pull `(filename, content)` out of a single-file `multipart/form-data`
+    body. Hand-rolled rather than `cgi.FieldStorage` — `cgi` was removed in
+    Python 3.13 (PEP 594) and this module stays stdlib-only across whatever
+    3.10+ interpreter runs it. Returns `None` if no file part is found."""
+    match = re.search(r'boundary="?([^";]+)"?', content_type)
+    if not match:
+        return None
+    boundary = ("--" + match.group(1)).encode("utf-8")
+    for part in body.split(boundary):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        header_end = part.find(b"\r\n\r\n")
+        if header_end == -1:
+            continue
+        headers = part[:header_end].decode("utf-8", "replace")
+        content = part[header_end + 4:]
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        name_match = re.search(r'filename="([^"]*)"', headers)
+        if name_match is None:
+            continue
+        return name_match.group(1), content
+    return None
+
+
+def _norm_link_name(name: str) -> str:
+    return name.strip().casefold()
+
+
+def _link_info(category: str, link: dict[str, Any]) -> dict[str, Any]:
+    return {"entry_id": link["entry_id"], "category": category, "name": link["name"], "vars": dict(link.get("vars") or {})}
+
+
+def _agent_info(agent: dict[str, Any]) -> dict[str, Any]:
+    """The one agent shape `/api/agents`/`/api/agents/{slug}` return — mirrors
+    the real `api._agent_info()` exactly. `claude_md`/`links` are fixture-only
+    bookkeeping (their own endpoints serve those), never part of this shape."""
+    return {
+        "slug": agent["slug"],
+        "name": agent["name"],
+        "root": agent["root"],
+        "owns_root": agent["owns_root"],
+        "created_at": agent["created_at"],
+        "bank_id": agent["bank_id"],
+        "bank_name": agent["bank_name"],
+        "launch": dict(agent["launch"]),
+    }
+
+
+# Adoption-preview demo: one path in `FS_FIXTURE` that already looks like an
+# agent workspace, so the wizard's "Вказати наявну теку" branch has a
+# non-empty case to confirm — mirrors the mockup's `CLAUDE_FOLDERS`. Every
+# other `FS_FIXTURE` path previews as empty (a fresh folder to build into).
+_AGENT_ADOPTABLE: dict[str, dict[str, Any]] = {
+    "/home/dev/projects/legacy-tool": {
+        "has_claude_md": True,
+        "claude_md_excerpt": "# legacy-tool\n\nAgent for triaging legacy-tool issues.\n",
+        "has_mcp_json": True,
+        "mcp_server_names": ["mnemo-memory", "github"],
+        "has_claude_dir": True,
+        "rule_files": ["v3-build.md"],
+        "skill_dirs": ["code-review"],
+        "has_memory": True,
+        "memory_already_bank": False,
+    },
+}
+
+
+def _agent_preview(root: str) -> dict[str, Any]:
+    """Fixture mirror of `agent_registry.preview_adopt()` — a read-only
+    inspection of a candidate folder, keyed off the same `FS_FIXTURE` the
+    bank picker already browses."""
+    target = (root or "").strip().replace("\\", "/").rstrip("/") or root
+    root_exists = target in FS_FIXTURE
+    adopt_info = _AGENT_ADOPTABLE.get(target)
+    with _lock:
+        already = next((a["slug"] for a in AGENTS if a["root"].rstrip("/") == target), None)
+    empty = root_exists and not FS_FIXTURE.get(target) and adopt_info is None
+    suggested_name = target.rsplit("/", 1)[-1] or target
+    suggested_slug = _unique_agent_slug(_agent_slugify(suggested_name))
+    base: dict[str, Any] = {
+        "root_exists": root_exists,
+        "empty": empty,
+        "already_registered_agent": already,
+        "has_claude_md": False,
+        "claude_md_excerpt": None,
+        "has_mcp_json": False,
+        "mcp_server_names": [],
+        "has_claude_dir": False,
+        "rule_files": [],
+        "skill_dirs": [],
+        "has_memory": False,
+        "memory_already_bank": False,
+        "suggested_slug": suggested_slug,
+        "suggested_name": suggested_name,
+    }
+    if adopt_info:
+        base.update(adopt_info)
+        base["empty"] = False
+    return base
+
+
+_LAUNCH_MODES = frozenset({"standard", "custom"})
+_LAUNCH_CUSTOM_FIELDS = frozenset({"mode", "host", "port", "model", "autocompact", "extra_args"})
+
+
+def _validate_launch_config(data: Any) -> dict[str, Any] | None:
+    """Fixture mirror of `agent_registry.validate_launch_config` — returns
+    the normalized dict, or `None` on anything invalid (the caller turns
+    that into a 400, same as the real endpoint's `InvalidLaunchConfig`)."""
+    if not isinstance(data, dict):
+        return None
+    mode = data.get("mode")
+    if mode not in _LAUNCH_MODES:
+        return None
+    if mode == "standard":
+        return {"mode": "standard"} if not (set(data) - {"mode"}) else None
+    if set(data) - _LAUNCH_CUSTOM_FIELDS:
+        return None
+    host = data.get("host")
+    if not isinstance(host, str) or not host.strip():
+        return None
+    port = data.get("port")
+    if not isinstance(port, int) or isinstance(port, bool) or not (1 <= port <= 65535):
+        return None
+    result: dict[str, Any] = {"mode": "custom", "host": host, "port": port}
+    if data.get("model"):
+        result["model"] = data["model"]
+    if "autocompact" in data:
+        result["autocompact"] = data["autocompact"]
+    if "extra_args" in data:
+        result["extra_args"] = data["extra_args"]
+    return result
+
 
 # --------------------------------------------------------------------------
 # self-update fixture state (contract: src/api.py GET/POST /api/update/*,
@@ -288,6 +710,17 @@ _UPDATE_STATE: dict[str, Any] = {
          "commit": "abc1234", "status": "active"},
         {"tag": "v3.0.0", "installed_at": "2026-07-01T10:00:00+03:00",
          "commit": "def5678", "status": "previous"},
+    ],
+    # MN-47: one permanently-blacklisted tag and one still within its retry
+    # window, so the Maintenance tab's blacklist section is reachable in dev
+    # without simulating any real auto-apply failures first.
+    "blacklist": [
+        {"tag": "v3.1.2", "attempts": 2, "blacklisted": True,
+         "last_error": "Health check failed after switching: backend did not come up within 30s",
+         "last_failed_at": "2026-08-19T11:20:00+03:00", "next_retry_at": None},
+        {"tag": "v3.1.4", "attempts": 1, "blacklisted": False,
+         "last_error": "Rollback: import error in embed_server after switching",
+         "last_failed_at": "2026-08-27T09:11:00+03:00", "next_retry_at": "2026-08-27T10:11:00+03:00"},
     ],
 }
 
@@ -342,7 +775,7 @@ def _auto_status_view() -> dict:
     return {
         "enabled": bool(_SETTINGS.get("auto_update", True)),
         "pending": pending,
-        "blacklist": [],
+        "blacklist": list(_UPDATE_STATE.get("blacklist", [])),
     }
 
 
@@ -801,6 +1234,174 @@ CLIENTS: list[WSClient] = []
 _clients_lock = threading.Lock()
 
 
+# --------------------------------------------------------------------------
+# agent chat WebSocket (MN-43/MN-44) — a fake PTY session per `chat_id`,
+# entirely separate from `CLIENTS`/`broadcast` above: those serve the one
+# shared `/ws` (bank/queue/journal events), this serves one dedicated socket
+# per chat with its own byte-stream contract (`output`/`replay_done`/
+# `exited`/`error` server->client, `input`/`resize` client->server — see
+# `src/api.py`'s `ws_agent_chat` docstring, which this mirrors).
+# --------------------------------------------------------------------------
+
+_WS_AGENT_CHAT_RE = re.compile(r"^/ws/agents/([^/]+)/chats/([^/]+)$")
+
+# chat_id -> {"history": str, "resize_markers": list[dict], "subscribers":
+#             list[WSClient], "started": bool, "buffer": str, "stopped": bool}
+_CHAT_SESSIONS: dict[str, dict[str, Any]] = {}
+_chat_sessions_lock = threading.Lock()
+
+_FAKE_CLAUDE_BANNER = (
+    "\x1b[36m*\x1b[0m Claude Code v3.0.0 (fixture — devserver.py, not a real session)\r\n"
+    "  model: claude-sonnet-5\r\n\r\n> "
+)
+
+
+def _chat_ws_replay_segments(history: str, resize_markers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Interleave `history` with `resize_markers` (MN-49) into an ordered
+    list of `output`/`resize` segments — mirrors `agent_runtime.
+    _replay_segments`. No markers at all degenerates to exactly one
+    `output` segment holding the whole text, same as before MN-49."""
+    segments: list[dict[str, Any]] = []
+    prev = 0
+    for marker in resize_markers:
+        offset = marker["offset"]
+        if offset > prev:
+            segments.append({"type": "output", "data": history[prev:offset]})
+        segments.append({"type": "resize", "rows": marker["rows"], "cols": marker["cols"]})
+        prev = offset
+    if prev < len(history) or not segments:
+        segments.append({"type": "output", "data": history[prev:]})
+    return segments
+
+
+def _chat_ws_subscribe(chat_id: str, client: WSClient) -> list[dict[str, Any]]:
+    """Register `client` as a live viewer of `chat_id` and return the replay
+    segments accumulated so far (MN-49) — mirrors `agent_runtime.
+    ensure_and_subscribe`'s lazy-spawn-on-first-subscriber contract: the
+    fake banner is only queued the very first time anyone connects to this
+    chat, never on a later reconnect."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.setdefault(
+            chat_id,
+            {
+                "history": "",
+                "resize_markers": [],
+                "subscribers": [],
+                "started": False,
+                "buffer": "",
+                "stopped": False,
+            },
+        )
+        session["subscribers"].append(client)
+        first = not session["started"]
+        session["started"] = True
+        replay = _chat_ws_replay_segments(session["history"], session["resize_markers"])
+    if first:
+        threading.Thread(target=_chat_ws_spawn, args=(chat_id,), daemon=True).start()
+    return replay
+
+
+def _chat_ws_handle_resize(chat_id: str, rows: int, cols: int) -> None:
+    """Record a resize marker at the current end of `history` (MN-49) so a
+    later reconnect's replay can reproduce this width change — lets
+    `ChatConsole.tsx`'s new `resize` replay branch actually be exercised in
+    dev mode by resizing the browser mid-chat, then reconnecting (e.g.
+    reopening the chat tab)."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session is None or session["stopped"]:
+            return
+        session["resize_markers"].append(
+            {"offset": len(session["history"]), "rows": rows, "cols": cols}
+        )
+
+
+def _chat_ws_unsubscribe(chat_id: str, client: WSClient) -> None:
+    """Drop one viewer. Never touches `history`/`started` — the fake session
+    (like the real one) outlives any single browser tab; only an explicit
+    chat deletion (`_chat_ws_force_exit`) ends it."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session and client in session["subscribers"]:
+            session["subscribers"].remove(client)
+
+
+def _chat_ws_broadcast(chat_id: str, envelope: dict[str, Any]) -> None:
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session is None or session["stopped"]:
+            return
+        if envelope.get("type") == "output":
+            session["history"] += str(envelope.get("data", ""))
+        targets = list(session["subscribers"])
+    for sub in targets:
+        try:
+            sub.send_json(envelope)
+        except OSError:
+            sub.alive = False
+
+
+def _chat_ws_spawn(chat_id: str) -> None:
+    time.sleep(0.3)
+    _chat_ws_broadcast(chat_id, {"type": "output", "data": _FAKE_CLAUDE_BANNER})
+
+
+def _chat_ws_handle_input(chat_id: str, data: str) -> None:
+    """Echoes every keystroke straight back — same as a real PTY running a
+    line-editing program, which is what makes typing feel alive in dev mode
+    even though no real `claude` process is underneath. On a carriage
+    return, whatever accumulated since the last one is treated as "what the
+    user typed" and gets one canned reply, purely for visual smoke-testing
+    of `ChatConsole.tsx` under `npm run dev` — this is not a slash-command
+    interpreter or anything close to the real CLI's own TUI."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session is None or session["stopped"]:
+            return
+    _chat_ws_broadcast(chat_id, {"type": "output", "data": data.replace("\r", "\r\n")})
+    if "\r" not in data and "\n" not in data:
+        with _chat_sessions_lock:
+            session = _CHAT_SESSIONS.get(chat_id)
+            if session is not None:
+                session["buffer"] += data
+        return
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session is None:
+            return
+        prompt = (session["buffer"] + data).strip("\r\n")
+        session["buffer"] = ""
+    if prompt:
+        threading.Thread(target=_chat_ws_reply, args=(chat_id, prompt), daemon=True).start()
+    else:
+        _chat_ws_broadcast(chat_id, {"type": "output", "data": "> "})
+
+
+def _chat_ws_reply(chat_id: str, prompt: str) -> None:
+    time.sleep(0.4)
+    reply = (
+        "\r\n\x1b[2m(fixture reply — devserver.py, not a real claude session)\x1b[0m\r\n"
+        f"You said: {prompt}\r\n\r\n> "
+    )
+    _chat_ws_broadcast(chat_id, {"type": "output", "data": reply})
+
+
+def _chat_ws_force_exit(chat_id: str) -> None:
+    """Called from `delete_chat` — the real endpoint's `agent_runtime.
+    stop_session` equivalent: tell every still-open viewer the process is
+    gone, then forget the session entirely (a later chat with the same id
+    never happens — ids are `uuid4().hex`)."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.pop(chat_id, None)
+        if session is None:
+            return
+        session["stopped"] = True
+        targets = list(session["subscribers"])
+    for sub in targets:
+        with suppress(OSError):
+            sub.send_json({"type": "exited", "code": 0})
+
+
 def broadcast(event_type: str, bank_id: str | None, data: dict) -> None:
     envelope = {
         "v": 1,
@@ -1138,6 +1739,8 @@ class Handler(BaseHTTPRequestHandler):
                                          "detail": detail}})
 
     def authorised(self) -> bool:
+        if NO_AUTH:
+            return True
         header = self.headers.get("Authorization", "")
         if header.startswith("Bearer "):
             return header[7:].strip() == DEV_TOKEN
@@ -1152,6 +1755,10 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/ws":
             self.handle_ws(query)
+            return
+        chat_ws_match = _WS_AGENT_CHAT_RE.match(path)
+        if chat_ws_match:
+            self.handle_agent_chat_ws(chat_ws_match.group(1), chat_ws_match.group(2), query)
             return
         if path == "/health":
             self.json_out(200, self.health())
@@ -1181,6 +1788,35 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorised():
             self.fail(401, "unauthorized", "missing or invalid token")
             return
+
+        if parsed.path.startswith("/api/catalog/"):
+            self.delete_catalog_entry(unquote(parsed.path[len("/api/catalog/"):]))
+            return
+
+        if parsed.path.startswith("/api/agents/"):
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 4 and parts[1] == "links":
+                self.delete_agent_link(parts[0], parts[2], parts[3])
+                return
+            if len(parts) == 3 and parts[1] == "chats":
+                self.delete_chat(parts[0], parts[2])
+                return
+            if len(parts) != 1:
+                self.fail(404, "internal", "no route " + parsed.path)
+                return
+            slug_ref = parts[0]
+            with _lock:
+                before = len(AGENTS)
+                AGENTS[:] = [a for a in AGENTS if a["slug"] != slug_ref]
+                removed = len(AGENTS) != before
+                _CHATS.pop(slug_ref, None)
+            if not removed:
+                self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
+                return
+            self.json_out(200, {"ok": True})
+            return
+
         if not parsed.path.startswith("/api/banks/"):
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -1239,6 +1875,35 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorised():
             self.fail(401, "unauthorized", "missing or invalid token")
             return
+
+        if parsed.path.startswith("/api/catalog/"):
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self.fail(422, "validation_error", "body is not valid JSON")
+                return
+            self.patch_catalog_entry(unquote(parsed.path[len("/api/catalog/"):]), body)
+            return
+
+        if parsed.path.startswith("/api/agents/"):
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self.fail(422, "validation_error", "body is not valid JSON")
+                return
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 1:
+                self.patch_agent(parts[0], body)
+                return
+            if len(parts) == 4 and parts[1] == "links":
+                self.patch_agent_link(parts[0], parts[2], parts[3], body)
+                return
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+
         if not parsed.path.startswith("/api/banks/"):
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -1278,6 +1943,49 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorised():
             self.fail(401, "unauthorized", "missing or invalid token")
             return
+
+        if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/launch"):
+            slug_ref = unquote(parsed.path[len("/api/agents/"): -len("/launch")])
+            agent = _find_agent(slug_ref)
+            if agent is None:
+                self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self.fail(422, "validation_error", "body is not valid JSON")
+                return
+            normalized = _validate_launch_config(body)
+            if normalized is None:
+                self.fail(400, "invalid_launch_config", "invalid launch config", {"slug": slug_ref})
+                return
+            with _lock:
+                agent["launch"] = normalized
+            self.json_out(200, dict(normalized))
+            return
+
+        if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/claude-md"):
+            slug_ref = unquote(parsed.path[len("/api/agents/"): -len("/claude-md")].rstrip("/"))
+            agent = _find_agent(slug_ref)
+            if agent is None:
+                self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
+                return
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self.fail(422, "validation_error", "body is not valid JSON")
+                return
+            content = body.get("content")
+            if not isinstance(content, str):
+                self.fail(422, "validation_error", "'content' must be a string")
+                return
+            with _lock:
+                agent["claude_md"] = content
+            self.json_out(200, {"content": content})
+            return
+
         if parsed.path != "/api/settings":
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -1334,6 +2042,18 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(401, "unauthorized", "missing or invalid token")
             return
 
+        # Handled before the generic JSON-body read below: a chat upload's
+        # body is `multipart/form-data`, not JSON, and `json.loads()` on it
+        # would just 422.
+        if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/upload"):
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 4 and parts[1] == "chats" and parts[3] == "upload":
+                self.post_chat_upload(parts[0], parts[2])
+                return
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"
         try:
@@ -1347,6 +2067,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/banks":
             self.post_bank(body)
+            return
+        if parsed.path == "/api/catalog":
+            self.post_catalog_entry(body)
+            return
+        if parsed.path == "/api/agents/preview":
+            root = str(body.get("root") or "").strip()
+            if not root:
+                self.fail(400, "bad_request", "'root' is required")
+                return
+            self.json_out(200, _agent_preview(root))
+            return
+        if parsed.path == "/api/agents":
+            self.post_agent(body)
+            return
+        if parsed.path.startswith("/api/agents/") and "/links/" in parsed.path:
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 3 and parts[1] == "links":
+                self.post_agent_link(parts[0], parts[2], body)
+                return
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+        if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/chats"):
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 2 and parts[1] == "chats":
+                self.post_chat(parts[0], body)
+                return
+            self.fail(404, "internal", "no route " + parsed.path)
             return
         if parsed.path == "/api/autostart":
             if "enabled" not in body:
@@ -1501,10 +2250,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_static(self, path: str) -> None:
         rel = unquote(path[len("/ui"):]).lstrip("/")
-        if not rel:
-            rel = "index.html"
-        target = (STATIC_DIR / rel).resolve()
-        if not str(target).startswith(str(STATIC_DIR.resolve())) or not target.is_file():
+        target = (STATIC_DIR / rel).resolve() if rel else STATIC_DIR.resolve()
+        if not str(target).startswith(str(STATIC_DIR.resolve())):
+            self._send(404, b"not found", "text/plain; charset=utf-8")
+            return
+        # Mirrors the real mount's `StaticFiles(..., html=True)`: a request
+        # for a directory (the bare root, or any of the exported app's
+        # nested routes — `/ui/settings/` resolves to a directory now that
+        # each route is its own `out/<route>/index.html`, not one shared
+        # `index.html` with in-DOM tab switching) resolves to that
+        # directory's own `index.html`, not a 404.
+        if target.is_dir():
+            target = target / "index.html"
+        if not target.is_file():
             self._send(404, b"not found", "text/plain; charset=utf-8")
             return
         ctype = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
@@ -1648,6 +2406,81 @@ class Handler(BaseHTTPRequestHandler):
             self.json_out(200, update_status_payload())
             return
 
+        if path == "/api/catalog":
+            category = (query.get("category") or [None])[0]
+            with _lock:
+                entries = [_catalog_entry_info(e) for e in CATALOG
+                           if category is None or e["category"] == category]
+            self.json_out(200, {"entries": entries})
+            return
+
+        if path.startswith("/api/catalog/"):
+            entry_id = unquote(path[len("/api/catalog/"):])
+            with _lock:
+                entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+            self.json_out(200, _catalog_entry_info(entry))
+            return
+
+        if path == "/api/agents":
+            with _lock:
+                agents = [_agent_info(a) for a in AGENTS]
+            self.json_out(200, {"agents": agents})
+            return
+
+        if path.startswith("/api/agents/"):
+            rest = unquote(path[len("/api/agents/"):])
+            parts = rest.split("/")
+            slug_ref = parts[0]
+            agent = _find_agent(slug_ref)
+            if agent is None:
+                self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
+                return
+
+            if len(parts) == 1:
+                self.json_out(200, _agent_info(agent))
+                return
+            if parts[1:] == ["launch"]:
+                self.json_out(200, dict(agent["launch"]))
+                return
+            if parts[1:] == ["claude-md"]:
+                self.json_out(200, {"content": agent["claude_md"]})
+                return
+            if parts[1:] == ["links"]:
+                with _lock:
+                    links = {
+                        category: [_link_info(category, link) for link in agent["links"][category]]
+                        for category in ("mcp", "skill", "rule")
+                    }
+                self.json_out(200, links)
+                return
+            if parts[1:] == ["chats"]:
+                with _lock:
+                    chats = sorted(
+                        (_chat_info(c) for c in _CHATS.get(slug_ref, [])),
+                        key=lambda c: c["last_active_at"] or "",
+                        reverse=True,
+                    )
+                self.json_out(200, {"chats": chats})
+                return
+            if len(parts) == 3 and parts[1] == "chats":
+                chat = _find_chat(slug_ref, parts[2])
+                if chat is None:
+                    self.fail(404, "chat_not_found", f"no chat {parts[2]!r} for agent {slug_ref!r}",
+                              {"slug": slug_ref, "chat_id": parts[2]})
+                    return
+                self.json_out(200, _chat_info(chat))
+                return
+            if parts[1:] == ["subagents"]:
+                self.json_out(200, {"subagents": _AGENT_SUBAGENTS_FIXTURE.get(slug_ref, [])})
+                return
+
+            self.fail(404, "internal", "no route " + path)
+            return
+
         self.fail(404, "internal", "no route " + path)
 
     def get_logs(self, query: dict) -> None:
@@ -1727,6 +2560,393 @@ class Handler(BaseHTTPRequestHandler):
             info["init"] = _mock_init_result(root)
         self.json_out(201, info)
 
+    def post_agent(self, body: dict) -> None:
+        """`POST /api/agents` — mirrors `api_create_agent`'s shape: a name is
+        required, an explicit `root` gets `owns_root=False` and a non-empty
+        target needs `confirm_adopt` (409 `adoption_confirmation_required`
+        otherwise, carrying the same preview the wizard already showed)."""
+        name = str(body.get("name") or "").strip()
+        if not name:
+            self.fail(400, "bad_request", "'name' cannot be empty")
+            return
+        claude_md = body.get("claude_md")
+        confirm_adopt = bool(body.get("confirm_adopt"))
+        root_in = body.get("root")
+
+        with _lock:
+            slug = _unique_agent_slug(_agent_slugify(name))
+            if root_in:
+                root = str(root_in).strip().replace("\\", "/").rstrip("/")
+                if not root.startswith("/"):
+                    self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root_in})
+                    return
+                preview = _agent_preview(root)
+                if preview["root_exists"] and not preview["empty"] and not confirm_adopt:
+                    self.fail(409, "adoption_confirmation_required",
+                              f"{root} is not empty — confirm adoption to proceed",
+                              {"root": root_in, "preview": preview})
+                    return
+                owns_root = False
+            else:
+                root = f"/home/dev/.mnemo/agents/{slug}"
+                owns_root = True
+
+            agent = {
+                "slug": slug,
+                "name": name,
+                "root": root,
+                "owns_root": owns_root,
+                "created_at": now_iso(),
+                "bank_id": f"agent_{slug.replace('-', '_')}",
+                "bank_name": name,
+                "launch": {"mode": "standard"},
+                "claude_md": claude_md if isinstance(claude_md, str) else "",
+                "links": {"mcp": [], "skill": [], "rule": []},
+            }
+            AGENTS.append(agent)
+        self.json_out(201, _agent_info(agent))
+
+    def post_chat(self, slug: str, body: dict) -> None:
+        """`POST /api/agents/{slug}/chats` — mirrors `agent_registry.create_chat`.
+        Cheap: creates the record only, never spawns the fake session (that
+        happens lazily on the first `/ws/agents/{slug}/chats/{chat_id}`
+        subscriber, same lazy-spawn contract as the real backend)."""
+        if _find_agent(slug) is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        now = now_iso()
+        chat = {
+            "chat_id": uuid.uuid4().hex,
+            "title": (str(body.get("title") or "")).strip() or None,
+            "created_at": now,
+            "last_active_at": now,
+        }
+        with _lock:
+            _CHATS.setdefault(slug, []).append(chat)
+        self.json_out(201, _chat_info(chat))
+
+    def post_chat_upload(self, slug: str, chat_id: str) -> None:
+        """`POST /api/agents/{slug}/chats/{chat_id}/upload` — mirrors
+        `api_agent_chat_upload`'s response shape (`{"path", "filename"}`).
+        Never writes anything to disk — this is a fixture, not a real
+        chat's uploads folder — the returned `path` is fake but shaped like
+        a real one, which is all `ChatConsole.tsx` needs to insert it into
+        the terminal input."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        if _find_chat(slug, chat_id) is None:
+            self.fail(404, "chat_not_found", f"no chat {chat_id!r} for agent {slug!r}",
+                      {"slug": slug, "chat_id": chat_id})
+            return
+
+        content_type = self.headers.get("Content-Type", "")
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        parsed_part = _parse_multipart_file(content_type, raw)
+        if parsed_part is None:
+            self.fail(400, "bad_request", "expected a multipart/form-data 'file' field")
+            return
+        filename, content = parsed_part
+        if not content:
+            self.fail(400, "bad_request", "uploaded file is empty", {"filename": filename})
+            return
+        if len(content) > _MAX_CHAT_UPLOAD_BYTES_FIXTURE:
+            self.fail(413, "upload_too_large",
+                      f"upload exceeds the {_MAX_CHAT_UPLOAD_BYTES_FIXTURE}-byte limit",
+                      {"filename": filename})
+            return
+
+        safe_name = _sanitize_upload_filename_fixture(filename or "upload")
+        fake_path = f"{agent['root']}/chats/{chat_id}/uploads/{uuid.uuid4().hex}-{safe_name}"
+        self.json_out(201, {"path": fake_path, "filename": filename or "upload"})
+
+    def patch_agent(self, slug: str, body: dict) -> None:
+        """`PATCH /api/agents/{slug}` — rename (MN-48). `slug`/`root` never
+        move, only `name` — mirrors `agent_registry.rename`'s own docstring:
+        `Agent.name` was never unique to begin with, so no dedup check here."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        name = body.get("name")
+        if name is None:
+            self.fail(400, "bad_request", "nothing to change", {"slug": slug})
+            return
+        clean = str(name).strip()
+        if not clean:
+            self.fail(400, "bad_request", "name must not be empty", {"slug": slug})
+            return
+        with _lock:
+            agent["name"] = clean
+        self.json_out(200, _agent_info(agent))
+
+    def post_agent_link(self, slug: str, category: str, body: dict) -> None:
+        """`POST /api/agents/{slug}/links/{category}` — attach (MN-48). Same
+        validation order as `agent_registry.attach_link`: entry exists, then
+        category matches, then not-already-attached, then name free within
+        this agent+category, then every `vars` key is one the entry
+        declares."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        if category not in ("mcp", "skill", "rule"):
+            self.fail(404, "internal", f"unknown category {category!r}")
+            return
+        entry_id = str(body.get("entry_id") or "")
+        name = str(body.get("name") or "").strip()
+        link_vars = body.get("vars") or {}
+        if not entry_id:
+            self.fail(400, "bad_request", "'entry_id' is required")
+            return
+        if not name:
+            self.fail(400, "bad_request", "name must not be empty")
+            return
+        with _lock:
+            entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+            if entry["category"] != category:
+                self.fail(400, "category_mismatch",
+                          f"catalog entry {entry_id!r} is category {entry['category']!r}, "
+                          f"not {category!r}", {"id": entry_id})
+                return
+            bucket = agent["links"][category]
+            if any(link["entry_id"] == entry_id for link in bucket):
+                self.fail(409, "link_exists",
+                          f"{entry_id!r} is already attached to agent {slug!r} in category {category!r}",
+                          {"id": entry_id})
+                return
+            clash = next(
+                (link for link in bucket if _norm_link_name(link["name"]) == _norm_link_name(name)),
+                None,
+            )
+            if clash is not None:
+                self.fail(409, "link_name_exists",
+                          f"another {category} link is already named {name!r}",
+                          {"existing_entry_id": clash["entry_id"]})
+                return
+            entry_vars = _catalog_vars(entry["content"]) if category == "mcp" else []
+            unknown = set(link_vars) - set(entry_vars)
+            if unknown:
+                self.fail(400, "unknown_var",
+                          f"unknown var(s) {sorted(unknown)} for catalog entry {entry_id!r} "
+                          f"(it declares {sorted(entry_vars)})", {"id": entry_id})
+                return
+            link = {"entry_id": entry_id, "name": name, "vars": dict(link_vars)}
+            bucket.append(link)
+        self.json_out(201, _link_info(category, link))
+
+    def patch_agent_link(self, slug: str, category: str, entry_id: str, body: dict) -> None:
+        """`PATCH /api/agents/{slug}/links/{category}/{entry_id}` — edit an
+        attached link in place (MN-48). `vars` full-replaces, never merges —
+        the catalog entry's own var set may have changed since attach."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        if category not in ("mcp", "skill", "rule"):
+            self.fail(404, "internal", f"unknown category {category!r}")
+            return
+        fields = {k: v for k, v in body.items() if k in ("name", "vars") and v is not None}
+        if not fields:
+            self.fail(400, "bad_request", "nothing to change", {"slug": slug, "id": entry_id})
+            return
+        with _lock:
+            entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+            if entry["category"] != category:
+                self.fail(400, "category_mismatch",
+                          f"catalog entry {entry_id!r} is category {entry['category']!r}, "
+                          f"not {category!r}", {"id": entry_id})
+                return
+            bucket = agent["links"][category]
+            idx = next((i for i, link in enumerate(bucket) if link["entry_id"] == entry_id), None)
+            if idx is None:
+                self.fail(404, "link_not_found",
+                          f"{entry_id!r} is not attached to agent {slug!r} in category {category!r}",
+                          {"id": entry_id})
+                return
+            current = bucket[idx]
+
+            new_name = current["name"] if "name" not in fields else str(fields["name"]).strip()
+            if not new_name:
+                self.fail(400, "bad_request", "name must not be empty", {"id": entry_id})
+                return
+            if "name" in fields:
+                clash = next(
+                    (link for j, link in enumerate(bucket)
+                     if j != idx and _norm_link_name(link["name"]) == _norm_link_name(new_name)),
+                    None,
+                )
+                if clash is not None:
+                    self.fail(409, "link_name_exists",
+                              f"another {category} link is already named {new_name!r}",
+                              {"existing_entry_id": clash["entry_id"]})
+                    return
+
+            entry_vars = _catalog_vars(entry["content"]) if category == "mcp" else []
+            new_vars = dict(current.get("vars") or {}) if "vars" not in fields else dict(fields["vars"] or {})
+            unknown = set(new_vars) - set(entry_vars)
+            if unknown:
+                self.fail(400, "unknown_var",
+                          f"unknown var(s) {sorted(unknown)} for catalog entry {entry_id!r} "
+                          f"(it declares {sorted(entry_vars)})", {"id": entry_id})
+                return
+
+            bucket[idx] = {"entry_id": entry_id, "name": new_name, "vars": new_vars}
+            updated = bucket[idx]
+        self.json_out(200, _link_info(category, updated))
+
+    def delete_agent_link(self, slug: str, category: str, entry_id: str) -> None:
+        """`DELETE /api/agents/{slug}/links/{category}/{entry_id}` — detach
+        (MN-48)."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        if category not in ("mcp", "skill", "rule"):
+            self.fail(404, "internal", f"unknown category {category!r}")
+            return
+        with _lock:
+            bucket = agent["links"][category]
+            before = len(bucket)
+            agent["links"][category] = [link for link in bucket if link["entry_id"] != entry_id]
+            removed = len(agent["links"][category]) != before
+        if not removed:
+            self.fail(404, "link_not_found",
+                      f"{entry_id!r} is not attached to agent {slug!r} in category {category!r}",
+                      {"id": entry_id})
+            return
+        self.json_out(200, {"ok": True})
+
+    def delete_chat(self, slug: str, chat_id: str) -> None:
+        """`DELETE /api/agents/{slug}/chats/{chat_id}` — mirrors
+        `api_delete_chat`: best-effort-stop the fake session first (an
+        `exited` broadcast to any still-open `ChatConsole.tsx`), then drop
+        the record."""
+        if _find_chat(slug, chat_id) is None:
+            self.fail(404, "chat_not_found", f"no chat {chat_id!r} for agent {slug!r}",
+                      {"slug": slug, "chat_id": chat_id})
+            return
+        _chat_ws_force_exit(chat_id)
+        with _lock:
+            _CHATS[slug] = [c for c in _CHATS.get(slug, []) if c["chat_id"] != chat_id]
+        self.json_out(200, {"ok": True})
+
+    def post_catalog_entry(self, body: dict) -> None:
+        """`POST /api/catalog` — same validation/dedup rules as `catalog.add`
+        (real `src/catalog.py`), against the fixture `CATALOG` list."""
+        category = body.get("category")
+        if category not in ("mcp", "skill", "rule"):
+            self.fail(400, "invalid_catalog_entry",
+                      f"unknown category {category!r} — expected one of "
+                      f"mcp, skill, rule")
+            return
+        name = (body.get("name") or "").strip()
+        if not name:
+            self.fail(400, "invalid_catalog_entry", "name must not be empty")
+            return
+        content = body.get("content") or ""
+        if not content.strip():
+            self.fail(400, "invalid_catalog_entry", "content must not be empty")
+            return
+        if category == "mcp" and _canonical_json(content) is None:
+            self.fail(400, "invalid_catalog_entry",
+                      "content must be valid JSON for an 'mcp' entry")
+            return
+
+        with _lock:
+            if category == "mcp":
+                dup = _find_duplicate_mcp(content, exclude_id=None)
+                if dup is not None:
+                    self.fail(409, "catalog_entry_exists",
+                              f"an mcp entry with this exact config already "
+                              f"exists: {dup['name']!r}",
+                              {"existing_id": dup["id"]})
+                    return
+            entry = {
+                "id": f"{category}_{secrets.token_hex(6)}",
+                "category": category,
+                "name": _unique_catalog_name(name, category),
+                "content": content,
+                "created_at": now_iso(),
+            }
+            CATALOG.append(entry)
+        self.json_out(201, _catalog_entry_info(entry))
+
+    def patch_catalog_entry(self, entry_id: str, body: dict) -> None:
+        with _lock:
+            entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+
+            fields = {k: v for k, v in body.items() if k in ("name", "content") and v is not None}
+            if not fields:
+                self.fail(400, "bad_request", "nothing to change", {"id": entry_id})
+                return
+
+            new_content = fields.get("content", entry["content"])
+            if not new_content.strip():
+                self.fail(400, "invalid_catalog_entry", "content must not be empty")
+                return
+            if entry["category"] == "mcp" and _canonical_json(new_content) is None:
+                self.fail(400, "invalid_catalog_entry",
+                          "content must be valid JSON for an 'mcp' entry")
+                return
+            if entry["category"] == "mcp" and "content" in fields:
+                dup = _find_duplicate_mcp(new_content, exclude_id=entry_id)
+                if dup is not None:
+                    self.fail(409, "catalog_entry_exists",
+                              f"an mcp entry with this exact config already "
+                              f"exists: {dup['name']!r}",
+                              {"existing_id": dup["id"]})
+                    return
+
+            new_name = entry["name"]
+            if "name" in fields:
+                new_name = fields["name"].strip()
+                if not new_name:
+                    self.fail(400, "invalid_catalog_entry", "name cannot be empty")
+                    return
+                clash = next(
+                    (e for e in CATALOG
+                     if e["id"] != entry_id and e["category"] == entry["category"]
+                     and _norm_catalog_name(e["name"]) == _norm_catalog_name(new_name)),
+                    None,
+                )
+                if clash:
+                    self.fail(409, "catalog_entry_exists",
+                              f"another {entry['category']} entry is already "
+                              f"named {new_name!r}", {"existing_id": clash["id"]})
+                    return
+
+            entry["name"] = new_name
+            entry["content"] = new_content
+        self.json_out(200, _catalog_entry_info(entry))
+
+    def delete_catalog_entry(self, entry_id: str) -> None:
+        with _lock:
+            entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+            # `used_by` is always empty here — MN-48 (attach/detach link
+            # storage) hasn't landed, same as the real backend's guarded
+            # `_catalog_used_by` hook before it exists.
+            CATALOG.remove(entry)
+        self.json_out(200, {"ok": True})
+
     def post_reindex(self, body: dict) -> None:
         ref = body.get("bank") or ""
         bank = find_bank(ref)
@@ -1761,7 +2981,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def handle_ws(self, query: dict) -> None:
         token = (query.get("token") or [""])[0]
-        if token != DEV_TOKEN:
+        if not NO_AUTH and token != DEV_TOKEN:
             self.fail(401, "unauthorized", "missing or invalid token")
             return
         key = self.headers.get("Sec-WebSocket-Key")
@@ -1811,6 +3031,85 @@ class Handler(BaseHTTPRequestHandler):
             self.close_connection = True
             self.log_message("ws close (clients=%d)", len(CLIENTS))
 
+    def handle_agent_chat_ws(self, slug: str, chat_id: str, query: dict) -> None:
+        """`/ws/agents/{slug}/chats/{chat_id}` — mirrors `src/api.py`'s
+        `ws_agent_chat`: same token gate, same `output`/`replay_done`/
+        `exited`/`error` envelope shapes, same "replay everything, then
+        `replay_done`, then live output" contract. The fake session itself
+        (`_chat_ws_*` above) is a canned typing-echo loop, not a structured
+        event simulator — the whole point of the real PTY architecture is
+        that the client renders raw bytes with no protocol of its own, and
+        this mock exists to exercise exactly that path, not to fake a
+        `claude` conversation."""
+        token = (query.get("token") or [""])[0]
+        if not NO_AUTH and token != DEV_TOKEN:
+            self.fail(401, "unauthorized", "missing or invalid token")
+            return
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or "websocket" not in self.headers.get("Upgrade", "").lower():
+            self.fail(400, "bad_request", "not a websocket upgrade")
+            return
+
+        accept = base64.b64encode(
+            hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
+        ).decode("ascii")
+        self.wfile.write(
+            b"HTTP/1.1 101 Switching Protocols\r\n"
+            b"Upgrade: websocket\r\n"
+            b"Connection: Upgrade\r\n"
+            b"Sec-WebSocket-Accept: " + accept.encode("ascii") + b"\r\n\r\n"
+        )
+        self.wfile.flush()
+        client = WSClient(self.connection, None)
+
+        agent = _find_agent(slug)
+        chat = _find_chat(slug, chat_id) if agent is not None else None
+        if agent is None or chat is None:
+            # Same policy as the real endpoint: send `error`, then close —
+            # a raw HTTP 404 can't be read by a WebSocket client, so the
+            # real backend (and this mock) always accepts the upgrade first.
+            with suppress(OSError):
+                client.send_json({"type": "error", "message": f"no chat {chat_id!r} for agent {slug!r}"})
+                client.send_frame(b"", opcode=0x8)
+            self.close_connection = True
+            return
+
+        replay_segments = _chat_ws_subscribe(chat_id, client)
+        try:
+            with suppress(OSError):
+                for segment in replay_segments:
+                    client.send_json(segment)
+                client.send_json({"type": "replay_done"})
+            while True:
+                frame = read_frame(self.rfile)
+                if frame is None:
+                    break
+                opcode, payload = frame
+                if opcode == 0x8:
+                    break
+                if opcode == 0x9:
+                    client.send_frame(payload, opcode=0xA)
+                    continue
+                if opcode != 0x1:
+                    continue
+                try:
+                    msg = json.loads(payload.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") == "input":
+                    _chat_ws_handle_input(chat_id, str(msg.get("data", "")))
+                elif msg.get("type") == "resize":
+                    rows, cols = msg.get("rows"), msg.get("cols")
+                    if isinstance(rows, int) and isinstance(cols, int):
+                        _chat_ws_handle_resize(chat_id, rows, cols)
+        except OSError:
+            pass
+        finally:
+            _chat_ws_unsubscribe(chat_id, client)
+            self.close_connection = True
+
 
 # --------------------------------------------------------------------------
 # background noise
@@ -1855,12 +3154,18 @@ def main() -> None:
                         help="seconds between synthetic query events (0 = off)")
     parser.add_argument("--batch-ms", type=int, default=260,
                         help="simulated time per index batch")
+    parser.add_argument("--no-auth", action="store_true",
+                        help="skip the token check (real backend is open by "
+                             "default too, unless $MNEMO_API_TOKEN/require_login "
+                             "is set) - this mock otherwise always requires one")
     args = parser.parse_args()
 
     if args.host not in ("127.0.0.1", "::1", "localhost"):
         raise SystemExit("dev server binds loopback only")
 
     Handler.batch_ms = args.batch_ms
+    global NO_AUTH
+    NO_AUTH = args.no_auth
 
     threading.Thread(target=heartbeat, daemon=True).start()
     threading.Thread(target=_auto_pending_scheduler, daemon=True).start()
@@ -1870,7 +3175,10 @@ def main() -> None:
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     httpd.daemon_threads = True
     print(f"mock backend on http://{args.host}:{args.port}", flush=True)
-    print(f"open  http://{args.host}:{args.port}/ui/?token={DEV_TOKEN}", flush=True)
+    if args.no_auth:
+        print(f"open  http://{args.host}:{args.port}/ui/  (no token required)", flush=True)
+    else:
+        print(f"open  http://{args.host}:{args.port}/ui/?token={DEV_TOKEN}", flush=True)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -1,0 +1,863 @@
+{
+  "common": {
+    "gate": {
+      "missing": {
+        "title": "Access token required",
+        "text": "A token is needed to open the console. The command prints a link with the current token and opens it:"
+      },
+      "rejected": {
+        "title": "Token rejected",
+        "text": "The service rejected the token you supplied (HTTP 401). It is most likely stale, or was copied incompletely — the current token is printed by the command itself.",
+        "lead": "The command prints a ready link with the current token and opens it:",
+        "note": "The token was rejected by the service"
+      },
+      "tokenPlaceholder": "48 hex characters",
+      "manualLabel": "Or paste the token manually:",
+      "submit": "Sign in",
+      "enterToken": "Enter a token",
+      "idle": "not authenticated"
+    },
+    "error": {
+      "unreachable": "backend unreachable: {message}",
+      "invalidJson": "invalid JSON in response"
+    },
+    "status": {
+      "ready": "ready",
+      "indexing": "indexing",
+      "empty": "empty"
+    },
+    "taskKind": {
+      "file": "file",
+      "bulk": "index sync",
+      "rebuild": "full reindex",
+      "prune": "index prune",
+      "default": "task"
+    },
+    "unit": {
+      "sec": "s",
+      "min": "min"
+    },
+    "progress": {
+      "batch": "batch",
+      "chunks": "chunks",
+      "yielded": "preempted",
+      "approxTitle": "time since the console saw this task — it started earlier",
+      "exactTitle": "time since the task started"
+    },
+    "reindex": {
+      "queuedNote": "queued: {what} · in queue {n} · task {ids}"
+    },
+    "bankMenu": {
+      "stateNote": "state: {state}",
+      "sync": "Sync index",
+      "syncTitle": "Reindexes only changed files and removes deleted ones from the index",
+      "rebuild": "Full reindex",
+      "rebuildTitle": "Wipes the index and rebuilds it from scratch — slow, proportional to the bank''s size",
+      "mcpTitle": "This bank''s token and a ready-made config fragment for a project",
+      "stateLabel": "State",
+      "remove": "Remove bank",
+      "removeTitle": "Unregister the bank; .md files are untouched"
+    },
+    "btn": {
+      "cancel": "Cancel",
+      "close": "Close",
+      "closeEsc": "Close (Esc)",
+      "copy": "copy",
+      "copied": "copied",
+      "back": "← Back"
+    },
+    "resizerTitle": "Drag to resize",
+    "picker": {
+      "title": "Add bank",
+      "ariaLabel": "Add bank",
+      "pathLabel": "Directory with .md — it becomes the bank''s root",
+      "pathPlaceholder": "or paste a path",
+      "nameLabel": "Bank name (optional)",
+      "namePlaceholder": "guessed from the folder name",
+      "createStructure": "Create the memory structure here (.claude/memory)",
+      "connectMcp": "Connect the project (MCP) right away",
+      "addDir": "Add this directory",
+      "reading": "reading…",
+      "home": "home",
+      "bankBadge": "bank",
+      "noSubdirs": "no subdirectories",
+      "truncated": "showing the first {n} directories — paste the rest as a path",
+      "withSubdirs": "(with subdirectories)",
+      "mdCount": "this directory has {count} .md{nested}",
+      "noMd": "this directory has no .md — nothing to index",
+      "countTruncatedTitle": "the count timed out — there are at least this many files, all of them will be indexed",
+      "excludesTitle": "excludes .git, .venv, node_modules — same as what the indexer skips",
+      "alreadyRegistered": "already registered as «{name}»",
+      "alreadyBankTitle": "already a bank: {name}",
+      "hint": {
+        "alreadyBank": "this directory is already a memory bank",
+        "hasNestedMemory": "this directory already has a .claude/memory structure",
+        "willBecome": "Will become the bank: {root}",
+        "project": "Project: {root}",
+        "willConnect": "Will be connected once the structure is created",
+        "projectOnly": "available only for a bank at «‹project›/.claude/memory»"
+      },
+      "mcpSkipped": "MCP not connected",
+      "mcpConnected": "MCP connected",
+      "mcpFailed": "MCP connection failed",
+      "addedNote": "bank added · indexing queued"
+    },
+    "token": {
+      "title": "MCP access",
+      "titleFor": "MCP access — {name}",
+      "ariaLabel": "MCP access to bank",
+      "regen": "Regenerate",
+      "regenTitle": "Issue the bank a new token; the old one stops working immediately",
+      "regenConfirm": "Regenerate the token for bank «{name}»? The old one stops working immediately: every config that already holds it — ~/.claude.json, another project''s .mcp.env — will stop connecting until you put the new one in.",
+      "regenYes": "Yes, regenerate",
+      "regeneratedNote": "Token regenerated. Configs with the old token will no longer connect — put the new one in them.",
+      "bankTokenLabel": "Bank token",
+      "hide": "hide",
+      "show": "show",
+      "hideTitle": "Remove the value from the screen",
+      "showTitle": "Show the value on screen",
+      "copyTokenTitle": "Copy the token without showing it",
+      "copyToClipboard": "Copy to clipboard",
+      "copyFailed": "Couldn''t copy — select the text and copy it manually",
+      "scopeNote": "Opens only the bank «{name}». The service token this console is open with is broader — it does not belong in a project config.",
+      "entryLabel": "Config entry name",
+      "entryHint": {
+        "base": "This is how the entry shows up among other MCP servers; it also becomes the prefix of the tool names — mcp__{entry}__search.",
+        "own": " It is also where {var} comes from: the token belongs to one bank, so a second bank in the same project does not overwrite the first one’s token. MNEMO_HOST and MNEMO_PORT are shared — they name the service, not the bank."
+      },
+      "scope": {
+        "literal": "with values · .mcp.json or ~/.claude.json",
+        "template": "with placeholders · .mcp.json.template"
+      },
+      "scopeHint": "The second — if the project has .mcp.json.template and mcp-setup.sh: values there are substituted from .mcp.env, and only the template rides in git. Otherwise the first: .mcp.json holds the values directly and is in .gitignore.",
+      "caption": {
+        "literal": "For the project''s .mcp.json or ~/.claude.json — merge into «mcpServers»",
+        "template": "For .mcp.json.template — merge into the existing «mcpServers»",
+        "env": "Lines for .mcp.env"
+      },
+      "templateLead": {
+        "part1": "All three files are filled in by ",
+        "part2": " — the fragment into .mcp.json.template, the variables into .mcp.env, the substitution lines into mcp-setup.sh. It does not create .mcp.env itself: that is a file with secrets, so first run ",
+        "part3": ", then init again, and finally ",
+        "part4": " — that is what assembles .mcp.json with the actual values. Below is exactly what init will write: to preview it, or to fill it in by hand if init cannot be run in this project."
+      },
+      "manualPaste": {
+        "part1": "If you fill it in by hand, add to the ",
+        "part2": " call in mcp-setup.sh the line ",
+        "part3": ". Without it the placeholder lands in .mcp.json verbatim, and the script still reports success — so the failure only shows up when the server silently fails to connect."
+      },
+      "generatedFileNote": ".mcp.json is a generated file: it is in .gitignore, and mcp-setup.sh rewrites it from the template. The entry must live in .mcp.json.template, or the next run of the script will wipe it."
+    },
+    "removal": {
+      "submit": "Remove",
+      "busy": "Removing…",
+      "title": "Remove bank",
+      "ariaLabel": "Remove bank",
+      "leadPrefix": "Bank ",
+      "leadSuffix": " will stop existing for this machine.",
+      "goneForever": "Gone forever",
+      "goneForeverText": "The bank''s registration and its token. The token is issued at random and cannot be recreated: every .mcp.json that connects with it stops working, and the same token can never be recovered.",
+      "untouched": "Left untouched",
+      "untouchedPrefix": "All .md under ",
+      "untouchedSuffix": ". The console does not delete the bank’s contents — only what was derived from it.",
+      "dropIndex": "also delete the index ({bytes}) — recoverable with a full reindex",
+      "stripMcpPrefix": "also remove the MCP wiring (",
+      "noMcpJson": "no .mcp.json at the project root",
+      "confirmLabel": "Type the bank name to confirm"
+    }
+  },
+  "shell": {
+    "nav": {
+      "ariaLabel": "Console sections",
+      "memory": "Memory",
+      "journal": "Journal",
+      "settings": "Settings",
+      "agents": "Agents",
+      "registry": "Registry"
+    },
+    "sidebar": {
+      "collapse": "Collapse navigation",
+      "expand": "Expand navigation"
+    },
+    "footTitle": "provider {provider} · version {version}",
+    "conn": {
+      "connecting": "connecting…",
+      "live": "live",
+      "dropped": "disconnected",
+      "error": "error"
+    },
+    "event": {
+      "done": "done: {what} · {n} chunks · {took}",
+      "error": "error: {what} — {error}",
+      "pruned": "removed from index: {n}"
+    }
+  },
+  "memory": {
+    "pane": {
+      "banks": "Banks",
+      "refreshTitle": "Refresh list",
+      "files": "Files",
+      "selectBankHint": "Select a bank on the left",
+      "content": "Content",
+      "chunkVizTitle": "Show chunk boundaries as they lie in the index",
+      "chunkVizLabel": "Chunk boundaries",
+      "reindexFileBtn": "Reindex file",
+      "selectFileHint": "Select a file in the tree"
+    },
+    "header": {
+      "addBank": "＋ Add bank",
+      "addBankTitle": "Register a new directory with .md as a bank"
+    },
+    "count": {
+      "banks": "{n, plural, one {# bank} other {# banks}}",
+      "files": "{n, plural, one {# file} other {# files}}",
+      "chunks": "{n, plural, one {# chunk} other {# chunks}}",
+      "dirs": "{n, plural, one {# directory} other {# directories}}"
+    },
+    "banks": {
+      "emptyHint": "No banks registered yet — \"＋ Add bank\" in the header picks a directory with .md."
+    },
+    "bankState": {
+      "enabled": {
+        "label": "Active",
+        "note": "Watching the files, the index updates itself, search works."
+      },
+      "frozen": {
+        "label": "Frozen",
+        "note": "Not watching the files — the index stays as-is, but search still works. This is what saves a full rebuild when the model changes."
+      },
+      "disabled": {
+        "label": "Disabled",
+        "note": "Not watching, not searching. The bank stays in the registry."
+      }
+    },
+    "statusNote": {
+      "indexingHasChunks": "the base exists, fresh changes are catching up",
+      "indexingEmpty": "first build in progress — still empty",
+      "emptyQueued": "empty, tasks queued",
+      "emptyIdle": "genuinely empty, nothing scheduled",
+      "ready": "index ready"
+    },
+    "bank": {
+      "menuBtnTitle": "Bank actions",
+      "filesStat": "{n} files",
+      "chunksStat": "{n} chunks",
+      "queuedStat": "queued {n}",
+      "dbSizeTitle": "index size",
+      "lastIndexed": "last indexed: {date}",
+      "frozenBadge": "frozen",
+      "frozenBadgeTitle": "The index is not updating — files may have changed since {date}. Search still works and answers from that state.",
+      "disabledBadge": "disabled",
+      "noRootBadge": "root missing"
+    },
+    "indexedState": {
+      "yes": "indexed",
+      "no": "not indexed"
+    },
+    "tree": {
+      "selectBankHint": "Select a bank on the left",
+      "loading": "Loading…",
+      "emptyMd": "This bank has no .md files"
+    },
+    "chunk": {
+      "gap": "· outside chunks ·",
+      "end": "{n, plural, one {end · # character} other {end · # characters}}"
+    },
+    "rebuild": {
+      "action": "Rebuild",
+      "queuing": "Queuing…",
+      "dialogTitle": "Rebuild indexes",
+      "dialogAriaLabel": "Rebuild indexes",
+      "notice": {
+        "actionable": "{n} bank(s) have an index from a previous model",
+        "running": "{n} already rebuilding",
+        "disabled": "{n} disabled — enable them first",
+        "suffix": ". Search over stale vectors refuses rather than mixing two spaces."
+      },
+      "dialog": {
+        "lead": "A full reindex will be queued for {n} bank(s). Old derived indexes will be wiped and rebuilt from the .md from scratch.",
+        "chunksLabel": "{n} chunks",
+        "note": ".md files are not changed. Time is proportional to size; the exact speed depends on this machine''s backend and hardware."
+      }
+    }
+  },
+  "agents": {
+    "header": {
+      "count": "{n, plural, one {# agent} other {# agents}} · {c, plural, one {# chat} other {# chats}}",
+      "add": "＋ Add agent",
+      "addTitle": "Create or adopt a new agent"
+    },
+    "tree": {
+      "loading": "Loading…",
+      "empty": "No agents yet — \"＋ Add agent\" creates the first one.",
+      "noChats": "No chats yet — select this agent to start one.",
+      "settingsTitle": "Agent settings",
+      "chatUntitled": "Untitled chat",
+      "newChat": "＋ New chat",
+      "creatingChat": "Creating…",
+      "deleteChatTitle": "Delete chat"
+    },
+    "workspace": {
+      "selectHint": "Select an agent on the left, or create a new one.",
+      "stubTitle": "Pick a chat, or start a new one",
+      "stubBody": "Select an existing chat in the tree, or use \"＋ New chat\" to start one. Switching between chats never stops background generation — only deleting a chat does."
+    },
+    "console": {
+      "status": {
+        "connecting": "connecting…",
+        "replaying": "replaying…",
+        "live": "live",
+        "error": "reconnecting…",
+        "exited": "session ended",
+        "limit": "session limit reached"
+      },
+      "errorBanner": "Connection error: {message}",
+      "limitBanner": "Machine-wide live-session limit reached ({count}/{limit}) — close another chat and try again.",
+      "exitedBanner": "The session ended (exit code: {code}).",
+      "dropHint": "Drop a file to attach it",
+      "attachTitle": "Attach a file",
+      "clearAttachment": "Remove attachment",
+      "uploading": "Uploading…",
+      "subagents": {
+        "label": "Subagent runs",
+        "pending": "started — no completion signal yet",
+        "done": "done"
+      }
+    },
+    "wizard": {
+      "title": "Add agent",
+      "ariaLabel": "Create agent",
+      "step1": "Persona",
+      "step2": "Backend",
+      "nameLabel": "Agent name",
+      "namePlaceholder": "e.g. Project debug assistant",
+      "claudeMdLabel": "CLAUDE.md",
+      "sourceLabel": "Folder source",
+      "sourceNew": "Create new",
+      "sourceExisting": "Point to an existing folder",
+      "newFolderHint": "Will be created automatically under the engine's own agents directory.",
+      "chosenNote": "✓ Chosen: {path}",
+      "confirm": {
+        "title": "This folder already has something — confirm before adopting",
+        "claudeMd": "CLAUDE.md",
+        "mcp": "MCP servers",
+        "skills": "Skills",
+        "rules": "Rules",
+        "yes": "yes",
+        "no": "no",
+        "note": "What's already there is adopted as-is, nothing gets overwritten; whatever's missing is filled in.",
+        "cancel": "Cancel",
+        "ok": "Create"
+      },
+      "previewError": "Couldn't inspect this folder: {message}",
+      "backendLabel": "Authentication",
+      "backendStandard": "System (Claude Code)",
+      "backendCustom": "Proxy",
+      "backendStandardHint": "Claude Code CLI/SDK defaults — the subscription or key as configured, nothing to fill in.",
+      "hostLabel": "Host",
+      "portLabel": "Port",
+      "modelLabel": "Model override",
+      "modelPlaceholder": "e.g. claude-sonnet-5",
+      "backendSavedHint": "Saved in the agent's own launch.json — per-agent, not a machine setting.",
+      "linksHint": "MCP / Skills / Rules aren't picked here — they attach later, separately, for this agent.",
+      "next": "Next",
+      "submit": "Create agent",
+      "creating": "Creating…",
+      "createdNote": "Agent «{name}» created.",
+      "launchWarnNote": "Agent «{name}» created, but the backend setting couldn't be saved: {error}"
+    },
+    "folder": {
+      "pathLabel": "Folder",
+      "home": "home",
+      "reading": "reading…",
+      "noSubdirs": "no subdirectories",
+      "chooseBtn": "Choose this folder"
+    },
+    "settings": {
+      "title": "⚙ Agent settings",
+      "save": "Save",
+      "loading": "Loading…",
+      "tabs": {
+        "general": "General",
+        "backend": "Backend",
+        "links": "MCP / Skills / Rules"
+      },
+      "general": {
+        "savedNote": "Settings saved.",
+        "subagentsTitle": "Subagents",
+        "subagentsEmpty": "No .claude/agents/*.md files in this agent's own folder.",
+        "subagentLaunchBtn": "Turn into agent",
+        "subagentLaunching": "Turning into agent…",
+        "subagentLaunchedNote": "Agent «{name}» created and opened.",
+        "subagentLaunchError": "Could not turn «{name}» into an agent: {message}"
+      },
+      "backend": {
+        "savedNote": "Backend setting saved.",
+        "savedHint": "Saved in this agent's own launch.json — per-agent, not a machine setting.",
+        "invalidNote": "This agent's launch.json is invalid: {error}"
+      }
+    },
+    "links": {
+      "hint": "Attached from the registry — each subsection shows only what's already attached to this agent. The name and template variable values can be changed only for this agent, not in the registry.",
+      "editBtn": "Change",
+      "doneBtn": "Done",
+      "empty": "Nothing attached.",
+      "addBtn": "+ Add",
+      "detachTitle": "Detach from agent",
+      "detachedNote": "Detached «{name}».",
+      "attachedNote": "Added «{name}» to «{agent}».",
+      "missingFromRegistry": "removed from the registry",
+      "error": {
+        "nameTaken": "Another entry named {name} is already attached in this category"
+      },
+      "pick": {
+        "title": "Attach {category} from the registry",
+        "ariaLabel": "Attach a registry entry to this agent",
+        "empty": "Nothing available — everything is already attached, or the registry is empty.",
+        "nameLabel": "Name for this agent",
+        "varsLabel": "Variable values (this agent only)",
+        "varPlaceholder": "value",
+        "varUnset": "not set",
+        "back": "Back",
+        "submit": "Attach to agent"
+      }
+    }
+  },
+  "journal": {
+    "filter": {
+      "bankLabel": "Bank",
+      "allBanks": "All banks",
+      "periodLabel": "Period",
+      "period24h": "24 hours",
+      "period1h": "Last hour",
+      "period7d": "7 days",
+      "period30d": "30 days"
+    },
+    "list": {
+      "newestFirst": "newest first",
+      "shownOf": "Showing {shown} of {total}",
+      "empty": "Empty",
+      "noEvents": "No events found"
+    },
+    "header": {
+      "segQuery": "Queries",
+      "segIndex": "Indexing",
+      "refreshTitle": "Refresh journal"
+    },
+    "event": {
+      "rebuildTitle": "Full bank rebuild",
+      "pruneTitle": "Removed from index",
+      "syncTitle": "Index sync",
+      "errorStatus": "error",
+      "result": {
+        "ok": "ok",
+        "skipped": "skipped"
+      }
+    },
+    "hit": {
+      "openFile": "Open file",
+      "showMore": "show more",
+      "collapse": "collapse",
+      "chunkLabel": "{heading} · chunk {n}"
+    },
+    "detail": {
+      "queryKicker": "query · #{id}",
+      "indexKicker": "indexing · #{id}",
+      "bank": "bank",
+      "face": "face",
+      "prefix": "prefix",
+      "hits": "hits",
+      "tookMs": "time, ms",
+      "when": "when",
+      "kind": "kind",
+      "trigger": "trigger",
+      "resultsLabel": "Results",
+      "resultsOrderNote": "in exact rank order",
+      "noHits": "No hits",
+      "filesIndexed": "files",
+      "chunksIndexed": "chunks",
+      "filesPruned": "removed",
+      "duration": "duration",
+      "errorLabel": "Error",
+      "fileSection": "File",
+      "currentFileOf": "current file of bank {bank}",
+      "selectHint": "Select an event on the left"
+    }
+  },
+  "registry": {
+    "tabs": {
+      "mcp": "MCP",
+      "skill": "Skills",
+      "rule": "Rules"
+    },
+    "category": {
+      "mcp": "MCP",
+      "skill": "Skill",
+      "rule": "Rule"
+    },
+    "header": {
+      "add": "＋ Add",
+      "addTitle": "Add a manual entry to the registry"
+    },
+    "count": {
+      "agents": "{n, plural, one {# agent} other {# agents}}"
+    },
+    "list": {
+      "loading": "Loading…",
+      "empty": "Empty — add an entry via \"＋ Add\"."
+    },
+    "detail": {
+      "selectHint": "Select an entry on the left.",
+      "contentLabelMcp": "Config",
+      "contentLabelText": "Text",
+      "editTitle": "Edit",
+      "nameLabel": "Name",
+      "save": "Save",
+      "varsLabel": "Template variables",
+      "varsEmpty": "None — static.",
+      "updatedNote": "Entry «{name}» updated."
+    },
+    "error": {
+      "emptyConfig": "Empty config",
+      "invalidJson": "Invalid JSON: {message}",
+      "duplicate": "This MCP server already exists in the registry: {name}",
+      "nameTaken": "Another entry named {name} already exists in this category"
+    },
+    "addModal": {
+      "title": "Add — {category}",
+      "ariaLabel": "Add entry to registry",
+      "nameLabel": "Name",
+      "configLabel": "Config (JSON)",
+      "configPlaceholder": "'{' \"type\": \"http\", \"url\": \"...\" '}'",
+      "contentLabelSkill": "Skill description",
+      "contentLabelRule": "Rule text",
+      "submit": "Add",
+      "addedNote": "Added «{name}» to the registry."
+    }
+  },
+  "settings": {
+    "btn": {
+      "save": "Save"
+    },
+    "header": {
+      "title": "Settings",
+      "sub": "applies to this machine, not one bank"
+    },
+    "tabs": {
+      "general": "General",
+      "embed": "Embedding model",
+      "maint": "Maintenance"
+    },
+    "lede": {
+      "general": "What concerns the console and the machine as a whole — not one bank, and not the embedding backend.",
+      "embed": "Which backend computes vectors for search across banks, and how much RAM it takes for that.",
+      "maint": "The same structured doctor report the CLI prints as text. Checks run only when this section is opened."
+    },
+    "loading": "Loading…",
+    "messages": {
+      "nothingChanged": "Nothing to save"
+    },
+    "overrideNote": "overridden by the {var} environment variable — what is saved here has no effect while it is set",
+    "notSavedToggle": "not saved — currently {state}; press \"Save\" to apply",
+    "state": {
+      "on": "on",
+      "off": "off"
+    },
+    "toggle": {
+      "on": "On",
+      "off": "Off"
+    },
+    "general": {
+      "theme": {
+        "label": "Console theme",
+        "note": "This browser''s own choice — applies immediately, does not wait for \"Save\".",
+        "dark": "Dark",
+        "light": "Light"
+      },
+      "language": {
+        "label": "Language",
+        "note": "This browser''s own choice — applies immediately, does not wait for \"Save\"."
+      },
+      "autostart": {
+        "label": "Start the service at logon",
+        "note": "Registers as {mechanism}{named}. Applies from the next logon; what is running now is untouched.",
+        "namedSuffix": " — \"{name}\"",
+        "notFetched": "state not received",
+        "unsupported": "not supported on this system",
+        "savedOn": "Autostart: the service will come up at logon",
+        "savedOff": "Autostart: off, you will need to start the service yourself"
+      },
+      "autoUpdate": {
+        "label": "Automatic update",
+        "note": "A fit release applies itself — with a short countdown and a \"Cancel\" button right in the console. Off — only the banner and manual confirmation remain, as before.",
+        "savedOn": "Auto-update: on",
+        "savedOff": "Auto-update: off",
+        "checking": "Checking…",
+        "checkBtn": "Check for updates",
+        "upToDate": "Up to date"
+      },
+      "requireLogin": {
+        "label": "Require a token to sign in",
+        "noteOff": "Off (default): \"/api\" (console and CLI) is open on loopback, as now — no token.",
+        "noteOn": "On: the console and CLI need a service token to access.",
+        "savedOn": "Signing in now requires a token",
+        "savedOff": "The console is open on loopback again, no token",
+        "tokenLabel": "Service token",
+        "tokenNote": "Shown once — GET /api/settings will not return it again. The console has already adopted this token for the current session, so signing in again is not needed. If it''s lost — the same file is on disk (the path and mnemo doctor will show it), or turn this option off again to drop the token requirement."
+      },
+      "serviceNotLoaded": "Service state not received yet",
+      "statusLabel": "State",
+      "stat": {
+        "version": "Version",
+        "pid": "PID",
+        "address": "Address",
+        "provider": "Provider",
+        "uptime": "Uptime",
+        "priorityQueue": "Priority queue",
+        "priorityOn": "enabled",
+        "priorityOff": "disabled"
+      },
+      "aboutLabel": "About the project"
+    },
+    "uptime": {
+      "hoursMinutes": "{h} h {m} min",
+      "minutesSeconds": "{m} min {s} s",
+      "seconds": "{s} s"
+    },
+    "embed": {
+      "warn": {
+        "line1": "Changing the model or width is a new rebuild key.",
+        "line2": "The configuration takes effect after saving settings.",
+        "line3": "Old indexes get REBUILD PENDING and search over them refuses until they are regenerated."
+      },
+      "backendLabel": "Embedding backend",
+      "notSavedBackend": "not saved — currently active is \"{active}\"; press \"Save\" to switch to \"{target}\"",
+      "backend": {
+        "local": {
+          "label": "Local resident",
+          "note": "nothing to configure; works offline"
+        },
+        "ollama": {
+          "label": "Ollama",
+          "note": "a local service; on a GPU, rebuilding a bank is noticeably faster — the exact gain depends on the card"
+        },
+        "openai": {
+          "label": "OpenAI",
+          "note": "the bank''s memory leaves the machine — a deliberate choice, not the default"
+        }
+      },
+      "model": {
+        "intfloat/multilingual-e5-large": {
+          "note": "ships with mnemo; ~2.2 GB, runs on the CPU resident"
+        },
+        "bge-m3": {
+          "note": "recommended: no prefixes, 8K window, fast on a GPU"
+        },
+        "zylonai/multilingual-e5-large": {
+          "note": "the same model as the local resident"
+        },
+        "nomic-embed-text": {
+          "note": "also has prefixes, but its own — not e5''s"
+        },
+        "prefixedNote": "this model is trained with markers — mnemo will add them itself",
+        "notInCatalog": " (not in catalogue)"
+      },
+      "local": {
+        "lead": "The resident on this machine computes vectors — ",
+        "dimsSuffix": " ({dim} dimensions). ",
+        "noDimSuffix": ". ",
+        "tail": "No byte of memory leaves the machine."
+      },
+      "modelLabel": "Model",
+      "urlLabel": "Address",
+      "dimLabel": "Dimensions",
+      "timeoutLabel": "Timeout, s",
+      "dimNote": "The width is filled from the catalogue, but the endpoint has the final word: mnemo checks it against the first vector received and refuses to write the index if they disagree.",
+      "keyLabel": "API key",
+      "keyNote": "Stored in settings.json on this machine. Never shown back — a page that prints a secret prints it into a screenshot too.",
+      "key": {
+        "placeholderStored": "stored — type a new one to replace it"
+      },
+      "mem": {
+        "hold": {
+          "loaded": "in memory",
+          "unloaded": "not in memory",
+          "na": "holds nothing",
+          "unknown": "unknown"
+        },
+        "label": "RAM",
+        "notFetched": "State not received yet",
+        "introStrong": "The model comes up on its own when needed for search or indexing",
+        "introRest": " — \"not in memory\" is a normal state, not an error. \"Unload\" frees the memory right away, instead of keeping the model loaded just in case.",
+        "statusCaption": "Status:",
+        "modelCaption": "Model:",
+        "idleCaption": "Auto-unload:",
+        "unloadBtn": "Unload",
+        "wakeBtn": "Bring into memory",
+        "probeEndpointBtn": "Check endpoint",
+        "probeBtn": "Check",
+        "downloading": "Downloading the model…",
+        "downloadBtn": "Download the model to disk (2.2 GB)",
+        "note": {
+          "wakeSoon": "It will come back in a few seconds",
+          "naHosted": "This endpoint holds nothing on this machine — the model lives on the provider''s side, so there is nothing to free.",
+          "naProbeCost": "\"Check endpoint\" makes one embedding request. For a metered API this can be a paid call.",
+          "expiresAt": "The backend holds it until {when}",
+          "othersHeld": "There are also {n} other model(s) there — not ours, we leave them alone",
+          "downloadFailed": "The download failed — try again"
+        },
+        "unloadedNote": "Memory freed. The model will come back on its own on the next search.",
+        "probeOkBase": "The endpoint responded",
+        "probeOkDimSuffix": " — the probe vector has {dim} dimensions",
+        "loadedNote": "The backend responded — the model is in memory",
+        "busyError": "The queue is still working through this backend — wait until it clears and try again."
+      },
+      "errors": {
+        "missingUrl": "Enter the endpoint address",
+        "dimNotPositive": "Dimensions must be a positive number",
+        "refreshFailed": "Settings saved, but not every state could be re-read. Refresh the page — no need to save again."
+      },
+      "saved": {
+        "restartRequired": "Saved. Takes effect after the service restarts.",
+        "appliedNoPending": "Saved and applied. Check the backend with the button above.",
+        "appliedPending": "Saved and applied. Check the backend with the button above, then regenerate the banks with REBUILD PENDING on the main screen."
+      }
+    },
+    "maint": {
+      "refreshing": "Refreshing…",
+      "refreshBtn": "Refresh diagnostics",
+      "collecting": "Collecting diagnostics…",
+      "notFetched": "The report has not been received yet",
+      "engineLabel": "Engine",
+      "embedLabel": "Embedding",
+      "providerLabel": "Provider",
+      "localModelLabel": "Local model",
+      "residentLabel": "Resident",
+      "serviceLabel": "Service",
+      "queueLabel": "Queue",
+      "registryLabel": "Registry",
+      "unknown": "unknown",
+      "unknownTitle": "Unknown",
+      "genericError": "error",
+      "model": {
+        "cachedFull": "cache complete",
+        "notLoaded": "NOT LOADED",
+        "cachedNotNeeded": "present but not needed",
+        "notNeeded": "not needed"
+      },
+      "unavailable": "UNAVAILABLE",
+      "resident": {
+        "up": "running",
+        "down": "not loaded",
+        "portSuffix": " · machine port",
+        "na": "n/a for this provider"
+      },
+      "endpoint": {
+        "dimsUnit": "dimensions",
+        "notConfigured": "NOT CONFIGURED — {error}"
+      },
+      "backend": {
+        "upSummary": "running · pid {pid} · machine port",
+        "down": "UNAVAILABLE — {error}"
+      },
+      "token": {
+        "notSet": "not set · /api is open on loopback by default"
+      },
+      "registryUnreadable": "UNREADABLE — {error}",
+      "registryReadable": "The registry reads fine",
+      "registry": {
+        "noRoot": "root missing"
+      },
+      "count": {
+        "projects": "{n, plural, one {# project} other {# projects}}",
+        "attempts": "{n, plural, one {# attempt} other {# attempts}}"
+      },
+      "wiring": {
+        "allCurrent": "all current"
+      },
+      "autoBlacklist": {
+        "sectionLabel": "Auto-update blacklist",
+        "sectionNote": "Tags the unattended auto-update checker tried and either gave up on, or is still retrying after a failure. Manual updates are unaffected — this is diagnostic only.",
+        "blacklistedTitle": "Blacklisted",
+        "retryingTitle": "Retrying",
+        "lastFailed": "last failed {date}",
+        "nextRetry": "next retry {date}",
+        "permanentNote": "gave up — will not be offered again automatically",
+        "noError": "no error recorded"
+      },
+      "orphans": {
+        "unavailableTitle": "List unavailable",
+        "deletionForbidden": "Deletion is refused: {reason}",
+        "registryUncheckable": "the registry cannot be checked",
+        "noneTitle": "No orphans",
+        "noneNote": "Every index belongs to a bank",
+        "unreadable": "unreadable — {error}",
+        "preV3NoRoot": "pre-v3 index — root not recorded",
+        "noRoot": "root not recorded",
+        "rootStillOnDisk": " · root still on disk",
+        "unknownFiles": "? files",
+        "sectionLabel": "Orphan indexes",
+        "sectionNote": "Doctor only shows them. Cleanup happens only as a separate confirmed action — never automatically, never together with diagnostics.",
+        "cleanupBtn": "Clean up orphans",
+        "confirmText": "Only these shown derived index ids will be deleted: {ids}. The registry is re-checked before each deletion; .md files are untouched.",
+        "cleaning": "Cleaning up…",
+        "deleteBtn": "Delete {n}",
+        "result": {
+          "removed": "removed {removed} of {total}",
+          "freed": "freed {bytes}",
+          "skipped": "skipped {n}",
+          "locked": "locked {n}"
+        },
+        "lockedError": "Not all files were deleted: {list}"
+      }
+    }
+  },
+  "update": {
+    "modal": {
+      "title": "mnemo update"
+    },
+    "steps": {
+      "download": "Downloading from GitHub",
+      "venv": "Installing packages",
+      "switching": "Switching version and restarting"
+    },
+    "confirm": {
+      "currentLabel": "Current version: ",
+      "newLabel": "New version: ",
+      "warning": "The mnemo service will be stopped and restarted on the new version. Search and indexing are unavailable while this happens. Once you press \"OK\" the action cannot be cancelled — progress is shown until it finishes.",
+      "okBtn": "OK",
+      "staleTarget": "The version shown is stale (current: {tag}). Close this window and try again."
+    },
+    "autoPending": {
+      "leadPrefix": "Automatic update to ",
+      "leadMiddle": " starts in ",
+      "leadSuffix": " s.",
+      "note": "If nothing is clicked, the update applies automatically. \"Cancel\" only postpones it — the same version may be offered again on the next check."
+    },
+    "progress": {
+      "title": "Updating to {tag}…",
+      "switchingNote": "The service is restarting — the page will lose its connection for a few seconds. This is expected: the result becomes known as soon as the connection recovers."
+    },
+    "timeout": {
+      "text": "Couldn''t learn the update''s outcome within the allotted time. The service may still be restarting, or the console can''t reach it right now. Check manually (mnemo doctor) or try again.",
+      "retryBtn": "Try again"
+    },
+    "terminal": {
+      "done": "Updated to {tag}",
+      "rolledBack": "A problem occurred updating to {tag} — rolled back to {current}",
+      "errorSuffix": " ({error})",
+      "failedBase": "Update failed",
+      "failedWithError": ": {error}",
+      "failedNoError": ".",
+      "unknownState": " Service state may be undefined — check mnemo doctor",
+      "unchanged": " The current version was not changed",
+      "autoClosePrefix": "Closes automatically in ",
+      "autoCloseSuffix": " s."
+    },
+    "banner": {
+      "busy": "mnemo update in progress…",
+      "autoPending": "Auto-update to {tag} awaiting confirmation",
+      "available": "New version {tag} available"
+    }
+  }
+}

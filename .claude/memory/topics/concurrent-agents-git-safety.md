@@ -1,0 +1,11 @@
+# Concurrent agents on one working tree — git safety rule
+
+Multiple subagents (`service-dev`, `ui-dev`, `reviewer`, `planner`) routinely run in parallel within one Claude Code session, all operating on the **same** git working tree (no per-agent worktree isolation in this project's workflow). Confirmed live 2026-08-29: while `reviewer-phase3` reviewed MN-35's diff, `service-dev-mn40` had genuinely uncommitted, unrelated changes sitting in the same tree (`src/api.py`, `src/config.py` modified, `src/agent_registry.py` untracked). The reviewer ran `git stash`/`git stash pop` to inspect something — round-tripped cleanly this time, but a stash captures **every** uncommitted change in the tree, not just the file(s) the agent is reviewing, so a `stash pop` conflict, a `git checkout --`, or `git clean -fd` run by one agent can silently clobber another agent's in-progress, not-yet-reported work.
+
+## Rule
+
+Subagents (via their prompt from the lead) should never run tree-wide destructive/history-rewriting git commands against the shared checkout while other agents may be active: `git stash` (any form), `git checkout -- <path>` / `git restore`, `git clean`, `git reset --hard`. Read-only inspection (`git status`, `git diff`, `git log`, `git show`) is always safe. If an agent needs to see a file's committed state without losing its own or a peer's uncommitted edits, read the specific file via `git show HEAD:<path>` instead of stashing.
+
+The lead is responsible for sequencing which agents touch the *same files* concurrently (e.g. two `service-dev` tickets that both edit `src/api.py` should not run in parallel — see `logs/2026-08-29-*.md` for how MN-40/MN-41 were sequenced for exactly this reason), but different agents touching genuinely disjoint files (frontend vs. backend) is fine and expected to run in parallel. The stash hazard above is orthogonal to that — it's about a single agent's own inspection commands having a tree-wide blast radius regardless of which files it's supposed to be scoped to.
+
+**Open, not yet decided:** whether to formalize per-agent git worktrees for this kind of heavy parallel fan-out. Not done as of this note — noted as a real option if the stash-class hazard recurs.

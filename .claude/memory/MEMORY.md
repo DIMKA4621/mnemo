@@ -36,6 +36,9 @@ This file is an **index**: links + quick facts only; detail lives in `topics/`, 
 - [Машинні налаштування і другий провайдер](topics/provider-settings.md) — `state/settings.json` **реалізовано** (`src/settings.py`, `GET`/`PUT /api/settings`, контракт §6.6): env > файл > дефолт, і кожне значення несе своє `source`, бо збережене може бути інертним.
   Усе віддає **функція** — константа при імпорті тут не працює, і ця вада вже лежала в `providers/api.py`.
   Там же: Ollama як конфігурація `api`, чому зміна провайдера **завжди** тягне перебудову (збіг `dim` — найнебезпечніший випадок, підтверджено живцем), керування резидентом, і чому Docker поки ні.
+- [Фіча «Агенти»](topics/agents-feature.md) — ще не в навігації кабінету; дизайн-концепт живе поза репо (`Desktop/mnemo-agent-files/Agents-design.md`), звужений v1-scope — `docs/Agents-v1-scope.md`, макети — `.claude/scratch/agents-*`.
+  **Рантайм сесії — обрано справжній `claude` CLI у PTY** (`pywinpty`/ConPTY на Windows) + xterm.js через WebSocket, дзеркалить термінал байт-в-байт, підтверджено живим тестом — піксель-в-піксель ідентично нативному терміналу, повна feature-parity без ручного перевикидання UI під SDK-події (альтернативний Підхід A з Claude Agent SDK теж перевірено робочим, але лишається запасним для програмного доступу до структурованих подій).
+- [Паралельні агенти в одному git-дереві — безпека](topics/concurrent-agents-git-safety.md) — субагенти не мають ізольованих worktree, тож `git stash`/`checkout --`/`clean` в одного агента може зачепити незакомічені зміни іншого; правило — лише read-only git-інспекція під час паралельної роботи.
 - [Відкладене й черга робіт](topics/deferred.md) — що вирішено зробити пізніше і чому саме в такому порядку; там же дрібні вади наскрізної перевірки й рішення, які лишились за користувачем.
 - [Самооновлення рушія — дизайн](topics/engine-self-update-design.md) — **ПОВНІСТЮ ЗАВЕРШЕНО** 2026-08-21, усі 13 кроків плану реалізовані, перевірені й закомічені на `feat/v3` (19 комітів, `3cf33e7`…`4e1faf4`, не запушені).
   Поза наявними фазами 0–7 доки (design decision #33 у `Memory-design-v3.md` §13), повний контракт — `Memory-contracts-v3.md` §9.9 (`/api/update/*`), FR-10 у `Memory-requirements-v3.md`.
@@ -70,6 +73,8 @@ This file is an **index**: links + quick facts only; detail lives in `topics/`, 
 
 ## Logs
 
+- [2026-08-28 (Агенти: реєстр/agent-settings rework + PTY-термінал POC)](logs/2026-08-28-agents-pty-terminal-poc.md) — реєстр-мокап: «Сканувати» прибрано (лише ручне «+ Додати»), live JSON-валідність + дедуп за конфігом, редагування записів на місці; agent-settings MCP/Skills/Rules переписано на три незалежні підрозділи (лише приєднане до агента, edit-mode, pick-from-registry з локальним перейменуванням і значеннями змінних).
+  PTY-термінал POC підтвердив підхід «справжній `claude` CLI + pywinpty + xterm.js» — деталі в `topics/agents-feature.md`.
 - [2026-08-25 (MN-28/MN-29)](logs/2026-08-25-mn28-mn29.md) — MN-28: regenerate-token confirmation already existed, verified live, no code change.
   MN-29: `docs/console.png` replaced with an all-English shot; the original's demo data was never committed anywhere (confirmed via `git log -S`) and is unrecoverable.
   Checked-in `devserver.py` fixtures needed temporary (uncommitted) fixes — provider-key mismatch banner, auto-update countdown firing within ~20s of boot, only 4 files in the one openable fixture bank.

@@ -8,14 +8,16 @@ Software project, team-managed (`simplified: true`).
 
 | Status | statusId | Category | Category color |
 |---|---|---|---|
-| Drafts | 10009 | To Do | blue-gray |
 | To Do | 10004 | To Do | blue-gray |
 | In Clarification | 10005 | In Progress | yellow |
 | In Progress | 10006 | In Progress | yellow |
 | In Review | 10007 | In Progress | yellow |
 | Done | 10008 | Done | green |
 
-New issues are created in **Drafts** — that's the project's configured initial status, not a special case to handle.
+New issues are created directly in **To Do** — that's the project's configured initial status, not a special case to handle.
+
+**Drafts (statusId `10009`) was removed from this board's workflow on 2026-08-29.** Confirmed live: `getTransitionsForJiraIssue` on a To Do issue no longer lists a transition to Drafts at all.
+A raw, ungroomed idea now lives in To Do too — the description just stays a one-liner until grooming happens, right before work starts (see the skill's step 2).
 
 ## Transition IDs
 
@@ -25,7 +27,6 @@ That's why the IDs are safe to hardcode here instead of re-discovering them on e
 
 | Transition id | Target status |
 |---|---|
-| 2 | Drafts |
 | 11 | To Do |
 | 21 | In Clarification |
 | 31 | In Progress |

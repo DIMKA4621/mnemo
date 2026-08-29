@@ -243,6 +243,12 @@ def _emit_queue(force: bool = False) -> None:
         high=snap.high,
         normal=snap.normal,
         low=snap.low,
+        # Same field the REST `/api/status` snapshot carries (`_queue_snapshot_json`
+        # in api.py) — the console's live per-bank counter reads it from every
+        # `queue` event via `setQueryData`, not `invalidate`, so a missing
+        # `by_bank` here silently degrades it to the 15s REST poll fallback
+        # instead of true live updates (found in MN-34 review, 2026-08-29).
+        by_bank=snap.by_bank,
         current=None
         if current is None
         else {

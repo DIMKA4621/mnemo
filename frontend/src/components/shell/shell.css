@@ -1,0 +1,162 @@
+/* Sidebar + persistent header — ported near-verbatim from
+ * `src/webui/static/styles/shell.css` (itself sourced from
+ * `docs/console-design.html`). `.pages`/`.page` (absolute-position,
+ * simultaneously-mounted panels toggled by `hidden`) are dropped: that was
+ * the vanilla console's own single-page-app router; Next's real routing
+ * mounts/unmounts one route at a time, so there is nothing left for those
+ * rules to do. `.top-right` is new — the vanilla shell had no persistent
+ * chrome on the topbar's right side (theme/language lived in Settings); the
+ * React shell moves them there now that the layout persists across
+ * navigation instead of doing a full in-DOM re-render on every page switch. */
+
+.mnemo-app {
+  display: grid;
+  grid-template-columns: var(--sidebar-w) minmax(0, 1fr);
+  height: 100dvh;
+  transition: grid-template-columns 140ms ease;
+}
+.mnemo-app.is-collapsed { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
+
+.mnemo-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--bg-sunken);
+  border-right: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.sb-top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 44px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line);
+}
+.sb-brand { flex: 1; min-width: 0; font-size: 14px; font-weight: 650; letter-spacing: .01em; }
+.is-collapsed .sb-brand { display: none; }
+.sb-toggle {
+  flex: none;
+  display: inline-flex;
+  padding: 4px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--fg-mute);
+  cursor: pointer;
+}
+.sb-toggle:hover { background: var(--bg-hover); color: var(--fg); }
+.is-collapsed .sb-toggle { margin: 0 auto; }
+.is-collapsed .sb-toggle svg { transform: scaleX(-1); }
+
+.sb-nav { flex: 1; min-height: 0; overflow: auto; padding: 8px 6px; }
+.sb-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--radius);
+  background: transparent;
+  color: var(--fg-dim);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+  text-decoration: none;
+}
+.sb-item + .sb-item { margin-top: 2px; }
+.sb-item:hover { background: var(--bg-hover); color: var(--fg); }
+.sb-item.is-active { background: var(--sel-bg); color: var(--sel-fg); font-weight: 500; }
+.sb-item svg { flex: none; }
+.sb-item .lbl { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.is-collapsed .sb-item { justify-content: center; padding: 0; }
+.is-collapsed .sb-item .lbl { display: none; }
+
+.sb-foot {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  color: var(--fg-mute);
+  font: 10.5px/1.4 var(--mono);
+}
+.sb-foot-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 18px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.sb-foot-row .sep { color: var(--line); }
+.sb-foot-row .ver { margin-left: auto; }
+.sb-foot-row .ver.is-local-build { color: var(--warn-fg); }
+.is-collapsed .sb-foot-row { justify-content: center; padding: 0 4px; }
+.is-collapsed .sb-foot-row .txt, .is-collapsed .sb-foot-row .sep, .is-collapsed .sb-foot-row .ver { display: none; }
+
+.dot { flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--ok); }
+.dot.busy { background: var(--busy); }
+.dot.err { background: var(--err); }
+.dot.idle { background: var(--idle); }
+
+.mnemo-stage { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+.mnemo-main { position: relative; flex: 1; min-width: 0; min-height: 0; overflow: auto; }
+
+.topbar {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: 44px;
+  padding: 7px 12px;
+  background: var(--bg-pane);
+  border-bottom: 1px solid var(--line);
+  min-width: 0;
+}
+.top-left { flex: 1; min-width: 0; display: flex; align-items: center; gap: 10px; }
+/* One row, one height (2026-08-29, revised same day): the earlier stacked
+   layout, and before that the `Select`-based `LangToggle`, both reserved
+   inline space proportional to their own content, so the row never lined
+   up with the plain icon button next to it. Both controls are now the same
+   `.sb-toggle` box (see below), so a plain row with no extra alignment
+   hacks is enough. */
+.top-right { flex: none; display: flex; align-items: center; gap: 4px; }
+
+/* `LangToggle`'s trigger reuses `.sb-toggle` (padding, radius, hover) so it
+   is pixel-identical in height to `ThemeToggle`'s icon button; only the
+   width differs (text vs. `svg`), fixed here so "EN"/"UK" don't shift the
+   button's own size between the two. AntD's `Dropdown` menu is a portaled
+   overlay — it draws over the page and never affects this box's layout. */
+.lang-toggle {
+  min-width: 26px;
+  justify-content: center;
+  font: 600 11px/1 var(--mono);
+  letter-spacing: .02em;
+}
+
+.page-title { font-size: 13.5px; font-weight: 650; white-space: nowrap; }
+.page-sub { color: var(--fg-mute); font-size: 11.5px; white-space: nowrap; }
+
+@media (max-width: 940px) {
+  .page-sub { display: none; }
+  .mnemo-app, .mnemo-app.is-collapsed { grid-template-columns: var(--sidebar-rail) minmax(0, 1fr); }
+  .sb-brand { display: none; }
+  .sb-foot { padding: 8px 4px; }
+  .sb-foot-row { justify-content: center; }
+  .sb-foot-row .txt, .sb-foot-row .sep, .sb-foot-row .ver { display: none; }
+  .sb-item { justify-content: center; padding: 0; }
+  .sb-item .lbl { display: none; }
+  .sb-toggle { display: none; }
+}
+
+@media (max-width: 620px) {
+  .topbar { flex-wrap: wrap; }
+}
+
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
