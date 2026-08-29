@@ -23,6 +23,8 @@ import base64
 import hashlib
 import json
 import mimetypes
+import re
+import secrets
 import socket
 import struct
 import threading
@@ -255,6 +257,134 @@ _ORPHANS: list[dict[str, Any]] = [
         "error": None,
     },
 ]
+
+# The general MCP/Skills/Rules registry (MN-41/MN-42, `src/catalog.py`), for
+# the Реєстр page. Shaped exactly like `_entry_info()`'s response — `vars` is
+# stored pre-computed here rather than derived per request, since this is a
+# fixture and there is no `catalog.py` behind it to call.
+_VAR_RE = re.compile(r"\{\{\s*([A-Za-z0-9_]+)\s*\}\}")
+
+
+def _catalog_vars(content: str) -> list[str]:
+    seen: dict[str, None] = {}
+    for m in _VAR_RE.finditer(content or ""):
+        seen.setdefault(m.group(1), None)
+    return list(seen)
+
+
+def _canonical_json(content: str) -> str | None:
+    try:
+        parsed = json.loads(content)
+    except (json.JSONDecodeError, TypeError, RecursionError):
+        return None
+    return json.dumps(parsed, sort_keys=True, ensure_ascii=False)
+
+
+CATALOG: list[dict[str, Any]] = [
+    {
+        "id": "mcp_a1b2c3d4e5f6",
+        "category": "mcp",
+        "name": "mnemo-memory",
+        "content": '{\n  "type": "http",\n  "url": "http://127.0.0.1:4646/mcp"\n}',
+        "created_at": "2026-08-10T09:00:00+03:00",
+    },
+    {
+        "id": "mcp_b2c3d4e5f6a1",
+        "category": "mcp",
+        "name": "github",
+        "content": '{\n  "type": "stdio",\n  "command": "gh",\n  "args": ["mcp", "serve"]\n}',
+        "created_at": "2026-08-11T09:00:00+03:00",
+    },
+    {
+        "id": "mcp_c3d4e5f6a1b2",
+        "category": "mcp",
+        "name": "atlassian",
+        "content": '{\n  "type": "http",\n  "url": "https://mcp.atlassian.com/v1/sse",\n'
+        '  "headers": { "Authorization": "Bearer {{ATLASSIAN_API_TOKEN}}" }\n}',
+        "created_at": "2026-08-12T09:00:00+03:00",
+    },
+    {
+        "id": "skill_d4e5f6a1b2c3",
+        "category": "skill",
+        "name": "keyboard-layout",
+        "content": "Конвертує текст, набраний не в тій розкладці, між EN (QWERTY) і UA (ЙЦУКЕН). "
+        "Спрацьовує на «гібришний» текст.",
+        "created_at": "2026-08-13T09:00:00+03:00",
+    },
+    {
+        "id": "skill_e5f6a1b2c3d4",
+        "category": "skill",
+        "name": "code-review",
+        "content": "Ревʼю поточного диму на баги та можливості спрощення/перевикористання коду, "
+        "з рівнями зусиль low/medium/high.",
+        "created_at": "2026-08-14T09:00:00+03:00",
+    },
+    {
+        "id": "rule_f6a1b2c3d4e5",
+        "category": "rule",
+        "name": "v3-build.md",
+        "content": "Джерело істини для v3: чотири доки Memory-{design,requirements,implementation,"
+        "contracts}-v3.md. Ніколи не комітити/пушити самостійно, ніякого Co-Authored-By.",
+        "created_at": "2026-08-15T09:00:00+03:00",
+    },
+    {
+        "id": "rule_a1b2c3d4e5f7",
+        "category": "rule",
+        "name": "git-workflow.md",
+        "content": "Гілки, PR і релізи: нова робота — завжди нова гілка від актуального master; "
+        "реліз — завжди чернетка.",
+        "created_at": "2026-08-16T09:00:00+03:00",
+    },
+]
+
+
+def _catalog_entry_info(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": entry["id"],
+        "category": entry["category"],
+        "name": entry["name"],
+        "content": entry["content"],
+        "created_at": entry["created_at"],
+        "vars": _catalog_vars(entry["content"]) if entry["category"] == "mcp" else [],
+        # No agent/links fixture exists yet (Phase B, not landed) — static 0
+        # until one does, mirroring the real `used_by_count` shape.
+        "used_by_count": 0,
+    }
+
+
+def _find_catalog_entry(entry_id: str) -> dict[str, Any] | None:
+    return next((e for e in CATALOG if e["id"] == entry_id), None)
+
+
+def _norm_catalog_name(name: str) -> str:
+    return name.strip().casefold()
+
+
+def _unique_catalog_name(candidate: str, category: str, *, exclude_id: str | None = None) -> str:
+    taken = {
+        _norm_catalog_name(e["name"])
+        for e in CATALOG
+        if e["category"] == category and (exclude_id is None or e["id"] != exclude_id)
+    }
+    base = candidate.strip() or category
+    if _norm_catalog_name(base) not in taken:
+        return base
+    n = 2
+    while _norm_catalog_name(f"{base}-{n}") in taken:
+        n += 1
+    return f"{base}-{n}"
+
+
+def _find_duplicate_mcp(content: str, *, exclude_id: str | None) -> dict[str, Any] | None:
+    normalized = _canonical_json(content)
+    if normalized is None:
+        return None
+    for entry in CATALOG:
+        if entry["category"] != "mcp" or entry["id"] == exclude_id:
+            continue
+        if _canonical_json(entry["content"]) == normalized:
+            return entry
+    return None
 
 
 # --------------------------------------------------------------------------
@@ -1189,6 +1319,11 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorised():
             self.fail(401, "unauthorized", "missing or invalid token")
             return
+
+        if parsed.path.startswith("/api/catalog/"):
+            self.delete_catalog_entry(unquote(parsed.path[len("/api/catalog/"):]))
+            return
+
         if not parsed.path.startswith("/api/banks/"):
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -1247,6 +1382,17 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authorised():
             self.fail(401, "unauthorized", "missing or invalid token")
             return
+
+        if parsed.path.startswith("/api/catalog/"):
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length) or b"{}")
+            except ValueError:
+                self.fail(422, "validation_error", "body is not valid JSON")
+                return
+            self.patch_catalog_entry(unquote(parsed.path[len("/api/catalog/"):]), body)
+            return
+
         if not parsed.path.startswith("/api/banks/"):
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -1355,6 +1501,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/banks":
             self.post_bank(body)
+            return
+        if parsed.path == "/api/catalog":
+            self.post_catalog_entry(body)
             return
         if parsed.path == "/api/autostart":
             if "enabled" not in body:
@@ -1665,6 +1814,25 @@ class Handler(BaseHTTPRequestHandler):
             self.json_out(200, update_status_payload())
             return
 
+        if path == "/api/catalog":
+            category = (query.get("category") or [None])[0]
+            with _lock:
+                entries = [_catalog_entry_info(e) for e in CATALOG
+                           if category is None or e["category"] == category]
+            self.json_out(200, {"entries": entries})
+            return
+
+        if path.startswith("/api/catalog/"):
+            entry_id = unquote(path[len("/api/catalog/"):])
+            with _lock:
+                entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+            self.json_out(200, _catalog_entry_info(entry))
+            return
+
         self.fail(404, "internal", "no route " + path)
 
     def get_logs(self, query: dict) -> None:
@@ -1743,6 +1911,112 @@ class Handler(BaseHTTPRequestHandler):
         if body.get("init"):
             info["init"] = _mock_init_result(root)
         self.json_out(201, info)
+
+    def post_catalog_entry(self, body: dict) -> None:
+        """`POST /api/catalog` — same validation/dedup rules as `catalog.add`
+        (real `src/catalog.py`), against the fixture `CATALOG` list."""
+        category = body.get("category")
+        if category not in ("mcp", "skill", "rule"):
+            self.fail(400, "invalid_catalog_entry",
+                      f"unknown category {category!r} — expected one of "
+                      f"mcp, skill, rule")
+            return
+        name = (body.get("name") or "").strip()
+        if not name:
+            self.fail(400, "invalid_catalog_entry", "name must not be empty")
+            return
+        content = body.get("content") or ""
+        if not content.strip():
+            self.fail(400, "invalid_catalog_entry", "content must not be empty")
+            return
+        if category == "mcp" and _canonical_json(content) is None:
+            self.fail(400, "invalid_catalog_entry",
+                      "content must be valid JSON for an 'mcp' entry")
+            return
+
+        with _lock:
+            if category == "mcp":
+                dup = _find_duplicate_mcp(content, exclude_id=None)
+                if dup is not None:
+                    self.fail(409, "catalog_entry_exists",
+                              f"an mcp entry with this exact config already "
+                              f"exists: {dup['name']!r}",
+                              {"existing_id": dup["id"]})
+                    return
+            entry = {
+                "id": f"{category}_{secrets.token_hex(6)}",
+                "category": category,
+                "name": _unique_catalog_name(name, category),
+                "content": content,
+                "created_at": now_iso(),
+            }
+            CATALOG.append(entry)
+        self.json_out(201, _catalog_entry_info(entry))
+
+    def patch_catalog_entry(self, entry_id: str, body: dict) -> None:
+        with _lock:
+            entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+
+            fields = {k: v for k, v in body.items() if k in ("name", "content") and v is not None}
+            if not fields:
+                self.fail(400, "bad_request", "nothing to change", {"id": entry_id})
+                return
+
+            new_content = fields.get("content", entry["content"])
+            if not new_content.strip():
+                self.fail(400, "invalid_catalog_entry", "content must not be empty")
+                return
+            if entry["category"] == "mcp" and _canonical_json(new_content) is None:
+                self.fail(400, "invalid_catalog_entry",
+                          "content must be valid JSON for an 'mcp' entry")
+                return
+            if entry["category"] == "mcp" and "content" in fields:
+                dup = _find_duplicate_mcp(new_content, exclude_id=entry_id)
+                if dup is not None:
+                    self.fail(409, "catalog_entry_exists",
+                              f"an mcp entry with this exact config already "
+                              f"exists: {dup['name']!r}",
+                              {"existing_id": dup["id"]})
+                    return
+
+            new_name = entry["name"]
+            if "name" in fields:
+                new_name = fields["name"].strip()
+                if not new_name:
+                    self.fail(400, "invalid_catalog_entry", "name cannot be empty")
+                    return
+                clash = next(
+                    (e for e in CATALOG
+                     if e["id"] != entry_id and e["category"] == entry["category"]
+                     and _norm_catalog_name(e["name"]) == _norm_catalog_name(new_name)),
+                    None,
+                )
+                if clash:
+                    self.fail(409, "catalog_entry_exists",
+                              f"another {entry['category']} entry is already "
+                              f"named {new_name!r}", {"existing_id": clash["id"]})
+                    return
+
+            entry["name"] = new_name
+            entry["content"] = new_content
+        self.json_out(200, _catalog_entry_info(entry))
+
+    def delete_catalog_entry(self, entry_id: str) -> None:
+        with _lock:
+            entry = _find_catalog_entry(entry_id)
+            if entry is None:
+                self.fail(404, "catalog_entry_not_found",
+                          f"no catalog entry with id {entry_id!r}", {"id": entry_id})
+                return
+            # `used_by` is always empty here — MN-48 (attach/detach link
+            # storage) hasn't landed, same as the real backend's guarded
+            # `_catalog_used_by` hook before it exists.
+            CATALOG.remove(entry)
+        self.json_out(200, {"ok": True})
 
     def post_reindex(self, body: dict) -> None:
         ref = body.get("bank") or ""

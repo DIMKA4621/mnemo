@@ -172,7 +172,8 @@
       "memory": "Памʼять",
       "journal": "Журнал",
       "settings": "Налаштування",
-      "agents": "Агенти"
+      "agents": "Агенти",
+      "registry": "Реєстр"
     },
     "sidebar": {
       "collapse": "Згорнути навігацію",
@@ -339,6 +340,57 @@
       "fileSection": "Файл",
       "currentFileOf": "поточний файл банку {bank}",
       "selectHint": "Оберіть подію ліворуч"
+    }
+  },
+  "registry": {
+    "tabs": {
+      "mcp": "MCP",
+      "skill": "Skills",
+      "rule": "Rules"
+    },
+    "category": {
+      "mcp": "MCP",
+      "skill": "Skill",
+      "rule": "Rule"
+    },
+    "header": {
+      "add": "＋ Додати",
+      "addTitle": "Додати запис до реєстру вручну"
+    },
+    "count": {
+      "agents": "{n, plural, one {# агент} few {# агенти} many {# агентів} other {# агентів}}"
+    },
+    "list": {
+      "loading": "Завантаження…",
+      "empty": "Порожньо — додай запис через «＋ Додати»."
+    },
+    "detail": {
+      "selectHint": "Виберіть запис зліва.",
+      "contentLabelMcp": "Конфіг",
+      "contentLabelText": "Текст",
+      "editTitle": "Редагувати",
+      "nameLabel": "Назва",
+      "save": "Зберегти",
+      "varsLabel": "Змінні шаблону",
+      "varsEmpty": "Немає — статичний.",
+      "updatedNote": "Запис «{name}» оновлено."
+    },
+    "error": {
+      "emptyConfig": "Порожній конфіг",
+      "invalidJson": "Невалідний JSON: {message}",
+      "duplicate": "Такий MCP-сервер уже є в реєстрі: {name}",
+      "nameTaken": "У цій категорії вже є запис з назвою {name}"
+    },
+    "addModal": {
+      "title": "Додати — {category}",
+      "ariaLabel": "Додати запис до реєстру",
+      "nameLabel": "Назва",
+      "configLabel": "Конфіг (JSON)",
+      "configPlaceholder": "'{' \"type\": \"http\", \"url\": \"...\" '}'",
+      "contentLabelSkill": "Опис скіла",
+      "contentLabelRule": "Текст правила",
+      "submit": "Додати",
+      "addedNote": "Додано «{name}» у реєстр."
     }
   },
   "settings": {

@@ -61,4 +61,9 @@ export const queryKeys = {
   autostart: {
     all: ["autostart"] as const,
   },
+  catalog: {
+    all: ["catalog"] as const,
+    list: (category?: string) => ["catalog", category ?? null] as const,
+    one: (entryId: string) => ["catalog", "entry", entryId] as const,
+  },
 };

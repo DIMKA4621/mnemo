@@ -172,7 +172,8 @@
       "memory": "Memory",
       "journal": "Journal",
       "settings": "Settings",
-      "agents": "Agents"
+      "agents": "Agents",
+      "registry": "Registry"
     },
     "sidebar": {
       "collapse": "Collapse navigation",
@@ -339,6 +340,57 @@
       "fileSection": "File",
       "currentFileOf": "current file of bank {bank}",
       "selectHint": "Select an event on the left"
+    }
+  },
+  "registry": {
+    "tabs": {
+      "mcp": "MCP",
+      "skill": "Skills",
+      "rule": "Rules"
+    },
+    "category": {
+      "mcp": "MCP",
+      "skill": "Skill",
+      "rule": "Rule"
+    },
+    "header": {
+      "add": "＋ Add",
+      "addTitle": "Add a manual entry to the registry"
+    },
+    "count": {
+      "agents": "{n, plural, one {# agent} other {# agents}}"
+    },
+    "list": {
+      "loading": "Loading…",
+      "empty": "Empty — add an entry via \"＋ Add\"."
+    },
+    "detail": {
+      "selectHint": "Select an entry on the left.",
+      "contentLabelMcp": "Config",
+      "contentLabelText": "Text",
+      "editTitle": "Edit",
+      "nameLabel": "Name",
+      "save": "Save",
+      "varsLabel": "Template variables",
+      "varsEmpty": "None — static.",
+      "updatedNote": "Entry «{name}» updated."
+    },
+    "error": {
+      "emptyConfig": "Empty config",
+      "invalidJson": "Invalid JSON: {message}",
+      "duplicate": "This MCP server already exists in the registry: {name}",
+      "nameTaken": "Another entry named {name} already exists in this category"
+    },
+    "addModal": {
+      "title": "Add — {category}",
+      "ariaLabel": "Add entry to registry",
+      "nameLabel": "Name",
+      "configLabel": "Config (JSON)",
+      "configPlaceholder": "'{' \"type\": \"http\", \"url\": \"...\" '}'",
+      "contentLabelSkill": "Skill description",
+      "contentLabelRule": "Rule text",
+      "submit": "Add",
+      "addedNote": "Added «{name}» to the registry."
     }
   },
   "settings": {

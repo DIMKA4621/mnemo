@@ -4,16 +4,26 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useUiStore } from "@/lib/store/ui";
 import { useT } from "@/lib/i18n/hooks";
-import { AgentsIcon, CollapseIcon, JournalIcon, MemoryIcon, SettingsIcon } from "@/components/common/icons";
+import {
+  AgentsIcon,
+  CollapseIcon,
+  JournalIcon,
+  MemoryIcon,
+  RegistryIcon,
+  SettingsIcon,
+} from "@/components/common/icons";
 import { useStatus } from "@/hooks/useMemoryQueries";
 import { UpdateBanner } from "@/components/settings/UpdateBanner";
 import { WsStatusIndicator } from "./WsStatusIndicator";
 
+// `Agents-design.md` §5 "Чинна структура" (revised 2026-08-25): Memory /
+// Agents / Registry / Journal / Settings.
 const NAV_ITEMS = [
   { href: "/memory", key: "shell.nav.memory", Icon: MemoryIcon },
+  { href: "/agents", key: "shell.nav.agents", Icon: AgentsIcon },
+  { href: "/registry", key: "shell.nav.registry", Icon: RegistryIcon },
   { href: "/journal", key: "shell.nav.journal", Icon: JournalIcon },
   { href: "/settings", key: "shell.nav.settings", Icon: SettingsIcon },
-  { href: "/agents", key: "shell.nav.agents", Icon: AgentsIcon },
 ] as const;
 
 export function Sidebar() {

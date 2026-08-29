@@ -44,6 +44,19 @@ export function AgentsIcon() {
   );
 }
 
+/** Four-square glyph, ported verbatim from the mockup's Реєстр nav item
+ *  (`.claude/scratch/agents-page-mockup/index.html`). */
+export function RegistryIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="4" y="4" width="7" height="7" rx="1.5" />
+      <rect x="13" y="4" width="7" height="7" rx="1.5" />
+      <rect x="4" y="13" width="7" height="7" rx="1.5" />
+      <rect x="13" y="13" width="7" height="7" rx="1.5" />
+    </svg>
+  );
+}
+
 export function CollapseIcon() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
