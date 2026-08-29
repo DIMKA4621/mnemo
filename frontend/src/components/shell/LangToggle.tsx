@@ -29,7 +29,7 @@ export function LangToggle() {
       size="small"
       variant="borderless"
       popupMatchSelectWidth={false}
-      style={{ width: 56 }}
+      style={{ width: "100%" }}
       aria-label="Language"
     />
   );

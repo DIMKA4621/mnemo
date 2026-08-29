@@ -21,8 +21,12 @@ export function Topbar() {
     <header className="topbar">
       <div className="top-left" />
       <div className="top-right">
-        <LangToggle />
-        <ThemeToggle />
+        <div className="top-right-slot">
+          <LangToggle />
+        </div>
+        <div className="top-right-slot">
+          <ThemeToggle />
+        </div>
       </div>
     </header>
   );
