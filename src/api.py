@@ -255,6 +255,19 @@ _MCP_401 = (
     "no bank to resolve to — and belongs on /mcp-admin or /mcp-tools."
 )
 
+# What a caller who reached `/mcp-agents` or `/hooks/agents/*` with the wrong
+# kind of credential (MN-45a) needs to read. This token is minted fresh per
+# live chat session and never survives a service restart or that chat
+# ending — unlike the other 401s above, "your token is simply stale" is the
+# common case here, not a typo.
+_AGENT_SESSION_401 = (
+    "this token is not a live agent-session token. These are minted per "
+    "live chat and last only as long as that chat's real `claude` process — "
+    "a service restart, or the chat ending, invalidates it. If this chat is "
+    "still open, reconnecting its terminal spawns a fresh session with a "
+    "fresh token."
+)
+
 # Same, for a URL that still carries the old `/mcp/<bank>` segment. Checked
 # before auth on purpose: the commonest way to arrive here is a config written
 # against the previous shape, whose token is *valid* — telling that caller
@@ -496,6 +509,13 @@ def _require_queue() -> Any:
 # there is nothing to reason about. `mcp_server`'s shim lifts it into the
 # ContextVar the tool bodies read, inside the app where that belongs.
 BANK_SCOPE_KEY = "mnemo_bank_id"
+
+# Same shape as BANK_SCOPE_KEY, one level over: what `/mcp-agents` and
+# `/hooks/agents/*` (MN-45a) resolve a presented token to — a live chat_id,
+# via `agent_runtime.resolve_session_token`, never `registry.resolve_by_token`.
+# `mcp_agents.AuthenticatedAgentSessionASGI` lifts it into `current_chat_id`
+# the same way `mcp_server`'s shim lifts BANK_SCOPE_KEY.
+AGENT_SESSION_SCOPE_KEY = "mnemo_agent_chat_id"
 
 
 def _resolve_bank(ref: str, *, require_enabled: bool = True) -> Bank:
@@ -1091,11 +1111,15 @@ app = FastAPI(
 # ------------------------------------------------------- auth + envelope
 
 
-_GUARDED = ("/api", "/mcp", "/mcp-tools", "/mcp-admin")
+_GUARDED = ("/api", "/mcp", "/mcp-tools", "/mcp-admin", "/mcp-agents", "/hooks/agents")
 # The faces that may take the token from the query string (§9.1). `/mcp-admin`
 # is here for the same reason as `/mcp`: an MCP client configures a URL, not
-# headers, and the admin face is reached the same way.
-_URL_TOKEN_OK = ("/mcp", "/mcp-tools", "/mcp-admin")
+# headers, and the admin face is reached the same way. `/mcp-agents` joins
+# them for MN-45a; `/hooks/agents/*` deliberately does NOT — the hook config
+# `agent_runtime._write_agent_configs` writes always carries the token as an
+# `Authorization: Bearer` header, since that surface is called by the
+# `claude` CLI's own hook machinery, never pasted into a browser or a URL bar.
+_URL_TOKEN_OK = ("/mcp", "/mcp-tools", "/mcp-admin", "/mcp-agents")
 
 
 # Declared so the OpenAPI schema carries a security scheme and `/docs` grows an
@@ -1127,7 +1151,7 @@ async def auth_middleware(request: Request, call_next):
     # once and caches it, so a rewrite made after touching it would be
     # invisible to everything downstream that asks the Request.
     path = request.scope.get("path", "") or request.url.path
-    for mount in ("/mcp", "/mcp-admin"):
+    for mount in ("/mcp", "/mcp-admin", "/mcp-agents"):
         if path == mount:
             path = mount + "/"
             request.scope["path"] = path
@@ -1198,6 +1222,15 @@ async def auth_middleware(request: Request, call_next):
                 return JSONResponse(_envelope("unauthorized", _MCP_401),
                                     status_code=401)
             request.scope[BANK_SCOPE_KEY] = bank.id
+        elif path.startswith("/mcp-agents") or path.startswith("/hooks/agents"):
+            # MN-45a's third credential kind: neither a bank token nor the
+            # service token opens this pair — only a per-session token
+            # `agent_runtime._spawn_session` minted for THIS live chat.
+            chat_id = agent_runtime.resolve_session_token(presented)
+            if chat_id is None:
+                return JSONResponse(_envelope("unauthorized", _AGENT_SESSION_401),
+                                    status_code=401)
+            request.scope[AGENT_SESSION_SCOPE_KEY] = chat_id
         elif path.startswith("/api"):
             if _api_gated() and not (
                 presented and secrets.compare_digest(presented.strip(), api_token())
@@ -4073,6 +4106,53 @@ async def ws_agent_chat(
         agent_runtime.unsubscribe(chat_id, sub_id)
 
 
+# ------------------------------------------------- agent subagent hook (MN-45a)
+
+
+@app.post("/hooks/agents/{slug}/{chat_id}/subagent", include_in_schema=False)
+async def hook_agent_subagent(request: Request, slug: str, chat_id: str) -> dict:
+    """The `SubagentStart`/`SubagentStop` HTTP hook target written into every
+    live chat's per-spawn `settings.json`
+    (`agent_runtime._write_agent_configs`) — confirmed live to actually fire
+    on a real Task-tool subagent run by the MN-45a gate spike
+    (`.claude/scratch/mn45-verify/gate_spike.py`, 2026-08-29) before any of
+    this endpoint existed.
+
+    Authenticated the same way as `/mcp-agents` (`auth_middleware`'s new
+    branch, `agent_runtime.resolve_session_token`) — but the middleware only
+    proves the *token* is live, not that it belongs to THIS url's chat_id, so
+    that is checked again here: a token resolves to exactly one chat_id, and
+    a request naming a different one in its path is rejected rather than
+    silently served, the same "the credential is the only address, and a
+    second thing claiming to say which chat must not be allowed to disagree
+    with it" reasoning `/mcp`'s bank routing already applies (see
+    `mcp_server.py`'s module docstring).
+
+    **Runtime plumbing only (MN-45a).** This proves the wire is live,
+    authenticated, and correctly scoped to one chat — it accepts and
+    acknowledges every SubagentStart/Stop event but does not yet persist or
+    broadcast them anywhere. Storing them (a `subagents.jsonl` sidecar) and
+    fanning them out over this chat's existing WebSocket channel as a new
+    `subagent_event` envelope for the console to render is MN-45b's job, not
+    this one's.
+    """
+    authed_chat_id = request.scope.get(AGENT_SESSION_SCOPE_KEY)
+    if authed_chat_id != chat_id:
+        raise ApiError("unauthorized",
+                       "this token does not authorize this chat_id")
+    body: dict[str, Any] = {}
+    with suppress(Exception):
+        body = await request.json()
+    log.info(
+        "subagent hook: agent=%s chat=%s event=%s agent_id=%s",
+        slug, chat_id, body.get("hook_event_name"), body.get("agent_id"),
+    )
+    # An empty JSON-RPC-adjacent object is a valid, no-op hook response (the
+    # same JSON output format command hooks use; SubagentStart/Stop have
+    # limited decision control, so there is nothing to say here yet).
+    return {}
+
+
 # The console's assets — `src.webui.STATIC_DIR` and nothing else from that
 # package. Mounting the package directory would put `devserver.py` (a
 # developer tool) on the request path; the static tree is the only thing the
@@ -4172,17 +4252,20 @@ def mcp_tools_reindex(
 # spawned for a Claude Code session (NFR-2). Mounted last so the /api routes
 # above are matched first. The bank travels as the path segment after /mcp.
 #
-# `/mcp-admin` is mounted BEFORE `/mcp` and is a separate path, not a bank:
-# the bank-routing shim under `/mcp` would otherwise read `admin` as a bank
-# name. Starlette matches mounts in declaration order, so the more specific
-# prefix has to be declared first.
+# `/mcp-admin` and `/mcp-agents` (MN-45a) are mounted BEFORE `/mcp` and are
+# separate paths, not banks: the bank-routing shim under `/mcp` would
+# otherwise read "admin"/"agents" as a bank name. Starlette matches mounts in
+# declaration order, so the more specific prefixes have to be declared first.
 try:
     from .mcp_admin import build_app as _build_admin
+    from .mcp_agents import build_app as _build_agents
     from .mcp_server import build_app as _build_mcp
 except ImportError:  # pragma: no cover - the SDK is a hard dep, but be honest
-    _build_admin = _build_mcp = None
+    _build_admin = _build_agents = _build_mcp = None
 if _build_admin is not None:
     app.mount("/mcp-admin", _build_admin(), name="mcp-admin")
+if _build_agents is not None:
+    app.mount("/mcp-agents", _build_agents(), name="mcp-agents")
 if _build_mcp is not None:
     app.mount("/mcp", _build_mcp(), name="mcp")
 

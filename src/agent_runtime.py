@@ -57,8 +57,10 @@ that is the entire point of this module, not something to hide.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
+import secrets
 import shutil
 import threading
 import time
@@ -68,7 +70,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import agent_registry, config
+from . import agent_registry, client, config
 
 log = logging.getLogger("mnemo.agent_runtime")
 
@@ -164,6 +166,11 @@ class Session:
     agent_slug: str
     history_path: Path
     proc: _PtyHandle
+    # This session's MN-45a coordination-tool credential — see
+    # `_session_tokens` just below. Carried on the session itself (not just
+    # in the token map) so `_finalize_session` can remove its own entry by
+    # value without a reverse lookup.
+    token: str
     # Guards `history_path`'s append handle and `subscribers` together — see
     # the module docstring's "race-free reconnect" note. Never held across a
     # blocking PTY read; only around the short append+fan-out in
@@ -181,6 +188,15 @@ _sessions: dict[str, Session] = {}
 _sessions_lock = threading.Lock()
 _loop: asyncio.AbstractEventLoop | None = None
 
+# MN-45a: the agent-to-agent coordination credential, one per live session.
+# Minted in `_spawn_session`, resolved by `resolve_session_token` (the auth
+# branch `api.py` gates `/mcp-agents` and `/hooks/agents/*` with), removed in
+# `_finalize_session` at the exact moment its `Session` leaves `_sessions` —
+# same in-memory-only, no-adoption-after-restart stance as `_sessions`
+# itself (module docstring), guarded by the same `_sessions_lock` rather than
+# a second lock, since the two dicts change together or not at all.
+_session_tokens: dict[str, str] = {}
+
 
 def bind_loop(loop: asyncio.AbstractEventLoop | None) -> None:
     """Called once from `api.py`'s `lifespan()` (mirrors `Hub.bind`) so
@@ -193,6 +209,55 @@ def bind_loop(loop: asyncio.AbstractEventLoop | None) -> None:
 def live_session_count() -> int:
     with _sessions_lock:
         return sum(1 for s in _sessions.values() if s.alive)
+
+
+def list_live_sessions() -> list[dict[str, Any]]:
+    """A machine-wide snapshot of every currently-live session — what
+    `mcp_agents.list_sessions` reports. In-memory only, same scope as
+    `_sessions` itself."""
+    with _sessions_lock:
+        return [
+            {
+                "chat_id": s.chat_id,
+                "agent_slug": s.agent_slug,
+                "alive": s.alive,
+                "created_at": s.created_at,
+            }
+            for s in _sessions.values()
+        ]
+
+
+def session_agent_slug(chat_id: str) -> str | None:
+    """The agent slug owning a live ``chat_id``, or `None` if it has no live
+    session right now. Used to attribute an `mcp_agents.py` call to its
+    caller — safe to trust because it is derived from the resolved session
+    token, never from anything the caller stated."""
+    with _sessions_lock:
+        session = _sessions.get(chat_id)
+        return session.agent_slug if session is not None else None
+
+
+def resolve_session_token(token: str | None) -> str | None:
+    """The ``chat_id`` a per-session MN-45a token belongs to, or `None` if
+    the token is missing, unknown, or its session has already ended — the
+    same three-way "no" `registry.resolve_by_token` gives for a bank token.
+
+    A linear scan with ``secrets.compare_digest`` rather than a plain dict
+    lookup — the same reasoning `registry.resolve_by_token` already spells
+    out for bank tokens (and `api._token_ok` for the service token): a dict
+    lookup is not constant-time, and this is a credential comparison, not an
+    index lookup. Live session counts are small (bounded by
+    `config.MAX_LIVE_SESSIONS`), so the O(n) cost here is the same kind of
+    cheap it is there.
+    """
+    candidate = (token or "").strip()
+    if not candidate:
+        return None
+    with _sessions_lock:
+        for tok, chat_id in _session_tokens.items():
+            if secrets.compare_digest(candidate, tok):
+                return chat_id
+    return None
 
 
 # ------------------------------------------------------- launch translation
@@ -208,6 +273,19 @@ def live_session_count() -> int:
 #                       `autocompact` is skipped — no known flag or env var
 #                       for it in the documented CLI interface, and this is
 #                       not the place to invent one.
+#
+# MN-45a adds `--mcp-config`/`--settings` on top, for every mode alike (the
+# gate spike below — `.claude/scratch/mn45-verify/gate_spike.py`, 2026-08-29
+# — confirmed live that both flags are purely additive: neither one writes
+# the spawned cwd's own `.mcp.json` or `.claude/settings.json`, so there is
+# nothing here for "standard" vs "custom" to disagree about). Placed right
+# after the executable, before anything `extra_args` might contain — that
+# much IS what argv order guarantees. What the gate spike did NOT test is
+# whether a conflicting flag later in `extra_args` could still override
+# these via the CLI's own last-flag-wins parsing; an operator can only point
+# that at their own agent's own launch config, so this is accepted as a
+# known, unverified gap rather than something this ordering is claimed to
+# close.
 
 
 def _claude_executable() -> str:
@@ -217,8 +295,14 @@ def _claude_executable() -> str:
     return path
 
 
-def _build_argv(launch: dict[str, Any]) -> list[str]:
-    argv = [_claude_executable()]
+def _build_argv(
+    launch: dict[str, Any], mcp_config_path: Path, settings_path: Path
+) -> list[str]:
+    argv = [
+        _claude_executable(),
+        "--mcp-config", str(mcp_config_path),
+        "--settings", str(settings_path),
+    ]
     if launch.get("mode") == "custom":
         model = launch.get("model")
         if model:
@@ -233,6 +317,56 @@ def _build_env(launch: dict[str, Any]) -> dict[str, str]:
     if launch.get("mode") == "custom":
         env["ANTHROPIC_BASE_URL"] = f"http://{launch['host']}:{launch['port']}"
     return env
+
+
+def _write_agent_configs(
+    chat_dir: Path, agent_slug: str, chat_id: str, token: str
+) -> tuple[Path, Path]:
+    """The per-spawn `--mcp-config`/`--settings` files (MN-45a) that give a
+    live ``claude`` process a documented, sanctioned way back into this same
+    backend — an agent-to-agent MCP face (`mcp_agents.py`, mounted at
+    `/mcp-agents`) and `SubagentStart`/`SubagentStop` HTTP hooks — without
+    touching the raw PTY byte stream MN-43 already established as off-limits
+    to parsing.
+
+    Written under `agent_registry.chat_dir(...)`, which `delete_chat`'s
+    existing `rmtree` already tears down — no new cleanup path to add or
+    forget. One token opens both faces (`api.py`'s `auth_middleware` resolves
+    it the same way for `/mcp-agents` and for this hook URL), because they
+    are two consumers of the one fact this backend actually needs to know:
+    which live chat session is calling.
+    """
+    base = client.default_base_url()
+
+    mcp_config = {
+        "mcpServers": {
+            "mnemo-agents": {
+                "type": "http",
+                "url": f"{base}/mcp-agents?token={token}",
+            }
+        }
+    }
+    # One URL for both events, not two: the JSON body's own `hook_event_name`
+    # already distinguishes Start from Stop (confirmed live by the gate
+    # spike), so a receiver branching on that field is simpler than two
+    # routes that would otherwise have to stay in lockstep.
+    hook = {
+        "type": "http",
+        "url": f"{base}/hooks/agents/{agent_slug}/{chat_id}/subagent",
+        "headers": {"Authorization": f"Bearer {token}"},
+    }
+    settings = {
+        "hooks": {
+            "SubagentStart": [{"matcher": "", "hooks": [hook]}],
+            "SubagentStop": [{"matcher": "", "hooks": [hook]}],
+        }
+    }
+
+    mcp_config_path = chat_dir / "mcp_config.json"
+    settings_path = chat_dir / "settings.json"
+    mcp_config_path.write_text(json.dumps(mcp_config), encoding="utf-8")
+    settings_path.write_text(json.dumps(settings), encoding="utf-8")
+    return mcp_config_path, settings_path
 
 
 # --------------------------------------------------------------- publishing
@@ -283,6 +417,7 @@ def _finalize_session(session: Session) -> None:
     _deliver(subs, {"type": "exited", "exit_code": exit_code})
     with _sessions_lock:
         _sessions.pop(session.chat_id, None)
+        _session_tokens.pop(session.token, None)
     with suppress(Exception):
         agent_registry.touch_chat(session.agent_slug, session.chat_id)
     log.info("chat %s exited (code=%r)", session.chat_id, exit_code)
@@ -319,7 +454,18 @@ def _spawn_session(agent: agent_registry.Agent, chat_id: str) -> Session:
         )
 
     launch = agent_registry.read_launch_config(agent.root)
-    argv = _build_argv(launch)
+
+    # MN-45a: mint this session's coordination-tool credential and the two
+    # config files that hand a live `claude` process a way back to it, before
+    # building argv (the paths are argv's `--mcp-config`/`--settings` values).
+    session_token = secrets.token_hex(32)
+    chat_dir = agent_registry.chat_dir(agent.root, chat_id)
+    chat_dir.mkdir(parents=True, exist_ok=True)
+    mcp_config_path, settings_path = _write_agent_configs(
+        chat_dir, agent.slug, chat_id, session_token
+    )
+
+    argv = _build_argv(launch, mcp_config_path, settings_path)
     env = _build_env(launch)
 
     history_path = agent_registry.chat_history_path(agent.root, chat_id)
@@ -328,10 +474,12 @@ def _spawn_session(agent: agent_registry.Agent, chat_id: str) -> Session:
     proc = _PtyHandle(argv, cwd=str(agent.root), env=env, dimensions=(24, 80))
     try:
         session = Session(
-            chat_id=chat_id, agent_slug=agent.slug, history_path=history_path, proc=proc
+            chat_id=chat_id, agent_slug=agent.slug, history_path=history_path,
+            proc=proc, token=session_token,
         )
         session._history_fh = history_path.open("a", encoding="utf-8")
         _sessions[chat_id] = session
+        _session_tokens[session_token] = chat_id
 
         thread = threading.Thread(
             target=_reader_loop, args=(session,),

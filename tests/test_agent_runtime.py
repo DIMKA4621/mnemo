@@ -30,10 +30,12 @@ the MN-43 report back to the team lead for what was observed.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import sys
 import tempfile
 import threading
+import uuid
 from pathlib import Path
 
 for _stream in (sys.stdout, sys.stderr):
@@ -170,10 +172,26 @@ def test_chat_storage() -> None:
 
 
 def test_launch_translation() -> None:
-    argv = agent_runtime._build_argv({"mode": "standard"})
+    # MN-45a: `_build_argv` now always takes the two per-spawn config paths
+    # and always emits `--mcp-config`/`--settings` for them, for EVERY mode —
+    # dummy paths are enough here, this is pure argv-shape logic.
+    mcp_cfg = Path("C:/fake/mcp_config.json")
+    settings_cfg = Path("C:/fake/settings.json")
+
+    argv = agent_runtime._build_argv({"mode": "standard"}, mcp_cfg, settings_cfg)
     check(
-        "standard mode: argv is just the claude executable",
-        len(argv) == 1 and argv[0].lower().endswith(("claude", "claude.exe", "claude.cmd")),
+        "standard mode: argv[0] is the claude executable",
+        argv[0].lower().endswith(("claude", "claude.exe", "claude.cmd")),
+        repr(argv),
+    )
+    check(
+        "standard mode: --mcp-config/--settings right after the executable",
+        argv[1:5] == ["--mcp-config", str(mcp_cfg), "--settings", str(settings_cfg)],
+        repr(argv),
+    )
+    check(
+        "standard mode: nothing beyond the two flags",
+        len(argv) == 5,
         repr(argv),
     )
     env = agent_runtime._build_env({"mode": "standard"})
@@ -191,14 +209,20 @@ def test_launch_translation() -> None:
         "mode": "custom", "host": "127.0.0.1", "port": 9931,
         "model": "claude-sonnet-5", "extra_args": ["--verbose", "--foo=bar"],
     }
-    argv = agent_runtime._build_argv(custom_launch)
+    argv = agent_runtime._build_argv(custom_launch, mcp_cfg, settings_cfg)
+    check(
+        "custom mode: --mcp-config/--settings STILL right after the executable, "
+        "before anything extra_args supplies",
+        argv[1:5] == ["--mcp-config", str(mcp_cfg), "--settings", str(settings_cfg)],
+        repr(argv),
+    )
     check(
         "custom mode: --model appended",
         "--model" in argv and argv[argv.index("--model") + 1] == "claude-sonnet-5",
         repr(argv),
     )
     check(
-        "custom mode: extra_args appended verbatim, in order",
+        "custom mode: extra_args appended verbatim, in order, at the end",
         argv[-2:] == ["--verbose", "--foo=bar"],
         repr(argv),
     )
@@ -210,17 +234,17 @@ def test_launch_translation() -> None:
     )
 
     no_model_launch = {"mode": "custom", "host": "example.internal", "port": 8080}
-    argv = agent_runtime._build_argv(no_model_launch)
+    argv = agent_runtime._build_argv(no_model_launch, mcp_cfg, settings_cfg)
     check(
-        "custom mode, no model/extra_args: argv is just the executable",
-        len(argv) == 1,
+        "custom mode, no model/extra_args: argv is just the executable + the two flags",
+        len(argv) == 5,
         repr(argv),
     )
 
     autocompact_launch = {
         "mode": "custom", "host": "h", "port": 1, "autocompact": 42,
     }
-    argv = agent_runtime._build_argv(autocompact_launch)
+    argv = agent_runtime._build_argv(autocompact_launch, mcp_cfg, settings_cfg)
     check(
         "autocompact: never translated into a flag (no known CLI mechanism)",
         not any("compact" in a.lower() for a in argv),
@@ -234,6 +258,129 @@ def test_launch_translation() -> None:
     )
 
 
+# ------------------------------------------------------- 45a config + argv
+
+
+def test_write_agent_configs() -> None:
+    chat_dir = Path(tempfile.mkdtemp(prefix="mnemo agent-runtime 45a configs "))
+    token = "cfgtest-" + uuid.uuid4().hex
+    mcp_path, settings_path = agent_runtime._write_agent_configs(
+        chat_dir, "myagent", "chat123", token
+    )
+    check("mcp_config written inside chat_dir", mcp_path.parent == chat_dir, str(mcp_path))
+    check("settings written inside chat_dir", settings_path.parent == chat_dir, str(settings_path))
+
+    mcp_doc = json.loads(mcp_path.read_text(encoding="utf-8"))
+    server = mcp_doc["mcpServers"]["mnemo-agents"]
+    check("mcp-config: type is http", server["type"] == "http", repr(server))
+    check(
+        "mcp-config: url carries the token as ?token=",
+        server["url"].endswith(f"/mcp-agents?token={token}"),
+        server["url"],
+    )
+
+    settings_doc = json.loads(settings_path.read_text(encoding="utf-8"))
+    start_group = settings_doc["hooks"]["SubagentStart"][0]
+    stop_group = settings_doc["hooks"]["SubagentStop"][0]
+    check(
+        "settings: matcher is empty (every subagent type)",
+        start_group["matcher"] == "" and stop_group["matcher"] == "",
+        repr((start_group["matcher"], stop_group["matcher"])),
+    )
+    start_hook = start_group["hooks"][0]
+    stop_hook = stop_group["hooks"][0]
+    check(
+        "settings: hook url points at this chat's own hook path",
+        start_hook["url"].endswith("/hooks/agents/myagent/chat123/subagent"),
+        start_hook["url"],
+    )
+    check(
+        "settings: ONE url for both Start and Stop (body's hook_event_name distinguishes)",
+        start_hook["url"] == stop_hook["url"],
+        repr((start_hook["url"], stop_hook["url"])),
+    )
+    check(
+        "settings: Authorization bearer carries the session token",
+        start_hook["headers"]["Authorization"] == f"Bearer {token}",
+        repr(start_hook["headers"]),
+    )
+    check("settings: hook type is http", start_hook["type"] == "http", repr(start_hook))
+
+
+def test_session_token_lifecycle() -> None:
+    """`resolve_session_token`/`session_agent_slug` mint-to-teardown, exercised
+    with a FAKE `Session` (`proc=None`) so `_finalize_session` runs for real —
+    no real `claude` process anywhere near this."""
+    agent = _make_agent("token-lifecycle")
+    chat = agent_registry.create_chat(agent.slug)
+    chat_id = chat["chat_id"]
+    token = "test-token-" + uuid.uuid4().hex
+
+    check(
+        "resolve_session_token: unknown token -> None",
+        agent_runtime.resolve_session_token("this-token-does-not-exist") is None,
+    )
+    check(
+        "resolve_session_token: None/empty -> None",
+        agent_runtime.resolve_session_token(None) is None
+        and agent_runtime.resolve_session_token("") is None,
+    )
+    check(
+        "session_agent_slug: unknown chat_id -> None",
+        agent_runtime.session_agent_slug("no-such-chat") is None,
+    )
+
+    fake = agent_runtime.Session(
+        chat_id=chat_id, agent_slug=agent.slug,
+        history_path=Path(tempfile.mktemp()), proc=None, token=token,
+    )
+    with agent_runtime._sessions_lock:
+        agent_runtime._sessions[chat_id] = fake
+        agent_runtime._session_tokens[token] = chat_id
+
+    try:
+        check(
+            "resolve_session_token: a registered token resolves to its chat_id",
+            agent_runtime.resolve_session_token(token) == chat_id,
+        )
+        check(
+            "session_agent_slug: reflects the live session's agent",
+            agent_runtime.session_agent_slug(chat_id) == agent.slug,
+        )
+        live = agent_runtime.list_live_sessions()
+        check(
+            "list_live_sessions: includes the fake session",
+            any(s["chat_id"] == chat_id and s["agent_slug"] == agent.slug for s in live),
+            repr(live),
+        )
+
+        # The exact teardown path a real session goes through on exit —
+        # never touches `session.proc` beyond a suppressed `.exitstatus`
+        # read, so `proc=None` is safe here.
+        agent_runtime._finalize_session(fake)
+
+        check(
+            "resolve_session_token: gone once the session is finalized",
+            agent_runtime.resolve_session_token(token) is None,
+        )
+        check(
+            "session_agent_slug: gone once the session is finalized",
+            agent_runtime.session_agent_slug(chat_id) is None,
+        )
+        check(
+            "_sessions: entry removed by finalize",
+            chat_id not in agent_runtime._sessions,
+        )
+        check(
+            "_session_tokens: entry removed by finalize (mirrors _sessions exactly)",
+            token not in agent_runtime._session_tokens,
+        )
+    finally:
+        with agent_runtime._sessions_lock:
+            agent_runtime._sessions.pop(chat_id, None)
+            agent_runtime._session_tokens.pop(token, None)
+
+
 # ------------------------------------------------------ 43.2 concurrency cap
 
 
@@ -245,7 +392,8 @@ def test_concurrency_ceiling() -> None:
     for fid in fake_ids:
         agent_runtime._sessions[fid] = agent_runtime.Session(
             chat_id=fid, agent_slug=agent.slug,
-            history_path=Path(tempfile.mktemp()), proc=None, alive=True,
+            history_path=Path(tempfile.mktemp()), proc=None,
+            token=f"tok-{fid}", alive=True,
         )
     try:
         check(
@@ -271,7 +419,8 @@ def test_concurrency_ceiling() -> None:
     for fid in dead_ids:
         agent_runtime._sessions[fid] = agent_runtime.Session(
             chat_id=fid, agent_slug=agent.slug,
-            history_path=Path(tempfile.mktemp()), proc=None, alive=False,
+            history_path=Path(tempfile.mktemp()), proc=None,
+            token=f"tok-{fid}", alive=False,
         )
     try:
         check(
@@ -293,6 +442,7 @@ async def _race_free_reconnect() -> tuple[bool, str]:
     session = agent_runtime.Session(
         chat_id="race-test", agent_slug="race-agent",
         history_path=hist_path, proc=None,  # type: ignore[arg-type]
+        token="race-token",
     )
     session._history_fh = hist_path.open("a", encoding="utf-8")
     agent_runtime.bind_loop(asyncio.get_running_loop())
@@ -419,6 +569,364 @@ def test_http_chat_endpoints() -> None:
         "/ws/agents/{slug}/chats/{chat_id}" in routes,
         repr(sorted(p for p in routes if "chat" in p)),
     )
+
+
+# --------------------------------------------------- 45a auth_middleware
+#
+# `auth_middleware` is a plain `async def` — `@app.middleware("http")` hands
+# it back unchanged, so it can be called directly with a synthetic
+# `starlette.Request` and a stub `call_next`, the same "skip uvicorn/ASGI"
+# approach `test_http_chat_endpoints` uses for endpoint functions. No real
+# socket, no lifespan, no real `claude` process.
+
+
+def _fake_request(path: str, headers: dict | None = None, query: str = ""):
+    from starlette.requests import Request  # noqa: PLC0415
+    from src import api  # noqa: PLC0415
+
+    raw_headers = [(k.lower().encode(), v.encode()) for k, v in (headers or {}).items()]
+    scope = {
+        "type": "http", "method": "GET", "path": path,
+        "headers": raw_headers, "query_string": query.encode(), "app": api.app,
+    }
+    return Request(scope), scope
+
+
+def _register_fake_live_session(agent_slug: str, chat_id: str, token: str):
+    fake = agent_runtime.Session(
+        chat_id=chat_id, agent_slug=agent_slug,
+        history_path=Path(tempfile.mktemp()), proc=None, token=token,
+    )
+    with agent_runtime._sessions_lock:
+        agent_runtime._sessions[chat_id] = fake
+        agent_runtime._session_tokens[token] = chat_id
+    return fake
+
+
+def _drop_fake_live_session(chat_id: str, token: str) -> None:
+    with agent_runtime._sessions_lock:
+        agent_runtime._sessions.pop(chat_id, None)
+        agent_runtime._session_tokens.pop(token, None)
+
+
+async def _auth_middleware_agent_branch() -> None:
+    from starlette.responses import Response  # noqa: PLC0415
+    from src import api  # noqa: PLC0415
+
+    async def call_next(request):
+        return Response("reached", status_code=200)
+
+    agent = _make_agent("auth-branch")
+    chat = agent_registry.create_chat(agent.slug)
+    chat_id = chat["chat_id"]
+    token = "auth-branch-" + uuid.uuid4().hex
+    _register_fake_live_session(agent.slug, chat_id, token)
+
+    try:
+        req, scope = _fake_request("/mcp-agents/", query=f"token={token}")
+        resp = await api.auth_middleware(req, call_next)
+        check(
+            "/mcp-agents: a valid session token reaches call_next",
+            resp.status_code == 200,
+            f"status={resp.status_code} body={resp.body!r}",
+        )
+        check(
+            "/mcp-agents: scope carries the resolved chat_id",
+            scope.get(api.AGENT_SESSION_SCOPE_KEY) == chat_id,
+            repr(scope.get(api.AGENT_SESSION_SCOPE_KEY)),
+        )
+
+        hook_path = f"/hooks/agents/{agent.slug}/{chat_id}/subagent"
+        req2, scope2 = _fake_request(hook_path, headers={"Authorization": f"Bearer {token}"})
+        resp2 = await api.auth_middleware(req2, call_next)
+        check(
+            "/hooks/agents/*: a valid Authorization-header token reaches call_next",
+            resp2.status_code == 200,
+            f"status={resp2.status_code}",
+        )
+        check(
+            "/hooks/agents/*: scope carries the resolved chat_id",
+            scope2.get(api.AGENT_SESSION_SCOPE_KEY) == chat_id,
+            repr(scope2.get(api.AGENT_SESSION_SCOPE_KEY)),
+        )
+
+        req3, _ = _fake_request(hook_path, headers={"Authorization": "Bearer wrong-token"})
+        resp3 = await api.auth_middleware(req3, call_next)
+        check(
+            "/hooks/agents/*: a wrong token is rejected with 401",
+            resp3.status_code == 401,
+            f"status={resp3.status_code}",
+        )
+        body3 = json.loads(resp3.body)
+        check(
+            "/hooks/agents/*: 401 carries the 'unauthorized' error code",
+            body3.get("error", {}).get("code") == "unauthorized",
+            repr(body3),
+        )
+
+        req4, _ = _fake_request("/mcp-agents/")
+        resp4 = await api.auth_middleware(req4, call_next)
+        check(
+            "/mcp-agents: no token at all -> 401, not a crash",
+            resp4.status_code == 401,
+            f"status={resp4.status_code}",
+        )
+
+        # A bank token (a real, different credential kind) must not open
+        # this face either — the whole point of a THIRD credential kind.
+        req5, _ = _fake_request("/mcp-agents/", query="token=not-a-real-bank-or-session-token")
+        resp5 = await api.auth_middleware(req5, call_next)
+        check(
+            "/mcp-agents: an unrelated bogus token -> 401",
+            resp5.status_code == 401,
+            f"status={resp5.status_code}",
+        )
+    finally:
+        _drop_fake_live_session(chat_id, token)
+
+
+def test_auth_middleware_agent_branch() -> None:
+    asyncio.run(_auth_middleware_agent_branch())
+
+
+async def _hook_agent_subagent_endpoint() -> None:
+    from src import api  # noqa: PLC0415
+
+    agent = _make_agent("hook-endpoint")
+    chat = agent_registry.create_chat(agent.slug)
+    chat_id = chat["chat_id"]
+    other_chat_id = "some-other-chat-id"
+    token = "hook-endpoint-" + uuid.uuid4().hex
+    _register_fake_live_session(agent.slug, chat_id, token)
+
+    try:
+        req, scope = _fake_request(f"/hooks/agents/{agent.slug}/{chat_id}/subagent")
+        scope[api.AGENT_SESSION_SCOPE_KEY] = chat_id  # what auth_middleware would set
+
+        async def _receive():
+            return {"type": "http.request", "body": b"{}", "more_body": False}
+
+        req = req.__class__(scope, _receive)
+        result = await api.hook_agent_subagent(req, agent.slug, chat_id)
+        check("hook endpoint: matching chat_id -> accepted (empty ack)", result == {}, repr(result))
+
+        # The token resolved to `chat_id`, but the URL names a DIFFERENT
+        # chat_id -- the confused-deputy case `hook_agent_subagent` itself
+        # checks for on top of what auth_middleware already verified.
+        req2, scope2 = _fake_request(f"/hooks/agents/{agent.slug}/{other_chat_id}/subagent")
+        scope2[api.AGENT_SESSION_SCOPE_KEY] = chat_id
+        req2 = req2.__class__(scope2, _receive)
+        try:
+            await api.hook_agent_subagent(req2, agent.slug, other_chat_id)
+            check(
+                "hook endpoint: token's chat_id != URL's chat_id -> rejected",
+                False, "no exception raised",
+            )
+        except api.ApiError as exc:
+            check(
+                "hook endpoint: token's chat_id != URL's chat_id -> rejected",
+                exc.code == "unauthorized" and exc.status == 401,
+                f"code={exc.code} status={exc.status}",
+            )
+    finally:
+        _drop_fake_live_session(chat_id, token)
+
+
+def test_hook_agent_subagent_endpoint() -> None:
+    asyncio.run(_hook_agent_subagent_endpoint())
+
+
+# --------------------------------------------------- 45a mcp_agents.py tools
+#
+# Calls the `run_*` bodies directly (same "module-level, testable without a
+# real MCP client" shape `mcp_server.py`'s tools already use), with
+# `current_chat_id` set by hand to simulate an authenticated caller, and a
+# tiny fake PTY (`_FakeProc`) so delivery-success paths (`send_message`,
+# `interrupt`) are actually exercised rather than silently short-circuiting
+# on `proc=None`. No real `claude` process anywhere near this file.
+
+
+class _FakeProc:
+    def __init__(self) -> None:
+        self.written: list[str] = []
+
+    def write(self, data: str) -> None:
+        self.written.append(data)
+
+
+def test_mcp_agents_tools() -> None:
+    from src import mcp_agents, servicelog  # noqa: PLC0415
+
+    # --- ansi stripping / tail -------------------------------------------
+    raw = "\x1b[31mred\x1b[0m plain \x1b]0;title\x07 done"
+    check(
+        "_strip_ansi: CSI and OSC sequences removed, text kept",
+        mcp_agents._strip_ansi(raw) == "red plain  done",
+        repr(mcp_agents._strip_ansi(raw)),
+    )
+    check("_tail: returns the last n chars", mcp_agents._tail("abcdefgh", 3) == "fgh")
+    check(
+        "_tail: clamps to the ceiling rather than trusting the caller",
+        len(mcp_agents._tail("x" * 999999, 10_000_000)) == mcp_agents._MAX_TAIL_CHARS,
+    )
+
+    caller = _make_agent("mcp-agents-caller")
+    caller_chat = agent_registry.create_chat(caller.slug)
+    caller_chat_id = caller_chat["chat_id"]
+    caller_token = "caller-" + uuid.uuid4().hex
+    caller_proc = _FakeProc()
+    caller_session = agent_runtime.Session(
+        chat_id=caller_chat_id, agent_slug=caller.slug,
+        history_path=Path(tempfile.mktemp()), proc=caller_proc, token=caller_token,
+    )
+
+    target = _make_agent("mcp-agents-target")
+    target_chat = agent_registry.create_chat(target.slug)
+    target_chat_id = target_chat["chat_id"]
+    target_token = "target-" + uuid.uuid4().hex
+    target_proc = _FakeProc()
+    target_session = agent_runtime.Session(
+        chat_id=target_chat_id, agent_slug=target.slug,
+        history_path=Path(tempfile.mktemp()), proc=target_proc, token=target_token,
+    )
+    target_history_path = agent_registry.chat_history_path(target.root, target_chat_id)
+    target_history_path.write_text("\x1b[32mhello\x1b[0m world\n", encoding="utf-8")
+
+    with agent_runtime._sessions_lock:
+        agent_runtime._sessions[caller_chat_id] = caller_session
+        agent_runtime._session_tokens[caller_token] = caller_chat_id
+        agent_runtime._sessions[target_chat_id] = target_session
+        agent_runtime._session_tokens[target_token] = target_chat_id
+
+    events_before = len(servicelog.read_agent_events(limit=10_000))
+
+    def call_as_caller(fn, *args, **kwargs):
+        tok = mcp_agents.current_chat_id.set(caller_chat_id)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            mcp_agents.current_chat_id.reset(tok)
+
+    try:
+        # --- list_sessions -------------------------------------------------
+        listing = call_as_caller(mcp_agents.run_list_sessions)
+        check(
+            "list_sessions: mentions both live fake sessions",
+            caller_chat_id in listing and target_chat_id in listing,
+            listing,
+        )
+
+        # --- send_message, by chat_id --------------------------------------
+        result = call_as_caller(
+            mcp_agents.run_send_message, target_chat_id, "ping via chat_id"
+        )
+        check(
+            "send_message: reports delivery",
+            "delivered" in result.lower(),
+            result,
+        )
+        check(
+            "send_message: server-supplied [from ...] prefix actually written to the target's pty",
+            len(target_proc.written) == 1
+            and target_proc.written[0].startswith(f"[from {caller.slug} · {caller_chat_id[:8]}]")
+            and target_proc.written[0].rstrip("\r").endswith("ping via chat_id"),
+            repr(target_proc.written),
+        )
+
+        # --- send_message, by agent slug (single live session) -------------
+        result2 = call_as_caller(mcp_agents.run_send_message, target.slug, "ping via slug")
+        check(
+            "send_message: resolves a bare agent slug to its live session",
+            "delivered" in result2.lower() and target_chat_id in result2,
+            result2,
+        )
+        check(
+            "send_message: second message also landed on the target's pty",
+            len(target_proc.written) == 2,
+            repr(target_proc.written),
+        )
+
+        # --- send_message, unknown target -----------------------------------
+        result3 = call_as_caller(mcp_agents.run_send_message, "no-such-agent-or-chat", "hi")
+        check(
+            "send_message: unknown chat_id/slug -> a clear note, not a crash",
+            "no live session" in result3,
+            result3,
+        )
+
+        # --- read_recent -----------------------------------------------------
+        recent = call_as_caller(mcp_agents.run_read_recent, target_chat_id)
+        check(
+            "read_recent: ANSI stripped, text preserved",
+            "hello world" in recent and "\x1b" not in recent,
+            recent,
+        )
+        check("read_recent: names the owning agent", target.slug in recent, recent)
+
+        missing = call_as_caller(mcp_agents.run_read_recent, "not-a-real-chat-id")
+        check(
+            "read_recent: unknown chat_id -> a clear note, not a crash",
+            "no chat" in missing.lower(),
+            missing,
+        )
+
+        # --- session_summary ---------------------------------------------
+        summary = call_as_caller(mcp_agents.run_session_summary, target_chat_id)
+        check(
+            "session_summary: carries metadata and the same ANSI-stripped tail",
+            "alive=True" in summary and "hello world" in summary,
+            summary,
+        )
+        check(
+            "session_summary: honest about not being an LLM summary (MN-45b note present)",
+            "MN-45b" in summary,
+            summary,
+        )
+
+        # --- interrupt -------------------------------------------------------
+        interrupt_result = call_as_caller(mcp_agents.run_interrupt, target_chat_id)
+        check("interrupt: reports success", "sent a soft interrupt" in interrupt_result, interrupt_result)
+        check(
+            "interrupt: wrote exactly one Escape byte, nothing else, to the target",
+            target_proc.written[-1] == "\x1b",
+            repr(target_proc.written[-1]),
+        )
+
+        no_session_result = call_as_caller(mcp_agents.run_interrupt, "not-a-real-chat-id")
+        check(
+            "interrupt: no live session -> a clear note, not a crash",
+            "no live session" in no_session_result,
+            no_session_result,
+        )
+
+        # --- audit logging (Jira decision #5: EVERY call is logged) --------
+        events_after = servicelog.read_agent_events(limit=10_000)
+        new_events = events_after[: len(events_after) - events_before]
+        tools_logged = [e["tool"] for e in new_events]
+        check(
+            "audit: every tool call above produced a servicelog entry",
+            {"list_sessions", "send_message", "read_recent", "session_summary",
+             "interrupt"} <= set(tools_logged),
+            repr(sorted(set(tools_logged))),
+        )
+        check(
+            "audit: entries attribute the caller correctly (never self-reported)",
+            all(
+                e["caller_chat_id"] == caller_chat_id and e["caller_slug"] == caller.slug
+                for e in new_events
+            ),
+            repr(new_events[:3]),
+        )
+        send_message_events = [e for e in new_events if e["tool"] == "send_message"]
+        check(
+            "audit: send_message entries record the target",
+            any(e["target"] == target_chat_id for e in send_message_events)
+            or any(e["target"] == target.slug for e in send_message_events),
+            repr(send_message_events),
+        )
+    finally:
+        _drop_fake_live_session(caller_chat_id, caller_token)
+        _drop_fake_live_session(target_chat_id, target_token)
 
 
 # -------------------------------------------------- 44.A chat file upload
@@ -687,9 +1195,14 @@ def test_agent_subagents_endpoint() -> None:
 def main() -> int:
     test_chat_storage()
     test_launch_translation()
+    test_write_agent_configs()
+    test_session_token_lifecycle()
     test_concurrency_ceiling()
     test_race_free_reconnect()
     test_http_chat_endpoints()
+    test_auth_middleware_agent_branch()
+    test_hook_agent_subagent_endpoint()
+    test_mcp_agents_tools()
     test_sanitize_upload_filename()
     test_agent_chat_upload_endpoint()
     test_agent_subagents_endpoint()
