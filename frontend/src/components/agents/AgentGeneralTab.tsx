@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import { Input } from "antd";
 import { useT } from "@/lib/i18n/hooks";
-import { useAgentClaudeMd } from "@/hooks/useAgentQueries";
+import { useAgentClaudeMd, useAgentSubagents } from "@/hooks/useAgentQueries";
 import { usePatchAgent, usePutClaudeMd } from "@/hooks/useAgentMutations";
 import { ApiError } from "@/lib/api/fetcher";
 import type { AgentSectionController } from "./AgentSettings";
@@ -33,6 +33,7 @@ interface AgentGeneralTabProps {
 export function AgentGeneralTab({ agent, onController }: AgentGeneralTabProps) {
   const t = useT();
   const claudeMdQuery = useAgentClaudeMd(agent.slug, true);
+  const subagentsQuery = useAgentSubagents(agent.slug, true);
   const patchAgentMutation = usePatchAgent();
   const putClaudeMdMutation = usePutClaudeMd();
 
@@ -111,6 +112,26 @@ export function AgentGeneralTab({ agent, onController }: AgentGeneralTabProps) {
         <p className={result.ok ? "wiz-hint" : "modal-error"} style={result.ok ? { color: "var(--ok)" } : undefined}>
           {result.message}
         </p>
+      )}
+
+      {/* Read-only display of `.claude/agents/*.md` (MN-44) — no launch
+          action here, that's MN-45's multiagent layer. */}
+      <h2 style={{ marginTop: 18 }}>{t("agents.settings.general.subagentsTitle")}</h2>
+      {subagentsQuery.isLoading && <p className="empty-hint">{t("agents.settings.loading")}</p>}
+      {!subagentsQuery.isLoading && (subagentsQuery.data ?? []).length === 0 && (
+        <p className="empty-hint">{t("agents.settings.general.subagentsEmpty")}</p>
+      )}
+      {(subagentsQuery.data ?? []).length > 0 && (
+        <div className="pick-list">
+          {(subagentsQuery.data ?? []).map((sub) => (
+            <div key={sub.name} className="pick-row" style={{ cursor: "default" }}>
+              <div className="pick-row-text">
+                <div className="pick-row-name">{sub.name}</div>
+                {sub.description && <div className="pick-row-meta">{sub.description}</div>}
+              </div>
+            </div>
+          ))}
+        </div>
       )}
     </>
   );

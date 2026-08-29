@@ -8,11 +8,11 @@ interface AgentWorkspaceStubProps {
 }
 
 /**
- * Right pane's whole content for Фаза B — there is no chat console yet
- * (MN-43), so clicking an agent (there is nothing else to click — see
- * `AgentTreeRow`'s docstring) always lands here. Ported text from the
- * mockup's `renderWorkspace` empty-chat stub
- * (`.claude/scratch/agents-page-mockup/app.js`).
+ * Right pane's content when no chat is open (MN-44): either no agent is
+ * selected at all (`selectHint`), or an agent is selected but its own row
+ * — not one of its chats — was clicked, so there's nothing to render but a
+ * "pick or start a chat" hint. `AgentsPage.tsx` renders `ChatConsole`
+ * instead of this the moment a `chat_id` is actually selected.
  */
 export function AgentWorkspaceStub({ agent }: AgentWorkspaceStubProps) {
   const t = useT();

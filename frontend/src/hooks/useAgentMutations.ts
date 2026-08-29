@@ -19,6 +19,7 @@ import {
   type PatchAgentRequest,
   type UpdateLinkRequest,
 } from "@/lib/api/agents";
+import { createChat, deleteChat } from "@/lib/api/agentChats";
 import type { CatalogCategory } from "@/lib/api/catalog";
 
 /** No cache to invalidate — a dry-run inspection, not a write. */
@@ -134,5 +135,28 @@ export function useDetachLink() {
       qc.invalidateQueries({ queryKey: queryKeys.agentLinks.one(slug) });
       qc.invalidateQueries({ queryKey: queryKeys.catalog.all });
     },
+  });
+}
+
+/** MN-44. Cheap on purpose (`POST /api/agents/{slug}/chats`'s own docstring):
+ *  creates the record only, never spawns the real `claude` process — that
+ *  happens lazily on the chat console's first WS connect. */
+export function useCreateChat() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, title }: { slug: string; title?: string | null }) => createChat(slug, title),
+    onSuccess: (_result, { slug }) => qc.invalidateQueries({ queryKey: queryKeys.agentChats.list(slug) }),
+  });
+}
+
+/** Deleting a chat is the one action allowed to stop its live session
+ *  (`api_delete_chat` -> `agent_runtime.stop_session`) — everything else in
+ *  this feature (switching agents, switching chats, closing the tab) only
+ *  ever closes the WebSocket, never the process. */
+export function useDeleteChat() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ slug, chatId }: { slug: string; chatId: string }) => deleteChat(slug, chatId),
+    onSuccess: (_result, { slug }) => qc.invalidateQueries({ queryKey: queryKeys.agentChats.list(slug) }),
   });
 }

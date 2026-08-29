@@ -291,12 +291,31 @@
       "loading": "Loading…",
       "empty": "No agents yet — \"＋ Add agent\" creates the first one.",
       "noChats": "No chats yet — select this agent to start one.",
-      "settingsTitle": "Agent settings"
+      "settingsTitle": "Agent settings",
+      "chatUntitled": "Untitled chat",
+      "newChat": "＋ New chat",
+      "creatingChat": "Creating…",
+      "deleteChatTitle": "Delete chat"
     },
     "workspace": {
       "selectHint": "Select an agent on the left, or create a new one.",
-      "stubTitle": "The session console goes here",
-      "stubBody": "Streaming display of the agent's thinking, tool calls and slash commands. Rendered by a separate task (agent-runtime.py plus a WS stream). Switching between agents doesn't stop background generation."
+      "stubTitle": "Pick a chat, or start a new one",
+      "stubBody": "Select an existing chat in the tree, or use \"＋ New chat\" to start one. Switching between chats never stops background generation — only deleting a chat does."
+    },
+    "console": {
+      "status": {
+        "connecting": "connecting…",
+        "replaying": "replaying…",
+        "live": "live",
+        "error": "reconnecting…",
+        "exited": "session ended"
+      },
+      "errorBanner": "Connection error: {message}",
+      "exitedBanner": "The session ended (exit code: {code}).",
+      "dropHint": "Drop a file to attach it",
+      "attachTitle": "Attach a file",
+      "clearAttachment": "Remove attachment",
+      "uploading": "Uploading…"
     },
     "wizard": {
       "title": "Add agent",
@@ -357,7 +376,9 @@
         "links": "MCP / Skills / Rules"
       },
       "general": {
-        "savedNote": "Settings saved."
+        "savedNote": "Settings saved.",
+        "subagentsTitle": "Subagents",
+        "subagentsEmpty": "No .claude/agents/*.md files in this agent's own folder."
       },
       "backend": {
         "savedNote": "Backend setting saved.",

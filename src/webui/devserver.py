@@ -29,6 +29,8 @@ import socket
 import struct
 import threading
 import time
+import uuid
+from contextlib import suppress
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -407,8 +409,9 @@ def _find_duplicate_mcp(content: str, *, exclude_id: str | None) -> dict[str, An
 # Shaped exactly like `_agent_info()`'s response (`src/api.py`'s agent
 # registry section) — `launch` is the same `read_launch_config()` shape
 # (`{"mode": "standard"}` or `{"mode": "custom", "host", "port", ...}`).
-# `AGENTS[].chats` does not exist: MN-43 (the chat backend) isn't built yet,
-# so the tree's chat lists are always empty — nothing here needs to fake one.
+# Chats (MN-43/MN-44) live in `_CHATS` below, keyed by slug — a separate dict
+# rather than an `AGENTS[].chats` field, mirroring `agent_registry.py`'s own
+# separation of `agents.json` from each agent's `chats.json`.
 
 _AGENT_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
@@ -480,6 +483,84 @@ AGENTS: list[dict[str, Any]] = [
 def _find_agent(slug: str) -> dict[str, Any] | None:
     with _lock:
         return next((a for a in AGENTS if a["slug"] == slug), None)
+
+
+# --------------------------------------------------------------------------
+# agent chats (MN-43/MN-44) — lifecycle fixture (`agent_registry.py`'s
+# `{chat_id, title, created_at, last_active_at}` shape) plus a hand-rolled
+# fake PTY session for `/ws/agents/{slug}/chats/{chat_id}`, further below
+# next to the real WebSocket plumbing.
+# --------------------------------------------------------------------------
+
+_CHATS: dict[str, list[dict[str, Any]]] = {}
+
+_AGENT_SUBAGENTS_FIXTURE: dict[str, list[dict[str, Any]]] = {
+    "debug-assistant": [
+        {"name": "test-runner", "description": "Runs pytest and summarizes failures."},
+        {"name": "log-triager", "description": None},
+    ],
+}
+
+
+def _chat_info(chat: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "chat_id": chat["chat_id"],
+        "title": chat.get("title"),
+        "created_at": chat.get("created_at", ""),
+        "last_active_at": chat.get("last_active_at", ""),
+    }
+
+
+def _find_chat(slug: str, chat_id: str) -> dict[str, Any] | None:
+    with _lock:
+        return next((c for c in _CHATS.get(slug, []) if c["chat_id"] == chat_id), None)
+
+
+# 25 MiB, mirroring `config.MAX_CHAT_UPLOAD_BYTES`'s own default — this
+# fixture has no `src/config.py` import (devserver.py is meant to run
+# standalone, stdlib-only), so the number is duplicated, not imported.
+_MAX_CHAT_UPLOAD_BYTES_FIXTURE = 25 * 1024 * 1024
+_UPLOAD_UNSAFE_CHARS_FIXTURE = frozenset('<>:"|?*')
+_UPLOAD_DRIVE_ANCHOR_RE_FIXTURE = re.compile(r"^[A-Za-z]:")
+
+
+def _sanitize_upload_filename_fixture(name: str) -> str:
+    """Same shape as `api._sanitize_upload_filename` — kept independent
+    rather than imported, since this whole module answers contract shapes
+    without depending on the real package it is standing in for."""
+    name = (name or "").strip()
+    name = re.split(r"[\\/]+", name)[-1]
+    name = _UPLOAD_DRIVE_ANCHOR_RE_FIXTURE.sub("", name)
+    name = name.strip().strip(".")
+    cleaned = "".join(c for c in name if c not in _UPLOAD_UNSAFE_CHARS_FIXTURE and ord(c) >= 32)
+    return cleaned or "upload"
+
+
+def _parse_multipart_file(content_type: str, body: bytes) -> tuple[str, bytes] | None:
+    """Pull `(filename, content)` out of a single-file `multipart/form-data`
+    body. Hand-rolled rather than `cgi.FieldStorage` — `cgi` was removed in
+    Python 3.13 (PEP 594) and this module stays stdlib-only across whatever
+    3.10+ interpreter runs it. Returns `None` if no file part is found."""
+    match = re.search(r'boundary="?([^";]+)"?', content_type)
+    if not match:
+        return None
+    boundary = ("--" + match.group(1)).encode("utf-8")
+    for part in body.split(boundary):
+        part = part.strip(b"\r\n")
+        if not part or part == b"--":
+            continue
+        header_end = part.find(b"\r\n\r\n")
+        if header_end == -1:
+            continue
+        headers = part[:header_end].decode("utf-8", "replace")
+        content = part[header_end + 4:]
+        if content.endswith(b"\r\n"):
+            content = content[:-2]
+        name_match = re.search(r'filename="([^"]*)"', headers)
+        if name_match is None:
+            continue
+        return name_match.group(1), content
+    return None
 
 
 def _norm_link_name(name: str) -> str:
@@ -1142,6 +1223,133 @@ CLIENTS: list[WSClient] = []
 _clients_lock = threading.Lock()
 
 
+# --------------------------------------------------------------------------
+# agent chat WebSocket (MN-43/MN-44) — a fake PTY session per `chat_id`,
+# entirely separate from `CLIENTS`/`broadcast` above: those serve the one
+# shared `/ws` (bank/queue/journal events), this serves one dedicated socket
+# per chat with its own byte-stream contract (`output`/`replay_done`/
+# `exited`/`error` server->client, `input`/`resize` client->server — see
+# `src/api.py`'s `ws_agent_chat` docstring, which this mirrors).
+# --------------------------------------------------------------------------
+
+_WS_AGENT_CHAT_RE = re.compile(r"^/ws/agents/([^/]+)/chats/([^/]+)$")
+
+# chat_id -> {"history": str, "subscribers": list[WSClient], "started": bool,
+#             "buffer": str, "stopped": bool}
+_CHAT_SESSIONS: dict[str, dict[str, Any]] = {}
+_chat_sessions_lock = threading.Lock()
+
+_FAKE_CLAUDE_BANNER = (
+    "\x1b[36m*\x1b[0m Claude Code v3.0.0 (fixture — devserver.py, not a real session)\r\n"
+    "  model: claude-sonnet-5\r\n\r\n> "
+)
+
+
+def _chat_ws_subscribe(chat_id: str, client: WSClient) -> str:
+    """Register `client` as a live viewer of `chat_id` and return whatever
+    output has already accumulated (the replay text) — mirrors
+    `agent_runtime.ensure_and_subscribe`'s lazy-spawn-on-first-subscriber
+    contract: the fake banner is only queued the very first time anyone
+    connects to this chat, never on a later reconnect."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.setdefault(
+            chat_id, {"history": "", "subscribers": [], "started": False, "buffer": "", "stopped": False},
+        )
+        session["subscribers"].append(client)
+        first = not session["started"]
+        session["started"] = True
+        replay = session["history"]
+    if first:
+        threading.Thread(target=_chat_ws_spawn, args=(chat_id,), daemon=True).start()
+    return replay
+
+
+def _chat_ws_unsubscribe(chat_id: str, client: WSClient) -> None:
+    """Drop one viewer. Never touches `history`/`started` — the fake session
+    (like the real one) outlives any single browser tab; only an explicit
+    chat deletion (`_chat_ws_force_exit`) ends it."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session and client in session["subscribers"]:
+            session["subscribers"].remove(client)
+
+
+def _chat_ws_broadcast(chat_id: str, envelope: dict[str, Any]) -> None:
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session is None or session["stopped"]:
+            return
+        if envelope.get("type") == "output":
+            session["history"] += str(envelope.get("data", ""))
+        targets = list(session["subscribers"])
+    for sub in targets:
+        try:
+            sub.send_json(envelope)
+        except OSError:
+            sub.alive = False
+
+
+def _chat_ws_spawn(chat_id: str) -> None:
+    time.sleep(0.3)
+    _chat_ws_broadcast(chat_id, {"type": "output", "data": _FAKE_CLAUDE_BANNER})
+
+
+def _chat_ws_handle_input(chat_id: str, data: str) -> None:
+    """Echoes every keystroke straight back — same as a real PTY running a
+    line-editing program, which is what makes typing feel alive in dev mode
+    even though no real `claude` process is underneath. On a carriage
+    return, whatever accumulated since the last one is treated as "what the
+    user typed" and gets one canned reply, purely for visual smoke-testing
+    of `ChatConsole.tsx` under `npm run dev` — this is not a slash-command
+    interpreter or anything close to the real CLI's own TUI."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session is None or session["stopped"]:
+            return
+    _chat_ws_broadcast(chat_id, {"type": "output", "data": data.replace("\r", "\r\n")})
+    if "\r" not in data and "\n" not in data:
+        with _chat_sessions_lock:
+            session = _CHAT_SESSIONS.get(chat_id)
+            if session is not None:
+                session["buffer"] += data
+        return
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.get(chat_id)
+        if session is None:
+            return
+        prompt = (session["buffer"] + data).strip("\r\n")
+        session["buffer"] = ""
+    if prompt:
+        threading.Thread(target=_chat_ws_reply, args=(chat_id, prompt), daemon=True).start()
+    else:
+        _chat_ws_broadcast(chat_id, {"type": "output", "data": "> "})
+
+
+def _chat_ws_reply(chat_id: str, prompt: str) -> None:
+    time.sleep(0.4)
+    reply = (
+        "\r\n\x1b[2m(fixture reply — devserver.py, not a real claude session)\x1b[0m\r\n"
+        f"You said: {prompt}\r\n\r\n> "
+    )
+    _chat_ws_broadcast(chat_id, {"type": "output", "data": reply})
+
+
+def _chat_ws_force_exit(chat_id: str) -> None:
+    """Called from `delete_chat` — the real endpoint's `agent_runtime.
+    stop_session` equivalent: tell every still-open viewer the process is
+    gone, then forget the session entirely (a later chat with the same id
+    never happens — ids are `uuid4().hex`)."""
+    with _chat_sessions_lock:
+        session = _CHAT_SESSIONS.pop(chat_id, None)
+        if session is None:
+            return
+        session["stopped"] = True
+        targets = list(session["subscribers"])
+    for sub in targets:
+        with suppress(OSError):
+            sub.send_json({"type": "exited", "code": 0})
+
+
 def broadcast(event_type: str, bank_id: str | None, data: dict) -> None:
     envelope = {
         "v": 1,
@@ -1496,6 +1704,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/ws":
             self.handle_ws(query)
             return
+        chat_ws_match = _WS_AGENT_CHAT_RE.match(path)
+        if chat_ws_match:
+            self.handle_agent_chat_ws(chat_ws_match.group(1), chat_ws_match.group(2), query)
+            return
         if path == "/health":
             self.json_out(200, self.health())
             return
@@ -1535,6 +1747,9 @@ class Handler(BaseHTTPRequestHandler):
             if len(parts) == 4 and parts[1] == "links":
                 self.delete_agent_link(parts[0], parts[2], parts[3])
                 return
+            if len(parts) == 3 and parts[1] == "chats":
+                self.delete_chat(parts[0], parts[2])
+                return
             if len(parts) != 1:
                 self.fail(404, "internal", "no route " + parsed.path)
                 return
@@ -1543,6 +1758,7 @@ class Handler(BaseHTTPRequestHandler):
                 before = len(AGENTS)
                 AGENTS[:] = [a for a in AGENTS if a["slug"] != slug_ref]
                 removed = len(AGENTS) != before
+                _CHATS.pop(slug_ref, None)
             if not removed:
                 self.fail(404, "agent_not_found", "no agent matches", {"slug": slug_ref})
                 return
@@ -1774,6 +1990,18 @@ class Handler(BaseHTTPRequestHandler):
             self.fail(401, "unauthorized", "missing or invalid token")
             return
 
+        # Handled before the generic JSON-body read below: a chat upload's
+        # body is `multipart/form-data`, not JSON, and `json.loads()` on it
+        # would just 422.
+        if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/upload"):
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 4 and parts[1] == "chats" and parts[3] == "upload":
+                self.post_chat_upload(parts[0], parts[2])
+                return
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+
         length = int(self.headers.get("Content-Length") or 0)
         raw = self.rfile.read(length) if length else b"{}"
         try:
@@ -1806,6 +2034,14 @@ class Handler(BaseHTTPRequestHandler):
             parts = rest.split("/")
             if len(parts) == 3 and parts[1] == "links":
                 self.post_agent_link(parts[0], parts[2], body)
+                return
+            self.fail(404, "internal", "no route " + parsed.path)
+            return
+        if parsed.path.startswith("/api/agents/") and parsed.path.endswith("/chats"):
+            rest = unquote(parsed.path[len("/api/agents/"):])
+            parts = rest.split("/")
+            if len(parts) == 2 and parts[1] == "chats":
+                self.post_chat(parts[0], body)
                 return
             self.fail(404, "internal", "no route " + parsed.path)
             return
@@ -2169,6 +2405,26 @@ class Handler(BaseHTTPRequestHandler):
                     }
                 self.json_out(200, links)
                 return
+            if parts[1:] == ["chats"]:
+                with _lock:
+                    chats = sorted(
+                        (_chat_info(c) for c in _CHATS.get(slug_ref, [])),
+                        key=lambda c: c["last_active_at"] or "",
+                        reverse=True,
+                    )
+                self.json_out(200, {"chats": chats})
+                return
+            if len(parts) == 3 and parts[1] == "chats":
+                chat = _find_chat(slug_ref, parts[2])
+                if chat is None:
+                    self.fail(404, "chat_not_found", f"no chat {parts[2]!r} for agent {slug_ref!r}",
+                              {"slug": slug_ref, "chat_id": parts[2]})
+                    return
+                self.json_out(200, _chat_info(chat))
+                return
+            if parts[1:] == ["subagents"]:
+                self.json_out(200, {"subagents": _AGENT_SUBAGENTS_FIXTURE.get(slug_ref, [])})
+                return
 
             self.fail(404, "internal", "no route " + path)
             return
@@ -2297,6 +2553,62 @@ class Handler(BaseHTTPRequestHandler):
             }
             AGENTS.append(agent)
         self.json_out(201, _agent_info(agent))
+
+    def post_chat(self, slug: str, body: dict) -> None:
+        """`POST /api/agents/{slug}/chats` — mirrors `agent_registry.create_chat`.
+        Cheap: creates the record only, never spawns the fake session (that
+        happens lazily on the first `/ws/agents/{slug}/chats/{chat_id}`
+        subscriber, same lazy-spawn contract as the real backend)."""
+        if _find_agent(slug) is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        now = now_iso()
+        chat = {
+            "chat_id": uuid.uuid4().hex,
+            "title": (str(body.get("title") or "")).strip() or None,
+            "created_at": now,
+            "last_active_at": now,
+        }
+        with _lock:
+            _CHATS.setdefault(slug, []).append(chat)
+        self.json_out(201, _chat_info(chat))
+
+    def post_chat_upload(self, slug: str, chat_id: str) -> None:
+        """`POST /api/agents/{slug}/chats/{chat_id}/upload` — mirrors
+        `api_agent_chat_upload`'s response shape (`{"path", "filename"}`).
+        Never writes anything to disk — this is a fixture, not a real
+        chat's uploads folder — the returned `path` is fake but shaped like
+        a real one, which is all `ChatConsole.tsx` needs to insert it into
+        the terminal input."""
+        agent = _find_agent(slug)
+        if agent is None:
+            self.fail(404, "agent_not_found", "no agent matches", {"slug": slug})
+            return
+        if _find_chat(slug, chat_id) is None:
+            self.fail(404, "chat_not_found", f"no chat {chat_id!r} for agent {slug!r}",
+                      {"slug": slug, "chat_id": chat_id})
+            return
+
+        content_type = self.headers.get("Content-Type", "")
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        parsed_part = _parse_multipart_file(content_type, raw)
+        if parsed_part is None:
+            self.fail(400, "bad_request", "expected a multipart/form-data 'file' field")
+            return
+        filename, content = parsed_part
+        if not content:
+            self.fail(400, "bad_request", "uploaded file is empty", {"filename": filename})
+            return
+        if len(content) > _MAX_CHAT_UPLOAD_BYTES_FIXTURE:
+            self.fail(413, "upload_too_large",
+                      f"upload exceeds the {_MAX_CHAT_UPLOAD_BYTES_FIXTURE}-byte limit",
+                      {"filename": filename})
+            return
+
+        safe_name = _sanitize_upload_filename_fixture(filename or "upload")
+        fake_path = f"{agent['root']}/chats/{chat_id}/uploads/{uuid.uuid4().hex}-{safe_name}"
+        self.json_out(201, {"path": fake_path, "filename": filename or "upload"})
 
     def patch_agent(self, slug: str, body: dict) -> None:
         """`PATCH /api/agents/{slug}` — rename (MN-48). `slug`/`root` never
@@ -2461,6 +2773,20 @@ class Handler(BaseHTTPRequestHandler):
                       f"{entry_id!r} is not attached to agent {slug!r} in category {category!r}",
                       {"id": entry_id})
             return
+        self.json_out(200, {"ok": True})
+
+    def delete_chat(self, slug: str, chat_id: str) -> None:
+        """`DELETE /api/agents/{slug}/chats/{chat_id}` — mirrors
+        `api_delete_chat`: best-effort-stop the fake session first (an
+        `exited` broadcast to any still-open `ChatConsole.tsx`), then drop
+        the record."""
+        if _find_chat(slug, chat_id) is None:
+            self.fail(404, "chat_not_found", f"no chat {chat_id!r} for agent {slug!r}",
+                      {"slug": slug, "chat_id": chat_id})
+            return
+        _chat_ws_force_exit(chat_id)
+        with _lock:
+            _CHATS[slug] = [c for c in _CHATS.get(slug, []) if c["chat_id"] != chat_id]
         self.json_out(200, {"ok": True})
 
     def post_catalog_entry(self, body: dict) -> None:
@@ -2652,6 +2978,83 @@ class Handler(BaseHTTPRequestHandler):
                     CLIENTS.remove(client)
             self.close_connection = True
             self.log_message("ws close (clients=%d)", len(CLIENTS))
+
+    def handle_agent_chat_ws(self, slug: str, chat_id: str, query: dict) -> None:
+        """`/ws/agents/{slug}/chats/{chat_id}` — mirrors `src/api.py`'s
+        `ws_agent_chat`: same token gate, same `output`/`replay_done`/
+        `exited`/`error` envelope shapes, same "replay everything, then
+        `replay_done`, then live output" contract. The fake session itself
+        (`_chat_ws_*` above) is a canned typing-echo loop, not a structured
+        event simulator — the whole point of the real PTY architecture is
+        that the client renders raw bytes with no protocol of its own, and
+        this mock exists to exercise exactly that path, not to fake a
+        `claude` conversation."""
+        token = (query.get("token") or [""])[0]
+        if not NO_AUTH and token != DEV_TOKEN:
+            self.fail(401, "unauthorized", "missing or invalid token")
+            return
+        key = self.headers.get("Sec-WebSocket-Key")
+        if not key or "websocket" not in self.headers.get("Upgrade", "").lower():
+            self.fail(400, "bad_request", "not a websocket upgrade")
+            return
+
+        accept = base64.b64encode(
+            hashlib.sha1((key + WS_GUID).encode("ascii")).digest()
+        ).decode("ascii")
+        self.wfile.write(
+            b"HTTP/1.1 101 Switching Protocols\r\n"
+            b"Upgrade: websocket\r\n"
+            b"Connection: Upgrade\r\n"
+            b"Sec-WebSocket-Accept: " + accept.encode("ascii") + b"\r\n\r\n"
+        )
+        self.wfile.flush()
+        client = WSClient(self.connection, None)
+
+        agent = _find_agent(slug)
+        chat = _find_chat(slug, chat_id) if agent is not None else None
+        if agent is None or chat is None:
+            # Same policy as the real endpoint: send `error`, then close —
+            # a raw HTTP 404 can't be read by a WebSocket client, so the
+            # real backend (and this mock) always accepts the upgrade first.
+            with suppress(OSError):
+                client.send_json({"type": "error", "message": f"no chat {chat_id!r} for agent {slug!r}"})
+                client.send_frame(b"", opcode=0x8)
+            self.close_connection = True
+            return
+
+        replay_text = _chat_ws_subscribe(chat_id, client)
+        try:
+            with suppress(OSError):
+                if replay_text:
+                    client.send_json({"type": "output", "data": replay_text})
+                client.send_json({"type": "replay_done"})
+            while True:
+                frame = read_frame(self.rfile)
+                if frame is None:
+                    break
+                opcode, payload = frame
+                if opcode == 0x8:
+                    break
+                if opcode == 0x9:
+                    client.send_frame(payload, opcode=0xA)
+                    continue
+                if opcode != 0x1:
+                    continue
+                try:
+                    msg = json.loads(payload.decode("utf-8"))
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if not isinstance(msg, dict):
+                    continue
+                if msg.get("type") == "input":
+                    _chat_ws_handle_input(chat_id, str(msg.get("data", "")))
+                # "resize" is accepted and ignored — nothing in this fixture
+                # depends on terminal dimensions.
+        except OSError:
+            pass
+        finally:
+            _chat_ws_unsubscribe(chat_id, client)
+            self.close_connection = True
 
 
 # --------------------------------------------------------------------------

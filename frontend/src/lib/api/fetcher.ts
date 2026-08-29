@@ -87,3 +87,57 @@ export async function api<T = unknown>(path: string, options?: ApiOptions): Prom
   }
   return payload as T;
 }
+
+/**
+ * Same auth/error contract as `api()`, but for a `multipart/form-data` body
+ * (a file upload) — `api()` always JSON-encodes `options.body`, which would
+ * mangle a `File`. No `Content-Type` header is set here on purpose: the
+ * browser fills in the boundary itself from the `FormData` instance, and
+ * setting it by hand strips that boundary.
+ */
+export async function apiUpload<T = unknown>(path: string, file: File): Promise<T> {
+  const { token, hydrated, openGate } = useTokenStore.getState();
+  const headers: Record<string, string> = { Accept: "application/json" };
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+
+  const form = new FormData();
+  form.append("file", file);
+
+  let response: Response;
+  try {
+    response = await fetch(path, { method: "POST", headers, body: form });
+  } catch (err) {
+    throw new ApiError(
+      "unreachable",
+      err instanceof Error ? err.message : String(err),
+      null,
+      0,
+    );
+  }
+
+  const text = await response.text();
+  let payload: unknown = null;
+  if (text) {
+    try {
+      payload = JSON.parse(text);
+    } catch {
+      throw new ApiError("internal", "invalid JSON from server", { raw: text.slice(0, 200) }, response.status);
+    }
+  }
+
+  if (!response.ok) {
+    const box = (payload as { error?: { code?: string; message?: string; detail?: Record<string, unknown> } } | null)
+      ?.error || {};
+    const err = new ApiError(
+      box.code || "internal",
+      box.message || response.statusText,
+      box.detail || null,
+      response.status,
+    );
+    if (isAuthError(err) && hydrated) {
+      openGate("rejected");
+    }
+    throw err;
+  }
+  return payload as T;
+}

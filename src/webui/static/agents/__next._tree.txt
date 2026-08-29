@@ -1,6 +1,7 @@
 :HL["/ui/_next/static/chunks/20dbkqfnvzwmu.css","style"]
 :HL["/ui/_next/static/chunks/1ng5r7iz7j87p.css","style"]
 :HL["/ui/_next/static/chunks/1kog3kw8xl-gr.css","style"]
+:HL["/ui/_next/static/chunks/42x_0tvgvtycd.css","style"]
 :HL["/ui/_next/static/chunks/2a4v9hk6wqecr.css","style"]
-:HL["/ui/_next/static/chunks/3hxl2zblfk_cb.css","style"]
+:HL["/ui/_next/static/chunks/3ibroyxcqgn9k.css","style"]
 0:{"tree":{"name":"","param":null,"prefetchHints":4176,"slots":{"children":{"name":"agents","param":null,"prefetchHints":4192,"slots":{"children":{"name":"__PAGE__","param":null,"prefetchHints":4256,"slots":null}}}}},"staleTime":300,"buildId":"mnemo-console"}

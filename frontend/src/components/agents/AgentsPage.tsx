@@ -5,6 +5,7 @@ import { AgentsHeader } from "./AgentsHeader";
 import { AgentTree } from "./AgentTree";
 import { AgentWorkspaceStub } from "./AgentWorkspaceStub";
 import { AgentSettings } from "./AgentSettings";
+import { ChatConsole } from "./ChatConsole";
 import { CreateAgentWizard } from "./CreateAgentWizard";
 import { PaneResizer } from "@/components/common/PaneResizer";
 import { useInlineNote, InlineNote } from "@/components/common/InlineNote";
@@ -31,6 +32,7 @@ export default function AgentsPage() {
 
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [selectedSlug, setSelectedSlug] = useState<string | null>(null);
+  const [selectedChatId, setSelectedChatId] = useState<string | null>(null);
   // Fills the same workspace pane a chat would, not a route — the ⚙ screen
   // belongs to one agent, not to the app (mockup's `renderAgentSettings`
   // docstring, `.claude/scratch/agents-page-mockup/app.js`, makes this call
@@ -52,6 +54,24 @@ export default function AgentsPage() {
     });
     setSelectedSlug(slug);
     setWorkspaceMode("chat");
+    // Clicking the agent row itself (as opposed to one of its chats) always
+    // lands on the "pick or start a chat" hint — the tree, not this pane,
+    // is what actually opens a chat (`selectChat` below).
+    setSelectedChatId(null);
+  }
+
+  function selectChat(agentSlug: string, chatId: string) {
+    setExpanded((prev) => new Set(prev).add(agentSlug));
+    setSelectedSlug(agentSlug);
+    setWorkspaceMode("chat");
+    setSelectedChatId(chatId);
+  }
+
+  // Deleting the chat currently open in the workspace pane must fall back
+  // to the "pick or start a chat" hint — otherwise `ChatConsole` would keep
+  // rendering against a `chat_id` the backend just 404s on reconnect.
+  function handleChatDeleted(chatId: string) {
+    setSelectedChatId((cur) => (cur === chatId ? null : cur));
   }
 
   function openSettings(slug: string) {
@@ -63,6 +83,7 @@ export default function AgentsPage() {
     setExpanded((prev) => new Set(prev).add(agent.slug));
     setSelectedSlug(agent.slug);
     setWorkspaceMode("chat");
+    setSelectedChatId(null);
     setNote(message);
   }
 
@@ -73,12 +94,22 @@ export default function AgentsPage() {
       <AgentsHeader onAdd={() => setWizardOpen(true)} />
       <div className="ag-layout" style={{ gridTemplateColumns: `${width}px 6px minmax(0, 1fr)` }}>
         <div className="ag-tree-pane">
-          <AgentTree expanded={expanded} selectedSlug={selectedSlug} onToggle={toggleAgent} onOpenSettings={openSettings} />
+          <AgentTree
+            expanded={expanded}
+            selectedSlug={selectedSlug}
+            selectedChatId={selectedChatId}
+            onToggle={toggleAgent}
+            onOpenSettings={openSettings}
+            onSelectChat={selectChat}
+            onChatDeleted={handleChatDeleted}
+          />
         </div>
         <PaneResizer onStart={beginDrag} onDrag={applyDrag} onCommit={commitDrag} />
         <div className="ag-workspace">
           {workspaceMode === "settings" && selectedAgent ? (
             <AgentSettings key={selectedAgent.slug} agent={selectedAgent} onClose={() => setWorkspaceMode("chat")} />
+          ) : workspaceMode === "chat" && selectedAgent && selectedChatId ? (
+            <ChatConsole key={selectedChatId} agent={selectedAgent} chatId={selectedChatId} />
           ) : (
             <AgentWorkspaceStub agent={selectedAgent} />
           )}
