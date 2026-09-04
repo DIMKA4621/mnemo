@@ -182,21 +182,59 @@ def base_version_tag(tag: str | None) -> str | None:
 _SEMVER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
+def _semver_tuple(tag: str | None) -> tuple[int, int, int] | None:
+    """Parse a ``vMAJOR.MINOR.PATCH`` tag into a comparable tuple, or
+    ``None`` for anything that does not match that exact shape (``"local"``,
+    a trailing local-build ``l`` not yet stripped by :func:`base_version_tag`,
+    a malformed tag from some future format change).
+    """
+    if not tag:
+        return None
+    match = _SEMVER_RE.match(tag)
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3))) if match else None
+
+
 def _major_version(tag: str | None) -> int | None:
     """The leading ``MAJOR`` out of a ``vMAJOR.MINOR.PATCH`` tag, or ``None``
-    for anything that does not match that exact shape (``"local"``, a
-    trailing local-build ``l`` not yet stripped by :func:`base_version_tag`,
-    a malformed tag from some future format change).
+    for anything that does not match that exact shape.
 
     ``None`` is the deliberate "I don't know" answer, not "block it" --
     :func:`auto_eligible_tag` treats it as permission to proceed, same as
     before this gate existed. Every tag this project mints today matches
     the pattern; this only exists for whatever does not.
     """
-    if not tag:
-        return None
-    match = _SEMVER_RE.match(tag)
-    return int(match.group(1)) if match else None
+    parsed = _semver_tuple(tag)
+    return parsed[0] if parsed is not None else None
+
+
+def _is_newer(latest: str | None, current: str | None) -> bool:
+    """Whether ``latest`` is a genuinely newer release than ``current`` --
+    what :func:`record_check`/:func:`record_installed` use to decide
+    ``update_available``, instead of a bare string inequality.
+
+    **Bug found live (2026-09-04):** the original check was
+    ``bool(latest) and latest != current``, which flags "update available"
+    for ANY different tag, newer or not. GitHub's ``releases/latest`` only
+    ever returns *published* releases, so while a new tag sits as a draft
+    (exactly the state ``v3.2.1`` was in right after being cut), the API
+    still reports the previous, older release as "latest" -- and a machine
+    already running the newer draft build got told "v3.2.0 available",
+    nagging a downgrade. Comparing parsed semver tuples instead answers the
+    question this is actually asking: is there a release newer than what is
+    running, not "is this tag string different."
+
+    Falls back to plain inequality when either side does not parse as
+    ``vMAJOR.MINOR.PATCH`` (e.g. ``"local"``) -- the same behaviour this
+    replaced, kept for tags this project has never actually minted in that
+    shape.
+    """
+    if not latest:
+        return False
+    latest_v = _semver_tuple(latest)
+    current_v = _semver_tuple(current)
+    if latest_v is None or current_v is None:
+        return latest != current
+    return latest_v > current_v
 
 
 def _is_valid(data: Any) -> bool:
@@ -288,9 +326,7 @@ def record_installed(*, tag: str, commit: str | None, status: str) -> dict[str, 
         # can flip it: a new tag becoming current, not a new tag being
         # reported.
         last_check = dict(state.get("last_check") or {})
-        last_check["update_available"] = (
-            bool(last_check.get("latest_tag")) and last_check.get("latest_tag") != tag
-        )
+        last_check["update_available"] = _is_newer(last_check.get("latest_tag"), tag)
         state["last_check"] = last_check
     installed.append(
         {"tag": tag, "installed_at": _now_iso(), "commit": commit, "status": status}
@@ -404,8 +440,7 @@ def record_check(*, latest_tag: str | None, error: str | None) -> dict[str, Any]
         state["last_check"] = {
             "at": _now_iso(),
             "latest_tag": latest_tag,
-            "update_available": bool(latest_tag)
-            and latest_tag != base_version_tag(effective_current_tag(state)),
+            "update_available": _is_newer(latest_tag, base_version_tag(effective_current_tag(state))),
             "error": None,
         }
     else:
