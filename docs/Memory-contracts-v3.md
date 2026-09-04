@@ -2396,7 +2396,7 @@ CLI лишається детермінованим примітивом: або
 | 9 | `install.ps1` лочить `mnemo.exe`; тепер лочитиме й запущений бекенд | platform-dev | 5 | stop → refresh → start (15.6) |
 | 10 | `EMBED_THREADS` `cpu/3 → cpu*3/4` проти виміряних чисел арени в `embedder.py` | engine-dev + tester | 0 | переміряти RSS (15.7) |
 | 11 | Строгий `is_model_cached()` змінює поведінку фолбеку провайдера | engine-dev | 0 | текст помилки розрізняє «немає» й «неповний» (15.7) |
-| 12 | `CLAUDE_PROJECT_DIR` — два механізми резолву кореня поряд | service-dev | 4 | хук шле `CLAUDE_PROJECT_DIR`, не `cwd` (15.8) |
+| 12 | `CLAUDE_PROJECT_DIR` — два механізми резолву кореня поряд | service-dev | 4 | скасовано 2026-09-04 — auto-inject хук зник, гілка стала пасткою для `mnemo init` (15.8) |
 | 13 | `_MEMORY_RULE` у `scaffold.py` вчить `scope`/`agent-memory` | service-dev | 4 | переписаний під плаский банк (15.9) |
 | 14 | `Setup-design.md` фіксує stdio-контракт `.mcp.json` у прозі | docs-keeper | 4 | переписано під §10.4 |
 | 15 | `README.md`, `CLAUDE.md`, скіл `mnemo-adopt` описують v2 | docs-keeper | 4–6 | синхронізовано |
@@ -2558,15 +2558,20 @@ ONNX-налаштування (`allow_spinning=0`, `enable_cpu_mem_arena=False`)
 Це **правильніше**, але користувач має розуміти причину: текст помилки мусить розрізняти «модель не завантажена» й «снапшот неповний — доверши `mnemo warmup`».
 Інакше діагностика зводиться до здогадок.
 
-### 15.8 `CLAUDE_PROJECT_DIR`: два резолвери поряд **[NEW]**
+### 15.8 `CLAUDE_PROJECT_DIR`: два резолвери поряд **[SUPERSEDED 2026-09-04]**
 
 Гілка додала `CLAUDE_PROJECT_DIR` у ланцюг `config.resolve()` (явний > `MNEMO_ROOT` > `CLAUDE_PROJECT_DIR` > cwd) — саме тому, що Claude Code віддає його хукам і MCP, а `cwd` дочірнього процесу довіряти не можна.
-Рішення правильне й **лишається**, але тепер у системі два резолвери: `config.resolve()` (корінь проєкту, для `init`/`scaffold`) і `registry.resolve(ref)` (банк, §6.4).
+Рішення правильне й ~~лишається~~, але тепер у системі два резолвери: `config.resolve()` (корінь проєкту, для `init`/`scaffold`) і `registry.resolve(ref)` (банк, §6.4).
 
 Зіткнення точкове й важливе: **auto-inject хук мусить слати `CLAUDE_PROJECT_DIR`, а не `cwd`.** Форма `path` у `registry.resolve` бере **найглибший** банк, чий корінь є предком шляху.
 Якщо хук пошле `cwd` підтеки, а користувач має вкладений банк — запит піде не в той банк, тихо й правдоподібно.
 З `CLAUDE_PROJECT_DIR` цього не станеться.
-*Розвʼязаний стан:* §11.1, `hook-inject` бере корінь у тому самому порядку, що й `config.resolve()`, і кладе його в поле `bank` запиту `/api/search`.
+*Розвʼязаний стан (на момент фази 4):* §11.1, `hook-inject` бере корінь у тому самому порядку, що й `config.resolve()`, і кладе його в поле `bank` запиту `/api/search`.
+
+**Скасовано 2026-09-04.** Обґрунтування вище повністю спиралось на auto-inject хук — а його більше немає: за поточним `CLAUDE.md`, mnemo не має жодного хука, що резолвить корінь («No hook targets any more beyond the hook-postedit no-op shim: the discipline lives in the rule, not in an injection»).
+Без цього хука `CLAUDE_PROJECT_DIR` у `config.resolve()` була мертвою гілкою, яку живив лише один живий викликач — `mnemo init` — і саме там вона стала пасткою: Claude Code підкладає цю змінну кожному своєму дочірньому процесу, тож термінал, що успадкував її з чужої сесії, змушував `mnemo init` мовчки ігнорувати справжній `cwd` (а `--help` про це не казав ані слова).
+`config.resolve()` тепер: явний > `MNEMO_ROOT` > cwd — без `CLAUDE_PROJECT_DIR`.
+`$MNEMO_ROOT` лишається — це свідомий, задокументований override для контейнерного розгортання (`docs/containers/`), а не щось, що Claude Code підкладає непомітно.
 
 ### 15.9 Документація й `_MEMORY_RULE` **[NEW]**
 
