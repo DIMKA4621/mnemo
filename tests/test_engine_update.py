@@ -228,6 +228,35 @@ def test_record_check_soft_failure(work: Path) -> None:
               after_same["last_check"]["update_available"] is False)
 
 
+def test_record_check_never_nags_toward_an_older_tag(work: Path) -> None:
+    """Bug found live (2026-09-04): the checker reported "v3.2.0 available"
+    to a machine already running v3.2.1. Root cause was `record_check`
+    comparing tags with plain `!=` -- ANY different tag counted as "an
+    update", newer or not. GitHub's `releases/latest` only ever returns
+    *published* releases, so while v3.2.1 sat as a draft it kept reporting
+    v3.2.0 (the previous, older release) as "latest". This exercises the
+    exact scenario: a locally-installed newer tag, and a GitHub check that
+    (for whatever reason -- draft window, a stale mirror, a rollback)
+    reports something OLDER. Semver-aware comparison must never call that
+    "update available".
+    """
+    with patch.object(config, "STATE_DIR", work / "no-downgrade"):
+        engine_update.record_installed(tag="v3.2.1", commit=None, status="active")
+
+        after = engine_update.record_check(latest_tag="v3.2.0", error=None)
+        check("an older tag from GitHub is never offered as an update",
+              after["last_check"]["update_available"] is False,
+              detail=str(after["last_check"]))
+
+        after_same = engine_update.record_check(latest_tag="v3.2.1", error=None)
+        check("the same tag is not an update either",
+              after_same["last_check"]["update_available"] is False)
+
+        after_newer = engine_update.record_check(latest_tag="v3.2.2", error=None)
+        check("a genuinely newer tag still is",
+              after_newer["last_check"]["update_available"] is True)
+
+
 def test_effective_current_tag_self_detects_fresh_install(work: Path) -> None:
     """Fresh install gap (found live, 2026-08-22): install.ps1/install.sh
     never call record_installed(), so `current` stays None until the FIRST
@@ -1094,6 +1123,7 @@ def main() -> int:
         test_state_recovers_from_corrupt_file(work)
         test_record_installed_and_apply_helpers(work)
         test_record_check_soft_failure(work)
+        test_record_check_never_nags_toward_an_older_tag(work)
         test_effective_current_tag_self_detects_fresh_install(work)
         test_base_version_tag_strips_local_build_marker(work)
         test_update_available_clears_on_switch(work)
