@@ -25,7 +25,7 @@ import os
 import sys
 from pathlib import Path
 
-from .config import TOP_K
+from .config import TOP_K, invoked_cwd
 
 EXIT_OK = 0
 EXIT_ERROR = 1
@@ -58,8 +58,10 @@ def _run_api(fn, *, autostart: bool = True) -> int:
 
 
 def _bank_ref(explicit: str | None) -> str:
-    """What to send as `bank`. Defaults to cwd — the backend resolves a path
-    to the bank containing it, or to the one bank it contains.
+    """What to send as `bank`. Defaults to the (launcher-corrected) cwd — the
+    backend resolves a path to the bank containing it, or to the one bank it
+    contains. See `config.invoked_cwd()` for why this isn't a bare
+    `Path.cwd()`.
 
     A path-looking ref is made absolute **here**, because the backend's cwd is
     its own: `--bank .claude/memory` is meaningful only where the user typed
@@ -68,7 +70,7 @@ def _bank_ref(explicit: str | None) -> str:
     bank happens to enclose that directory.
     """
     if explicit is None:
-        return str(Path.cwd())
+        return str(invoked_cwd())
     looks_like_path = explicit in (".", "..") or any(s in explicit for s in "/\\")
     if looks_like_path and not Path(explicit).expanduser().is_absolute():
         return str(Path(explicit).expanduser().resolve())

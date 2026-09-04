@@ -1709,7 +1709,8 @@ def test_project_resolution() -> None:
         explicit = base / "explicit"
         mnemo_root = base / "env-root"
         claude_root = base / "claude-root"
-        for path in (explicit, mnemo_root, claude_root):
+        invoked = base / "invoked-cwd"
+        for path in (explicit, mnemo_root, claude_root, invoked):
             path.mkdir()
 
         with patch.dict(
@@ -1717,6 +1718,7 @@ def test_project_resolution() -> None:
             {
                 "MNEMO_ROOT": str(mnemo_root),
                 "CLAUDE_PROJECT_DIR": str(claude_root),
+                "MNEMO_INVOKED_CWD": str(invoked),
             },
             clear=False,
         ):
@@ -1725,19 +1727,34 @@ def test_project_resolution() -> None:
                 config.resolve(explicit).root == explicit.resolve(),
             )
             check(
-                "MNEMO_ROOT wins over cwd",
+                "MNEMO_ROOT wins over MNEMO_INVOKED_CWD and cwd",
                 config.resolve(None).root == mnemo_root.resolve(),
             )
 
         with patch.dict(
             os.environ,
-            {"CLAUDE_PROJECT_DIR": str(claude_root)},
+            {"CLAUDE_PROJECT_DIR": str(claude_root),
+             "MNEMO_INVOKED_CWD": str(invoked)},
             clear=False,
         ):
             os.environ.pop("MNEMO_ROOT", None)
             check(
-                "CLAUDE_PROJECT_DIR is not consulted — cwd wins instead",
-                config.resolve(None).root == Path.cwd().resolve(),
+                "CLAUDE_PROJECT_DIR is not consulted — MNEMO_INVOKED_CWD "
+                "wins instead",
+                config.resolve(None).root == invoked.resolve(),
+            )
+            check(
+                "invoked_cwd() itself returns the same corrected directory",
+                config.invoked_cwd() == invoked.resolve(),
+            )
+
+        with patch.dict(os.environ, {}, clear=False):
+            for name in ("MNEMO_ROOT", "CLAUDE_PROJECT_DIR", "MNEMO_INVOKED_CWD"):
+                os.environ.pop(name, None)
+            check(
+                "with no launcher env at all, invoked_cwd() falls back to "
+                "the real Path.cwd() (direct `python -m src.cli`, dev/tests)",
+                config.invoked_cwd() == Path.cwd().resolve(),
             )
 
 

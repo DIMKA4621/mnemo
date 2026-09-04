@@ -91,6 +91,11 @@ _BACKGROUND_ONLY = frozenset(
 
 def _dispatch(*, gui: bool) -> int:
     _configure_utf8()
+    # Captured before anything below changes directory or spawns a child --
+    # this is the ONE place that ever sees the real caller's cwd. See the
+    # `cwd=` comment further down for why the dispatched process cannot be
+    # trusted to see it via its own `Path.cwd()`.
+    invoked_cwd = os.getcwd()
     engine_home = _engine_home()
     python = _versioned_python(engine_home, gui=gui)
     if not python.is_file():
@@ -111,13 +116,16 @@ def _dispatch(*, gui: bool) -> int:
 
     env = dict(os.environ)
     env["MNEMO_HOME"] = str(engine_home)
-    # This is how `-m src.cli` finds the `src` package: NOT the child's cwd
-    # (see below), just this. A child that changes directory, or an odd
-    # invocation of this dispatcher from a different cwd, must not lose
-    # sight of `src` either way.
+    # Belt-and-braces alongside `-m src.cli`'s own cwd-based resolution: a
+    # child that changes directory, or an odd invocation of this dispatcher
+    # from a different cwd, must not lose sight of `src`.
     env["PYTHONPATH"] = str(version_root) + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
     )
+    # The real caller's directory, for `config.invoked_cwd()` to read --
+    # the dispatched process's OWN `Path.cwd()` is deliberately NOT this
+    # (see the `cwd=` argument below).
+    env["MNEMO_INVOKED_CWD"] = invoked_cwd
 
     argv = [str(python), "-m", "src.cli", *sys.argv[1:]]
     kwargs: dict = {}
@@ -142,24 +150,26 @@ def _dispatch(*, gui: bool) -> int:
             "stderr": subprocess.DEVNULL,
         }
     try:
-        # No `cwd=` override here: the dispatched `src.cli` process must see
-        # the REAL caller's working directory. `config.resolve()` (`init`)
-        # and `cli._bank_ref()` (`search`/`tree`/`reindex`) both default to
-        # `Path.cwd()` when no explicit `--root`/`--bank` is given — that is
-        # the entire documented contract ("Project root (default: cwd)").
-        # An earlier version of this dispatcher pinned `cwd=str(version_root)`
-        # (belt-and-braces for `-m src.cli`'s own import, redundant with the
-        # `PYTHONPATH` set above) and it silently broke that contract for
-        # every plain invocation of the installed launcher: `Path.cwd()`
-        # inside the child was always the engine's own version directory,
-        # never the terminal's actual directory — `mnemo init`/`search`/
-        # `tree`/`reindex` run without an explicit root/bank silently
-        # resolved against the engine's install tree instead of the caller's
-        # project (found live 2026-09-04, `.claude/memory/topics/
-        # config-root-resolution.md`). Nothing else in the codebase reads
-        # `cwd` (everything else is absolute paths off the registry/
-        # `MNEMO_HOME`), so inheriting the real cwd here is safe.
-        completed = subprocess.run(argv, env=env, **kwargs)
+        # `cwd=str(version_root)`, deliberately NOT the caller's real
+        # directory: Python's `-m` always prepends the process's OWN cwd to
+        # `sys.path`, ahead of `PYTHONPATH` -- so if this subprocess ran
+        # with the caller's real project directory as its cwd, a top-level
+        # `src/` package living in that project (an extremely common Python
+        # layout) would shadow mnemo's own `src` and `-m src.cli` would
+        # import the WRONG one. Confirmed as a real regression, not a
+        # theoretical one: briefly removed this `cwd=` on 2026-09-04 to fix
+        # `config.resolve()`/`cli._bank_ref()` seeing the wrong directory,
+        # and `tests/test_install_windows.py`'s "project-local src
+        # shadowing" case caught it immediately in CI (Windows-only, since
+        # that is the only OS this dispatcher runs on).
+        #
+        # The actual fix for `config.resolve()`/`cli._bank_ref()` is
+        # `$MNEMO_INVOKED_CWD` above, not this `cwd=` -- see
+        # `config.invoked_cwd()`. This subprocess's own `Path.cwd()` stays
+        # the engine's version directory on purpose; nothing in `src/`
+        # calls `Path.cwd()`/`os.getcwd()` directly any more except through
+        # that one function.
+        completed = subprocess.run(argv, cwd=str(version_root), env=env, **kwargs)
     except KeyboardInterrupt:
         # Ctrl-C on a foreground command (e.g. `mnemo search` waiting on the
         # service) reaches both us and the child directly: no
