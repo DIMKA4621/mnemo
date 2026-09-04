@@ -1725,7 +1725,7 @@ def test_project_resolution() -> None:
                 config.resolve(explicit).root == explicit.resolve(),
             )
             check(
-                "MNEMO_ROOT beats CLAUDE_PROJECT_DIR",
+                "MNEMO_ROOT wins over cwd",
                 config.resolve(None).root == mnemo_root.resolve(),
             )
 
@@ -1736,8 +1736,8 @@ def test_project_resolution() -> None:
         ):
             os.environ.pop("MNEMO_ROOT", None)
             check(
-                "CLAUDE_PROJECT_DIR fallback",
-                config.resolve(None).root == claude_root.resolve(),
+                "CLAUDE_PROJECT_DIR is not consulted — cwd wins instead",
+                config.resolve(None).root == Path.cwd().resolve(),
             )
 
 

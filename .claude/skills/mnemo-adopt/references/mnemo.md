@@ -160,7 +160,7 @@ There are no hooks left to be portable, so this is about one entry:
 The one logical path resolves to the platform's real launcher: `~/.mnemo/bin/mnemo` (extensionless Bash script) on Linux/macOS, `bin\mnemo.exe` on Windows (process creation resolves the extensionless path to the `.exe`).
 On Windows `install.ps1` sets the user `HOME` environment variable **only when it is absent**, never overwrites it, and refuses a value different from PowerShell `$HOME`/`%USERPROFILE%` — the engine lives under `HOME`, and the portable form resolves against it.
 After first creating it, close and reopen the launching terminal or IDE, then restart Claude Code.
-Root resolution for the commands that take one is the same everywhere — explicit `--root` > `MNEMO_ROOT` > `CLAUDE_PROJECT_DIR` > cwd — and indexed relative file identifiers always use `/`, avoiding separator-only drift between platforms.
+Root resolution for the commands that take one is the same everywhere — explicit `--root` > `MNEMO_ROOT` (a deliberate override for containerized deployments, never set implicitly) > cwd — and indexed relative file identifiers always use `/`, avoiding separator-only drift between platforms.
 Resolve a wiring conflict by copying the expected form from the `mnemo init` refusal report.
 
 ## `mnemo` is not a human command

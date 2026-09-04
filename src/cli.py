@@ -801,7 +801,10 @@ def _build_parser() -> argparse.ArgumentParser:
              "entry. Additive and idempotent; refuses rather than write a "
              "token into a git-tracked file, and writes NOTHING when it does.",
     )
-    pn.add_argument("--root", default=None, help="Project root (default: cwd).")
+    pn.add_argument(
+        "--root", default=None,
+        help="Project root. Default: $MNEMO_ROOT if set, else cwd.",
+    )
     pn.add_argument(
         "--yes", action="store_true",
         help="Answer yes to the one question init can ask: taking a "

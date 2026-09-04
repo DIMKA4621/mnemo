@@ -111,9 +111,10 @@ def _dispatch(*, gui: bool) -> int:
 
     env = dict(os.environ)
     env["MNEMO_HOME"] = str(engine_home)
-    # Belt-and-braces alongside `-m src.cli`'s own cwd-based resolution: a
-    # child that changes directory, or an odd invocation of this dispatcher
-    # from a different cwd, must not lose sight of `src`.
+    # This is how `-m src.cli` finds the `src` package: NOT the child's cwd
+    # (see below), just this. A child that changes directory, or an odd
+    # invocation of this dispatcher from a different cwd, must not lose
+    # sight of `src` either way.
     env["PYTHONPATH"] = str(version_root) + (
         os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else ""
     )
@@ -141,7 +142,24 @@ def _dispatch(*, gui: bool) -> int:
             "stderr": subprocess.DEVNULL,
         }
     try:
-        completed = subprocess.run(argv, cwd=str(version_root), env=env, **kwargs)
+        # No `cwd=` override here: the dispatched `src.cli` process must see
+        # the REAL caller's working directory. `config.resolve()` (`init`)
+        # and `cli._bank_ref()` (`search`/`tree`/`reindex`) both default to
+        # `Path.cwd()` when no explicit `--root`/`--bank` is given — that is
+        # the entire documented contract ("Project root (default: cwd)").
+        # An earlier version of this dispatcher pinned `cwd=str(version_root)`
+        # (belt-and-braces for `-m src.cli`'s own import, redundant with the
+        # `PYTHONPATH` set above) and it silently broke that contract for
+        # every plain invocation of the installed launcher: `Path.cwd()`
+        # inside the child was always the engine's own version directory,
+        # never the terminal's actual directory — `mnemo init`/`search`/
+        # `tree`/`reindex` run without an explicit root/bank silently
+        # resolved against the engine's install tree instead of the caller's
+        # project (found live 2026-09-04, `.claude/memory/topics/
+        # config-root-resolution.md`). Nothing else in the codebase reads
+        # `cwd` (everything else is absolute paths off the registry/
+        # `MNEMO_HOME`), so inheriting the real cwd here is safe.
+        completed = subprocess.run(argv, env=env, **kwargs)
     except KeyboardInterrupt:
         # Ctrl-C on a foreground command (e.g. `mnemo search` waiting on the
         # service) reaches both us and the child directly: no

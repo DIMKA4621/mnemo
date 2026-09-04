@@ -135,19 +135,26 @@ def bank_id(root: Path) -> str:
 def resolve(root: Path | str | None) -> BankPaths:
     """Resolve all paths for a bank root.
 
-    Precedence: explicit arg > $MNEMO_ROOT > $CLAUDE_PROJECT_DIR > cwd.
-    Claude Code supplies CLAUDE_PROJECT_DIR to project-scoped MCP servers
-    and hooks, so resolution never depends on the child cwd.
+    Precedence: explicit arg > $MNEMO_ROOT > cwd. ``$MNEMO_ROOT`` is a
+    deliberate, user-set override for non-interactive/containerized
+    deployments (docs/containers/) where there is no meaningful cwd to
+    fall back on — it is never set implicitly.
+
+    ``$CLAUDE_PROJECT_DIR`` was dropped from this chain (it used to sit
+    between ``$MNEMO_ROOT`` and cwd): it was added for an auto-inject hook
+    that read the project root from it instead of cwd, but that hook no
+    longer exists (docs/Memory-contracts-v3.md §15.8) — mnemo now has no
+    hook that resolves a root at all. Left in place, it was a silent
+    footgun for interactive use: Claude Code sets this env var for its own
+    child processes, so a terminal that inherited it from an unrelated
+    Claude Code session made `mnemo init` silently ignore the terminal's
+    actual cwd with no indication in `--help`.
 
     The key stays ``sha1(root)``, but the root it hashes is now the bank root
     — so v2 index files are simply not reused (they are also incompatible;
     ``store`` drops them).
     """
-    chosen = (
-        root
-        or os.environ.get("MNEMO_ROOT")
-        or os.environ.get("CLAUDE_PROJECT_DIR")
-    )
+    chosen = root or os.environ.get("MNEMO_ROOT")
     root_path = Path(chosen).resolve() if chosen else Path.cwd().resolve()
     bid = bank_id(root_path)
     return BankPaths(id=bid, root=root_path, db=STATE_DIR / f"{bid}.db")
