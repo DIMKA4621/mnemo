@@ -2779,10 +2779,8 @@ def _spawn_update_apply_breakaway(argv: list[str], cwd: Path) -> None:
     from . import service_ctl  # noqa: PLC0415
 
     if os.name != "nt":
-        raise NotImplementedError(
-            "update-apply spawning is Windows-only for now (self-update's "
-            "own scope) -- see the design topic's migration-risk decision"
-        )
+        service_ctl.spawn_detached(argv, cwd=cwd)
+        return
 
     tmp_dir = service_ctl.state_dir() / "tmp"
     tmp_dir.mkdir(parents=True, exist_ok=True)  # not guaranteed by stage_release's own cleanup
