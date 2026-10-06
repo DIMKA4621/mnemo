@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 from contextlib import suppress
@@ -949,6 +950,157 @@ def _ps_quote(path: Path) -> str:
     return str(path).replace("'", "''")
 
 
+def _write_pip_progress(path: Path, status: dict[str, Any]) -> None:
+    """Best-effort update of the side-channel progress file."""
+    with suppress(OSError):
+        path.write_text(json.dumps(status), encoding="utf-8")
+
+
+def _run_pip_install_posix(
+    venv_python: Path,
+    reqs_file: Path,
+    *,
+    progress_file: Path | None = None,
+    timeout: float = 3600.0,
+) -> None:
+    """Install dependencies on POSIX while streaming lines to detect progress."""
+    cmd = [str(venv_python), "-m", "pip", "install", "-r", str(reqs_file)]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    count = 0
+    output_lines: list[str] = []
+    try:
+        if proc.stdout:
+            for line in proc.stdout:
+                output_lines.append(line)
+                stripped = line.strip()
+                if stripped.startswith("Collecting "):
+                    count += 1
+                    if progress_file is not None:
+                        _write_pip_progress(
+                            progress_file, {"phase": "collecting", "count": count}
+                        )
+                elif "Installing collected packages" in stripped:
+                    if progress_file is not None:
+                        _write_pip_progress(
+                            progress_file, {"phase": "installing", "count": count}
+                        )
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise RuntimeError(f"pip install timed out after {timeout}s") from None
+    except Exception:
+        proc.kill()
+        proc.wait()
+        raise
+
+    if proc.returncode != 0:
+        detail = "".join(output_lines[-20:]).strip()
+        raise RuntimeError(f"pip install failed (exit {proc.returncode}): {detail}")
+
+    if progress_file is not None:
+        _write_pip_progress(progress_file, {"phase": "done", "count": count})
+
+
+def _build_engine_version_posix(
+    repo_root: Path,
+    version_dir: Path,
+    *,
+    timeout: float = 3600.0,
+    progress_file: Path | None = None,
+) -> None:
+    """Build a versioned {src, .venv} tree directly on POSIX."""
+    if not (repo_root / "src" / "cli.py").is_file():
+        raise RuntimeError(f"release archive has no src/cli.py at {repo_root}")
+    reqs_file = repo_root / "requirements.txt"
+    if not reqs_file.is_file():
+        raise RuntimeError(f"release archive has no requirements.txt at {repo_root}")
+
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Mirror code & runtime assets
+    src_dest = version_dir / "src"
+    if src_dest.exists():
+        shutil.rmtree(src_dest)
+    shutil.copytree(
+        repo_root / "src",
+        src_dest,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    for name in ("requirements.txt", "pyproject.toml", "mnemo_bootstrap.py"):
+        f = repo_root / name
+        if f.is_file():
+            shutil.copy2(f, version_dir / name)
+
+    # 2. Virtual environment
+    venv_dir = version_dir / ".venv"
+    venv_python = venv_dir / "bin" / "python"
+    if not venv_python.is_file():
+        base_py = getattr(sys, "_base_executable", None) or shutil.which("python3") or sys.executable
+        res = subprocess.run(
+            [base_py, "-m", "venv", str(venv_dir)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"Failed to create virtual environment: {res.stderr.strip() or res.stdout.strip()}"
+            )
+
+    # 3. Upgrade pip
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "--quiet", "--upgrade", "pip"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+
+    # 4. Install dependencies with progress tracking
+    _run_pip_install_posix(
+        venv_python, version_dir / "requirements.txt", progress_file=progress_file, timeout=timeout
+    )
+
+    # 5. SQLite-vec extension probe
+    vec_probe = (
+        "import sqlite3, sqlite_vec; "
+        "conn = sqlite3.connect(':memory:'); "
+        "conn.enable_load_extension(True); "
+        "sqlite_vec.load(conn)"
+    )
+    probe = subprocess.run(
+        [str(venv_python), "-c", vec_probe],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "This Python cannot load SQLite extensions, so sqlite-vec "
+            f"cannot load and no bank can be opened: {venv_python}. "
+            f"Error: {probe.stderr.strip() or probe.stdout.strip()}"
+        )
+
+    # 6. Install launcher metadata if pyproject.toml is present
+    if (version_dir / "pyproject.toml").is_file():
+        subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "--quiet", "--no-deps", "--force-reinstall", str(version_dir)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+
+
 def _build_engine_version(
     repo_root: Path,
     version_dir: Path,
@@ -957,49 +1109,18 @@ def _build_engine_version(
     progress_file: Path | None = None,
 ) -> None:
     """Build a full ``{src, .venv}`` tree at ``version_dir`` from
-    ``repo_root``'s source, by dot-sourcing THAT checkout's own
-    ``install.ps1`` and calling its ``Build-EngineVersion`` function
-    directly — never a Python re-implementation of what it does.
+    ``repo_root``'s source.
 
-    **Coordination note, resolved before writing this (not decided here on
-    the fly).** Whether ``Build-EngineVersion`` was already callable from
-    outside ``install.ps1``, or whether platform-dev's file needed a new
-    entry point, was an open question going in. Its own docstring in
-    ``install.ps1`` answers it: the function is explicitly written for two
-    callers, "the first full install" and "later, the self-update apply
-    handler (step 7, service-dev, not this file) stages a new release tag
-    the same way", via dot-sourcing — "the same reuse mechanism
-    ``test_platform.py`` already relies on to exercise other functions here
-    in isolation". So no change to ``install.ps1`` was needed, and none was
-    made.
-
-    Deliberately the EXTRACTED RELEASE's own ``install.ps1``, not the
-    currently-running engine's: the release tarball is a full repo snapshot
-    (GitHub's auto-archive), so it carries whatever ``Build-EngineVersion``
-    looked like AT THAT TAG — a future change to how the venv gets built
-    ships with the release that needs it, rather than requiring the OLD
-    engine's installer to already know about it.
-
-    Windows only. The design topic's own "Рішення по ризиках" scopes the
-    whole self-update feature to the one machine it exists for; ``install.sh``
-    never grew a reusable ``Build-EngineVersion`` equivalent (its venv build
-    is inline), so there is nothing to call on POSIX yet.
-
-    ``timeout`` is a last-resort backstop only (bumped from the original
-    1800s to a generous 3600s) — the real slow-vs-dead distinction now lives
-    inside ``install.ps1``'s own ``Invoke-CheckedWithHeartbeat`` stall
-    detector (``-StallTimeoutSec``), which kills a genuinely stalled pip
-    install in ~2 minutes regardless of this ceiling. This one only fires if
-    PowerShell itself gets wedged outside pip's control. ``progress_file``,
-    when given, is forwarded as ``-ProgressFile`` so the pip-install step
-    can report an approximate running status; see :func:`stage_release`
-    for who reads it.
+    On Windows, this dot-sources that checkout's own ``install.ps1`` and calls
+    its ``Build-EngineVersion`` function directly.
+    On POSIX, this builds the venv and installs dependencies directly in
+    Python, verifying the sqlite-vec extension probe upon completion.
     """
     if os.name != "nt":
-        raise NotImplementedError(
-            "engine self-update staging is Windows-only for now "
-            "(see the design topic's migration-risk decision)"
+        _build_engine_version_posix(
+            repo_root, version_dir, timeout=timeout, progress_file=progress_file
         )
+        return
 
     installer = repo_root / "install.ps1"
     if not installer.is_file():
