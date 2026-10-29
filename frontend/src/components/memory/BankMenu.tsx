@@ -1,6 +1,6 @@
 "use client";
 
-import { Dropdown, type MenuProps } from "antd";
+import { Dropdown, theme, type MenuProps } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import type { BankInfo } from "@/lib/api/memory";
 import { bankState } from "@/lib/memory/format";
@@ -21,6 +21,7 @@ interface BankMenuProps {
  */
 export function BankMenu({ bank, onSync, onRebuild, onOpenToken, onSetState, onRemove }: BankMenuProps) {
   const t = useT();
+  const { token } = theme.useToken();
   const current = bankState(bank);
 
   const stateItems: MenuProps["items"] = (["enabled", "frozen", "disabled"] as const).map((value) => ({
@@ -67,7 +68,19 @@ export function BankMenu({ bank, onSync, onRebuild, onOpenToken, onSetState, onR
   ];
 
   return (
-    <Dropdown menu={{ items }} trigger={["click"]}>
+    // AntD's default submenu arrow is a hairline outline glyph that all but
+    // disappears at menu size; a solid triangle matches the file tree's ▾.
+    <Dropdown
+      menu={{
+        items,
+        expandIcon: (
+          <span aria-hidden="true" style={{ color: token.colorTextSecondary, fontSize: token.fontSize }}>
+            ▸
+          </span>
+        ),
+      }}
+      trigger={["click"]}
+    >
       <button
         className="btn-menu"
         title={t("memory.bank.menuBtnTitle")}

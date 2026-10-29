@@ -1,63 +1,63 @@
-import { theme as antdTheme, type ThemeConfig } from "antd";
-import { sharedTokens } from "./design-tokens";
+import { theme as antdTheme, type MappingAlgorithm, type ThemeConfig } from "antd";
+import { sharedTokens, tokensFor, type ThemeMode } from "./design-tokens";
 
 const RADIUS_PX = parseInt(sharedTokens.radius, 10);
 
+// `darkAlgorithm` remaps the brand seeds onto its dark palette (#6aa8ff comes
+// out as #5d92dc), but our dark palette is already the dark-mode colour. Keep
+// the derived hover/active/bg shades and put the seeds themselves back.
+const keepSeedColors: MappingAlgorithm = (seed, map) => ({
+  ...map!,
+  colorPrimary: seed.colorPrimary,
+  colorSuccess: seed.colorSuccess,
+  colorWarning: seed.colorWarning,
+  colorError: seed.colorError,
+  colorInfo: seed.colorInfo,
+  colorLink: seed.colorLink,
+});
+
 /**
- * One AntD theme config, not two — every color token below is a literal
- * `var(--token)` reference into `tokens.css`'s custom properties, not a
- * resolved hex value. AntD's CSS-in-JS happily accepts any valid CSS
- * string, so the actual color resolution happens in the browser at
- * `var()`-lookup time, keyed off `<html data-theme>` — the same attribute
- * the inline bootstrap script in `app/layout.tsx`'s `<head>` already sets
- * before first paint (see that file's comment).
- *
- * This is deliberate, not a shortcut: a static export has no server-known
- * theme, so anything resolved through React state (a `mode: 'dark' |
- * 'light'` branch picked *after* mount) would flash the wrong palette for a
- * frame on every load — exactly the FOUC problem the vanilla console's own
- * inline script exists to prevent for native CSS. Routing AntD through the
- * same custom properties extends that same fix to AntD's components,
- * instead of needing a second, JS-driven fix that could only ever run
- * after hydration.
- *
- * `darkAlgorithm` is used as the fixed base for AntD's own internally
- * *derived* shades (states this file does not pin token-by-token) — since
- * nearly every color that actually reaches the screen is pinned explicitly
- * below, the residual light-mode surfaces this could affect are minor; call
- * out anything that reads wrong in the Phase 1 screenshot comparison rather
- * than solving it preemptively.
+ * One AntD theme per mode, with literal colours. AntD derives hover/active/
+ * bg/border shades from the seeds with colour math, which cannot parse a
+ * `var(--token)` — a `var()` seed silently collapses every derived shade to
+ * near-black. The static export prerenders AntD in the dark palette; how the
+ * light theme avoids showing that is in `app/layout.tsx`'s bootstrap comment.
  */
-export function buildAntdTheme(): ThemeConfig {
-  const v = (name: string) => `var(--${name})`;
+function buildAntdTheme(mode: ThemeMode): ThemeConfig {
+  const c = tokensFor(mode);
 
   return {
-    algorithm: antdTheme.darkAlgorithm,
+    algorithm: mode === "light" ? antdTheme.defaultAlgorithm : [antdTheme.darkAlgorithm, keepSeedColors],
     token: {
-      colorPrimary: v("accent"),
-      colorLink: v("accent"),
-      colorSuccess: v("ok"),
-      colorWarning: v("busy"),
-      colorError: v("err"),
-      colorInfo: v("accent"),
+      colorPrimary: c.accent,
+      colorLink: c.accent,
+      colorSuccess: c.ok,
+      colorWarning: c.busy,
+      colorError: c.err,
+      colorInfo: c.accent,
 
-      colorBgContainer: v("bg-pane"),
-      colorBgLayout: v("bg"),
-      colorBgElevated: v("bg-pane"),
-      colorBgSpotlight: v("bg-hover"),
-      colorBgMask: v("overlay"),
+      colorBgContainer: c.bgPane,
+      colorBgLayout: c.bg,
+      colorBgElevated: c.bgPane,
+      colorBgSpotlight: c.bgHover,
+      colorBgMask: c.overlay,
 
-      colorText: v("fg"),
-      colorTextSecondary: v("fg-dim"),
-      colorTextTertiary: v("fg-mute"),
-      colorTextQuaternary: v("fg-mute"),
+      colorText: c.fg,
+      colorTextSecondary: c.fgDim,
+      colorTextTertiary: c.fgMute,
+      colorTextQuaternary: c.fgMute,
 
-      colorBorder: v("line"),
-      colorBorderSecondary: v("line-sunken"),
-      colorSplit: v("line"),
+      colorBorder: c.line,
+      colorBorderSecondary: c.lineSunken,
+      colorBorderDisabled: c.line,
+      colorSplit: c.line,
+      // AntD draws every focus ring in this colour; its derived tint is too
+      // faint on either background to be seen (base.css: 2px solid accent).
+      colorPrimaryBorder: c.accent,
+      lineWidthFocus: 2,
 
-      colorFillSecondary: v("bg-hover"),
-      colorFillTertiary: v("bg-sunken"),
+      colorFillSecondary: c.bgHover,
+      colorFillTertiary: c.bgSunken,
 
       borderRadius: RADIUS_PX,
       borderRadiusLG: RADIUS_PX,
@@ -72,26 +72,29 @@ export function buildAntdTheme(): ThemeConfig {
       // dense 12-13px scale (base.css: `body { font: 13px/1.5 ... }`).
       fontSize: 13,
 
-      boxShadow: v("shadow-card"),
-      boxShadowSecondary: v("shadow-menu"),
+      boxShadow: c.shadowCard,
+      boxShadowSecondary: c.shadowMenu,
 
       wireframe: false,
     },
     components: {
       Layout: {
-        headerBg: v("bg-pane"),
-        bodyBg: v("bg"),
-        siderBg: v("bg-pane"),
+        headerBg: c.bgPane,
+        bodyBg: c.bg,
+        siderBg: c.bgPane,
       },
       Menu: {
         itemBg: "transparent",
-        itemColor: v("fg-dim"),
-        itemHoverBg: v("bg-hover"),
-        itemHoverColor: v("fg"),
-        itemSelectedBg: v("sel-bg"),
-        itemSelectedColor: v("sel-fg"),
+        itemColor: c.fgDim,
+        itemHoverBg: c.bgHover,
+        itemHoverColor: c.fg,
+        itemSelectedBg: c.selBg,
+        itemSelectedColor: c.selFg,
         activeBarBorderWidth: 0,
       },
+      // The console's own button palette: a neutral default whose hover stays
+      // neutral, and solid primary/danger fills distinct from the accent and
+      // error text colours. Destructive actions are `type="primary" danger`.
       Button: {
         borderRadius: RADIUS_PX,
         controlHeight: 26,
@@ -99,49 +102,78 @@ export function buildAntdTheme(): ThemeConfig {
         primaryShadow: "none",
         defaultShadow: "none",
         dangerShadow: "none",
+        defaultBg: c.btnBg,
+        defaultColor: c.fg,
+        defaultBorderColor: c.line,
+        defaultHoverBg: c.btnBgHover,
+        defaultHoverColor: c.fg,
+        defaultHoverBorderColor: c.btnBorderHover,
+        defaultActiveBg: c.btnBgHover,
+        defaultActiveColor: c.fg,
+        defaultActiveBorderColor: c.btnBorderHover,
+        colorPrimary: c.btnPrimaryBg,
+        colorPrimaryHover: c.btnPrimaryBgHover,
+        colorPrimaryActive: c.btnPrimaryBorderHover,
+        primaryColor: c.btnPrimaryFg,
+        colorError: c.btnDangerBg,
+        colorErrorHover: c.btnDangerBgHover,
+        colorErrorActive: c.btnDangerBorderHover,
+        dangerColor: c.btnDangerFg,
+      },
+      // AntD's danger item uses one token for its text and its hover fill, so
+      // the hover text is set to keep contrast on that fill in both themes.
+      Dropdown: {
+        controlItemBgHover: c.bgHover,
+        colorError: c.menuDangerFg,
+        colorTextLightSolid: mode === "light" ? c.bgPane : c.bg,
       },
       Input: {
-        colorBgContainer: v("bg-sunken"),
+        colorBgContainer: c.bgSunken,
         controlHeight: 26,
       },
       Select: {
-        colorBgContainer: v("bg-sunken"),
+        colorBgContainer: c.bgSunken,
         controlHeight: 26,
       },
       Table: {
-        headerBg: v("bg-sunken"),
-        headerColor: v("fg-dim"),
-        borderColor: v("line-table"),
-        rowHoverBg: v("bg-hover"),
+        headerBg: c.bgSunken,
+        headerColor: c.fgDim,
+        borderColor: c.lineTable,
+        rowHoverBg: c.bgHover,
       },
       Modal: {
-        contentBg: v("bg-pane"),
-        headerBg: v("bg-pane"),
-        boxShadow: v("shadow-modal"),
+        contentBg: c.bgPane,
+        headerBg: c.bgPane,
+        boxShadow: c.shadowModal,
       },
       Tag: {
-        defaultBg: v("badge-empty-bg"),
-        defaultColor: v("badge-empty-fg"),
+        defaultBg: c.badgeEmptyBg,
+        defaultColor: c.badgeEmptyFg,
       },
       Tabs: {
-        itemColor: v("fg-dim"),
-        itemSelectedColor: v("fg"),
-        itemHoverColor: v("fg"),
-        inkBarColor: v("accent"),
+        itemColor: c.fgDim,
+        itemSelectedColor: c.fg,
+        itemHoverColor: c.fg,
+        inkBarColor: c.accent,
       },
       Segmented: {
-        itemSelectedBg: v("seg-active-bg"),
-        itemSelectedColor: v("fg"),
-        itemColor: v("fg-dim"),
+        itemSelectedBg: c.segActiveBg,
+        itemSelectedColor: c.fg,
+        itemColor: c.fgDim,
         trackBg: "transparent",
       },
       Switch: {
-        colorPrimary: v("accent"),
+        colorPrimary: c.accent,
       },
       Tooltip: {
-        colorBgSpotlight: v("bg-sunken"),
-        colorTextLightSolid: v("fg"),
+        colorBgSpotlight: c.bgSunken,
+        colorTextLightSolid: c.fg,
       },
     },
   };
 }
+
+export const antdThemes: Record<ThemeMode, ThemeConfig> = {
+  dark: buildAntdTheme("dark"),
+  light: buildAntdTheme("light"),
+};

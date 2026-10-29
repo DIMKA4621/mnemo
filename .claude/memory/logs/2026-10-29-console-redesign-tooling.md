@@ -27,3 +27,18 @@ Tried first, on a throwaway branch off `master` (`feature/webui-hallmark-redesig
 - Looked at and **not** installed: `AntGroupDesign/Ant-Design-Skill` (official Ant Group design team) — enterprise admin templates that require `@ant-design/pro-components` plus its own `global-style.css`; covers tables/forms/lists, little of what the Памʼять page is (tree + document viewer).
 
 `.claude/agents/ui-dev.md` gained a Tooling section and a "antd first, CSS last" order: global token → component token / semantic slots → antd layout primitives → scoped CSS module as the last resort.
+
+## MN-51 — black buttons and hovers: antd cannot derive colours from `var()`
+
+Symptom: on the Next.js console the remove-bank button, "Reindex file" hover, `···` menu hovers and modal buttons rendered near-black.
+Root cause, measured in the browser: `antd-theme.ts` passed seed tokens as `var(--accent)` strings; antd does colour math on seeds and cannot parse `var()`, so `--ant-color-primary` became `#030303` and every derived shade (hover/active/bg/border, the whole `error` family) followed.
+`darkAlgorithm` was also fixed for both themes.
+
+Fix (`ui-dev`, reviewed): one antd theme per mode with literal hex from `design-tokens.ts`, `defaultAlgorithm` for light, `[darkAlgorithm, keepSeedColors]` for dark — `darkAlgorithm` remaps the seed itself (#6aa8ff → #5d92dc), `keepSeedColors` puts the exact seeds back while keeping the derived shades.
+Danger buttons are `type="primary" danger`; the dropdown menu border is one CSS rule (antd has no token for it); the submenu arrow is a `menu.expandIcon` glyph because the default outline chevron stays a sub-pixel hairline at any `fontSizeIcon`.
+
+Trade-off the user chose: the static export prerenders antd components (Journal, Settings) in the dark palette, so in the **light** theme the inline bootstrap script sets `data-hydrating` and `.mnemo-main` stays hidden until `providers.tsx`'s layout effect clears it, with a 3 s fallback if the bundle never hydrates.
+Rejected alternatives: accept a 0.1–0.4 s dark flash in light mode; generate antd CSS for both themes at build time (new module, depends on `@ant-design/cssinjs` output internals).
+Verified frame by frame on a production export: zero dark-palette antd frames in light on `/ui/settings/`, `/ui/journal/`, `/ui/memory/`; dark unchanged.
+
+Two consecutive local `npm run release` runs produce identical `src/webui/static/` — the build is deterministic on one machine; whether CI's Linux build matches a Windows build is what `frontend-static-guard` decides.

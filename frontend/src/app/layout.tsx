@@ -17,14 +17,19 @@ export const metadata: Metadata = {
 
 // Must run before any styled paint: dark is the CSS default, so a saved
 // "light" preference needs `data-theme` set before first paint or every
-// load flashes dark for a frame. Ported verbatim from
-// `src/webui/static/index.html`'s own inline bootstrap script — this is
-// also what lets `lib/theme/antd-theme.ts` route AntD's colors through the
-// same CSS custom properties instead of a second, React-state-driven theme
-// switch (see that file's docstring).
+// load flashes dark for a frame. Ported from the vanilla console's inline
+// bootstrap script and extended with the hydration guard below. AntD's
+// theme follows the store instead (see `lib/theme/antd-theme.ts`), so the
+// prerendered AntD markup carries the dark palette until hydration: in light
+// mode the main area stays hidden until `providers.tsx` clears
+// `data-hydrating`. The attribute only exists with JS on, and the timeout
+// shows the page anyway if the bundle never hydrates.
 const THEME_BOOTSTRAP = `
 if (localStorage.getItem('mnemo_theme') === 'light') {
-  document.documentElement.dataset.theme = 'light';
+  var root = document.documentElement;
+  root.dataset.theme = 'light';
+  root.dataset.hydrating = '';
+  setTimeout(function () { delete root.dataset.hydrating; }, 3000);
 }
 `;
 

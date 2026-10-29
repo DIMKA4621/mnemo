@@ -214,7 +214,7 @@ export function BankTokenPanel({ bank, onClose }: BankTokenPanelProps) {
                 <Button size="small" onClick={() => setConfirming(false)}>
                   {t("common.btn.cancel")}
                 </Button>
-                <Button size="small" danger loading={regenMutation.isPending} onClick={regenerate}>
+                <Button size="small" type="primary" danger loading={regenMutation.isPending} onClick={regenerate}>
                   {t("common.token.regenYes")}
                 </Button>
               </div>

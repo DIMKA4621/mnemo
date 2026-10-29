@@ -77,7 +77,7 @@ export function RemovalDialog({ bank, onClose, onRemoved }: RemovalDialogProps) 
           <Button disabled={removeMutation.isPending} onClick={onClose}>
             {t("common.btn.cancel")}
           </Button>
-          <Button danger disabled={!ready} loading={removeMutation.isPending} onClick={submit}>
+          <Button type="primary" danger disabled={!ready} loading={removeMutation.isPending} onClick={submit}>
             {removeMutation.isPending ? t("common.removal.busy") : t("common.removal.submit")}
           </Button>
         </>

@@ -11,9 +11,8 @@ export function ErrorBanner() {
   return (
     <Alert
       type="error"
-      message={message}
-      closable
-      onClose={hide}
+      title={message}
+      closable={{ onClose: hide }}
       style={{ borderRadius: 0, borderLeft: "none", borderRight: "none" }}
     />
   );

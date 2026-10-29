@@ -96,7 +96,7 @@ export function OrphanCleanup({ orphans, onCleaned }: { orphans: DoctorReportOrp
               <Button size="small" disabled={cleanupMutation.isPending} onClick={() => setConfirming(false)}>
                 {t("common.btn.cancel")}
               </Button>
-              <Button size="small" danger loading={cleanupMutation.isPending} onClick={submit}>
+              <Button size="small" type="primary" danger loading={cleanupMutation.isPending} onClick={submit}>
                 {cleanupMutation.isPending ? t("settings.maint.orphans.cleaning") : t("settings.maint.orphans.deleteBtn", { n: ids.length })}
               </Button>
             </div>
