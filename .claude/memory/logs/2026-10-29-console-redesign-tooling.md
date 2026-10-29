@@ -65,5 +65,12 @@ Two agents edited the same tree in parallel (Памʼять vs Journal/Settings)
 
 ## MN-55 — Journal snippet cue and hit separation
 
-The snippet's «показати повністю / згорнути» text is gone: a collapsed snippet ends with a muted «…» (the preview is cut on sentence boundaries, so a bottom fade would only dim the second sentence); screen readers get «Розгорнути / Згорнути фрагмент» as the label and the text via `aria-describedby`.
+The snippet's «показати повністю / згорнути» text is gone: a collapsed snippet ends with «…»; screen readers get «Розгорнути / Згорнути фрагмент» as the label and the text via `aria-describedby`.
 Hits merged into one panel because they were ruled in `--line-table`, nearly invisible on both themes; each hit is now its own row ruled in `--line`, like the Памʼять bank list.
+
+## Journal snippet preview: 8 visual lines, not 2 sentences
+
+The preview used to be the chunk's first two sentences, split by a regex ported from the vanilla console.
+That regex required whitespace after the stop, so on a dot inside `6.6`, `page-journal.js` or `3.29:1` `String.match` failed and skipped ahead, silently dropping text: previews started mid-sentence («6 + React 19)…», «jsonl\` sidecar…»).
+The vanilla console on `master` (`page-journal.js`'s `splitSentences`) has the same bug.
+User's call: no sentence logic at all — the collapsed snippet is CSS `line-clamp: 8` on an inner span (on the padded outer box line 9 shows through the padding), the browser draws the «…», and the toggle appears only when a measurement (`scrollHeight > clientHeight`, re-run by a `ResizeObserver`) says the clamp actually cut something.

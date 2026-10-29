@@ -39,7 +39,7 @@ function QueryDetail({ ev }: { ev: QueryLogEvent }) {
         <span>{t("journal.detail.queryKicker", { id: ev.id })}</span>
         <StatusBadge variant={queryStatusVariant(ev)} text={t(`common.status.${ev.status}`)} />
       </div>
-      <h2 className="d-h">{ev.query}</h2>
+      <h2 className="d-h d-q">{ev.query}</h2>
       <FactsRow pairs={ev.path_prefix ? [[t("journal.detail.prefix"), ev.path_prefix]] : []} />
       <div className="d-sec">
         {t("journal.detail.resultsLabel")}{" "}
