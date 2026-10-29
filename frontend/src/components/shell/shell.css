@@ -137,11 +137,15 @@ html[data-hydrating] .mnemo-main { visibility: hidden; }
    button's own size between the two. AntD's `Dropdown` menu is a portaled
    overlay — it draws over the page and never affects this box's layout. */
 .lang-toggle {
-  min-width: 26px;
+  min-width: 30px;
   justify-content: center;
-  font: 600 11px/1 var(--mono);
+  font: 600 13px/20px var(--mono);
   letter-spacing: .02em;
 }
+/* Topbar controls a size up from the rail's 16px icons; the sun/moon in full text
+   colour (white in dark, black in light), not the muted default. */
+.top-right .sb-toggle svg { width: 20px; height: 20px; }
+.top-right .theme-toggle { color: var(--fg); }
 
 /* AntD has no token for a Dropdown menu or Select popup border, only
    `boxShadowSecondary`; the console's menus are outlined in `line`,

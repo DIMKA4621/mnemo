@@ -19,7 +19,7 @@ export function ThemeToggle() {
   return (
     <button
       type="button"
-      className="sb-toggle"
+      className="sb-toggle theme-toggle"
       title={theme === "dark" ? "Light theme" : "Dark theme"}
       aria-label={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
       onClick={() => setTheme(next)}
