@@ -1,14 +1,9 @@
 "use client";
 
 import { createPortal } from "react-dom";
-import { Button } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { useBanks } from "@/hooks/useMemoryQueries";
 import { usePageHeaderSlotStore } from "@/lib/store/page-header-slot";
-
-interface MemoryPageHeaderProps {
-  onAddBank: () => void;
-}
 
 /**
  * Composes into the shell's persistent `Topbar` via a portal targeting the
@@ -24,7 +19,7 @@ interface MemoryPageHeaderProps {
  * Content panes (`FileTree.tsx`, `FileViewer.tsx`) undoing one step. A
  * persistent tab bar here was tried and dropped (lead decision, MN-34).
  */
-export function MemoryPageHeader({ onAddBank }: MemoryPageHeaderProps) {
+export function MemoryPageHeader() {
   const t = useT();
   const banksQuery = useBanks();
   const slot = usePageHeaderSlotStore((s) => s.slot);
@@ -42,10 +37,6 @@ export function MemoryPageHeader({ onAddBank }: MemoryPageHeaderProps) {
         {t("memory.count.banks", { n: banks.length })} · {t("memory.count.files", { n: files })} ·{" "}
         {t("memory.count.chunks", { n: chunks })}
       </span>
-      <div style={{ flex: 1 }} />
-      <Button size="small" title={t("memory.header.addBankTitle")} onClick={onAddBank}>
-        {t("memory.header.addBank")}
-      </Button>
     </>,
     slot,
   );

@@ -42,3 +42,9 @@ Rejected alternatives: accept a 0.1–0.4 s dark flash in light mode; generate a
 Verified frame by frame on a production export: zero dark-palette antd frames in light on `/ui/settings/`, `/ui/journal/`, `/ui/memory/`; dark unchanged.
 
 Two consecutive local `npm run release` runs produce identical `src/webui/static/` — the build is deterministic on one machine; whether CI's Linux build matches a Windows build is what `frontend-static-guard` decides.
+
+## «Додати банк» moved from the topbar into the Banks pane header
+
+User's call after looking at the finished Памʼять page: the button sat next to the language/theme toggles and read as part of them.
+Now it is the Banks column's own action (right side of its `pane-head`), the same place "Reindex file" lives in the Content column, so each pane carries its own actions.
+This revises the 2026-08-19 rule in `topics/console-ui.md` ("the header holds the tab's actions, e.g. `Додати банк`"): on Памʼять the topbar now holds only the title, the counters and the shell's language/theme toggles.
