@@ -62,3 +62,8 @@ Root cause found on the way: `tokens.css` had a bare `svg { fill: none; stroke: 
 It is now `svg:where(:not(.anticon *))`.
 Also learned: antd's `--ant-*` CSS variables exist only on antd component roots, so hand CSS outside an antd node must use the console's own tokens (`--accent`, …).
 Two agents edited the same tree in parallel (Памʼять vs Journal/Settings) and once raced on that `tokens.css` rule; giving each one a disjoint file list in the brief prevented the rest.
+
+## MN-55 — Journal snippet cue and hit separation
+
+The snippet's «показати повністю / згорнути» text is gone: a collapsed snippet ends with a muted «…» (the preview is cut on sentence boundaries, so a bottom fade would only dim the second sentence); screen readers get «Розгорнути / Згорнути фрагмент» as the label and the text via `aria-describedby`.
+Hits merged into one panel because they were ruled in `--line-table`, nearly invisible on both themes; each hit is now its own row ruled in `--line`, like the Памʼять bank list.

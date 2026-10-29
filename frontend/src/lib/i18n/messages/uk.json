@@ -461,8 +461,8 @@
     },
     "hit": {
       "openFile": "Відкрити файл",
-      "showMore": "показати повністю",
-      "collapse": "згорнути",
+      "expandSnippet": "Розгорнути фрагмент",
+      "collapseSnippet": "Згорнути фрагмент",
       "chunkLabel": "{heading} · чанк {n}"
     },
     "detail": {

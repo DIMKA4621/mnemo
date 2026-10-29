@@ -461,8 +461,8 @@
     },
     "hit": {
       "openFile": "Open file",
-      "showMore": "show more",
-      "collapse": "collapse",
+      "expandSnippet": "Expand snippet",
+      "collapseSnippet": "Collapse snippet",
       "chunkLabel": "{heading} · chunk {n}"
     },
     "detail": {

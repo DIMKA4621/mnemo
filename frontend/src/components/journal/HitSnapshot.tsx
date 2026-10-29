@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type KeyboardEvent, type MouseEvent } from "react";
+import { useId, useState, type KeyboardEvent, type MouseEvent } from "react";
 import { useT } from "@/lib/i18n/hooks";
 
 const PREVIEW_SENTENCES = 2;
@@ -18,12 +18,13 @@ interface HitSnapshotProps {
   content: string;
 }
 
-/** The snapshot block: first two sentences; the whole block toggles to the
- *  full chunk in place — jumping the reader to a fresh box elsewhere reads
- *  as navigating away from what they were just reading. */
+/** The snapshot block: first two sentences and a trailing ellipsis; the whole
+ *  block toggles to the full chunk in place — jumping the reader to a fresh
+ *  box elsewhere reads as navigating away from what they were just reading. */
 export function HitSnapshot({ content }: HitSnapshotProps) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
+  const textId = useId();
   const trimmed = content.trim();
   const sentences = splitSentences(trimmed);
 
@@ -53,11 +54,14 @@ export function HitSnapshot({ content }: HitSnapshotProps) {
       role="button"
       tabIndex={0}
       aria-expanded={expanded}
+      // A button's content is not read out, so the snippet rides as its description.
+      aria-label={expanded ? t("journal.hit.collapseSnippet") : t("journal.hit.expandSnippet")}
+      aria-describedby={textId}
       onClick={onClick}
       onKeyDown={onKeyDown}
     >
-      <span>{expanded ? trimmed : preview}</span>{" "}
-      <span className="hit-snap-more">{expanded ? t("journal.hit.collapse") : t("journal.hit.showMore")}</span>
+      <span id={textId}>{expanded ? trimmed : preview}</span>
+      {!expanded && <span className="hit-snap-ellipsis" aria-hidden>…</span>}
     </div>
   );
 }

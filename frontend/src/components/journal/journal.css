@@ -70,10 +70,13 @@
 .d-facts { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 12px 28px; padding: 12px 0; border-top: 1px solid var(--line-table); border-bottom: 1px solid var(--line-table); }
 .d-k { color: var(--fg-mute); font-size: 10.5px; }
 .d-v { margin-top: 3px; font: 12px/1.3 var(--mono); }
-.d-sec { margin: 20px 0 8px; display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; font-weight: 650; }
+.d-sec { margin: 20px 0 0; padding-bottom: 10px; display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; font-weight: 650; }
 .d-sec .muted { color: var(--fg-mute); font-size: 11px; font-weight: 400; }
 
-.hit { padding: 11px 0; border-bottom: 1px solid var(--line-table); }
+/* Each hit is its own row, ruled in `line` like Памʼять's bank list; the rule
+   above the first one also separates it from the «Результати» heading. */
+.hit { padding: 14px 0; border-top: 1px solid var(--line); }
+.hit:last-child { border-bottom: 1px solid var(--line); }
 .hit-top { display: flex; align-items: baseline; gap: 9px; }
 .hit-r { flex: none; width: 14px; color: var(--fg-mute); font: 11px/1.45 var(--mono); }
 .hit-l { flex: 1; min-width: 0; }
@@ -83,8 +86,8 @@
 .hit-snap.is-toggle { cursor: pointer; transition: background-color 120ms, border-color 120ms; }
 .hit-snap.is-toggle:hover { background: var(--bg-hover); border-color: var(--btn-border-hover); }
 .hit-snap.is-toggle:focus-visible { outline-offset: 2px; }
-/* A cue inside the clickable block, not a control of its own. */
-.hit-snap-more { color: var(--accent); text-decoration: underline; }
+/* The only sign of a collapsed snippet: it trails off. */
+.hit-snap-ellipsis { margin-left: 4px; color: var(--fg-mute); font-weight: 600; letter-spacing: .08em; }
 
 /* The path is the way into Памʼять: plain until pointed at, then link-coloured
    with an arrow that only appears on hover/focus. */
