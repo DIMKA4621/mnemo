@@ -944,6 +944,8 @@ def _on_queue_event(ev: dict) -> None:
 
     if type_ not in ("index_done", "index_error") or not bank_id:
         return
+    if _is_empty_sync(type_, data):
+        return
     servicelog.log_index(
         bank_id=bank_id,
         kind=data.get("kind", "file"),
@@ -964,6 +966,18 @@ def _on_queue_event(ev: dict) -> None:
     with suppress(Exception):
         hub.publish("bank_status", {"bank": _bank_info(registry.get(bank_id))},
                     bank_id)
+
+
+def _is_empty_sync(type_: str, data: dict) -> bool:
+    """A bulk scan that found nothing to index or prune — the watcher runs
+    thousands of these, and a row saying "0 files" buries the real events.
+    A scan that found changes is still recorded, and so is every failure."""
+    return (
+        type_ == "index_done"
+        and data.get("kind") == "bulk"
+        and not data.get("planned_files")
+        and not data.get("planned_prunes")
+    )
 
 
 def _write_service_info() -> None:
