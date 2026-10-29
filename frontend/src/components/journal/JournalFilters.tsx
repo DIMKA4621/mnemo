@@ -1,16 +1,19 @@
 "use client";
 
-import { Select } from "antd";
+import { Button, Select } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
 import { useT } from "@/lib/i18n/hooks";
 import { useBanks } from "@/hooks/useMemoryQueries";
 
-export type JournalPeriod = "1h" | "24h" | "7d" | "30d";
+export type JournalPeriod = "1h" | "24h" | "7d" | "30d" | "all";
 
 interface JournalFiltersProps {
   bank: string;
   onBankChange: (bank: string) => void;
   period: JournalPeriod;
   onPeriodChange: (period: JournalPeriod) => void;
+  onRefresh: () => void;
+  refreshing: boolean;
 }
 
 /** Bank filter matches by NAME, not id — `GET /api/logs`'s `bank` param
@@ -18,7 +21,7 @@ interface JournalFiltersProps {
  *  does (contract 6.4), and the vanilla console filtered by name for the
  *  same reason: `bank_id` on a log row is a stable hash, not something a
  *  person picks out of a dropdown. */
-export function JournalFilters({ bank, onBankChange, period, onPeriodChange }: JournalFiltersProps) {
+export function JournalFilters({ bank, onBankChange, period, onPeriodChange, onRefresh, refreshing }: JournalFiltersProps) {
   const t = useT();
   const banksQuery = useBanks();
   const banks = banksQuery.data ?? [];
@@ -46,8 +49,16 @@ export function JournalFilters({ bank, onBankChange, period, onPeriodChange }: J
           { value: "24h", label: t("journal.filter.period24h") },
           { value: "7d", label: t("journal.filter.period7d") },
           { value: "30d", label: t("journal.filter.period30d") },
+          { value: "all", label: t("journal.filter.periodAll") },
         ]}
         aria-label={t("journal.filter.periodLabel")}
+      />
+      <Button
+        size="small"
+        icon={<ReloadOutlined spin={refreshing} />}
+        title={t("journal.header.refreshTitle")}
+        aria-label={t("journal.header.refreshTitle")}
+        onClick={onRefresh}
       />
     </div>
   );

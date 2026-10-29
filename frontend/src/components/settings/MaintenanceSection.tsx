@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
-import { Button } from "antd";
+import { Button, Skeleton } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { useDoctor, useUpdateStatus } from "@/hooks/useSettingsQueries";
 import { DoctorReport } from "./DoctorReport";
@@ -43,7 +43,11 @@ export function MaintenanceSection() {
       )}
 
       {!doctorQuery.data ? (
-        <p className="empty-hint">{doctorQuery.isFetching ? t("settings.maint.collecting") : t("settings.maint.notFetched")}</p>
+        doctorQuery.isFetching ? (
+          <Skeleton active title={false} paragraph={{ rows: 8 }} />
+        ) : (
+          <p className="set-note">{t("settings.maint.notFetched")}</p>
+        )
       ) : (
         <DoctorReport report={doctorQuery.data} onOrphansCleaned={() => doctorQuery.refetch()} />
       )}

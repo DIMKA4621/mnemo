@@ -11,6 +11,7 @@ import { useUpdateModalStore } from "@/lib/store/update-modal";
 import { queryKeys } from "@/lib/query/keys";
 import { ApiError } from "@/lib/api/fetcher";
 import type { UpdateApplyState, UpdateStatusResult } from "@/lib/api/settings";
+import "@/components/common/dialogs.css";
 import "./settings.css";
 
 const UPDATE_POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes of silence before giving up

@@ -201,11 +201,9 @@
       "content": "Вміст",
       "chunkVizTitle": "Показати межі чанків так, як вони лежать в індексі",
       "chunkVizLabel": "Межі чанків",
-      "reindexFileBtn": "Переіндексувати файл",
       "selectFileHint": "Оберіть файл у дереві"
     },
     "header": {
-      "addBank": "＋ Додати банк",
       "addBankTitle": "Зареєструвати нову директорію з .md як банк"
     },
     "count": {
@@ -257,7 +255,10 @@
     "tree": {
       "selectBankHint": "Оберіть банк ліворуч",
       "loading": "Завантаження…",
-      "emptyMd": "У цьому банку немає .md файлів"
+      "emptyMd": "У цьому банку немає .md файлів",
+      "reindexFileTitle": "Переіндексувати файл",
+      "reindexConfirmTitle": "Переіндексувати файл?",
+      "reindexConfirmYes": "Так"
     },
     "chunk": {
       "gap": "· поза чанками ·",
@@ -431,10 +432,11 @@
       "period24h": "24 години",
       "period1h": "Остання година",
       "period7d": "7 днів",
-      "period30d": "30 днів"
+      "period30d": "30 днів",
+      "periodAll": "Весь час"
     },
     "list": {
-      "newestFirst": "нові спочатку",
+      "caption": "Події",
       "shownOf": "Показано {shown} із {total}",
       "empty": "Порожньо",
       "noEvents": "Подій не знайдено"
@@ -448,6 +450,9 @@
       "rebuildTitle": "Повна перебудова банку",
       "pruneTitle": "Зняття з індексу",
       "syncTitle": "Синхронізація індексу",
+      "hits": "{n, plural, one {# хіт} few {# хіти} many {# хітів} other {# хітів}}",
+      "ms": "{n, number} мс",
+      "s": "{n, number} с",
       "errorStatus": "помилка",
       "result": {
         "ok": "готово",
@@ -463,21 +468,13 @@
     "detail": {
       "queryKicker": "запит · #{id}",
       "indexKicker": "індексація · #{id}",
-      "bank": "банк",
-      "face": "обличчя",
       "prefix": "префікс",
-      "hits": "хітів",
-      "tookMs": "час, мс",
-      "when": "коли",
       "kind": "вид",
-      "trigger": "тригер",
       "resultsLabel": "Результати",
       "resultsOrderNote": "у точному ранговому порядку",
       "noHits": "Жодного влучення",
       "filesIndexed": "файлів",
-      "chunksIndexed": "чанків",
       "filesPruned": "знято",
-      "duration": "тривалість",
       "errorLabel": "Помилка",
       "fileSection": "Файл",
       "currentFileOf": "поточний файл банку {bank}",
@@ -553,7 +550,6 @@
       "embed": "Який бекенд рахує вектори для пошуку в банках і скільки оперативної памʼяті він для цього займає.",
       "maint": "Той самий структурований doctor report, який CLI показує текстом. Перевірки запускаються лише при відкритті цього розділу."
     },
-    "loading": "Завантаження…",
     "messages": {
       "nothingChanged": "Немає що зберігати"
     },
@@ -726,7 +722,6 @@
     "maint": {
       "refreshing": "Оновлюємо…",
       "refreshBtn": "Оновити діагностику",
-      "collecting": "Збираємо діагностику…",
       "notFetched": "Звіт ще не отримано",
       "engineLabel": "Рушій",
       "embedLabel": "Ембединг",

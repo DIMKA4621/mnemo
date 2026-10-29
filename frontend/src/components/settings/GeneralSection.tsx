@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { Skeleton } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { useTokenStore } from "@/lib/store/token";
 import { useSettings, useAutostart } from "@/hooks/useSettingsQueries";
@@ -152,7 +153,11 @@ export function GeneralSection({ onController }: GeneralSectionProps) {
       />
 
       {!statusQuery.data ? (
-        <p className="empty-hint">{t("settings.general.serviceNotLoaded")}</p>
+        statusQuery.isLoading ? (
+          <Skeleton active title={false} paragraph={{ rows: 4 }} />
+        ) : (
+          <p className="set-note">{t("settings.general.serviceNotLoaded")}</p>
+        )
       ) : (
         <>
           <div className="set-divider" />

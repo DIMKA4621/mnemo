@@ -3,6 +3,7 @@
 import { Suspense, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "next/navigation";
 import { Button } from "antd";
+import { PlusOutlined } from "@ant-design/icons";
 import { MemoryPageHeader } from "@/components/memory/MemoryPageHeader";
 import { RebuildPendingBanner } from "@/components/memory/RebuildPendingBanner";
 import { BankList } from "@/components/memory/BankList";
@@ -116,9 +117,13 @@ function MemoryPageInner() {
           <div className="pane-head">
             <h2>{t("memory.pane.banks")}</h2>
             <div className="pane-actions">
-              <Button size="small" title={t("memory.header.addBankTitle")} onClick={() => setPickerOpen(true)}>
-                {t("memory.header.addBank")}
-              </Button>
+              <Button
+                size="small"
+                icon={<PlusOutlined />}
+                title={t("memory.header.addBankTitle")}
+                aria-label={t("memory.header.addBankTitle")}
+                onClick={() => setPickerOpen(true)}
+              />
             </div>
           </div>
           <div className="pane-body">

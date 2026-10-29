@@ -85,7 +85,7 @@ export function EmbedMemoryCard() {
     return (
       <div className="set-field">
         <span className="set-label">{t("settings.embed.mem.label")}</span>
-        <p className={embedQuery.error ? "modal-error" : "empty-hint"}>
+        <p className={embedQuery.error ? "modal-error" : "set-note"}>
           {embedQuery.error instanceof Error ? embedQuery.error.message : t("settings.embed.mem.notFetched")}
         </p>
       </div>

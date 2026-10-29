@@ -1,8 +1,11 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { Button, ConfigProvider, Modal, message, theme } from "antd";
+import { ReloadOutlined } from "@ant-design/icons";
 import { useT } from "@/lib/i18n/hooks";
 import { useTree } from "@/hooks/useMemoryQueries";
+import { useReindex } from "@/hooks/useMemoryMutations";
 import { useIndexProgressStore } from "@/lib/store/index-progress";
 import type { TreeNode } from "@/lib/api/memory";
 
@@ -35,6 +38,10 @@ export function FileTree({ bankId, selectedPath, onSelectFile, isMob, onBack }: 
   // rather than written into state until the first real toggle.
   const [expanded, setExpanded] = useState<Set<string> | null>(null);
   const liveMap = useIndexProgressStore((s) => (bankId ? s.byBank.get(bankId) : undefined));
+  const reindexMutation = useReindex();
+  const [messageApi, messageHolder] = message.useMessage();
+  const [modal, modalHolder] = Modal.useModal();
+  const { token } = theme.useToken();
 
   const defaultExpanded = useMemo(() => {
     const all = new Set<string>();
@@ -55,6 +62,34 @@ export function FileTree({ bankId, selectedPath, onSelectFile, isMob, onBack }: 
     if (next.has(path)) next.delete(path);
     else next.add(path);
     setExpanded(next);
+  }
+
+  function reindexFile(path: string) {
+    if (!bankId) return;
+    reindexMutation.mutate(
+      { bank: bankId, path },
+      {
+        onSuccess: (res) =>
+          messageApi.success(
+            t("common.reindex.queuedNote", {
+              what: path,
+              n: res.queued,
+              ids: res.task_ids.join(", "),
+            }),
+          ),
+        onError: (err) => messageApi.error(err instanceof Error ? err.message : String(err)),
+      },
+    );
+  }
+
+  function confirmReindexFile(path: string) {
+    modal.confirm({
+      title: t("memory.tree.reindexConfirmTitle"),
+      content: <span className="tree-confirm-path">{path}</span>,
+      okText: t("memory.tree.reindexConfirmYes"),
+      cancelText: t("common.btn.cancel"),
+      onOk: () => reindexFile(path),
+    });
   }
 
   function renderNode(node: TreeNode, depth: number): React.ReactNode {
@@ -89,7 +124,21 @@ export function FileTree({ bankId, selectedPath, onSelectFile, isMob, onBack }: 
         title={(node.headings ?? []).join(" · ") || node.path}
         onClick={() => onSelectFile(node.path)}
       >
-        <span className="tree-twisty" />
+        <span className="tree-twisty">
+          <Button
+            type="text"
+            size="small"
+            className="tree-reindex"
+            // Mirrored to a counter-clockwise arrow; antd ships no such refresh glyph.
+            icon={<ReloadOutlined style={{ transform: "scaleX(-1)" }} />}
+            title={t("memory.tree.reindexFileTitle")}
+            aria-label={`${t("memory.tree.reindexFileTitle")}: ${node.path}`}
+            onClick={(ev) => {
+              ev.stopPropagation();
+              confirmReindexFile(node.path);
+            }}
+          />
+        </span>
         <span className="tree-label">{node.name}</span>
         <span className="tree-chunks">
           {node.indexed ? `${node.chunks}×` : t("memory.indexedState.no")}
@@ -120,11 +169,26 @@ export function FileTree({ bankId, selectedPath, onSelectFile, isMob, onBack }: 
         ) : (treeQuery.data.tree.children ?? []).length === 0 ? (
           <p className="empty-hint">{t("memory.tree.emptyMd")}</p>
         ) : (
-          <div className="tree">
-            {(treeQuery.data.tree.children ?? []).map((child) => renderNode(child, 0))}
-          </div>
+          // Sized to fit the tree's 22px rows, not antd's 24px small control.
+          <ConfigProvider
+            theme={{
+              components: {
+                Button: {
+                  controlHeightSM: 14,
+                  onlyIconSizeSM: token.fontSizeSM,
+                  textTextColor: token.colorTextTertiary,
+                },
+              },
+            }}
+          >
+            <div className="tree">
+              {(treeQuery.data.tree.children ?? []).map((child) => renderNode(child, 0))}
+            </div>
+          </ConfigProvider>
         )}
       </div>
+      {modalHolder}
+      {messageHolder}
     </div>
   );
 }

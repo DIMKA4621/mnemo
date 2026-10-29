@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, type KeyboardEvent, type MouseEvent } from "react";
 import { useT } from "@/lib/i18n/hooks";
 
 const PREVIEW_SENTENCES = 2;
@@ -18,10 +18,9 @@ interface HitSnapshotProps {
   content: string;
 }
 
-/** The snapshot block: first two sentences, with a toggle that expands to
- *  the full chunk in the SAME block rather than a separate area — jumping
- *  the reader to a fresh box elsewhere reads as navigating away from what
- *  they were just reading (the mockup's original behavior, dropped). */
+/** The snapshot block: first two sentences; the whole block toggles to the
+ *  full chunk in place — jumping the reader to a fresh box elsewhere reads
+ *  as navigating away from what they were just reading. */
 export function HitSnapshot({ content }: HitSnapshotProps) {
   const t = useT();
   const [expanded, setExpanded] = useState(false);
@@ -34,12 +33,31 @@ export function HitSnapshot({ content }: HitSnapshotProps) {
 
   const preview = sentences.slice(0, PREVIEW_SENTENCES).join("").trim();
 
+  // A click that ends a drag-selection inside the block is the user copying
+  // text, not asking to toggle.
+  function onClick(e: MouseEvent<HTMLDivElement>) {
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed && e.currentTarget.contains(sel.anchorNode)) return;
+    setExpanded((v) => !v);
+  }
+
+  function onKeyDown(e: KeyboardEvent<HTMLDivElement>) {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    e.preventDefault();
+    setExpanded((v) => !v);
+  }
+
   return (
-    <div className={`hit-snap${expanded ? " is-expanded" : ""}`}>
+    <div
+      className={`hit-snap is-toggle${expanded ? " is-expanded" : ""}`}
+      role="button"
+      tabIndex={0}
+      aria-expanded={expanded}
+      onClick={onClick}
+      onKeyDown={onKeyDown}
+    >
       <span>{expanded ? trimmed : preview}</span>{" "}
-      <button type="button" className="hit-snap-more" onClick={() => setExpanded((v) => !v)}>
-        {expanded ? t("journal.hit.collapse") : t("journal.hit.showMore")}
-      </button>
+      <span className="hit-snap-more">{expanded ? t("journal.hit.collapse") : t("journal.hit.showMore")}</span>
     </div>
   );
 }

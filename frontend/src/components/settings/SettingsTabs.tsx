@@ -8,6 +8,7 @@ import { usePageHeaderSlotStore } from "@/lib/store/page-header-slot";
 import { GeneralSection } from "./GeneralSection";
 import { EmbedSection } from "./EmbedSection";
 import { MaintenanceSection } from "./MaintenanceSection";
+import "@/components/common/dialogs.css";
 import "./settings.css";
 
 /** What a Save-gated section (Загальні, Модель ембедингу) hands the shared
@@ -59,7 +60,7 @@ export function SettingsTabs() {
           { key: "embed", label: t("settings.tabs.embed") },
           { key: "maint", label: t("settings.tabs.maint") },
         ]}
-        style={{ padding: "0 12px" }}
+        styles={{ header: { margin: 0, padding: "0 12px", background: "var(--ant-color-bg-container)" } }}
       />
 
       <div className="set-body">

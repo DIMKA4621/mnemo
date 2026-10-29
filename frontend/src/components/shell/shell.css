@@ -143,10 +143,12 @@ html[data-hydrating] .mnemo-main { visibility: hidden; }
   letter-spacing: .02em;
 }
 
-/* AntD has no token for a Dropdown menu border, only `boxShadowSecondary`;
-   the console's menus are outlined in `line`, submenus included. */
+/* AntD has no token for a Dropdown menu or Select popup border, only
+   `boxShadowSecondary`; the console's menus are outlined in `line`,
+   submenus and select lists included. */
 .ant-dropdown .ant-dropdown-menu,
-.ant-dropdown-menu-submenu-popup .ant-dropdown-menu { border: 1px solid var(--ant-color-border); }
+.ant-dropdown-menu-submenu-popup .ant-dropdown-menu,
+.ant-select-dropdown { border: 1px solid var(--ant-color-border); }
 
 .page-title { font-size: 13.5px; font-weight: 650; white-space: nowrap; }
 .page-sub { color: var(--fg-mute); font-size: 11.5px; white-space: nowrap; }

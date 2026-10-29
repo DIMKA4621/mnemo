@@ -1,5 +1,6 @@
 "use client";
 
+import { Alert, Skeleton } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { EventCard } from "./EventCard";
 import type { IndexLogEvent, QueryLogEvent } from "@/lib/api/journal";
@@ -9,6 +10,7 @@ interface JournalEventListProps {
   events: (QueryLogEvent | IndexLogEvent)[];
   total: number;
   loading: boolean;
+  error: string | null;
   selectedId: number | null;
   onSelect: (id: number) => void;
   bankLabel: (bankId: string) => string;
@@ -19,6 +21,7 @@ export function JournalEventList({
   events,
   total,
   loading,
+  error,
   selectedId,
   onSelect,
   bankLabel,
@@ -28,17 +31,21 @@ export function JournalEventList({
   return (
     <div className="events">
       <div className="events-head">
-        <span>{t("journal.list.newestFirst")}</span>
-        <span>
+        <h2>{t("journal.list.caption")}</h2>
+        <span className="events-count">
           {loading
             ? t("memory.tree.loading")
-            : events.length
+            : error
+              ? "—"
+              : events.length
               ? t("journal.list.shownOf", { shown: events.length, total })
               : t("journal.list.empty")}
         </span>
       </div>
       <div className="events-body">
-        {!loading && events.length === 0 && <p className="empty-hint">{t("journal.list.noEvents")}</p>}
+        {loading && <Skeleton active title={false} paragraph={{ rows: 6 }} />}
+        {error && <Alert type="error" showIcon title={error} />}
+        {!loading && !error && events.length === 0 && <p className="mnemo-empty-hint">{t("journal.list.noEvents")}</p>}
         {events.map((ev) => (
           <EventCard
             key={ev.id}

@@ -201,11 +201,9 @@
       "content": "Content",
       "chunkVizTitle": "Show chunk boundaries as they lie in the index",
       "chunkVizLabel": "Chunk boundaries",
-      "reindexFileBtn": "Reindex file",
       "selectFileHint": "Select a file in the tree"
     },
     "header": {
-      "addBank": "＋ Add bank",
       "addBankTitle": "Register a new directory with .md as a bank"
     },
     "count": {
@@ -257,7 +255,10 @@
     "tree": {
       "selectBankHint": "Select a bank on the left",
       "loading": "Loading…",
-      "emptyMd": "This bank has no .md files"
+      "emptyMd": "This bank has no .md files",
+      "reindexFileTitle": "Reindex file",
+      "reindexConfirmTitle": "Reindex file?",
+      "reindexConfirmYes": "Yes"
     },
     "chunk": {
       "gap": "· outside chunks ·",
@@ -431,10 +432,11 @@
       "period24h": "24 hours",
       "period1h": "Last hour",
       "period7d": "7 days",
-      "period30d": "30 days"
+      "period30d": "30 days",
+      "periodAll": "All time"
     },
     "list": {
-      "newestFirst": "newest first",
+      "caption": "Events",
       "shownOf": "Showing {shown} of {total}",
       "empty": "Empty",
       "noEvents": "No events found"
@@ -448,6 +450,9 @@
       "rebuildTitle": "Full bank rebuild",
       "pruneTitle": "Removed from index",
       "syncTitle": "Index sync",
+      "hits": "{n, plural, one {# hit} other {# hits}}",
+      "ms": "{n, number} ms",
+      "s": "{n, number} s",
       "errorStatus": "error",
       "result": {
         "ok": "ok",
@@ -463,21 +468,13 @@
     "detail": {
       "queryKicker": "query · #{id}",
       "indexKicker": "indexing · #{id}",
-      "bank": "bank",
-      "face": "face",
       "prefix": "prefix",
-      "hits": "hits",
-      "tookMs": "time, ms",
-      "when": "when",
       "kind": "kind",
-      "trigger": "trigger",
       "resultsLabel": "Results",
       "resultsOrderNote": "in exact rank order",
       "noHits": "No hits",
       "filesIndexed": "files",
-      "chunksIndexed": "chunks",
       "filesPruned": "removed",
-      "duration": "duration",
       "errorLabel": "Error",
       "fileSection": "File",
       "currentFileOf": "current file of bank {bank}",
@@ -553,7 +550,6 @@
       "embed": "Which backend computes vectors for search across banks, and how much RAM it takes for that.",
       "maint": "The same structured doctor report the CLI prints as text. Checks run only when this section is opened."
     },
-    "loading": "Loading…",
     "messages": {
       "nothingChanged": "Nothing to save"
     },
@@ -726,7 +722,6 @@
     "maint": {
       "refreshing": "Refreshing…",
       "refreshBtn": "Refresh diagnostics",
-      "collecting": "Collecting diagnostics…",
       "notFetched": "The report has not been received yet",
       "engineLabel": "Engine",
       "embedLabel": "Embedding",

@@ -1,13 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Button, Checkbox } from "antd";
+import { Checkbox } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { useFile } from "@/hooks/useMemoryQueries";
-import { useReindex } from "@/hooks/useMemoryMutations";
 import { fmtBytes } from "@/lib/memory/format";
 import { ChunkBoundaryOverlay } from "./ChunkBoundaryOverlay";
-import { useInlineNote, InlineNote } from "@/components/common/InlineNote";
 
 interface FileViewerProps {
   bankId: string | null;
@@ -22,31 +20,11 @@ interface FileViewerProps {
 export function FileViewer({ bankId, path, isMob, onBack }: FileViewerProps) {
   const t = useT();
   const fileQuery = useFile(bankId, path);
-  const reindexMutation = useReindex();
   // Session-only, deliberately not persisted (confirmed from the
   // pre-cutover implementation — the toggle always starts checked).
   const [showChunks, setShowChunks] = useState(true);
-  const [note, setNote] = useInlineNote();
 
   const file = fileQuery.data;
-
-  function handleReindexFile() {
-    if (!bankId || !path) return;
-    reindexMutation.mutate(
-      { bank: bankId, path },
-      {
-        onSuccess: (res) =>
-          setNote(
-            t("common.reindex.queuedNote", {
-              what: path,
-              n: res.queued,
-              ids: res.task_ids.join(", "),
-            }),
-          ),
-        onError: (err) => setNote(err instanceof Error ? err.message : String(err)),
-      },
-    );
-  }
 
   return (
     <div className={`pane${isMob ? " is-mob" : ""}`}>
@@ -63,13 +41,6 @@ export function FileViewer({ bankId, path, isMob, onBack }: FileViewerProps) {
           >
             {t("memory.pane.chunkVizLabel")}
           </Checkbox>
-          <Button
-            size="small"
-            disabled={!file || reindexMutation.isPending}
-            onClick={handleReindexFile}
-          >
-            {t("memory.pane.reindexFileBtn")}
-          </Button>
         </div>
       </div>
       <div className="pane-body">
@@ -90,9 +61,6 @@ export function FileViewer({ bankId, path, isMob, onBack }: FileViewerProps) {
             </div>
             <div className="doc">
               <ChunkBoundaryOverlay text={file.text} chunks={file.chunks} showChunks={showChunks} />
-            </div>
-            <div style={{ padding: "0 14px" }}>
-              <InlineNote text={note} tone={reindexMutation.isError ? "error" : "success"} />
             </div>
           </>
         )}

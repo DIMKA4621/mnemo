@@ -192,7 +192,17 @@
 
 .tree-dir { color: var(--fg-dim); cursor: pointer; }
 
-.tree-twisty { flex: none; width: 10px; color: var(--fg-mute); }
+.tree-twisty { flex: none; width: 16px; color: var(--fg-mute); }
+
+/* The slot is always laid out, only its opacity changes, so names never shift
+   and the button stays tabbable (visibility: hidden would drop it from focus). */
+.tree-reindex { opacity: 0; vertical-align: middle; }
+.tree-node.is-file:hover .tree-reindex,
+.tree-reindex:focus-visible { opacity: 1; }
+/* No hover on touch screens: keep the icon visible there. */
+@media (hover: none) { .tree-reindex { opacity: 1; } }
+
+.tree-confirm-path { font-family: var(--mono); word-break: break-all; }
 .tree-chunks { flex: none; color: var(--fg-mute); font-size: 11px; }
 
 .tree-node.not-indexed .tree-label { color: var(--fg-mute); }

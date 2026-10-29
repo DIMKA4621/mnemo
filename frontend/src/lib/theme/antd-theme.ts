@@ -134,6 +134,13 @@ function buildAntdTheme(mode: ThemeMode): ThemeConfig {
       Select: {
         colorBgContainer: c.bgSunken,
         controlHeight: 26,
+        optionActiveBg: c.bgHover,
+        optionSelectedBg: c.selBg,
+        optionSelectedColor: c.selFg,
+        optionSelectedFontWeight: 500,
+        // The selected option under the pointer/keyboard uses this alias token,
+        // not `optionSelectedBg`; left alone it is a saturated accent fill.
+        controlItemBgActiveHover: c.selBg,
       },
       Table: {
         headerBg: c.bgSunken,

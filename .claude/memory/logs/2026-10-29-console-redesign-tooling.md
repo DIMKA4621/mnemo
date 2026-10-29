@@ -48,3 +48,17 @@ Two consecutive local `npm run release` runs produce identical `src/webui/static
 User's call after looking at the finished Памʼять page: the button sat next to the language/theme toggles and read as part of them.
 Now it is the Banks column's own action (right side of its `pane-head`), the same place "Reindex file" lives in the Content column, so each pane carries its own actions.
 This revises the 2026-08-19 rule in `topics/console-ui.md` ("the header holds the tab's actions, e.g. `Додати банк`"): on Памʼять the topbar now holds only the title, the counters and the shell's language/theme toggles.
+
+## MN-53 / MN-30 / MN-52 — Памʼять actions, Journal and Settings brought to the Памʼять level
+
+User-driven decisions, all recorded so they are not relitigated:
+
+- Памʼять: «Додати банк» is an icon-only «+» in the Banks pane header; single-file reindex moved from the Content header button to a counter-clockwise ↻ that appears on a file row's hover/focus (left of the name, mirrored `ReloadOutlined` — `UndoOutlined` reads as "undo"), confirmed by a «Переіндексувати файл?» modal whose buttons are just «Так» / «Скасувати» (the title already says the action); the queued note is an antd `message`, so the tree never shifts.
+- Journal: ↻ refresh is the third control of the filter row, not in the topbar; a hit's file path is the link into Памʼять (no separate «Відкрити файл» button, also in the Indexing detail); the whole snippet block toggles expand/collapse but a drag-selection does not toggle it; `score` and `sim` are gone from hits — `sim` is computed only by the retired auto-inject gate, so it was always «—», and `score` is a raw RRF value with no meaning to a person, the rank number says the same; the events list header looks like a Памʼять `pane-head` («Події»); cards label their numbers («3 хіти · 41 мс») and show time-only for today; the detail panel keeps only facts the card does not show; the period filter has «Весь час» (no `since`, bounded only by log retention, 30 days by default).
+- Settings: «Оновити діагностику» stays in its own row inside Обслуговування — moving it into the tab strip was tried and reverted at the user's request.
+- Text search over queries is deferred to MN-54 (likely needs `GET /api/logs` support).
+
+Root cause found on the way: `tokens.css` had a bare `svg { fill: none; stroke: currentColor; … }` for the hand-drawn icons, which blanked every `@ant-design/icons` glyph (Select arrows, the new «+», the Modal.confirm icon).
+It is now `svg:where(:not(.anticon *))`.
+Also learned: antd's `--ant-*` CSS variables exist only on antd component roots, so hand CSS outside an antd node must use the console's own tokens (`--accent`, …).
+Two agents edited the same tree in parallel (Памʼять vs Journal/Settings) and once raced on that `tokens.css` rule; giving each one a disjoint file list in the brief prevented the rest.

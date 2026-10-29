@@ -12,9 +12,12 @@ import { useJournalWidthStore } from "@/lib/store/journal-width";
 import type { IndexLogEvent, QueryLogEvent } from "@/lib/api/journal";
 import "@/components/journal/journal.css";
 
-const PERIOD_HOURS: Record<JournalPeriod, number> = { "1h": 1, "24h": 24, "7d": 24 * 7, "30d": 24 * 30 };
+const PERIOD_HOURS: Record<Exclude<JournalPeriod, "all">, number> = { "1h": 1, "24h": 24, "7d": 24 * 7, "30d": 24 * 30 };
 
-function periodSinceIso(period: JournalPeriod): string {
+/** `undefined` for "all": `/api/logs` without `since` applies no lower bound,
+ *  so the list reaches back as far as log retention kept. */
+function periodSinceIso(period: JournalPeriod): string | undefined {
+  if (period === "all") return undefined;
   return new Date(Date.now() - PERIOD_HOURS[period] * 3600 * 1000).toISOString();
 }
 
@@ -66,14 +69,22 @@ export default function JournalPage() {
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
-      <JournalHeader kind={kind} onKindChange={setKind} onRefresh={() => logsQuery.refetch()} />
-      <JournalFilters bank={bank} onBankChange={setBank} period={period} onPeriodChange={setPeriod} />
+      <JournalHeader kind={kind} onKindChange={setKind} />
+      <JournalFilters
+        bank={bank}
+        onBankChange={setBank}
+        period={period}
+        onPeriodChange={setPeriod}
+        onRefresh={() => logsQuery.refetch()}
+        refreshing={logsQuery.isFetching}
+      />
       <div className="jl" style={{ gridTemplateColumns: `${width}px 6px minmax(0, 1fr)` }}>
         <JournalEventList
           kind={kind}
           events={events}
           total={total}
           loading={logsQuery.isLoading}
+          error={logsQuery.error ? logsQuery.error.message : null}
           selectedId={selected?.id ?? null}
           onSelect={(id) => setSelectedId((prev) => ({ ...prev, [kind]: id }))}
           bankLabel={bankLabel}

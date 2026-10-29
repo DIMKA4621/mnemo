@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Segmented, Select, Input, InputNumber } from "antd";
+import { Segmented, Select, Input, InputNumber, Skeleton } from "antd";
 import { useT, useTMaybe } from "@/lib/i18n/hooks";
 import { InlineNote, useInlineNote } from "@/components/common/InlineNote";
 import { useSettings } from "@/hooks/useSettingsQueries";
@@ -170,8 +170,11 @@ export function EmbedSection({ onController }: EmbedSectionProps) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hasPendingChange, putSettingsMutation.isPending, backendId, form, keyTouched]);
 
+  if (settingsQuery.error && !settingsQuery.data) {
+    return <p className="modal-error">{settingsQuery.error instanceof Error ? settingsQuery.error.message : String(settingsQuery.error)}</p>;
+  }
   if (!settingsQuery.data || !backendId || !form) {
-    return <p className="empty-hint">{t("settings.loading")}</p>;
+    return <Skeleton active title={false} paragraph={{ rows: 6 }} />;
   }
 
   const backend = settingsQuery.data.presets.find((b) => b.id === backendId) ?? null;

@@ -222,8 +222,10 @@ h2 {
 /* Inline SVG icons (sidebar nav, theme/lang toggles) share one default so
    every icon file only needs a `<path>`, never its own stroke width or
    fill declaration. Omitting this was a real Phase 1 bug caught live: every
-   icon rendered as a giant filled black block instead of a 16px outline. */
-svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
+   icon rendered as a giant filled black block instead of a 16px outline.
+   AntD's icons are filled 1em glyphs and must stay out of it, or every
+   Select arrow / menu chevron turns into a 16px hairline outline. */
+svg:where(:not(.anticon *)) { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; flex-shrink: 0; }
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 
