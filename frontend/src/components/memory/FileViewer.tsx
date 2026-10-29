@@ -1,8 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { Checkbox } from "antd";
 import { useT } from "@/lib/i18n/hooks";
+import { useUiStore } from "@/lib/store/ui";
 import { useFile } from "@/hooks/useMemoryQueries";
 import { fmtBytes } from "@/lib/memory/format";
 import { ChunkBoundaryOverlay } from "./ChunkBoundaryOverlay";
@@ -20,9 +19,7 @@ interface FileViewerProps {
 export function FileViewer({ bankId, path, isMob, onBack }: FileViewerProps) {
   const t = useT();
   const fileQuery = useFile(bankId, path);
-  // Session-only, deliberately not persisted (confirmed from the
-  // pre-cutover implementation — the toggle always starts checked).
-  const [showChunks, setShowChunks] = useState(true);
+  const showChunks = useUiStore((s) => s.showChunks);
 
   const file = fileQuery.data;
 
@@ -33,15 +30,6 @@ export function FileViewer({ bankId, path, isMob, onBack }: FileViewerProps) {
           {t("common.btn.back")}
         </button>
         <h2>{t("memory.pane.content")}</h2>
-        <div className="pane-actions">
-          <Checkbox
-            checked={showChunks}
-            onChange={(e) => setShowChunks(e.target.checked)}
-            title={t("memory.pane.chunkVizTitle")}
-          >
-            {t("memory.pane.chunkVizLabel")}
-          </Checkbox>
-        </div>
       </div>
       <div className="pane-body">
         {!path ? (

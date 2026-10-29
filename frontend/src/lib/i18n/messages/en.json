@@ -199,8 +199,6 @@
       "files": "Files",
       "selectBankHint": "Select a bank on the left",
       "content": "Content",
-      "chunkVizTitle": "Show chunk boundaries as they lie in the index",
-      "chunkVizLabel": "Chunk boundaries",
       "selectFileHint": "Select a file in the tree"
     },
     "header": {
@@ -564,15 +562,9 @@
       "off": "Off"
     },
     "general": {
-      "theme": {
-        "label": "Console theme",
-        "note": "This browser''s own choice — applies immediately, does not wait for \"Save\".",
-        "dark": "Dark",
-        "light": "Light"
-      },
-      "language": {
-        "label": "Language",
-        "note": "This browser''s own choice — applies immediately, does not wait for \"Save\"."
+      "chunks": {
+        "label": "Chunk boundaries in Memory",
+        "note": "Highlights where the index cut a file''s content into chunks."
       },
       "autostart": {
         "label": "Start the service at logon",

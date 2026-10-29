@@ -9,6 +9,7 @@ import type { ThemeMode } from "../theme/design-tokens";
 const THEME_KEY = "mnemo_theme";
 const LANG_KEY = "mnemo_lang";
 const SIDEBAR_KEY = "mnemo_sidebar";
+const CHUNKS_KEY = "mnemo_chunks";
 
 export type Lang = "en" | "uk";
 
@@ -27,10 +28,17 @@ function readSidebarCollapsed(): boolean {
   return window.localStorage.getItem(SIDEBAR_KEY) === "collapsed";
 }
 
+function readShowChunks(): boolean {
+  if (typeof window === "undefined") return true;
+  return window.localStorage.getItem(CHUNKS_KEY) !== "off";
+}
+
 interface UiState {
   theme: ThemeMode;
   lang: Lang;
   sidebarCollapsed: boolean;
+  /** Памʼять's chunk-boundary overlay, switched in Settings → General. */
+  showChunks: boolean;
   /** True once `hydrate()` has run — before that, `theme`/`lang`/
    *  `sidebarCollapsed` are the static-export defaults, matched to what the
    *  server-rendered HTML shows, so hydration never mismatches. */
@@ -38,6 +46,7 @@ interface UiState {
   setTheme: (theme: ThemeMode) => void;
   setLang: (lang: Lang) => void;
   toggleSidebar: () => void;
+  setShowChunks: (show: boolean) => void;
   /** Reads the three legacy keys once, client-side, after mount. */
   hydrate: () => void;
 }
@@ -46,6 +55,7 @@ export const useUiStore = create<UiState>((set, get) => ({
   theme: "dark",
   lang: "en",
   sidebarCollapsed: false,
+  showChunks: true,
   hydrated: false,
 
   setTheme: (theme) => {
@@ -68,11 +78,16 @@ export const useUiStore = create<UiState>((set, get) => ({
     set({ sidebarCollapsed: next });
   },
 
+  setShowChunks: (show) => {
+    if (typeof window !== "undefined") window.localStorage.setItem(CHUNKS_KEY, show ? "on" : "off");
+    set({ showChunks: show });
+  },
+
   hydrate: () => {
     const theme = readTheme();
     const lang = readLang();
     document.documentElement.dataset.theme = theme;
     document.documentElement.lang = lang;
-    set({ theme, lang, sidebarCollapsed: readSidebarCollapsed(), hydrated: true });
+    set({ theme, lang, sidebarCollapsed: readSidebarCollapsed(), showChunks: readShowChunks(), hydrated: true });
   },
 }));

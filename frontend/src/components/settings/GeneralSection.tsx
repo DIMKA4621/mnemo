@@ -4,12 +4,14 @@ import { useEffect, useState } from "react";
 import { Skeleton } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { useTokenStore } from "@/lib/store/token";
+import { useUiStore } from "@/lib/store/ui";
 import { useSettings, useAutostart } from "@/hooks/useSettingsQueries";
 import { useSetAutostart, usePutSettings } from "@/hooks/useSettingsMutations";
 import { useStatus } from "@/hooks/useMemoryQueries";
 import { ApiError } from "@/lib/api/fetcher";
 import { AutostartField } from "./AutostartField";
 import { AutoUpdateField } from "./AutoUpdateField";
+import { ChunksField } from "./ChunksField";
 import { RequireLoginField } from "./RequireLoginField";
 import { ServiceStatusStats } from "./ServiceStatusStats";
 import type { SectionController } from "./SettingsTabs";
@@ -45,13 +47,15 @@ export function GeneralSection({ onController }: GeneralSectionProps) {
   const [autostartWant, setAutostartWant] = useState<boolean | null>(null);
   const [autoUpdateWant, setAutoUpdateWant] = useState<boolean | null>(null);
   const [requireLoginWant, setRequireLoginWant] = useState<boolean | null>(null);
+  const [chunksWant, setChunksWant] = useState<boolean | null>(null);
   const [autostartResult, setAutostartResult] = useState<FieldSaveResult | null>(null);
   const [autoUpdateResult, setAutoUpdateResult] = useState<FieldSaveResult | null>(null);
   const [requireLoginResult, setRequireLoginResult] = useState<FieldSaveResult | null>(null);
   const [requireLoginToken, setRequireLoginToken] = useState<string | null>(null);
 
   const busy = setAutostartMutation.isPending || putSettingsMutation.isPending;
-  const hasPendingChange = autostartWant != null || autoUpdateWant != null || requireLoginWant != null;
+  const hasPendingChange =
+    autostartWant != null || autoUpdateWant != null || requireLoginWant != null || chunksWant != null;
 
   async function submit() {
     // Dropped rather than reset to `null` up front: a field's OWN want must
@@ -61,6 +65,11 @@ export function GeneralSection({ onController }: GeneralSectionProps) {
     setAutostartResult(null);
     setAutoUpdateResult(null);
     setRequireLoginResult(null);
+
+    if (chunksWant != null) {
+      useUiStore.getState().setShowChunks(chunksWant);
+      setChunksWant(null);
+    }
 
     if (autostartWant != null) {
       try {
@@ -124,7 +133,7 @@ export function GeneralSection({ onController }: GeneralSectionProps) {
     // state) — the controller must always hold the latest one, so it is a
     // dependency rather than something to memoize away.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hasPendingChange, busy, autostartWant, autoUpdateWant, requireLoginWant]);
+  }, [hasPendingChange, busy, autostartWant, autoUpdateWant, requireLoginWant, chunksWant]);
 
   return (
     <>
@@ -144,6 +153,7 @@ export function GeneralSection({ onController }: GeneralSectionProps) {
         saveResult={requireLoginResult}
         token={requireLoginToken}
       />
+      <ChunksField want={chunksWant} onChoose={setChunksWant} />
       <AutoUpdateField
         settings={settingsQuery.data ?? null}
         want={autoUpdateWant}
