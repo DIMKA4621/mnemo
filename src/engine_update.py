@@ -35,6 +35,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import threading
 from contextlib import suppress
@@ -182,21 +183,59 @@ def base_version_tag(tag: str | None) -> str | None:
 _SEMVER_RE = re.compile(r"^v(\d+)\.(\d+)\.(\d+)$")
 
 
+def _semver_tuple(tag: str | None) -> tuple[int, int, int] | None:
+    """Parse a ``vMAJOR.MINOR.PATCH`` tag into a comparable tuple, or
+    ``None`` for anything that does not match that exact shape (``"local"``,
+    a trailing local-build ``l`` not yet stripped by :func:`base_version_tag`,
+    a malformed tag from some future format change).
+    """
+    if not tag:
+        return None
+    match = _SEMVER_RE.match(tag)
+    return (int(match.group(1)), int(match.group(2)), int(match.group(3))) if match else None
+
+
 def _major_version(tag: str | None) -> int | None:
     """The leading ``MAJOR`` out of a ``vMAJOR.MINOR.PATCH`` tag, or ``None``
-    for anything that does not match that exact shape (``"local"``, a
-    trailing local-build ``l`` not yet stripped by :func:`base_version_tag`,
-    a malformed tag from some future format change).
+    for anything that does not match that exact shape.
 
     ``None`` is the deliberate "I don't know" answer, not "block it" --
     :func:`auto_eligible_tag` treats it as permission to proceed, same as
     before this gate existed. Every tag this project mints today matches
     the pattern; this only exists for whatever does not.
     """
-    if not tag:
-        return None
-    match = _SEMVER_RE.match(tag)
-    return int(match.group(1)) if match else None
+    parsed = _semver_tuple(tag)
+    return parsed[0] if parsed is not None else None
+
+
+def _is_newer(latest: str | None, current: str | None) -> bool:
+    """Whether ``latest`` is a genuinely newer release than ``current`` --
+    what :func:`record_check`/:func:`record_installed` use to decide
+    ``update_available``, instead of a bare string inequality.
+
+    **Bug found live (2026-09-04):** the original check was
+    ``bool(latest) and latest != current``, which flags "update available"
+    for ANY different tag, newer or not. GitHub's ``releases/latest`` only
+    ever returns *published* releases, so while a new tag sits as a draft
+    (exactly the state ``v3.2.1`` was in right after being cut), the API
+    still reports the previous, older release as "latest" -- and a machine
+    already running the newer draft build got told "v3.2.0 available",
+    nagging a downgrade. Comparing parsed semver tuples instead answers the
+    question this is actually asking: is there a release newer than what is
+    running, not "is this tag string different."
+
+    Falls back to plain inequality when either side does not parse as
+    ``vMAJOR.MINOR.PATCH`` (e.g. ``"local"``) -- the same behaviour this
+    replaced, kept for tags this project has never actually minted in that
+    shape.
+    """
+    if not latest:
+        return False
+    latest_v = _semver_tuple(latest)
+    current_v = _semver_tuple(current)
+    if latest_v is None or current_v is None:
+        return latest != current
+    return latest_v > current_v
 
 
 def _is_valid(data: Any) -> bool:
@@ -288,9 +327,7 @@ def record_installed(*, tag: str, commit: str | None, status: str) -> dict[str, 
         # can flip it: a new tag becoming current, not a new tag being
         # reported.
         last_check = dict(state.get("last_check") or {})
-        last_check["update_available"] = (
-            bool(last_check.get("latest_tag")) and last_check.get("latest_tag") != tag
-        )
+        last_check["update_available"] = _is_newer(last_check.get("latest_tag"), tag)
         state["last_check"] = last_check
     installed.append(
         {"tag": tag, "installed_at": _now_iso(), "commit": commit, "status": status}
@@ -404,8 +441,7 @@ def record_check(*, latest_tag: str | None, error: str | None) -> dict[str, Any]
         state["last_check"] = {
             "at": _now_iso(),
             "latest_tag": latest_tag,
-            "update_available": bool(latest_tag)
-            and latest_tag != base_version_tag(effective_current_tag(state)),
+            "update_available": _is_newer(latest_tag, base_version_tag(effective_current_tag(state))),
             "error": None,
         }
     else:
@@ -914,6 +950,157 @@ def _ps_quote(path: Path) -> str:
     return str(path).replace("'", "''")
 
 
+def _write_pip_progress(path: Path, status: dict[str, Any]) -> None:
+    """Best-effort update of the side-channel progress file."""
+    with suppress(OSError):
+        path.write_text(json.dumps(status), encoding="utf-8")
+
+
+def _run_pip_install_posix(
+    venv_python: Path,
+    reqs_file: Path,
+    *,
+    progress_file: Path | None = None,
+    timeout: float = 3600.0,
+) -> None:
+    """Install dependencies on POSIX while streaming lines to detect progress."""
+    cmd = [str(venv_python), "-m", "pip", "install", "-r", str(reqs_file)]
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    count = 0
+    output_lines: list[str] = []
+    try:
+        if proc.stdout:
+            for line in proc.stdout:
+                output_lines.append(line)
+                stripped = line.strip()
+                if stripped.startswith("Collecting "):
+                    count += 1
+                    if progress_file is not None:
+                        _write_pip_progress(
+                            progress_file, {"phase": "collecting", "count": count}
+                        )
+                elif "Installing collected packages" in stripped:
+                    if progress_file is not None:
+                        _write_pip_progress(
+                            progress_file, {"phase": "installing", "count": count}
+                        )
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait()
+        raise RuntimeError(f"pip install timed out after {timeout}s") from None
+    except Exception:
+        proc.kill()
+        proc.wait()
+        raise
+
+    if proc.returncode != 0:
+        detail = "".join(output_lines[-20:]).strip()
+        raise RuntimeError(f"pip install failed (exit {proc.returncode}): {detail}")
+
+    if progress_file is not None:
+        _write_pip_progress(progress_file, {"phase": "done", "count": count})
+
+
+def _build_engine_version_posix(
+    repo_root: Path,
+    version_dir: Path,
+    *,
+    timeout: float = 3600.0,
+    progress_file: Path | None = None,
+) -> None:
+    """Build a versioned {src, .venv} tree directly on POSIX."""
+    if not (repo_root / "src" / "cli.py").is_file():
+        raise RuntimeError(f"release archive has no src/cli.py at {repo_root}")
+    reqs_file = repo_root / "requirements.txt"
+    if not reqs_file.is_file():
+        raise RuntimeError(f"release archive has no requirements.txt at {repo_root}")
+
+    version_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Mirror code & runtime assets
+    src_dest = version_dir / "src"
+    if src_dest.exists():
+        shutil.rmtree(src_dest)
+    shutil.copytree(
+        repo_root / "src",
+        src_dest,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    for name in ("requirements.txt", "pyproject.toml", "mnemo_bootstrap.py"):
+        f = repo_root / name
+        if f.is_file():
+            shutil.copy2(f, version_dir / name)
+
+    # 2. Virtual environment
+    venv_dir = version_dir / ".venv"
+    venv_python = venv_dir / "bin" / "python"
+    if not venv_python.is_file():
+        base_py = getattr(sys, "_base_executable", None) or shutil.which("python3") or sys.executable
+        res = subprocess.run(
+            [base_py, "-m", "venv", str(venv_dir)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+        if res.returncode != 0:
+            raise RuntimeError(
+                f"Failed to create virtual environment: {res.stderr.strip() or res.stdout.strip()}"
+            )
+
+    # 3. Upgrade pip
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "--quiet", "--upgrade", "pip"],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=True,
+    )
+
+    # 4. Install dependencies with progress tracking
+    _run_pip_install_posix(
+        venv_python, version_dir / "requirements.txt", progress_file=progress_file, timeout=timeout
+    )
+
+    # 5. SQLite-vec extension probe
+    vec_probe = (
+        "import sqlite3, sqlite_vec; "
+        "conn = sqlite3.connect(':memory:'); "
+        "conn.enable_load_extension(True); "
+        "sqlite_vec.load(conn)"
+    )
+    probe = subprocess.run(
+        [str(venv_python), "-c", vec_probe],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    if probe.returncode != 0:
+        raise RuntimeError(
+            "This Python cannot load SQLite extensions, so sqlite-vec "
+            f"cannot load and no bank can be opened: {venv_python}. "
+            f"Error: {probe.stderr.strip() or probe.stdout.strip()}"
+        )
+
+    # 6. Install launcher metadata if pyproject.toml is present
+    if (version_dir / "pyproject.toml").is_file():
+        subprocess.run(
+            [str(venv_python), "-m", "pip", "install", "--quiet", "--no-deps", "--force-reinstall", str(version_dir)],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=True,
+        )
+
+
 def _build_engine_version(
     repo_root: Path,
     version_dir: Path,
@@ -922,49 +1109,18 @@ def _build_engine_version(
     progress_file: Path | None = None,
 ) -> None:
     """Build a full ``{src, .venv}`` tree at ``version_dir`` from
-    ``repo_root``'s source, by dot-sourcing THAT checkout's own
-    ``install.ps1`` and calling its ``Build-EngineVersion`` function
-    directly — never a Python re-implementation of what it does.
+    ``repo_root``'s source.
 
-    **Coordination note, resolved before writing this (not decided here on
-    the fly).** Whether ``Build-EngineVersion`` was already callable from
-    outside ``install.ps1``, or whether platform-dev's file needed a new
-    entry point, was an open question going in. Its own docstring in
-    ``install.ps1`` answers it: the function is explicitly written for two
-    callers, "the first full install" and "later, the self-update apply
-    handler (step 7, service-dev, not this file) stages a new release tag
-    the same way", via dot-sourcing — "the same reuse mechanism
-    ``test_platform.py`` already relies on to exercise other functions here
-    in isolation". So no change to ``install.ps1`` was needed, and none was
-    made.
-
-    Deliberately the EXTRACTED RELEASE's own ``install.ps1``, not the
-    currently-running engine's: the release tarball is a full repo snapshot
-    (GitHub's auto-archive), so it carries whatever ``Build-EngineVersion``
-    looked like AT THAT TAG — a future change to how the venv gets built
-    ships with the release that needs it, rather than requiring the OLD
-    engine's installer to already know about it.
-
-    Windows only. The design topic's own "Рішення по ризиках" scopes the
-    whole self-update feature to the one machine it exists for; ``install.sh``
-    never grew a reusable ``Build-EngineVersion`` equivalent (its venv build
-    is inline), so there is nothing to call on POSIX yet.
-
-    ``timeout`` is a last-resort backstop only (bumped from the original
-    1800s to a generous 3600s) — the real slow-vs-dead distinction now lives
-    inside ``install.ps1``'s own ``Invoke-CheckedWithHeartbeat`` stall
-    detector (``-StallTimeoutSec``), which kills a genuinely stalled pip
-    install in ~2 minutes regardless of this ceiling. This one only fires if
-    PowerShell itself gets wedged outside pip's control. ``progress_file``,
-    when given, is forwarded as ``-ProgressFile`` so the pip-install step
-    can report an approximate running status; see :func:`stage_release`
-    for who reads it.
+    On Windows, this dot-sources that checkout's own ``install.ps1`` and calls
+    its ``Build-EngineVersion`` function directly.
+    On POSIX, this builds the venv and installs dependencies directly in
+    Python, verifying the sqlite-vec extension probe upon completion.
     """
     if os.name != "nt":
-        raise NotImplementedError(
-            "engine self-update staging is Windows-only for now "
-            "(see the design topic's migration-risk decision)"
+        _build_engine_version_posix(
+            repo_root, version_dir, timeout=timeout, progress_file=progress_file
         )
+        return
 
     installer = repo_root / "install.ps1"
     if not installer.is_file():

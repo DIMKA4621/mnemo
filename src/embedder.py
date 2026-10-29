@@ -10,8 +10,11 @@ to silently download.
 """
 from __future__ import annotations
 
+import os
+import shutil
 import threading
 import warnings
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .config import EMBED_THREADS, EMBEDDING_MODEL, MODEL_CACHE
@@ -106,6 +109,34 @@ def _model() -> TextEmbedding:
     return _MODEL
 
 
+def _colocate_external_data(model_dir: Path) -> None:
+    """Ensure ONNX external data files reside alongside the model as hardlinks.
+
+    On Linux, huggingface_hub downloads model files as symlinks into sharded
+    `blobs/<hash>` directories. ONNX Runtime validates that external data
+    (e.g. `model.onnx_data`) resides within the canonical directory of
+    `model.onnx`. Resolving symlinks sends them to different shard directories,
+    triggering 'External data path escapes model directory'.
+
+    Replacing symlinks in the snapshot directory with hardlinks colocates
+    them within the same canonical directory without duplicating disk space.
+    Windows is an immediate no-op: huggingface_hub uses hardlinks/copies by default.
+    """
+    if os.name == "nt" or not model_dir.is_dir():
+        return
+    for path in model_dir.glob("*.onnx*"):
+        if path.is_symlink():
+            try:
+                target = path.resolve()
+                path.unlink()
+                try:
+                    os.link(target, path)
+                except OSError:
+                    shutil.copy2(target, path)
+            except OSError:
+                pass
+
+
 def _build_model() -> TextEmbedding:
     from fastembed import TextEmbedding
 
@@ -130,6 +161,9 @@ def _build_model() -> TextEmbedding:
     _orig_session = ort.InferenceSession
 
     def _no_spin_session(*args, **kwargs):
+        model_path = args[0] if args else kwargs.get("path_or_bytes")
+        if isinstance(model_path, (str, Path)):
+            _colocate_external_data(Path(model_path).parent)
         so = kwargs.get("sess_options")
         if so is not None:
             so.add_session_config_entry(

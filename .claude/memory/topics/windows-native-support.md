@@ -19,7 +19,7 @@
   The installer creates user `HOME` only when absent and refuses mismatches so MCP and hooks cannot target different engines.
   After first creating `HOME`, reopen the launching terminal/IDE before restarting Claude Code.
 - `-InstallHome` is for isolated/manual checks; git-tracked wiring always targets the canonical home.
-- Project root precedence is explicit root > `MNEMO_ROOT` > `CLAUDE_PROJECT_DIR` > cwd.
+- Project root precedence is explicit root > `MNEMO_ROOT` > cwd (`CLAUDE_PROJECT_DIR` dropped 2026-09-04 — see `topics/config-root-resolution.md`).
 - Indexed relative file identifiers use POSIX `/` separators on every platform.
 - Model cache readiness requires the complete current ONNX/tokenizer snapshot, not merely a non-empty cache directory.
   Model download remains explicit via `warmup`.

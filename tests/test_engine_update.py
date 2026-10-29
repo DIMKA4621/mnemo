@@ -228,6 +228,35 @@ def test_record_check_soft_failure(work: Path) -> None:
               after_same["last_check"]["update_available"] is False)
 
 
+def test_record_check_never_nags_toward_an_older_tag(work: Path) -> None:
+    """Bug found live (2026-09-04): the checker reported "v3.2.0 available"
+    to a machine already running v3.2.1. Root cause was `record_check`
+    comparing tags with plain `!=` -- ANY different tag counted as "an
+    update", newer or not. GitHub's `releases/latest` only ever returns
+    *published* releases, so while v3.2.1 sat as a draft it kept reporting
+    v3.2.0 (the previous, older release) as "latest". This exercises the
+    exact scenario: a locally-installed newer tag, and a GitHub check that
+    (for whatever reason -- draft window, a stale mirror, a rollback)
+    reports something OLDER. Semver-aware comparison must never call that
+    "update available".
+    """
+    with patch.object(config, "STATE_DIR", work / "no-downgrade"):
+        engine_update.record_installed(tag="v3.2.1", commit=None, status="active")
+
+        after = engine_update.record_check(latest_tag="v3.2.0", error=None)
+        check("an older tag from GitHub is never offered as an update",
+              after["last_check"]["update_available"] is False,
+              detail=str(after["last_check"]))
+
+        after_same = engine_update.record_check(latest_tag="v3.2.1", error=None)
+        check("the same tag is not an update either",
+              after_same["last_check"]["update_available"] is False)
+
+        after_newer = engine_update.record_check(latest_tag="v3.2.2", error=None)
+        check("a genuinely newer tag still is",
+              after_newer["last_check"]["update_available"] is True)
+
+
 def test_effective_current_tag_self_detects_fresh_install(work: Path) -> None:
     """Fresh install gap (found live, 2026-08-22): install.ps1/install.sh
     never call record_installed(), so `current` stays None until the FIRST
@@ -735,8 +764,10 @@ def _make_local_release_tarball(dest: Path) -> Path:
 
     wrap = "mnemo-local"
     with tarfile.open(dest, "w:gz") as tar:
-        for name in ("install.ps1", "requirements.txt", "pyproject.toml", "mnemo_bootstrap.py"):
-            tar.add(REPO / name, arcname=f"{wrap}/{name}")
+        for name in ("install.ps1", "install.sh", "requirements.txt", "pyproject.toml", "mnemo_bootstrap.py"):
+            f = REPO / name
+            if f.is_file():
+                tar.add(f, arcname=f"{wrap}/{name}")
 
         def _skip_pycache(info: "tarfile.TarInfo") -> "tarfile.TarInfo | None":
             return None if "__pycache__" in info.name else info
@@ -761,10 +792,6 @@ def test_stage_release_real_pipeline(work: Path) -> None:
     Skipped, not failed, without Windows (this module's build step is
     Windows-only, matching install.ps1's Build-EngineVersion).
     """
-    if os.name != "nt":
-        print("SKIP  test_stage_release_real_pipeline (Windows-only staging)")
-        return
-
     import functools
     import http.server
     import threading as th
@@ -798,10 +825,25 @@ def test_stage_release_real_pipeline(work: Path) -> None:
                   detail=str(final_dir))
             check("the version dir contains a built venv",
                   (final_dir / ".venv").is_dir())
-            check("mnemo.exe was generated in the staged venv",
-                  (final_dir / ".venv" / "Scripts" / "mnemo.exe").is_file())
-            check("mnemow.exe (windowless twin) was generated too",
-                  (final_dir / ".venv" / "Scripts" / "mnemow.exe").is_file())
+            if os.name == "nt":
+                check("mnemo.exe was generated in the staged venv",
+                      (final_dir / ".venv" / "Scripts" / "mnemo.exe").is_file())
+                check("mnemow.exe (windowless twin) was generated too",
+                      (final_dir / ".venv" / "Scripts" / "mnemow.exe").is_file())
+                mnemo_launcher = final_dir / ".venv" / "Scripts" / "mnemo.exe"
+                shebang = _read_shebang(mnemo_launcher)
+                print(f"  mnemo.exe shebang: {shebang}")
+                shebang_path = shebang[2:].strip('"')
+            else:
+                check("python was generated in the staged venv",
+                      (final_dir / ".venv" / "bin" / "python").is_file())
+                check("mnemo was generated in the staged venv",
+                      (final_dir / ".venv" / "bin" / "mnemo").is_file())
+                mnemo_launcher = final_dir / ".venv" / "bin" / "mnemo"
+                shebang_line = mnemo_launcher.read_text(encoding="utf-8").splitlines()[0]
+                print(f"  mnemo shebang: {shebang_line}")
+                shebang_path = shebang_line[2:].strip().strip('"')
+
             check("the code was mirrored into src/",
                   (final_dir / "src" / "cli.py").is_file())
             check("a VERSION marker with the tag was written",
@@ -813,60 +855,53 @@ def test_stage_release_real_pipeline(work: Path) -> None:
             # a shebang pointing at the STAGING dir, which then got deleted.
             # Byte-level proof the fix is real: the shebang must name the
             # FINAL versions/<tag>/ location, which still exists.
-            mnemo_exe = final_dir / ".venv" / "Scripts" / "mnemo.exe"
-            shebang = _read_shebang(mnemo_exe)
-            print(f"  mnemo.exe shebang: {shebang}")
-            # distlib quotes the path when it contains a space -- this
-            # temp dir's own name does (tempfile.TemporaryDirectory's
-            # prefix), so strip a possible surrounding '"' before comparing.
-            shebang_path = shebang[2:].strip('"')
             check("shebang points at the FINAL version dir, not a staging path",
-                  shebang_path.startswith(str(final_dir)), detail=shebang)
+                  shebang_path.startswith(str(final_dir)), detail=shebang_path)
             check("shebang does NOT mention state/tmp (the old staging root)",
-                  "state" not in shebang.lower() or "tmp" not in shebang.lower(),
-                  detail=shebang)
+                  "state" not in shebang_path.lower() or "tmp" not in shebang_path.lower(),
+                  detail=shebang_path)
             check("the shebang's own interpreter path actually exists on disk",
-                  Path(shebang_path).is_file(), detail=shebang)
+                  Path(shebang_path).is_file(), detail=shebang_path)
 
-            # Live run, proving it end to end, not just the embedded string:
-            # invoked directly from .venv/Scripts (not the copied bin/
-            # launcher), so mnemo_bootstrap's OWN engine-home resolution
-            # will correctly report "no engine found" (rc=3, real stderr) --
-            # what matters here is that it is NOT the old silent rc=1 death
-            # (pip's launcher stub failing before Python ever starts).
-            direct = subprocess.run([str(mnemo_exe), "--help"], capture_output=True,
+            # Live run, proving it end to end:
+            direct = subprocess.run([str(mnemo_launcher), "--help"], capture_output=True,
                                      text=True, timeout=30)
             print(f"  direct run: rc={direct.returncode} "
                   f"stdout={direct.stdout[:80]!r} stderr={direct.stderr[:120]!r}")
-            check("mnemo.exe invoked directly no longer dies with the silent "
-                  "launcher-stub rc=1 (it now finds its own python.exe)",
+            check("mnemo invoked directly finds its own python",
                   direct.returncode != 1 or bool(direct.stdout or direct.stderr),
                   detail=f"rc={direct.returncode}")
 
             # Stronger, unambiguous proof: set this build up as `current`
-            # (real service_ctl.switch_current, same throwaway
-            # VERSIONS_DIR already patched above) and run the exe from a
-            # copied bin/ location -- exactly how a real install invokes
-            # it -- and confirm a genuinely clean rc=0 with real --help text.
-            #
-            # mnemo_bootstrap.py resolves its OWN engine home from
-            # `sys.argv[0]` (never from config, which it cannot import yet)
-            # as `<argv0>/../.. / "current"` -- the directory MUST be
-            # named literally "current", one level above wherever the exe
-            # sits, or the bootstrap dispatcher will never find it.
+            # and run the launcher from a copied bin/ location.
             engine_home = work / "install-shape"
             current_link = engine_home / "current"
             bin_dir = engine_home / "bin"
             bin_dir.mkdir(parents=True, exist_ok=True)
             with patch.object(config, "CURRENT_LINK", current_link):
                 service_ctl.switch_current(tag)
-            bin_mnemo = bin_dir / "mnemo.exe"
-            shutil.copy2(mnemo_exe, bin_mnemo)
+
+            if os.name == "nt":
+                bin_mnemo = bin_dir / "mnemo.exe"
+                shutil.copy2(mnemo_launcher, bin_mnemo)
+            else:
+                bin_mnemo = bin_dir / "mnemo"
+                launcher_script = f"""#!/usr/bin/env bash
+HOME_DIR="{engine_home}"
+CURRENT_DIR="$HOME_DIR/current"
+exec env PYTHONPATH="$CURRENT_DIR" MNEMO_HOME="$HOME_DIR" \\
+    "$CURRENT_DIR/.venv/bin/python" \\
+    -c 'import os,sys; sys.path.insert(0, os.environ["PYTHONPATH"]); from src.cli import main; raise SystemExit(main())' \\
+    "$@"
+"""
+                bin_mnemo.write_text(launcher_script, encoding="utf-8")
+                bin_mnemo.chmod(0o755)
+
             full = subprocess.run([str(bin_mnemo), "--help"], capture_output=True,
                                    text=True, timeout=30)
-            print(f"  bin/mnemo.exe --help: rc={full.returncode} "
+            print(f"  bin/mnemo --help: rc={full.returncode} "
                   f"stdout[:120]={full.stdout[:120]!r}")
-            check("bin/mnemo.exe --help (real install shape) succeeds cleanly",
+            check("bin/mnemo --help (real install shape) succeeds cleanly",
                   full.returncode == 0 and bool(full.stdout), detail=full.stderr[:300])
 
             # `--quiet` was dropped from the pip install call (2026-08-22,
@@ -898,9 +933,6 @@ def test_stage_release_failure_leaves_nothing_behind(work: Path) -> None:
     leave `versions/<tag>/` absent and the staging temp dir cleaned up --
     never a half-built tree.
     """
-    if os.name != "nt":
-        print("SKIP  test_stage_release_failure_leaves_nothing_behind (Windows-only)")
-        return
     if not _network_up():
         print("SKIP  test_stage_release_failure_leaves_nothing_behind (no network)")
         return
@@ -1094,6 +1126,7 @@ def main() -> int:
         test_state_recovers_from_corrupt_file(work)
         test_record_installed_and_apply_helpers(work)
         test_record_check_soft_failure(work)
+        test_record_check_never_nags_toward_an_older_tag(work)
         test_effective_current_tag_self_detects_fresh_install(work)
         test_base_version_tag_strips_local_build_marker(work)
         test_update_available_clears_on_switch(work)
