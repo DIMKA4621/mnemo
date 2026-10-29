@@ -66,8 +66,8 @@ export function RequireLoginField({ settings, want, onChoose, busy, saveResult, 
         disabled={busy}
         onChange={(v) => choose(v === "on")}
         options={[
-          { label: t("settings.toggle.off"), value: "off" },
           { label: t("settings.toggle.on"), value: "on" },
+          { label: t("settings.toggle.off"), value: "off" },
         ]}
       />
       <p className="set-note">

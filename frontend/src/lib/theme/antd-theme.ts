@@ -168,6 +168,12 @@ function buildAntdTheme(mode: ThemeMode): ThemeConfig {
         itemSelectedColor: c.fg,
         itemColor: c.fgDim,
         trackBg: "transparent",
+        // One bar, not a row of pills: no inset, square inner corners, so a
+        // hovered or selected option meets its neighbour on a straight edge.
+        // The outer frame and the corner clip are in shell.css.
+        trackPadding: 0,
+        borderRadiusSM: 0,
+        borderRadiusXS: 0,
       },
       Switch: {
         colorPrimary: c.accent,

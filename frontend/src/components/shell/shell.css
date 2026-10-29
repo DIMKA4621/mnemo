@@ -150,6 +150,14 @@ html[data-hydrating] .mnemo-main { visibility: hidden; }
 .ant-dropdown-menu-submenu-popup .ant-dropdown-menu,
 .ant-select-dropdown { border: 1px solid var(--ant-color-border); }
 
+/* Segmented has no border token: the frame that makes its options read as
+   one bar, and the clip that keeps their square corners inside it.
+   `size="small"` takes its outer radius from `borderRadiusSM`, which the
+   theme zeroes for the inner corners, so it gets the normal one back
+   (`html` outranks antd's own `.css-var-*.ant-segmented` rule). */
+.ant-segmented { border: 1px solid var(--ant-color-border); overflow: hidden; }
+html .ant-segmented.ant-segmented-sm { border-radius: var(--radius); }
+
 .page-title { font-size: 13.5px; font-weight: 650; white-space: nowrap; }
 .page-sub { color: var(--fg-mute); font-size: 11.5px; white-space: nowrap; }
 
