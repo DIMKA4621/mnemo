@@ -302,11 +302,44 @@ def test_retry_admission_math() -> None:
               not streak_fn.called and calls == [])
 
 
+def test_sync_watches_does_not_need_the_pending_lock() -> None:
+    """Scheduling a watch must not wait for `_lock`: watchdog's dispatch thread
+    holds its own lock while our handler waits for `_lock`, so needing both
+    deadlocked startup whenever a file changed mid-scheduling."""
+    import threading  # noqa: PLC0415
+    from types import SimpleNamespace  # noqa: PLC0415
+
+    bank = SimpleNamespace(id="b1", name="b1", root=Path(_STATE), watched=True, exists=True)
+    observer = SimpleNamespace(schedule=lambda *a, **k: object(), unschedule=lambda w: None)
+    held, release = threading.Event(), threading.Event()
+
+    def hold_pending_lock() -> None:
+        with watcher._lock:
+            held.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold_pending_lock)
+    holder.start()
+    held.wait(5)
+    done = threading.Event()
+    with patch.object(watcher, "_observer", observer),             patch.object(watcher.registry, "load", return_value=[bank]):
+        worker = threading.Thread(target=lambda: (watcher._sync_watches(), done.set()))
+        worker.start()
+        finished = done.wait(2)
+    release.set()
+    holder.join()
+    worker.join(5)
+    check("_sync_watches completes while another thread holds _lock", finished)
+    with watcher._watch_lock:
+        watcher._watches.clear()
+
+
 def main() -> int:
     try:
         test_is_embedding_unavailable_error()
         test_embedding_unavailable_streak()
         test_retry_admission_math()
+        test_sync_watches_does_not_need_the_pending_lock()
     finally:
         servicelog.close()
 

@@ -33,3 +33,12 @@ Installers try `py -3.13 … -3.10` / `python3.13 … python3.10` and take the n
 Self-update builds on the running engine's own interpreter (`sys._base_executable`, `pythonw.exe` → `python.exe`), checked against the range before the download, and its build error now carries the last 20 lines of pip's stdout.
 Accepted consequence: an engine already running on 3.14+ gets a self-update refusal telling it to reinstall with `-Python`/`--python` (user: practically nobody is affected).
 Not covered: `-DepsOnly`/`--deps-only` reuse the existing venv without checking the range.
+
+## Local install of the branch: startup deadlock in `watcher.py` (pre-existing, fixed)
+
+`install.ps1` from this branch (engine `v3.3.0l`) left the service running but never listening: `mnemo service status` said "no endpoint published", the real `pythonw` child sat at 615 MB.
+`py-spy dump` showed the deadlock: `MainThread` in `lifespan → watcher.start → _sync_watches → observer.schedule()` holding `watcher._lock` and waiting for watchdog's own lock, while watchdog's dispatch thread (holding that lock) was in `on_modified → _touch()` waiting for `watcher._lock`.
+It needs a file to change in a watched bank while the banks are being scheduled at startup, which is why earlier starts got lucky; `watcher.py` is unchanged on this branch, so `v3.3.0` has it too.
+Fix: `_watches` gets its own `_watch_lock`, never taken by the event handler; `test_watcher.py`'s `test_sync_watches_does_not_need_the_pending_lock` holds `_lock` from another thread and requires `_sync_watches()` to finish (fails on the old code).
+Diagnosing a hung `pythonw` on Windows: `pip install py-spy` into the repo venv, `py-spy dump --pid <real child pid>` — the PID in `service.pid` is the venv redirector stub, the working process is the other `pythonw.exe`.
+After the fix the reinstall came up first time; `/ui/memory|journal|settings` and the dotted segment file serve 200, the console shows no errors, a CLI search lands in the Journal as «4 результати».
