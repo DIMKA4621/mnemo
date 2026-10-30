@@ -2186,6 +2186,21 @@ class Handler(BaseHTTPRequestHandler):
             self.json_out(200, out)
             return
 
+        # Dev-only: "publish" a release the way the real background checker
+        # sees one — `last_check` changes and nothing is broadcast, which is
+        # exactly how a console's cached status drifts (MN-58).
+        if parsed.path == "/api/__dev/release":
+            tag = str(body.get("tag") or "")
+            if not tag:
+                self.fail(400, "bad_request", "tag is required")
+                return
+            with _UPDATE_LOCK:
+                _UPDATE_STATE["latest_tag"] = tag
+                _UPDATE_STATE["update_available"] = tag != _UPDATE_STATE["current_tag"]
+                _UPDATE_STATE["checked_at"] = now_iso()
+            self.json_out(200, {"latest_tag": tag})
+            return
+
         if parsed.path == "/api/update/apply":
             tag = str(body.get("tag") or "")
             with _UPDATE_LOCK:
