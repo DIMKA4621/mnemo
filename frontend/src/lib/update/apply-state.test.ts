@@ -10,6 +10,7 @@ import {
   rejectedApply,
   seedAttempt,
   stagingPlaceholder,
+  staleTargetRetryTag,
   supersededAfter,
   visibleApply,
 } from "./apply-state";
@@ -133,5 +134,25 @@ describe("isApplyBusy / isApplyTerminal", () => {
     expect(states.filter((s) => isApplyBusy(of(s)))).toEqual(["staging", "switching"]);
     expect(states.filter((s) => isApplyTerminal(of(s)))).toEqual(["done", "failed", "rolled_back"]);
     expect(isApplyBusy(undefined)).toBe(false);
+  });
+});
+
+describe("staleTargetRetryTag", () => {
+  const latest = (tag: string | null, update_available: boolean) => ({
+    latest_known: { tag, checked_at: null, update_available },
+  });
+
+  it("offers the release the server now knows about", () => {
+    expect(staleTargetRetryTag(latest("v3.4.1", true), "v3.4.0")).toBe("v3.4.1");
+  });
+
+  it("never re-offers the tag the server just rejected", () => {
+    expect(staleTargetRetryTag(latest("v3.4.1", true), "v3.4.1")).toBeNull();
+  });
+
+  it("offers nothing when there is nothing left to update to", () => {
+    expect(staleTargetRetryTag(latest("v3.4.1", false), "v3.4.0")).toBeNull();
+    expect(staleTargetRetryTag(latest(null, true), "v3.4.0")).toBeNull();
+    expect(staleTargetRetryTag(undefined, "v3.4.0")).toBeNull();
   });
 });

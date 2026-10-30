@@ -314,32 +314,11 @@
 }
 .upd-step.is-active .upd-step-mark { border-color: var(--accent); color: var(--accent); }
 .upd-step.is-done .upd-step-mark { border-color: var(--success-border); background: var(--success-bg); color: var(--success-fg); }
-/* No shared `.bar.is-indeterminate` primitive exists elsewhere in this
-   console yet, so this is self-contained rather than reusing one. */
-.upd-step-bar {
-  position: relative;
-  margin: 4px 0 0 29px;
-  height: 3px;
-  border-radius: 2px;
-  background: var(--bg-sunken);
-  overflow: hidden;
-}
-.upd-step-bar i {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: -30%;
-  width: 30%;
-  background: var(--accent);
-  border-radius: 2px;
-  animation: upd-step-bar-sweep 1.1s ease-in-out infinite;
-}
-@keyframes upd-step-bar-sweep {
-  0% { left: -30%; }
-  100% { left: 100%; }
-}
+
+/* antd's `active` sweep is a `::after` on the track, which neither a token
+   nor the `styles` slot reaches, and its own selector outranks this one. */
 @media (prefers-reduced-motion: reduce) {
-  .upd-step-bar i { animation: none; left: 0; width: 100%; opacity: .5; }
+  .upd-progress-track::after { animation: none !important; }
 }
 
 .upd-note { margin: 6px 0 0; color: var(--fg-mute); font-size: 12px; line-height: 1.5; }

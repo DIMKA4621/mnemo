@@ -813,7 +813,8 @@
       "newLabel": "New version: ",
       "warning": "The mnemo service will be stopped and restarted on the new version. Search and indexing are unavailable while this happens. Once you press \"OK\" the action cannot be cancelled — progress is shown until it finishes.",
       "okBtn": "OK",
-      "staleTarget": "The version shown is stale (current: {tag}). Close this window and try again."
+      "staleTarget": "The version shown is stale (current: {tag}). Close this window and try again.",
+      "newerFound": "A newer version was found: {tag}. Confirm again to update to it."
     },
     "autoPending": {
       "leadPrefix": "Automatic update to ",
