@@ -271,6 +271,7 @@ def collect(
     called: an explicit «Перевірити» action owns that potentially metered
     request, not a diagnostic somebody may run repeatedly.
     """
+    from .agent_runtime import live_session_count
     from .embed_server import server_is_up
     from .embedder import is_model_cached
     from .engine_update import check_disk_space
@@ -364,6 +365,15 @@ def collect(
             ],
         },
         "orphans": orphans,
+        # MN-46: the machine-wide live-PTY-session ceiling (`config.
+        # MAX_LIVE_SESSIONS`, `agent_runtime.py`) — same fact `GET
+        # /api/status`'s `service.live_sessions` reports, surfaced here too
+        # so a rejection ("machine-wide live-session cap reached") is
+        # explainable from `mnemo doctor` alone, without a second endpoint.
+        "live_sessions": {
+            "count": live_session_count(),
+            "limit": config.MAX_LIVE_SESSIONS,
+        },
         "wiring": _project_wiring(banks) if registry_error is None else {
             "ok": False,
             "error": registry_error,
@@ -514,6 +524,11 @@ def render_text(report: dict[str, Any]) -> str:
         )
     else:
         lines.append("orphan indexes   none")
+
+    live_sessions = report.get("live_sessions") or {}
+    lines.append(
+        f"live sessions    {live_sessions.get('count', '?')}/{live_sessions.get('limit', '?')}"
+    )
 
     wiring = report["wiring"]
     if not wiring.get("ok"):

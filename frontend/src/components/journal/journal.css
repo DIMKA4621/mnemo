@@ -1,0 +1,109 @@
+/* Журнал: master-detail — event cards on the left, full detail on the
+ * right. Ported near-verbatim from the pre-cutover vanilla console
+ * (`git show a5361db~1:src/webui/static/styles/page-journal.css`) — same
+ * class names, same rules. No mobile stacking (scope cut, MN-35, same as
+ * Памʼять's own mid-flight cut): the `.jl` grid stays a fixed two-column
+ * desktop layout at every width, so the vanilla file's `@media` blocks and
+ * `.pane-resizer`-hiding rule are dropped rather than ported.
+ *
+ * `.jl`'s `grid-template-columns` fallback below is only the value for the
+ * instant before `journal/page.tsx` applies the hydrated store width inline
+ * — same pattern as `memory.css`'s `.layout`. */
+
+.filters {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding: 8px 12px;
+  background: var(--bg-pane);
+  border-bottom: 1px solid var(--line);
+}
+
+.jl { flex: 1; min-height: 0; display: grid; grid-template-columns: 400px 6px minmax(0, 1fr); }
+.events { min-width: 0; min-height: 0; display: flex; flex-direction: column; background: var(--bg-pane); border-right: 1px solid var(--line); }
+/* Same header as a Памʼять pane (`memory.css`'s `.pane-head`/`.pane-sub`),
+   restated here because that stylesheet is not loaded on this route. */
+.events-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 37px;
+  padding: 0 12px;
+  background: var(--bg-sunken);
+  border-bottom: 1px solid var(--line);
+}
+.events-head h2 { white-space: nowrap; }
+.events-count { margin-left: auto; overflow: hidden; color: var(--fg-mute); font: 11px var(--mono); text-overflow: ellipsis; white-space: nowrap; }
+.events-body { min-height: 0; overflow: auto; padding: 7px; }
+
+/* «прямокутнички» — every call its own card, not a table row, since a query
+   reads best over two lines. */
+.ev {
+  display: block;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--bg-sunken);
+  color: var(--fg);
+  text-align: left;
+}
+.ev + .ev { margin-top: 6px; }
+.ev:hover { background: var(--bg-hover); border-color: var(--btn-border-hover); }
+.ev.is-selected { background: var(--sel-bg); border-color: var(--accent); }
+.ev-top { display: flex; align-items: baseline; gap: 8px; }
+.ev-q { flex: 1; min-width: 0; font-size: 12px; line-height: 1.4; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.ev-n { flex: none; text-align: right; color: var(--fg-dim); font: 12px/1.4 var(--mono); }
+.ev-bot { margin-top: 7px; display: flex; align-items: center; gap: 8px; color: var(--fg-mute); font: 10.5px/1 var(--mono); }
+.ev-bot .mnemo-badge { flex: none; }
+.ev-bot .t { margin-left: auto; }
+
+.detail { min-width: 0; min-height: 0; overflow: auto; background: var(--bg-pane); }
+.detail-in { padding: 16px 16px 70px; }
+.d-kick { display: flex; align-items: center; gap: 8px; color: var(--fg-mute); font: 11px/1 var(--mono); }
+/* The global `h2` rule is the pane-header caption (uppercase, dim); this one
+   is the event's own title and must read as plain text. */
+.d-h { margin: 9px 0 0; color: var(--fg); font-size: 15px; font-weight: 650; line-height: 1.45; letter-spacing: normal; text-transform: none; }
+/* The query as it was typed, framed like the search box, so it does not run into «Результати». */
+.d-q { margin-top: 10px; padding: 9px 12px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg-sunken); font-family: var(--mono); font-size: 13.5px; font-weight: 500; word-break: break-word; }
+.d-facts { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 12px 28px; padding: 12px 0; border-top: 1px solid var(--line-table); border-bottom: 1px solid var(--line-table); }
+.d-k { color: var(--fg-mute); font-size: 10.5px; }
+.d-v { margin-top: 3px; font: 12px/1.3 var(--mono); }
+.d-sec { margin: 20px 0 0; padding-bottom: 10px; display: flex; align-items: baseline; gap: 8px; font-size: 12.5px; font-weight: 650; }
+.d-sec .muted { color: var(--fg-mute); font-size: 11px; font-weight: 400; }
+
+/* Each hit is its own row, ruled in `line` like Памʼять's bank list; the rule
+   above the first one also separates it from the «Результати» heading. */
+.hit { padding: 14px 0; border-top: 1px solid var(--line); }
+.hit:last-child { border-bottom: 1px solid var(--line); }
+.hit-top { display: flex; align-items: baseline; gap: 9px; }
+.hit-r { flex: none; width: 14px; color: var(--fg-mute); font: 11px/1.45 var(--mono); }
+.hit-l { flex: 1; min-width: 0; }
+.hit-p { font: 12px/1.45 var(--mono); overflow-wrap: anywhere; }
+.hit-h { margin-top: 2px; color: var(--fg-mute); font-size: 11px; }
+.hit-snap { margin: 8px 0 0 23px; padding: 9px 11px; border: 1px solid transparent; border-radius: var(--radius); background: var(--bg-sunken); color: var(--fg-dim); font: 11.5px/1.7 var(--mono); white-space: pre-wrap; word-break: break-word; }
+.hit-snap.is-toggle { cursor: pointer; transition: background-color 120ms, border-color 120ms; }
+.hit-snap.is-toggle:hover { background: var(--bg-hover); border-color: var(--btn-border-hover); }
+.hit-snap.is-toggle:focus-visible { outline-offset: 2px; }
+/* Collapsed: the first 8 lines, the last one ended with «…» by the browser.
+   Clamped on the inner span: on the padded box, line 9 shows through the padding. */
+.hit-snap.is-clamped .hit-snap-text { display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 8; line-clamp: 8; overflow: hidden; }
+
+/* The path is the way into Памʼять: plain until pointed at, then link-coloured
+   with an arrow that only appears on hover/focus. */
+.hit-link { border-radius: 2px; }
+.hit-link:hover,
+.hit-link:focus-visible { color: var(--accent); text-decoration: underline; text-underline-offset: 2px; }
+.hit-link:focus-visible { outline-offset: 2px; }
+.hit-link-arrow { margin-left: 6px; font-size: 11px; opacity: 0; transition: opacity 120ms; }
+.hit-link:hover .hit-link-arrow,
+.hit-link:focus-visible .hit-link-arrow { opacity: 1; }
+.note { margin-top: 14px; padding: 10px 12px; border: 1px solid var(--warn-border); border-radius: var(--radius); background: var(--warn-bg); color: var(--warn-fg); font-size: 12px; line-height: 1.6; }
+.note.is-err { border-color: var(--danger-border); background: var(--danger-bg); color: var(--danger-fg); font: 11.5px/1.65 var(--mono); }
+.note strong { color: var(--fg); }
+.nums { margin-top: 14px; display: flex; flex-wrap: wrap; gap: 18px 40px; }
+.num { font: 500 19px/1.2 var(--mono); }
+.num-k { margin-top: 3px; color: var(--fg-mute); font-size: 11px; }

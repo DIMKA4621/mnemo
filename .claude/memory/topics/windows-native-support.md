@@ -2,7 +2,7 @@
 
 ## Supported contract
 
-- Native Windows 10/11 uses built-in Windows PowerShell 5.1 and 64-bit Python 3.10+; WSL, PowerShell 7, Git Bash, and a PATH entry are not required.
+- Native Windows 10/11 uses built-in Windows PowerShell 5.1 and 64-bit Python 3.10–3.13 (newer versions lack wheels for some dependencies on some platforms — MN-56); WSL, PowerShell 7, Git Bash, and a PATH entry are not required.
 - `install.ps1` installs to the canonical `%USERPROFILE%\.claude\mnemo` home, preserves `state` and `model-cache`, and writes real `bin\mnemo.exe`/`mnemow.exe`.
   **Змінено 2026-08-20 (unstaged, self-update — див. вище й `topics/engine-self-update-design.md`):** код і venv більше не в корені, а під `versions/<tag>/{src,.venv}`, з `current` (junction) на активну версію; `install.ps1`'s `Build-EngineVersion` збирає одну версійну теку (код-мірор + повний runtime venv + перевірка `sqlite-vec`), `Set-CurrentVersion` перемикає junction, `Publish-Launchers` копіює стабільні exe в `bin\`.
   Свіжий інстал сьогодні кладе `versions\local\`.

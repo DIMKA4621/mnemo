@@ -316,6 +316,108 @@ def check_disk_space_constants_agree() -> None:
     ok("disk-space budget constants agree across install.sh, install.ps1 and config.py")
 
 
+def check_python_range_constants_agree() -> None:
+    """MN-56: the supported Python range is hard-coded in install.sh,
+    install.ps1, src/config.py and pyproject.toml's requires-python, for the
+    same reason as the disk-space numbers above. Duplicated in
+    test_install_windows.py for the same reason too.
+    """
+    sh_text = INSTALLER.read_text(encoding="utf-8")
+    ps1_text = (REPO / "install.ps1").read_text(encoding="utf-8")
+    py_text = (REPO / "src" / "config.py").read_text(encoding="utf-8")
+    toml_text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+
+    def grab(pattern: str, text: str) -> tuple[int, int]:
+        match = re.search(pattern, text)
+        assert match, f"pattern not found: {pattern}"
+        return int(match.group(1)), int(match.group(2))
+
+    requires = re.search(r'requires-python = ">=(\d+)\.(\d+),<(\d+)\.(\d+)"', toml_text)
+    assert requires, "pyproject.toml requires-python is not '>=X.Y,<X.Z'"
+    toml_min = (int(requires.group(1)), int(requires.group(2)))
+    toml_max = (int(requires.group(3)), int(requires.group(4)) - 1)
+
+    pairs = [
+        (
+            "minimum",
+            grab(r"PYTHON_MIN_VERSION=(\d+)\.(\d+)", sh_text),
+            grab(r'\$PythonMinVersion = "(\d+)\.(\d+)"', ps1_text),
+            grab(r"PYTHON_MIN_VERSION: tuple\[int, int\] = \((\d+), (\d+)\)", py_text),
+            toml_min,
+        ),
+        (
+            "maximum",
+            grab(r"PYTHON_MAX_VERSION=(\d+)\.(\d+)", sh_text),
+            grab(r'\$PythonMaxVersion = "(\d+)\.(\d+)"', ps1_text),
+            grab(r"PYTHON_MAX_VERSION: tuple\[int, int\] = \((\d+), (\d+)\)", py_text),
+            toml_max,
+        ),
+    ]
+    for name, sh_val, ps1_val, py_val, toml_val in pairs:
+        assert sh_val == ps1_val == py_val == toml_val, (
+            f"Python {name} disagrees: install.sh={sh_val} install.ps1={ps1_val} "
+            f"config.py={py_val} pyproject.toml={toml_val}"
+        )
+    ok("supported Python range agrees across install.sh, install.ps1, config.py and pyproject.toml")
+
+
+def test_python_resolution() -> None:
+    """MN-56: resolve_python picks the newest SUPPORTED Python on PATH, never
+    a bare newest `python3`, and refuses an out-of-range one by name. PATH is
+    narrowed to a directory of fake interpreters after sourcing (sourcing
+    itself still needs dirname/pwd)."""
+    with tempfile.TemporaryDirectory(prefix="mnemo python ") as raw:
+        bin_dir = Path(raw) / "bin"
+        bin_dir.mkdir()
+
+        def fake(name: str, version: str) -> Path:
+            path = bin_dir / name
+            path.write_text(f"#!/bin/sh\necho {version}\n", encoding="utf-8")
+            path.chmod(0o755)
+            return path
+
+        def resolve(explicit: str = "", expect: int = 0) -> subprocess.CompletedProcess[str]:
+            return run(
+                [
+                    "bash", "-c",
+                    f"source {shlex.quote(str(INSTALLER))}; "
+                    f"PATH={shlex.quote(str(bin_dir))}; "
+                    f"resolve_python {shlex.quote(explicit)}",
+                ],
+                expect=expect,
+            )
+
+        too_new = fake("python3", "3.15")
+        out = resolve(expect=1)
+        assert "3.10-3.13" in out.stderr and f"3.15 ({too_new})" in out.stderr, out.stderr
+        ok("no supported Python on PATH: the error lists what was found and the range")
+
+        fake("python3.11", "3.11")
+        older = fake("python3.10", "3.10")
+        out = resolve()
+        assert out.stdout.strip() == str(bin_dir / "python3.11"), out.stdout
+        ok("the newest supported python3.X wins over a newer bare python3")
+
+        out = resolve(str(too_new), expect=1)
+        assert "3.10-3.13" in out.stderr and "--python" in out.stderr, out.stderr
+        ok("an explicit --python outside the range is refused, naming it and the range")
+
+        out = resolve(str(older))
+        assert out.stdout.strip() == str(older), out.stdout
+        ok("an explicit --python inside the range is used as given")
+
+    out = run([
+        "bash", "-c",
+        f"source {shlex.quote(str(INSTALLER))}; "
+        f"python_version_supported 3.9 || echo NO39; "
+        f"python_version_supported 3.14 || echo NO314; "
+        f"python_version_supported 3.10 && echo YES310; "
+        f"python_version_supported 3.13 && echo YES313",
+    ])
+    assert out.stdout.split() == ["NO39", "NO314", "YES310", "YES313"], out.stdout
+    ok("python_version_supported is inclusive at both ends and nothing past them")
+
+
 def check_no_quiet_on_requirements_install() -> None:
     """`--quiet` dropped from both pip-install-requirements call sites
     (2026-08-23, mirroring install.ps1's own 2026-08-22 fix) so a failure
@@ -350,6 +452,8 @@ def main() -> int:
     test_heartbeat_failure_path()
     test_disk_space_check()
     check_disk_space_constants_agree()
+    check_python_range_constants_agree()
+    test_python_resolution()
     check_no_quiet_on_requirements_install()
 
     help_text = run([str(INSTALLER), "--help"])
@@ -375,7 +479,10 @@ def main() -> int:
         ok("--check reports an absent engine and changes nothing")
         assert not engine.exists(), "--check created the engine home"
 
-        install = [str(INSTALLER), "--home", str(engine)]
+        # The matrix's own interpreter, as test_install_windows.py passes
+        # -Python: left to resolve_python, the 3.10 job would quietly build
+        # on the runner's system 3.12 instead.
+        install = [str(INSTALLER), "--home", str(engine), "--python", sys.executable]
 
         first = run(install)
         launcher = engine / "bin" / "mnemo"

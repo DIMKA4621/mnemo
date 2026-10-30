@@ -1,0 +1,121 @@
+/* Реєстр: master-detail — a category-filtered list on the left, the selected
+ * entry's full record on the right. Ported from the live-verified mockup
+ * (`.claude/scratch/agents-page-mockup/styles.css`'s `.reg-*` rules), same
+ * class names, same layout. `.reg-list`'s `grid-template-columns` fallback
+ * below is only the value for the instant before `RegistryPage.tsx` applies
+ * the hydrated store width inline — same pattern as `memory.css`'s `.layout`
+ * and `journal.css`'s `.jl`. */
+
+.reg-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 320px 6px minmax(0, 1fr);
+}
+
+.reg-list-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-pane);
+  border-right: 1px solid var(--line);
+}
+
+.empty-hint {
+  margin: 0;
+  padding: 16px 14px;
+  color: var(--fg-mute);
+}
+
+.reg-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  font: inherit;
+  text-align: left;
+  color: var(--fg);
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--line-sunken);
+  cursor: pointer;
+}
+.reg-row:hover { background: var(--bg-hover); }
+.reg-row.is-selected { background: var(--sel-bg); box-shadow: inset 2px 0 0 var(--accent); }
+
+.reg-row-text { flex: 1 1 auto; min-width: 0; }
+.reg-row-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reg-row-meta {
+  margin-top: 2px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reg-detail-pane { min-width: 0; min-height: 0; overflow: auto; background: var(--bg-pane); }
+
+.reg-detail-head {
+  padding: 10px 16px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+.reg-detail-name { font-weight: 650; font-size: 14px; }
+.reg-detail-meta { margin-top: 2px; color: var(--fg-mute); font-size: 11.5px; font-family: var(--mono); }
+
+.reg-detail-body { padding: 14px 16px 30px; }
+.reg-detail-body h2 { margin: 0 0 6px; font-size: 12.5px; }
+
+.reg-detail-head-row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+.reg-detail-head-row h2 { margin: 0; flex: 1 1 auto; }
+
+.reg-edit-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 12px; }
+
+.reg-code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.reg-code-prose { font-family: var(--sans); font-size: 13px; line-height: 1.65; white-space: pre-wrap; }
+
+.reg-var-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.reg-var-chips .chip { color: var(--accent); cursor: default; }
+
+/* Small square icon button — the edit (✎) on a registry entry's detail
+ * panel. Ported from the mockup's `.icon-btn`/`.icon-btn-edit`. */
+.icon-btn {
+  flex: none;
+  padding: 3px 7px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--fg-mute);
+  font-size: 12px;
+  line-height: 1;
+  cursor: pointer;
+}
+.icon-btn:hover { color: var(--err); background: var(--bg-hover); border-color: var(--line); }
+.icon-btn.icon-btn-edit:hover { color: var(--accent); }
+
+@media (max-width: 940px) {
+  .reg-list { display: flex; flex-direction: column; }
+  .reg-list .reg-list-pane { flex: none; height: 260px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .reg-list .reg-detail-pane { flex: 1 1 auto; min-height: 0; }
+}

@@ -1,0 +1,504 @@
+/* Агенти: дерево агент→чати + робоча область. Ported from the live-verified
+ * mockup (`.claude/scratch/agents-page-mockup/styles.css`'s `.ag-*`/`.wiz-*`
+ * rules), same class names, same layout. Self-contained on purpose — does
+ * not rely on `.pane`/`.pane-body` from `memory.css` (a different route's
+ * stylesheet, not guaranteed loaded here). `.ag-layout`'s
+ * `grid-template-columns` fallback below is only the value for the instant
+ * before `AgentsPage.tsx` applies the hydrated store width inline — same
+ * pattern as `registry.css`'s `.reg-list`. */
+
+.ag-layout {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: 300px 6px minmax(0, 1fr);
+}
+
+.ag-tree-pane {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: var(--bg-pane);
+  border-right: 1px solid var(--line);
+}
+
+.ag-workspace {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-pane);
+}
+
+/* ---- tree ------------------------------------------------------------- */
+
+.ag-agent { border-bottom: 1px solid var(--line); }
+
+.ag-agent-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 8px 8px 8px 13.6px;
+  background: color-mix(in srgb, var(--bg-hover) 72%, var(--bg-pane));
+  border: 0;
+  text-align: left;
+  color: var(--fg);
+  cursor: pointer;
+}
+.ag-agent-row:hover { background: var(--bg-hover); }
+.ag-agent-row.is-selected { background: var(--sel-bg); color: var(--sel-fg); box-shadow: inset 2px 0 0 var(--accent); }
+
+.ag-agent-title { flex: 1 1 auto; min-width: 0; display: flex; align-items: center; gap: 9px; }
+.ag-agent-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 12.5px; }
+
+.ag-agent-count { flex: none; color: var(--fg-mute); font-family: var(--mono); font-size: 11px; }
+
+/* ⚙ sits right before the disclosure chevron — a real, separately
+   clickable button (the row around it is a div, not a button, so this
+   nests without an invalid button-in-button); its own click handler stops
+   propagation before opening settings so it doesn't also toggle the row. */
+.ag-agent-gear {
+  flex: none;
+  padding: 2px 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--fg-mute);
+  font-size: 12px;
+  cursor: pointer;
+}
+.ag-agent-gear:hover { color: var(--fg); background: var(--bg-hover); border-color: var(--line); }
+
+.ag-twisty { flex: none; width: 12px; text-align: center; color: var(--fg-mute); font-family: var(--mono); font-size: 11px; }
+
+.ag-chats { padding: 0; }
+
+.ag-no-chats { padding: 7px 8px 9px 13.6px; color: var(--fg-mute); font-size: 11.5px; }
+
+/* ---- workspace (chat/settings stub) ------------------------------------ */
+
+.ag-ws-head {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+}
+.ag-ws-title { font-weight: 650; font-size: 13px; }
+.ag-ws-sub { color: var(--fg-mute); font-size: 11.5px; font-family: var(--mono); }
+
+.ag-ws-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  overflow: auto;
+}
+
+.ag-ws-stub {
+  max-width: 420px;
+  text-align: center;
+  color: var(--fg-mute);
+  padding: 26px 22px;
+  border: 1px dashed var(--line);
+  border-radius: 10px;
+  background: var(--bg-sunken);
+}
+.ag-ws-stub .glyph { font-size: 26px; margin-bottom: 8px; }
+.ag-ws-stub p { margin: 6px 0 0; font-size: 12.5px; line-height: 1.55; }
+.ag-ws-stub code { font-family: var(--mono); background: var(--bg-hover); padding: 1px 5px; border-radius: 3px; }
+
+/* ---- create-agent wizard ------------------------------------------------ */
+
+.wiz-steps { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+.wiz-step { display: flex; align-items: center; gap: 7px; color: var(--fg-mute); font-size: 12px; }
+.wiz-step.is-active { color: var(--fg); }
+.wiz-step.is-done { color: var(--fg-dim); }
+.wiz-step-mark {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: 20px; height: 20px; border: 1px solid var(--line); border-radius: 50%;
+  color: var(--fg-mute); font-family: var(--mono); font-size: 11px;
+}
+.wiz-step.is-active .wiz-step-mark { border-color: var(--accent); color: var(--accent); }
+.wiz-step.is-done .wiz-step-mark { border-color: var(--ok); color: var(--ok); }
+.wiz-step-line { flex: 1 1 auto; height: 1px; background: var(--line); max-width: 60px; }
+
+.wiz-field-label { display: block; margin: 8px 0 3px; color: var(--fg-mute); font-size: 12px; }
+.wiz-field-label:first-child { margin-top: 0; }
+.wiz-hint { margin: 4px 0 0; color: var(--fg-mute); font-size: 11.5px; line-height: 1.5; }
+
+.wiz-source-row { margin: 4px 0 2px; }
+
+.wiz-confirm {
+  margin-top: 8px; padding: 10px 11px;
+  background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: var(--radius);
+}
+.wiz-confirm-title { margin: 0 0 6px; color: var(--warn-fg); font-size: 12.5px; font-weight: 600; }
+.wiz-confirm-list { margin: 0 0 9px; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--fg-dim); }
+.wiz-confirm-list li span.v { font-family: var(--mono); color: var(--fg); }
+.wiz-confirm-row { display: flex; justify-content: flex-end; gap: 8px; }
+
+.wiz-backend-fields { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; padding: 10px 11px; background: var(--bg-sunken); border: 1px solid var(--line); border-radius: var(--radius); }
+.wiz-backend-fields .row { display: flex; gap: 8px; }
+.wiz-backend-fields .row > * { flex: 1 1 auto; }
+
+/* `.empty-hint`/`.reg-code` are also used on this route (`AgentTree`'s
+ * loading/empty states, `CreateAgentWizard`'s CLAUDE.md textarea) — ported
+ * here rather than pulled from `registry.css`, same self-containment reason
+ * as this file's header comment gives for everything else. */
+.empty-hint {
+  margin: 0;
+  padding: 16px 14px;
+  color: var(--fg-mute);
+}
+
+.reg-code {
+  margin: 0;
+  padding: 10px 12px;
+  background: var(--bg-sunken);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--fg);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* ---- agent settings screen (⚙ on a tree row) ---------------------------
+ * Ported from the mockup's `.ags-*` rules (`.claude/scratch/agents-page-
+ * mockup/styles.css`), same class names, same layout. */
+
+.ags-tabs { flex: none; display: flex; gap: 4px; padding: 0 14px; border-bottom: 1px solid var(--line); background: var(--bg-pane); }
+.ags-tab {
+  padding: 9px 12px 8px;
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--fg-mute);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.ags-tab:hover { color: var(--fg); }
+.ags-tab.is-active { color: var(--fg); border-bottom-color: var(--accent); }
+
+.ags-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+}
+
+.ags-foot { flex: none; display: flex; justify-content: flex-end; padding: 10px 16px; border-top: 1px solid var(--line); background: var(--bg-pane); }
+
+.ags-vars { display: flex; flex-direction: column; gap: 6px; padding: 0 12px 10px 33px; }
+.ags-var-row { display: flex; align-items: center; gap: 8px; font-size: 11.5px; color: var(--fg-mute); }
+.ags-var-row span { flex: none; width: 130px; font-family: var(--mono); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ags-var-row input { flex: 1 1 auto; }
+.ags-var-row code { font-family: var(--mono); color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; }
+
+/* Read-only var display under an agent's own MCP link row — no field to
+   align under any more, so the indent steps back down to the row's text. */
+.ags-vars-ro { padding: 0 12px 10px 12px; }
+
+/* The attach-picker's "still empty" hint next to an unfilled var field. */
+.ags-var-unset { flex: none; color: var(--fg-mute); font-size: 11px; white-space: nowrap; }
+
+/* ---- agent link subsections (⚙ → MCP/Skills/Rules): attached-only rows,
+   per-subsection "Change" edit toggle, detach + "+ Add" in edit mode ------ */
+
+.reg-section { margin-bottom: 18px; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
+.reg-section-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 8px 12px; background: var(--bg-sunken); border-bottom: 1px solid var(--line);
+}
+.reg-section-head h2 { margin: 0; font-size: 12.5px; }
+.reg-section-head .cnt { font-family: var(--mono); font-size: 11px; color: var(--fg-mute); }
+
+.reg-line { border-bottom: 1px solid var(--line-sunken); }
+.reg-line:last-child { border-bottom: 0; }
+
+.reg-item-name { font-weight: 600; font-size: 12.5px; }
+.reg-item-meta { color: var(--fg-mute); font-size: 11.5px; font-family: var(--mono); margin-top: 1px; }
+
+.ags-links-sections .reg-section:last-child { margin-bottom: 0; }
+
+.ags-link-row { display: flex; align-items: center; gap: 9px; padding: 8px 12px; }
+.ags-link-text { flex: 1 1 auto; min-width: 0; }
+
+.ags-link-add {
+  display: block; width: 100%; padding: 7px 12px; margin: 0;
+  background: transparent; border: 0; border-top: 1px solid var(--line-sunken);
+  text-align: left; color: var(--accent-muted); font-size: 11.5px; cursor: pointer;
+}
+.ags-link-add:hover { color: var(--accent); background: var(--bg-hover); }
+
+/* Small square icon button — the detach (🗑) on an agent's link row. */
+.icon-btn {
+  flex: none; padding: 3px 7px; background: transparent; border: 1px solid transparent;
+  border-radius: 4px; color: var(--fg-mute); font-size: 12px; line-height: 1; cursor: pointer;
+}
+.icon-btn:hover { color: var(--err); background: var(--bg-hover); border-color: var(--line); }
+.icon-btn:disabled { opacity: .5; cursor: default; }
+
+/* ---- pick-modal (attach-from-registry) list ----------------------------- */
+
+.pick-list { max-height: 320px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius); }
+.pick-row {
+  display: flex; align-items: center; width: 100%; padding: 9px 12px;
+  background: transparent; border: 0; border-bottom: 1px solid var(--line);
+  text-align: left; font: inherit; color: inherit; cursor: pointer;
+}
+.pick-row:last-child { border-bottom: 0; }
+.pick-row:hover { background: var(--bg-hover); }
+
+.pick-row-text { flex: 1 1 auto; min-width: 0; }
+.pick-row-name {
+  font-weight: 600;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pick-row-meta {
+  margin-top: 2px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-family: var(--mono);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ---- responsive: keep the agent tree from breaking narrow --------------
+ * Below 940px the two columns cannot sit side by side — same fallback
+ * `registry.css`'s `.reg-list` uses: the tree becomes a fixed-height,
+ * independently-scrolling strip stacked above the workspace. */
+@media (max-width: 940px) {
+  .ag-layout { display: flex; flex-direction: column; }
+  .ag-layout .ag-tree-pane { flex: none; height: 260px; border-right: 0; border-bottom: 1px solid var(--line); }
+  .ag-layout .ag-workspace { flex: 1 1 auto; min-height: 0; }
+  .ag-layout .mnemo-pane-resizer { display: none; }
+}
+
+/* ---- chat subrows (⚙ tree, MN-44) --------------------------------------- */
+
+.ag-chat-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 6px 8px 6px 30px;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--fg-dim);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ag-chat-row:hover { background: var(--bg-hover); color: var(--fg); }
+.ag-chat-row.is-selected { background: var(--sel-bg); color: var(--sel-fg); box-shadow: inset 2px 0 0 var(--accent); }
+.ag-chat-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ag-chat-time { flex: none; color: var(--fg-mute); font-family: var(--mono); font-size: 10.5px; }
+
+.ag-chat-delete {
+  flex: none;
+  padding: 2px 5px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--fg-mute);
+  font-size: 11px;
+  cursor: pointer;
+}
+.ag-chat-delete:hover { color: var(--err); background: var(--bg-hover); border-color: var(--line); }
+
+.ag-new-chat {
+  display: block;
+  width: 100%;
+  padding: 7px 8px 7px 30px;
+  margin: 0;
+  background: transparent;
+  border: 0;
+  text-align: left;
+  color: var(--accent-muted);
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.ag-new-chat:hover { color: var(--accent); background: var(--bg-hover); }
+.ag-new-chat:disabled { opacity: .5; cursor: default; }
+
+/* ---- chat console (ChatConsole.tsx, MN-44) ------------------------------
+ * Only the outer chrome shape is ported from the mockup
+ * (`.claude/scratch/agents-console-mockup/index.html`): its own log/input-
+ * bar/slash-menu were built for a structured event stream MN-43 deliberately
+ * doesn't send — this route's conversation area is a plain xterm.js
+ * terminal, no custom UI on top of it. */
+
+.cc-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--fg-dim);
+  font: 11px var(--mono);
+  white-space: nowrap;
+}
+
+.cc-banner {
+  flex: none;
+  padding: 6px 14px;
+  font-size: 12px;
+  border-bottom: 1px solid var(--line);
+}
+.cc-banner-error { background: var(--danger-bg); color: var(--danger-fg); border-color: var(--danger-border); }
+.cc-banner-idle { background: var(--bg-sunken); color: var(--fg-mute); }
+
+.cc-term-wrap {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 8px 10px;
+  background: var(--bg-pane);
+}
+.cc-term-wrap.is-drag-over { outline: 2px dashed var(--accent); outline-offset: -2px; }
+.cc-term { width: 100%; height: 100%; }
+
+.cc-drop-overlay {
+  position: absolute;
+  inset: 8px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: color-mix(in srgb, var(--bg-pane) 78%, transparent);
+  color: var(--accent);
+  font-size: 12.5px;
+  font-weight: 600;
+  pointer-events: none;
+}
+
+.cc-footer {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid var(--line);
+  background: var(--bg-pane);
+}
+
+.cc-uploading { color: var(--fg-mute); font-size: 11.5px; }
+.cc-upload-error { color: var(--err); font-size: 11.5px; }
+
+/* ---- subagent runs panel (SubagentPanel.tsx, MN-45b) --------------------
+ * Deliberately secondary to the terminal below it: a slim strip, not a
+ * second pane — see the module docstring. Renders nothing (no element at
+ * all) when there are no runs yet, so a chat with no subagents pays no
+ * layout cost for this. */
+
+.sa-panel {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-sunken);
+  overflow: hidden;
+}
+
+.sa-panel-label {
+  flex: none;
+  color: var(--fg-mute);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+}
+
+.sa-panel-list {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+}
+
+.sa-run {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-pane);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.sa-run.is-done { color: var(--fg-dim); }
+.sa-run.is-pending { color: var(--fg); }
+
+.sa-run-type { font-family: var(--mono); font-weight: 600; }
+.sa-run-status { color: var(--fg-mute); }
+.sa-run-summary {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--fg-mute);
+  border-left: 1px solid var(--line);
+  padding-left: 6px;
+}
+
+/* Ported verbatim from the mockup's `.ac-attach-chip`/`.ac-icon-btn`
+ * (`.claude/scratch/agents-console-mockup/index.html`) — the one piece of
+ * its input bar that survives, since MN-44's own file-attach chip is the
+ * same shape. */
+.ac-attach-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px 3px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-sunken);
+  color: var(--fg-dim);
+  font: 11px var(--mono);
+}
+.ac-attach-chip button {
+  border: none;
+  background: transparent;
+  color: var(--fg-mute);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 999px;
+}
+.ac-attach-chip button:hover { background: var(--bg-hover); color: var(--fg); }
+
+.ac-icon-btn {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: var(--btn-bg);
+  color: var(--fg-dim);
+  font-size: 13px;
+}
+.ac-icon-btn:hover:not(:disabled) { background: var(--btn-bg-hover); border-color: var(--btn-border-hover); color: var(--fg); }
+.ac-icon-btn:disabled { opacity: .5; cursor: default; }

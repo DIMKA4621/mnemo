@@ -1116,6 +1116,61 @@ def test_stage_release_raises_before_download_when_disk_full(work: Path) -> None
           any(p["step"] == "failed" for p in progress), detail=str(progress))
 
 
+def test_build_interpreter_is_the_running_one_and_in_range(work: Path) -> None:
+    """MN-56: a release is built on the interpreter this engine runs on, never
+    re-resolved (that picked `py -3` = 3.15 on CI), and only inside the
+    supported range."""
+    interpreter = engine_update._build_interpreter()
+    expected = Path(getattr(sys, "_base_executable", None) or sys.executable)
+    if expected.name.lower() == "pythonw.exe":
+        expected = expected.with_name("python.exe")
+    check("the build interpreter is the running one's base", interpreter == expected,
+          detail=f"{interpreter} != {expected}")
+
+    with patch.object(sys, "_base_executable", str(work / "base" / "pythonw.exe"), create=True):
+        mapped = engine_update._build_interpreter()
+    check("pythonw.exe is swapped for the console python.exe beside it",
+          mapped == work / "base" / "python.exe", detail=str(mapped))
+
+    with patch.object(config, "PYTHON_MAX_VERSION", (3, 9)):
+        try:
+            engine_update._build_interpreter()
+            check("a running Python outside the range is refused", False)
+        except RuntimeError as exc:
+            check("a running Python outside the range is refused",
+                  "3.10-3.9" in str(exc) and "reinstall" in str(exc), detail=str(exc))
+
+
+def test_build_failure_carries_pip_output(work: Path) -> None:
+    """MN-56: Build-EngineVersion's throw lands on stderr while pip's own
+    error is in stdout; the RuntimeError must carry both."""
+    if os.name != "nt":
+        check("build failure detail (Windows build path only)", True)
+        return
+    stdout = "\n".join(
+        [f"install.ps1:   Collecting pkg{i}" for i in range(40)]
+        + ["install.ps1:   ERROR: No matching distribution found for onnxruntime"]
+    )
+    failed = subprocess.CompletedProcess(
+        args=[], returncode=1, stdout=stdout,
+        stderr="Failed to install Python dependencies (exit 1)",
+    )
+    with patch.object(engine_update.subprocess, "run", return_value=failed):
+        try:
+            engine_update._build_engine_version(
+                REPO, work / "never-built", python=Path(sys.executable)
+            )
+            check("a failed build raises", False)
+        except RuntimeError as exc:
+            message = str(exc)
+            check("the build error carries pip's last line from stdout",
+                  "No matching distribution found for onnxruntime" in message, detail=message)
+            check("the build error still carries the thrown stderr",
+                  "Failed to install Python dependencies" in message, detail=message)
+            check("only the tail of stdout, not all of it",
+                  "Collecting pkg0\n" not in message, detail=message)
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="mnemo eu ") as raw:
         work = Path(raw)
@@ -1153,6 +1208,8 @@ def main() -> int:
         test_cmd_warmup_refuses_to_download_when_disk_full(work)
         test_cmd_warmup_proceeds_when_disk_has_room(work)
         test_stage_release_raises_before_download_when_disk_full(work)
+        test_build_interpreter_is_the_running_one_and_in_range(work)
+        test_build_failure_carries_pip_output(work)
         test_stage_release_real_pipeline(work)
         test_stage_release_failure_leaves_nothing_behind(work)
 

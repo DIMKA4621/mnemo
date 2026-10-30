@@ -21,12 +21,14 @@ Judgment call, exception: a change small enough that spinning up an agent costs 
 ## Who does what
 
 - **Team lead (you)** — owns intake and every write:
-  - When the user describes substantive new work (a feature, fix, or phase — not a one-off question or trivial edit), file it in Jira: a raw **Draft** if it's just been described, or straight to **To Do** if it's already well-scoped.
+  - When the user describes substantive new work (a feature, fix, or phase — not a one-off question or trivial edit), file it in Jira — always in **To Do** (the Drafts column no longer exists on this board, as of 2026-08-29).
+    A raw one-liner idea is filed as-is; a well-scoped description is filed as-is too.
+    Either way, grooming a still-raw description into goal/scope/AC happens right before work starts, not as a separate status.
   - Resolves ambiguity either directly with the user, or by delegating the grooming/research to `planner` and writing the result back into the ticket's description.
   - Owns every `In Clarification` escalation and return — it's the one talking to the user, so it's the one who knows when an answer resolves things.
   - Performs every `editJiraIssue`, `addCommentToJiraIssue`, and `transitionJiraIssue` call, using content the relevant subagent produced.
 
-- **planner** — produces the grooming (Draft → To Do) content and the detailed execution plan (To Do → In Progress).
+- **planner** — produces the grooming content (expanding a raw To Do ticket into a scoped spec, when the description is still just a one-liner) and the detailed execution plan, both ahead of the To Do → In Progress transition.
   Returns plan text to the lead; does not call Jira tools itself.
 
 - **engine-dev / service-dev / ui-dev / platform-dev / docs-keeper** — when finishing implementation work tied to a ticket, report completion and a summary to the lead.

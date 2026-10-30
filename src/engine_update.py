@@ -956,6 +956,28 @@ def _write_pip_progress(path: Path, status: dict[str, Any]) -> None:
         path.write_text(json.dumps(status), encoding="utf-8")
 
 
+def _build_interpreter() -> Path:
+    """The interpreter the running engine's venv was built on, to build the
+    next one on: re-resolving would pick whatever is newest on the machine."""
+    version = sys.version_info[:2]
+    if not config.PYTHON_MIN_VERSION <= version <= config.PYTHON_MAX_VERSION:
+        supported = "{}.{}-{}.{}".format(*config.PYTHON_MIN_VERSION, *config.PYTHON_MAX_VERSION)
+        raise RuntimeError(
+            f"this engine runs on Python {version[0]}.{version[1]}, outside the "
+            f"supported {supported}; reinstall with a supported Python "
+            "(install.ps1 -Python / install.sh --python) instead of self-updating"
+        )
+    base = Path(getattr(sys, "_base_executable", None) or sys.executable)
+    # A console interpreter: pythonw has no stdout for the build to read.
+    if base.name.lower() == "pythonw.exe":
+        base = base.with_name("python.exe")
+    return base
+
+
+def _output_tail(text: str, lines: int = 20) -> str:
+    return "\n".join(text.strip().splitlines()[-lines:])
+
+
 def _run_pip_install_posix(
     venv_python: Path,
     reqs_file: Path,
@@ -1012,6 +1034,7 @@ def _build_engine_version_posix(
     repo_root: Path,
     version_dir: Path,
     *,
+    python: Path,
     timeout: float = 3600.0,
     progress_file: Path | None = None,
 ) -> None:
@@ -1042,9 +1065,8 @@ def _build_engine_version_posix(
     venv_dir = version_dir / ".venv"
     venv_python = venv_dir / "bin" / "python"
     if not venv_python.is_file():
-        base_py = getattr(sys, "_base_executable", None) or shutil.which("python3") or sys.executable
         res = subprocess.run(
-            [base_py, "-m", "venv", str(venv_dir)],
+            [str(python), "-m", "venv", str(venv_dir)],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -1105,11 +1127,12 @@ def _build_engine_version(
     repo_root: Path,
     version_dir: Path,
     *,
+    python: Path,
     timeout: float = 3600.0,
     progress_file: Path | None = None,
 ) -> None:
     """Build a full ``{src, .venv}`` tree at ``version_dir`` from
-    ``repo_root``'s source.
+    ``repo_root``'s source, with a venv on ``python``.
 
     On Windows, this dot-sources that checkout's own ``install.ps1`` and calls
     its ``Build-EngineVersion`` function directly.
@@ -1118,7 +1141,7 @@ def _build_engine_version(
     """
     if os.name != "nt":
         _build_engine_version_posix(
-            repo_root, version_dir, timeout=timeout, progress_file=progress_file
+            repo_root, version_dir, python=python, timeout=timeout, progress_file=progress_file
         )
         return
 
@@ -1131,7 +1154,7 @@ def _build_engine_version(
     )
     script = (
         f". '{_ps_quote(installer)}'; "
-        "$py = Resolve-PythonCommand ''; "
+        f"$py = Resolve-PythonCommand '{_ps_quote(python)}'; "
         f"Build-EngineVersion -RepoRoot '{_ps_quote(repo_root)}' "
         f"-VersionDir '{_ps_quote(version_dir)}' -PythonCommand $py"
         f"{progress_arg} | Out-Null; "
@@ -1156,9 +1179,13 @@ def _build_engine_version(
         **kwargs,
     )
     if completed.returncode != 0 or "MNEMO_BUILD_OK" not in completed.stdout:
+        # The throw lands on stderr, but pip's own error is in the captured
+        # output install.ps1 echoes to stdout -- without it the reason is lost.
+        detail = "\n".join(
+            part for part in (completed.stderr.strip(), _output_tail(completed.stdout)) if part
+        )
         raise RuntimeError(
-            f"Build-EngineVersion failed (exit {completed.returncode}): "
-            f"{completed.stderr.strip() or completed.stdout.strip()}"
+            f"Build-EngineVersion failed (exit {completed.returncode}): {detail}"
         )
 
 
@@ -1311,6 +1338,7 @@ def stage_release(
         space = check_disk_space()
         if not space.ok:
             raise InsufficientDiskSpace(space)
+        python = _build_interpreter()
 
         _emit_progress(tag, "download", detail=url)
         _download(url, archive, timeout=download_timeout)
@@ -1335,7 +1363,11 @@ def stage_release(
         watcher.start()
         try:
             _build_engine_version(
-                repo_root, final_dir, timeout=build_timeout, progress_file=progress_file
+                repo_root,
+                final_dir,
+                python=python,
+                timeout=build_timeout,
+                progress_file=progress_file,
             )
         finally:
             stop_watch.set()

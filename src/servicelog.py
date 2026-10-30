@@ -63,9 +63,29 @@ CREATE TABLE IF NOT EXISTS index_events (
 );
 CREATE INDEX IF NOT EXISTS idx_ie_bank_ts ON index_events(bank_id, ts_epoch DESC);
 CREATE INDEX IF NOT EXISTS idx_ie_ts      ON index_events(ts_epoch DESC);
+
+-- MN-45a: one row per call into any `mcp_agents.py` coordination tool. Not a
+-- reach limiter -- the machine-wide scope those tools have was accepted on
+-- the explicit condition that every call be auditable (Jira decision #5),
+-- so this table exists to make that true, not to gate anything.
+CREATE TABLE IF NOT EXISTS agent_events (
+    id             INTEGER PRIMARY KEY,
+    ts             TEXT NOT NULL,
+    ts_epoch       REAL NOT NULL,
+    caller_chat_id TEXT NOT NULL,
+    caller_slug    TEXT NOT NULL,
+    tool           TEXT NOT NULL,
+    target         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_ag_ts ON agent_events(ts_epoch DESC);
 """
 
 TABLES = {"query": "query_events", "index": "index_events"}
+# `agent_events` (MN-45a) is deliberately NOT in `TABLES`/wired through
+# `count()`'s generic `_where()` -- that helper's `bank_id`/`kind` filters are
+# shaped for the query/index tables specifically, and `agent_events` has
+# neither column. It still shares `prune()`'s retention loop below (see
+# `deleted`), which only ever needs the table name.
 
 # VACUUM is not free; run it at most daily and only after a prune that
 # actually reclaimed something worth reclaiming (§7.4).
@@ -266,6 +286,26 @@ def log_index(
         pass
 
 
+def log_agent_call(
+    *, caller_chat_id: str, caller_slug: str, tool: str, target: str | None = None,
+) -> None:
+    """Record one call into an `mcp_agents.py` coordination tool (MN-45a) —
+    which tool, who called it (from the resolved session token, never from
+    anything the caller stated) and what it targeted, if anything."""
+    try:
+        ts, epoch = _now()
+        with _lock:
+            conn = connect()
+            conn.execute(
+                "INSERT INTO agent_events(ts, ts_epoch, caller_chat_id, "
+                "caller_slug, tool, target) VALUES (?, ?, ?, ?, ?, ?)",
+                (ts, epoch, caller_chat_id, caller_slug, tool, target),
+            )
+            conn.commit()
+    except Exception:  # noqa: BLE001 - telemetry must never break a tool call
+        pass
+
+
 # ------------------------------------------------------------------- read
 
 
@@ -339,6 +379,34 @@ def read_index(
     return [dict(r) for r in rows]
 
 
+def read_agent_events(
+    *,
+    since: float | None = None,
+    until: float | None = None,
+    limit: int = 200,
+    offset: int = 0,
+) -> list[dict]:
+    """Newest first — the audit trail behind `mcp_agents.py`'s tools. Its own
+    small query rather than `_where()`/`count()`: `agent_events` has neither
+    a `bank_id` nor a `kind` column, so it does not fit either helper's
+    shape."""
+    clauses: list[str] = []
+    args: list[Any] = []
+    if since is not None:
+        clauses.append("ts_epoch >= ?")
+        args.append(float(since))
+    if until is not None:
+        clauses.append("ts_epoch <= ?")
+        args.append(float(until))
+    where = (" WHERE " + " AND ".join(clauses)) if clauses else ""
+    rows = _reader().execute(
+        f"SELECT * FROM agent_events{where} "
+        f"ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
+        (*args, int(limit), int(offset)),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
 def count(table: str, **filters: Any) -> int:
     """Row count for ``query`` / ``index`` (or the raw table name)."""
     name = TABLES.get(table, table)
@@ -385,13 +453,18 @@ def prune(
 
     The row backstop is second, so a burst that overshoots the cap inside the
     window still gets trimmed instead of growing the file forever.
+
+    `agent_events` (MN-45a) is pruned by this same pass, under the same
+    retention/cap policy — but not reported in this tuple, to avoid changing
+    its long-standing shape; read `agent_events` directly (`read_agent_events`)
+    if that count is ever needed.
     """
     global _deleted_since_vacuum, _last_vacuum
     keep_days = (
         default_retention_days() if retention_days is None else int(retention_days)
     )
     cap = default_max_rows() if max_rows is None else int(max_rows)
-    deleted = {"query_events": 0, "index_events": 0}
+    deleted = {"query_events": 0, "index_events": 0, "agent_events": 0}
 
     with _lock:
         conn = connect()
@@ -415,7 +488,7 @@ def prune(
                 deleted[table] += cur.rowcount or 0
         conn.commit()
 
-        total = deleted["query_events"] + deleted["index_events"]
+        total = sum(deleted.values())
         _deleted_since_vacuum += total
         now = time.time()
         if (

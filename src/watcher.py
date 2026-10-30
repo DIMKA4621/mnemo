@@ -118,6 +118,11 @@ _pending: dict[tuple[str, str], float] = {}
 # bank_id -> watchdog watch handle, so banks can be added and removed while
 # the service runs.
 _watches: dict[str, object] = {}
+# Guards `_watches` only. Never `_lock`: `observer.schedule()` waits for
+# watchdog's own lock, which its dispatch thread holds while our handler waits
+# for `_lock` in `_touch()` — holding `_lock` here deadlocked startup whenever
+# a file changed while the banks were being scheduled.
+_watch_lock = threading.Lock()
 _last_rescan = 0.0
 _last_retry_check = 0.0
 # Floor for how many recent `file`-kind index_events to inspect per bank when
@@ -315,7 +320,7 @@ def _sync_watches() -> None:
         banks = {b.id: b for b in registry.load() if b.watched and b.exists}
     except Exception:  # noqa: BLE001
         return
-    with _lock:
+    with _watch_lock:
         for bank_id in list(_watches):
             if bank_id not in banks:
                 try:
@@ -393,8 +398,9 @@ def stop(timeout: float = 5.0) -> None:
             observer.join(timeout=timeout)
         except Exception:  # noqa: BLE001
             pass
-    with _lock:
+    with _watch_lock:
         _watches.clear()
+    with _lock:
         _pending.clear()
     _thread, _observer = None, None
 
