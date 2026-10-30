@@ -9,27 +9,15 @@ import { ModalShell } from "@/components/common/ModalShell";
 import type { BankInfo } from "@/lib/api/memory";
 import { effectiveBankRoot, projectRootForBankPath } from "@/lib/memory/bankRoot";
 
-const LAST_DIR_KEY = "mnemo_fs_last";
-
 interface BankPickerProps {
   open: boolean;
   onClose: () => void;
   onAdded: (bank: BankInfo, note: string) => void;
 }
 
-/** Resumes where the last look around ended — session-only, so a "look
- *  around, then add two banks from the same folder" flow doesn't walk down
- *  from home twice. Read once, as the initial state, not via an effect: the
- *  parent remounts this component fresh on every open
- *  (`key={pickerOpen ? … }` in `app/memory/page.tsx`). */
-function initialBrowsePath(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.sessionStorage.getItem(LAST_DIR_KEY) || null;
-}
-
 export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
   const t = useT();
-  const [browsePath, setBrowsePath] = useState<string | null>(initialBrowsePath);
+  const [browsePath, setBrowsePath] = useState<string | null>(null);
   const [pathInput, setPathInput] = useState("");
   const [name, setName] = useState("");
   const [createChecked, setCreateChecked] = useState(false);
@@ -58,7 +46,6 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
     setCreateChecked(false);
     if (data) {
       setPathInput(data.display || data.path);
-      if (typeof window !== "undefined") window.sessionStorage.setItem(LAST_DIR_KEY, data.path);
     }
   }
 

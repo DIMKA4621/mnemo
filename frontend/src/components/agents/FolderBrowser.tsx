@@ -6,13 +6,6 @@ import { useT } from "@/lib/i18n/hooks";
 import { useFsDirs } from "@/hooks/useMemoryQueries";
 import "@/components/common/dialogs.css";
 
-const LAST_DIR_KEY = "mnemo_fs_agent_last";
-
-function initialBrowsePath(): string | null {
-  if (typeof window === "undefined") return null;
-  return window.sessionStorage.getItem(LAST_DIR_KEY) || null;
-}
-
 interface FolderBrowserProps {
   onPick: (path: string) => void;
   busy?: boolean;
@@ -31,7 +24,7 @@ interface FolderBrowserProps {
  */
 export function FolderBrowser({ onPick, busy }: FolderBrowserProps) {
   const t = useT();
-  const [browsePath, setBrowsePath] = useState<string | null>(initialBrowsePath);
+  const [browsePath, setBrowsePath] = useState<string | null>(null);
   const [pathInput, setPathInput] = useState("");
 
   const fsQuery = useFsDirs(browsePath, true);
@@ -44,7 +37,6 @@ export function FolderBrowser({ onPick, busy }: FolderBrowserProps) {
     setTrackedPath(data?.path ?? null);
     if (data) {
       setPathInput(data.display || data.path);
-      if (typeof window !== "undefined") window.sessionStorage.setItem(LAST_DIR_KEY, data.path);
     }
   }
 
