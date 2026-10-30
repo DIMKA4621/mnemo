@@ -448,7 +448,7 @@
       "rebuildTitle": "Повна перебудова банку",
       "pruneTitle": "Зняття з індексу",
       "syncTitle": "Синхронізація індексу",
-      "hits": "{n, plural, one {# хіт} few {# хіти} many {# хітів} other {# хітів}}",
+      "hits": "{n, plural, one {# результат} few {# результати} many {# результатів} other {# результату}}",
       "ms": "{n, number} мс",
       "s": "{n, number} с",
       "errorStatus": "помилка",
