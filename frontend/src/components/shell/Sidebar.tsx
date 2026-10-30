@@ -18,13 +18,21 @@ import { WsStatusIndicator } from "./WsStatusIndicator";
 
 // `Agents-design.md` §5 "Чинна структура" (revised 2026-08-25): Memory /
 // Agents / Registry / Journal / Settings.
+// Agents and Registry stay hidden from the rail until they ship; their routes
+// and the backend are still there, so flipping this brings them back.
+const SHOW_AGENTS = false;
+
 const NAV_ITEMS = [
   { href: "/memory", key: "shell.nav.memory", Icon: MemoryIcon },
-  { href: "/agents", key: "shell.nav.agents", Icon: AgentsIcon },
-  { href: "/registry", key: "shell.nav.registry", Icon: RegistryIcon },
+  ...(SHOW_AGENTS
+    ? ([
+        { href: "/agents", key: "shell.nav.agents", Icon: AgentsIcon },
+        { href: "/registry", key: "shell.nav.registry", Icon: RegistryIcon },
+      ] as const)
+    : []),
   { href: "/journal", key: "shell.nav.journal", Icon: JournalIcon },
   { href: "/settings", key: "shell.nav.settings", Icon: SettingsIcon },
-] as const;
+];
 
 export function Sidebar() {
   const t = useT();
