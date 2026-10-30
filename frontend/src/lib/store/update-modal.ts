@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import type { UpdateApplyState } from "../api/settings";
 
 /** `'idle'` (not shown) | manual: `'confirm'` -> `'progress'` -> `'terminal'`
  *  | auto: `'auto-pending'` -> `'progress'` -> `'terminal'` | `'timeout'` is
@@ -16,9 +17,15 @@ interface UpdateModalState {
   // The auto-pending phase's own confirm/cancel error, separate from
   // anything the progress/terminal phases show.
   autoPendingError: string | null;
+  // The cached `apply` record as it stood when OK was clicked — an earlier
+  // attempt's outcome, which a status read can still return until the
+  // backend's staging thread records the new one. Never shown as this
+  // attempt's result.
+  supersededApply: UpdateApplyState | null;
   setPhase: (phase: UpdateModalPhase) => void;
   setEverSwitching: (v: boolean) => void;
   setAutoPendingError: (msg: string | null) => void;
+  setSupersededApply: (apply: UpdateApplyState | null) => void;
 }
 
 /**
@@ -35,8 +42,10 @@ export const useUpdateModalStore = create<UpdateModalState>((set) => ({
   phase: "idle",
   everSwitching: false,
   autoPendingError: null,
+  supersededApply: null,
 
   setPhase: (phase) => set({ phase }),
   setEverSwitching: (v) => set({ everSwitching: v }),
   setAutoPendingError: (msg) => set({ autoPendingError: msg }),
+  setSupersededApply: (apply) => set({ supersededApply: apply }),
 }));
