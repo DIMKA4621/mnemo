@@ -298,6 +298,128 @@ def check_disk_space_constants_agree() -> None:
     ok("disk-space budget constants agree across install.sh, install.ps1 and config.py")
 
 
+def check_python_range_constants_agree() -> None:
+    """MN-56: the supported Python range is hard-coded in install.sh,
+    install.ps1, src/config.py and pyproject.toml's requires-python, for the
+    same reason as the disk-space numbers above. Duplicated in
+    test_install_posix.py for the same reason too.
+    """
+    sh_text = (REPO / "install.sh").read_text(encoding="utf-8")
+    ps1_text = INSTALLER.read_text(encoding="utf-8")
+    py_text = (REPO / "src" / "config.py").read_text(encoding="utf-8")
+    toml_text = (REPO / "pyproject.toml").read_text(encoding="utf-8")
+
+    def grab(pattern: str, text: str) -> tuple[int, int]:
+        match = re.search(pattern, text)
+        assert match, f"pattern not found: {pattern}"
+        return int(match.group(1)), int(match.group(2))
+
+    requires = re.search(r'requires-python = ">=(\d+)\.(\d+),<(\d+)\.(\d+)"', toml_text)
+    assert requires, "pyproject.toml requires-python is not '>=X.Y,<X.Z'"
+    toml_min = (int(requires.group(1)), int(requires.group(2)))
+    toml_max = (int(requires.group(3)), int(requires.group(4)) - 1)
+
+    pairs = [
+        (
+            "minimum",
+            grab(r"PYTHON_MIN_VERSION=(\d+)\.(\d+)", sh_text),
+            grab(r'\$PythonMinVersion = "(\d+)\.(\d+)"', ps1_text),
+            grab(r"PYTHON_MIN_VERSION: tuple\[int, int\] = \((\d+), (\d+)\)", py_text),
+            toml_min,
+        ),
+        (
+            "maximum",
+            grab(r"PYTHON_MAX_VERSION=(\d+)\.(\d+)", sh_text),
+            grab(r'\$PythonMaxVersion = "(\d+)\.(\d+)"', ps1_text),
+            grab(r"PYTHON_MAX_VERSION: tuple\[int, int\] = \((\d+), (\d+)\)", py_text),
+            toml_max,
+        ),
+    ]
+    for name, sh_val, ps1_val, py_val, toml_val in pairs:
+        assert sh_val == ps1_val == py_val == toml_val, (
+            f"Python {name} disagrees: install.sh={sh_val} install.ps1={ps1_val} "
+            f"config.py={py_val} pyproject.toml={toml_val}"
+        )
+    ok("supported Python range agrees across install.sh, install.ps1, config.py and pyproject.toml")
+
+
+def _fake_python(path: Path, version: str, bits: int = 64) -> Path:
+    """A .cmd standing in for an interpreter: answers Resolve-PythonCommand's
+    probe with a fixed version, whatever it is asked."""
+    path.write_text(f"@echo {version};{bits};{path};{path}\r\n", encoding="ascii")
+    return path
+
+
+def test_python_resolution() -> None:
+    """MN-56: Resolve-PythonCommand picks the newest SUPPORTED Python, never
+    `py -3`'s newest-installed, and refuses an out-of-range one by name."""
+    def resolve(setup: str) -> str:
+        result = _run_ps(
+            f". '{INSTALLER}'; {setup}; "
+            "try { $r = Resolve-PythonCommand $explicit; Write-Output ('GOT:' + $r.Version + ';' + $r.Interpreter) } "
+            "catch { Write-Output ('THREW:' + $_.Exception.Message) }"
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        return result.stdout.strip()
+
+    with tempfile.TemporaryDirectory(prefix="mnemo python ") as raw:
+        root = Path(raw)
+        too_new = _fake_python(root / "py315.cmd", "3.15")
+        narrow = _fake_python(root / "py312-32.cmd", "3.12", bits=32)
+
+        out = resolve(f"$explicit = '{too_new}'")
+        assert out.startswith("THREW:"), out
+        assert "3.10-3.13" in out and "3.15" in out and "-Python" in out, out
+        ok("an explicit -Python outside the range is refused, naming it and the range")
+
+        out = resolve(f"$explicit = '{narrow}'")
+        assert out.startswith("THREW:") and "32-bit" in out, out
+        ok("an explicit 32-bit -Python is refused")
+
+        mine = f"{sys.version_info[0]}.{sys.version_info[1]}"
+        out = resolve(f"$explicit = '{sys.executable}'")
+        assert out.startswith(f"GOT:{mine};"), out
+        ok("an explicit -Python inside the range is used as given")
+
+        # py.exe answering -3.11 and -3.12, python.exe on PATH being 3.15:
+        # the newest supported one wins, the newer unsupported one is skipped.
+        launcher = root / "py.cmd"
+        launcher.write_text(
+            "@if \"%1\"==\"-3.12\" (echo 3.12;64;C:\\py312\\python.exe;C:\\py312\\python.exe& exit /b 0)\r\n"
+            "@if \"%1\"==\"-3.11\" (echo 3.11;64;C:\\py311\\python.exe;C:\\py311\\python.exe& exit /b 0)\r\n"
+            "@exit /b 1\r\n",
+            encoding="ascii",
+        )
+        stub = (
+            "$explicit = ''; "
+            "function Get-Command { param([string]$Name, $ErrorAction) "
+            f"if ($Name -eq 'py.exe') {{ return [pscustomobject]@{{ Source = '{launcher}' }} }} "
+            f"if ($Name -eq 'python.exe') {{ return [pscustomobject]@{{ Source = '{too_new}' }} }} "
+            "return $null }"
+        )
+        out = resolve(stub)
+        assert out == "GOT:3.12;C:\\py312\\python.exe", out
+        ok("auto-resolution picks the newest supported py -3.X over a newer python.exe")
+
+        stub_none = (
+            "$explicit = ''; "
+            "function Get-Command { param([string]$Name, $ErrorAction) "
+            f"if ($Name -eq 'python.exe') {{ return [pscustomobject]@{{ Source = '{too_new}' }} }} "
+            "return $null }"
+        )
+        out = resolve(stub_none)
+        assert out.startswith("THREW:"), out
+        assert "3.10-3.13" in out and f"3.15 ({too_new})" in out, out
+        ok("no supported Python found: the error lists what was found and the range")
+
+        # On the real machine (CI: 3.11-3.15 all installed, `py -3` = 3.15).
+        out = resolve("$explicit = ''")
+        assert out.startswith("GOT:3.1"), out
+        major, minor = out[4:].split(";", 1)[0].split(".")[:2]
+        assert (3, 10) <= (int(major), int(minor)) <= (3, 13), out
+        ok(f"this machine resolves to a supported Python ({out[4:]})")
+
+
 def main() -> int:
     if os.name != "nt":
         print("SKIP  native Windows installer test")
@@ -309,6 +431,8 @@ def main() -> int:
     test_heartbeat_zero_tick_edge_case()
     test_disk_space_check()
     check_disk_space_constants_agree()
+    check_python_range_constants_agree()
+    test_python_resolution()
 
     with tempfile.TemporaryDirectory(prefix="mnemo install ") as raw:
         mismatched_env = {

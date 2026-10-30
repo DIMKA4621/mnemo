@@ -16,3 +16,20 @@ Not caused by the branch: the same test passed on runner image `20260824`; image
 On 3.15 `onnxruntime` and `mmh3` (via fastembed) have no wheels (`pip install --dry-run --python-version 3.15 … → ResolutionImpossible`); 3.12 and 3.14 resolve.
 A real product bug: a machine with 3.15 next to 3.12 breaks both self-update and `install.ps1` without `-Python`.
 User's decision: one unified Python version check across every install path (install scripts, get one-liners, self-update), with an explicit supported range and an upper bound, instead of trusting whatever `py -3` returns.
+
+## MN-56 — supported Python is 3.10–3.13, chosen per platform wheel availability
+
+Measured with `uv pip compile --only-binary :all:` per target (plain `pip --platform` gives false Linux failures: it evaluates `sys_platform` markers against the host and asks for `pywin32`):
+
+| Python | win_amd64 | linux x86_64 | macOS arm64 |
+|---|---|---|---|
+| 3.10–3.13 | OK | OK | OK |
+| 3.14 | OK | OK | no `watchdog` cp314 wheel |
+| 3.15 | no `onnxruntime`/`numpy`/`mmh3` | same | same |
+
+User's decision: 3.10 up to 3.13 inclusive, nothing newer for now; 3.13 joined the CI matrix so the upper bound is tested, not just resolved.
+The range lives in four mirrors kept equal by a sync test: `install.ps1`, `install.sh`, `src/config.py` (`PYTHON_MIN_VERSION`/`PYTHON_MAX_VERSION`), `pyproject.toml` (`requires-python`).
+Installers try `py -3.13 … -3.10` / `python3.13 … python3.10` and take the newest supported one, never a bare `py -3`; an explicit `-Python`/`--python` out of range is refused with the found versions and the range; `install.sh` gained `--python`.
+Self-update builds on the running engine's own interpreter (`sys._base_executable`, `pythonw.exe` → `python.exe`), checked against the range before the download, and its build error now carries the last 20 lines of pip's stdout.
+Accepted consequence: an engine already running on 3.14+ gets a self-update refusal telling it to reinstall with `-Python`/`--python` (user: practically nobody is affected).
+Not covered: `-DepsOnly`/`--deps-only` reuse the existing venv without checking the range.

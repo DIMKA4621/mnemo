@@ -19,6 +19,14 @@ jobs:
             python: "3.12"
           - os: ubuntu-latest
             python: "3.10"
+          # The top of the supported range (PYTHON_MAX_VERSION in
+          # src/config.py and its installer mirrors).
+          - os: windows-2022
+            python: "3.13"
+          - os: ubuntu-latest
+            python: "3.13"
+          - os: macos-latest
+            python: "3.13"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4

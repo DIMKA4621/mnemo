@@ -24,7 +24,7 @@ Which is why `.claude/memory/agents/<role>/` still organises per-role notes but 
 ## Two layers
 
 **Engine — user scope, once per machine, NOT in git** `~/.mnemo/`: `.venv`, `model-cache` (~2.2 GB, only via an explicit `warmup`), `state/<bankhash>.db` (the disposable index — one file per **bank root**, keyed by `sha1` of that path), `bin/mnemo` (self-locating launcher; a real `bin\mnemo.exe` on Windows).
-Installed by `install.ps1` on native Windows (built-in PowerShell 5.1+, 64-bit Python 3.10+ — no WSL, PowerShell 7 or PATH entry required) and `install.sh` on POSIX.
+Installed by `install.ps1` on native Windows (built-in PowerShell 5.1+, 64-bit Python 3.10–3.13 — no WSL, PowerShell 7 or PATH entry required) and `install.sh` on POSIX.
 One command does the whole machine: venv, deps, launcher, API token, autostart, the model (it asks, and skips silently when the run is not interactive), the service, and `doctor` last — so the run ends on evidence rather than a claim.
 Idempotent, and the update path; never deletes `state/` or `model-cache/`.
 `uninstall.ps1` / `uninstall.sh` is its mirror image.

@@ -141,7 +141,8 @@ Faces:
 Around it:
 
 - `install.sh` — engine installer, POSIX (`--check`/`--home`).
-- `install.ps1` — same for native Windows (`-Check`/`-InstallHome`/ `-Python`/`-DepsOnly`; PowerShell 5.1+, 64-bit Python 3.10+).
+- `install.ps1` — same for native Windows (`-Check`/`-InstallHome`/ `-Python`/`-DepsOnly`; PowerShell 5.1+, 64-bit Python 3.10–3.13).
+  The upper bound is deliberate: on 3.14+ some dependencies (`onnxruntime`, `numpy`, `mmh3`, macOS `watchdog`) have no wheels on every platform, so both installers and self-update pick the newest *supported* Python, never the newest installed one (MN-56).
 - `tests/test_search.py` — labeled recall eval (regression floor); `tests/test_platform.py` — wiring and scaffold plans; `tests/test_pipeline.py` — the whole `.md → chunks → vectors → search` path on a throwaway bank behind a hash provider, so CI exercises it without the 2.2 GB model; `tests/test_install_windows.py` and `tests/test_install_posix.py` — each installer/uninstaller pair run for real against a throwaway `--home`, one per platform because they share no code; `tests/test_mcp.py` — MCP over HTTP against the running service, plus the check that `/mcp-tools/*` is byte-identical to the tools it mirrors.
   The bundled fixture corpus uses the canonical layout (`.claude/memory/` with `logs/`, `agents/<role>/` inside).
 - Installed engine: `~/.mnemo/` (`bin/mnemo`, a real `bin\mnemo.exe` on Windows — a subprocess dispatcher resolving itself from `sys.argv[0]`, never `sys.prefix`, and spawning `current/.venv/.../python -m src.cli`; `versions/<tag>/{src,.venv}` one full tree per installed release, `current` a junction/symlink naming the active one; `model-cache` and `state/` shared across versions).

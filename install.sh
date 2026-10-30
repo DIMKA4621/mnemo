@@ -18,6 +18,8 @@
 #   ./install.sh --model      download it without asking (scripts)
 #   ./install.sh --no-start   do not start the service
 #   ./install.sh --home DIR   install into DIR instead of the default
+#   ./install.sh --python P   build on interpreter P (3.10-3.13; default:
+#                             the newest of those on PATH)
 #
 # Default location: $HOME/.mnemo  (override with $MNEMO_HOME).
 set -euo pipefail
@@ -166,6 +168,67 @@ check_disk_space() {
 	return 1
 }
 
+# --- python preflight ---------------------------------------------------
+# Versions the engine venv may be built on, inclusive -- what CI tests.
+# Mirrored in install.ps1, src/config.py and pyproject.toml.
+PYTHON_MIN_VERSION=3.10
+PYTHON_MAX_VERSION=3.13
+
+# python_version <exe> — "3.12", or nothing when <exe> does not run.
+python_version() {
+	"$1" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null
+}
+
+# python_version_supported <major.minor> — inside the range above.
+python_version_supported() {
+	case "$1" in 3.*) ;; *) return 1 ;; esac
+	local minor="${1#3.}"
+	[ "$minor" -ge "${PYTHON_MIN_VERSION#3.}" ] 2>/dev/null \
+		&& [ "$minor" -le "${PYTHON_MAX_VERSION#3.}" ]
+}
+
+# resolve_python [explicit] — prints the interpreter to build the venv on:
+# the explicit one if it is in range, otherwise the highest in-range
+# version on PATH. Never a bare newest `python3`: a Python newer than CI
+# tests may have no wheels for our requirements at all.
+resolve_python() {
+	local explicit="${1:-}" found="" best="" best_minor=-1 name exe version minor
+	local -a candidates=()
+	if [ -n "$explicit" ]; then
+		candidates=("$explicit")
+	else
+		minor="${PYTHON_MAX_VERSION#3.}"
+		while [ "$minor" -ge "${PYTHON_MIN_VERSION#3.}" ]; do
+			candidates+=("python3.$minor")
+			minor=$((minor - 1))
+		done
+		candidates+=(python3 python)
+	fi
+	for name in "${candidates[@]}"; do
+		exe="$(command -v "$name" 2>/dev/null)" || continue
+		version="$(python_version "$exe")" || version=""
+		[ -n "$version" ] || continue
+		case "$found" in *" $version ($exe),"*) ;; *) found="$found $version ($exe)," ;; esac
+		if python_version_supported "$version" && [ "${version#3.}" -gt "$best_minor" ]; then
+			best="$exe"
+			best_minor="${version#3.}"
+		fi
+	done
+	if [ -n "$best" ]; then
+		printf '%s\n' "$best"
+		return 0
+	fi
+	found="${found%,}"
+	local hint
+	if [ -n "$explicit" ]; then
+		hint="pass --python with a supported interpreter"
+	else
+		hint="install one, or pass --python /path/to/python3"
+	fi
+	echo "install.sh: Python $PYTHON_MIN_VERSION-$PYTHON_MAX_VERSION is required; found:${found:- none} -- $hint" >&2
+	return 1
+}
+
 # --- locate the repo (this script's own directory) ---------------------
 SRC_REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
@@ -227,6 +290,7 @@ NO_AUTOSTART=0
 NO_MODEL=0
 WANT_MODEL=0
 NO_START=0
+PYTHON_ARG=""
 while [ $# -gt 0 ]; do
 	case "$1" in
 		--check) CHECK_ONLY=1 ;;
@@ -237,6 +301,8 @@ while [ $# -gt 0 ]; do
 		--no-start) NO_START=1 ;;
 		--home) shift; MNEMO_HOME="${1:?--home needs a directory}" ;;
 		--home=*) MNEMO_HOME="${1#--home=}" ;;
+		--python) shift; PYTHON_ARG="${1:?--python needs an interpreter}" ;;
+		--python=*) PYTHON_ARG="${1#--python=}" ;;
 		-h|--help) usage; exit 0 ;;
 		*) echo "install.sh: unknown argument: $1" >&2; exit 2 ;;
 	esac
@@ -445,12 +511,9 @@ if [ "$DEPS_ONLY" -eq 1 ]; then
 fi
 
 # --- preflight ---------------------------------------------------------
-command -v python3 >/dev/null 2>&1 \
-	|| { echo "install.sh: python3 not found" >&2; exit 1; }
-if [ "$(python3 -c 'import sys; print(1 if sys.version_info[:2] >= (3, 10) else 0)')" != 1 ]; then
-	echo "install.sh: Python >= 3.10 is required" >&2
-	exit 1
-fi
+PYTHON_BIN="$(resolve_python "$PYTHON_ARG")" || exit 1
+PYTHON_VERSION="$(python_version "$PYTHON_BIN")"
+say "python: $PYTHON_BIN ($PYTHON_VERSION)"
 [ -f "$SRC_REPO/src/cli.py" ] \
 	|| { echo "install.sh: run from the mnemo repo (src/cli.py not found)" >&2; exit 1; }
 
@@ -545,8 +608,15 @@ cp "$SRC_REPO/requirements.txt" "$VERSION_DIR/requirements.txt"
 say "engine code refreshed ($VERSION_DIR)"
 
 VERSION_PY_BIN="$VERSION_DIR/.venv/bin/python"
+# A venv on another interpreter version than the one just resolved is
+# rebuilt: it may predate the supported range, or --python asked for another.
+if [ -x "$VERSION_PY_BIN" ] \
+	&& [ "$(python_version "$VERSION_PY_BIN")" != "$PYTHON_VERSION" ]; then
+	say "existing virtualenv uses a different Python; rebuilding"
+	rm -rf "$VERSION_DIR/.venv"
+fi
 if [ ! -x "$VERSION_PY_BIN" ]; then
-	run_with_heartbeat "creating the virtual environment" python3 -m venv "$VERSION_DIR/.venv"
+	run_with_heartbeat "creating the virtual environment" "$PYTHON_BIN" -m venv "$VERSION_DIR/.venv"
 	say "virtualenv created"
 else
 	say "virtualenv reused"
@@ -562,11 +632,10 @@ if ! "$VERSION_PY_BIN" -c "$VEC_PROBE" 2>/dev/null; then
 	printf 'install.sh: ERROR: this Python cannot load SQLite extensions, so\n' >&2
 	printf '            sqlite-vec cannot load and no bank can be opened:\n' >&2
 	printf '              %s\n' "$VERSION_PY_BIN" >&2
-	printf '            The venv is built from whichever python3 is on PATH,\n' >&2
-	printf '            so put one that has them in front of it. On macOS:\n' >&2
+	printf '            The venv was built from %s;\n' "$PYTHON_BIN" >&2
+	printf '            pass one that has them with --python. On macOS:\n' >&2
 	printf '              brew install python@3.12\n' >&2
-	printf '              PATH="$(brew --prefix python@3.12)/libexec/bin:$PATH" \\\n' >&2
-	printf '                ./install.sh\n' >&2
+	printf '              ./install.sh --python "$(brew --prefix python@3.12)/libexec/bin/python3"\n' >&2
 	printf '            (Homebrew python has loadable extensions; the\n' >&2
 	printf '            python.org build does not.)\n' >&2
 	exit 1

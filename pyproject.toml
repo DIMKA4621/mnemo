@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "mnemo-bootstrap"
 version = "0.0.0"
 description = "Self-locating launcher for the mnemo engine"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.14"
 license = { file = "LICENSE" }
 classifiers = [
     "License :: OSI Approved :: GNU Affero General Public License v3",

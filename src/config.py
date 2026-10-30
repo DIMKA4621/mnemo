@@ -597,6 +597,14 @@ SERVICE_READY_TIMEOUT: float = float(
     os.environ.get("MNEMO_SERVICE_READY_TIMEOUT", "45.0")
 )
 
+# Python versions an engine venv may be built on, inclusive: exactly what CI
+# tests. Outside it the requirements may not even resolve (3.15 has no
+# onnxruntime wheel), and "newest installed" is what `py -3` picks.
+# Mirrored in install.sh, install.ps1 and pyproject.toml's requires-python;
+# a test keeps the four equal.
+PYTHON_MIN_VERSION: tuple[int, int] = (3, 10)
+PYTHON_MAX_VERSION: tuple[int, int] = (3, 13)
+
 # --- versioned engine layout (self-update spike, step 0; see
 # .claude/memory/topics/engine-self-update-design.md) --------------------
 #

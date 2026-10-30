@@ -12,6 +12,8 @@
 #   .\install.ps1 -NoModel       skip the model download
 #   .\install.ps1 -Model         download it without asking (scripts)
 #   .\install.ps1 -NoStart       do not start the service
+#   .\install.ps1 -Python P      build on python.exe P (3.10-3.13; default:
+#                                the newest of those installed)
 #
 # state\ (per-project indexes) and model-cache\ are never touched.
 [CmdletBinding()]
@@ -43,6 +45,11 @@ $VecProbe = "import sqlite3, sqlite_vec; " +
 $EngineVersionBytes = 300000000
 $ModelBytes = 2200000000
 $DiskBufferBytes = 500000000
+
+# Python versions the engine venv may be built on, inclusive -- what CI
+# tests. Mirrored in install.sh, src/config.py and pyproject.toml.
+$PythonMinVersion = "3.10"
+$PythonMaxVersion = "3.13"
 
 function Write-Status {
     param([string]$Message)
@@ -280,19 +287,26 @@ function Invoke-CheckedWithHeartbeat {
 function Resolve-PythonCommand {
     param([string]$ExplicitPython)
 
+    $explicit = -not [string]::IsNullOrWhiteSpace($ExplicitPython)
+    $minVersion = [version]$PythonMinVersion
+    $maxVersion = [version]$PythonMaxVersion
     $candidates = @()
-    if (-not [string]::IsNullOrWhiteSpace($ExplicitPython)) {
+    if ($explicit) {
         $candidates += [pscustomobject]@{
             Exe = $ExplicitPython
             Prefix = @()
         }
     }
     else {
+        # Never a bare `py -3`: that is whatever is newest, and a Python newer
+        # than CI tests may have no wheels for our requirements at all.
         $py = Get-Command "py.exe" -ErrorAction SilentlyContinue
         if ($null -ne $py) {
-            $candidates += [pscustomobject]@{
-                Exe = $py.Source
-                Prefix = @("-3")
+            for ($minor = $maxVersion.Minor; $minor -ge $minVersion.Minor; $minor--) {
+                $candidates += [pscustomobject]@{
+                    Exe = $py.Source
+                    Prefix = @("-3.$minor")
+                }
             }
         }
         $pythonExe = Get-Command "python.exe" -ErrorAction SilentlyContinue
@@ -311,41 +325,53 @@ function Resolve-PythonCommand {
         }
     }
 
+    $found = @()
+    $best = $null
     foreach ($candidate in $candidates) {
         $exe = [string]$candidate.Exe
         $prefix = @($candidate.Prefix)
+        $probeCode = "import struct,sys; print('%d.%d;%d;%s;%s' % (sys.version_info[0], sys.version_info[1], struct.calcsize('P')*8, sys.executable, getattr(sys, '_base_executable', sys.executable)))"
         try {
-            $probeCode = "import struct,sys; print('%d.%d;%d;%s;%s' % (sys.version_info[0], sys.version_info[1], struct.calcsize('P')*8, sys.executable, getattr(sys, '_base_executable', sys.executable)))"
             $probe = & $exe @prefix -c $probeCode 2>$null
-            if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($probe)) {
-                continue
-            }
-            $parts = ([string]$probe).Trim().Split(";", 4)
-            $version = [version]$parts[0]
-            $bits = [int]$parts[1]
-            if ($version -lt [version]"3.10") {
-                continue
-            }
-            if ($bits -ne 64) {
-                throw "Python must be 64-bit; found $bits-bit at $($parts[2])"
-            }
-            return [pscustomobject]@{
-                Exe = $exe
-                Prefix = $prefix
-                Version = $version
-                Bits = $bits
-                Interpreter = $parts[2]
-                BaseInterpreter = $parts[3]
-            }
         }
         catch {
-            if (-not [string]::IsNullOrWhiteSpace($ExplicitPython)) {
-                throw
+            $probe = $null
+        }
+        if ([string]::IsNullOrWhiteSpace($probe) -or $LASTEXITCODE -ne 0) {
+            if ($explicit) {
+                throw "-Python $ExplicitPython is not a runnable Python interpreter."
             }
+            continue
+        }
+        $parts = ([string]$probe).Trim().Split(";", 4)
+        $resolved = [pscustomobject]@{
+            Exe = $exe
+            Prefix = $prefix
+            Version = [version]$parts[0]
+            Bits = [int]$parts[1]
+            Interpreter = $parts[2]
+            BaseInterpreter = $parts[3]
+        }
+        $label = "$($resolved.Version) ($($resolved.Interpreter))"
+        if ($resolved.Bits -ne 64) {
+            $label = "$($resolved.Version) $($resolved.Bits)-bit ($($resolved.Interpreter))"
+        }
+        if ($found -notcontains $label) {
+            $found += $label
+        }
+        $supported = $resolved.Bits -eq 64 -and
+            $resolved.Version -ge $minVersion -and $resolved.Version -le $maxVersion
+        if ($supported -and ($null -eq $best -or $resolved.Version -gt $best.Version)) {
+            $best = $resolved
         }
     }
 
-    throw "Python 3.10+ x64 was not found. Install 64-bit Python and retry."
+    if ($null -ne $best) {
+        return $best
+    }
+    $foundText = if ($found.Count) { $found -join ", " } else { "none" }
+    $hint = if ($explicit) { "pass -Python with a supported interpreter" } else { "install one, or pass -Python <path\to\python.exe>" }
+    throw "Python $PythonMinVersion-$PythonMaxVersion (64-bit) is required; found: $foundText -- $hint."
 }
 
 function Test-ModelCached {
