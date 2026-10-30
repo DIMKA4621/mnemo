@@ -9,6 +9,7 @@ import {
   getSettings,
   getUpdateStatus,
 } from "@/lib/api/settings";
+import { isApplyBusy } from "@/lib/update/apply-state";
 
 export function useSettings() {
   return useQuery({
@@ -56,8 +57,8 @@ export function useDoctor() {
  *  shell level) — the `update_progress`/`update_auto_pending` WS handlers in
  *  `lib/ws/dispatch.ts` patch this same cache entry directly, and
  *  `useUpdateProgressPolling`/`useAutoPendingPolling` below add polling only
- *  while their own modal phase is actually open. No background polling by
- *  default. */
+ *  while their own modal phase is open or an apply is still running. No
+ *  background polling otherwise. */
 export function useUpdateStatus() {
   return useQuery({
     queryKey: queryKeys.updateStatus.all,
@@ -65,18 +66,19 @@ export function useUpdateStatus() {
   });
 }
 
-/** A second observer on the same query key, active only while
- *  `UpdateModal`'s phase is `'progress'` — `GET /api/update/status` is the
- *  sole source of truth for the outcome once the WS channel dies mid-switch
- *  (see that component's docstring). `retry: false`: a failed poll during
- *  the switch window is expected and silent, not a reason to burn extra
- *  attempts faster than the plain 2s cadence. */
-export function useUpdateProgressPolling(enabled: boolean) {
+/** A second observer on the same query key, polling while `UpdateModal`'s
+ *  phase is `'progress'` OR the cached apply is still `staging`/`switching`
+ *  whatever the modal shows — `GET /api/update/status` is the sole source of
+ *  truth for the outcome once the WS channel dies mid-switch (see that
+ *  component's docstring), and the sidebar banner reads the same cache.
+ *  `retry: false`: a failed poll during the switch window is expected and
+ *  silent, not a reason to burn extra attempts faster than the plain 2s
+ *  cadence. */
+export function useUpdateProgressPolling(progressOpen: boolean) {
   useQuery({
     queryKey: queryKeys.updateStatus.all,
     queryFn: getUpdateStatus,
-    enabled,
-    refetchInterval: enabled ? 2000 : false,
+    refetchInterval: (query) => (progressOpen || isApplyBusy(query.state.data?.apply) ? 2000 : false),
     retry: false,
   });
 }

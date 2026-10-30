@@ -11,6 +11,16 @@ import { useUpdateModalStore } from "@/lib/store/update-modal";
 import { queryKeys } from "@/lib/query/keys";
 import { ApiError } from "@/lib/api/fetcher";
 import type { UpdateApplyState, UpdateStatusResult } from "@/lib/api/settings";
+import {
+  autoPendingNext,
+  isApplyBusy,
+  isApplyTerminal,
+  isSupersededApply,
+  rejectedApply,
+  seedAttempt,
+  supersededAfter,
+  visibleApply,
+} from "@/lib/update/apply-state";
 import "@/components/common/dialogs.css";
 import "./settings.css";
 
@@ -77,11 +87,12 @@ function TerminalAutoClose({ seconds, onDone }: { seconds: number; onDone: () =>
  * console's `update.js` (ported closely). Once staging finishes, the API
  * process hands off to a detached process that STOPS it to switch versions
  * — the WS channel dies with it, by design, so `GET /api/update/status`
- * polling (`useUpdateProgressPolling`, 2s, active only while this phase is
- * `'progress'`) is the actual source of truth for the outcome, not a WS
- * disconnect. `lib/ws/dispatch.ts`'s `update_progress`/`update_auto_pending`
- * handlers patch the same query cache this component reads, so a poll tick
- * and a WS event are indistinguishable to the state machine below.
+ * polling (`useUpdateProgressPolling`, 2s, while this phase is `'progress'`
+ * or the cached apply is still running) is the actual source of truth for
+ * the outcome, not a WS disconnect.
+ * `lib/ws/dispatch.ts`'s `update_progress`/`update_auto_pending` handlers
+ * patch the same query cache this component reads, so a poll tick and a WS
+ * event are indistinguishable to the state machine below.
  */
 export function UpdateModal() {
   const t = useT();
@@ -92,6 +103,8 @@ export function UpdateModal() {
   const setPhase = useUpdateModalStore((s) => s.setPhase);
   const setEverSwitching = useUpdateModalStore((s) => s.setEverSwitching);
   const setAutoPendingError = useUpdateModalStore((s) => s.setAutoPendingError);
+  const supersededApply = useUpdateModalStore((s) => s.supersededApply);
+  const setSupersededApply = useUpdateModalStore((s) => s.setSupersededApply);
 
   const statusQuery = useUpdateStatus();
   useUpdateProgressPolling(phase === "progress");
@@ -103,6 +116,7 @@ export function UpdateModal() {
   const bootstrappedRef = useRef(false);
   const lastProgressAtRef = useRef(0);
   const lastSeenRef = useRef<{ step: string | null; detail: string | null }>({ step: null, detail: null });
+  const pendingGoneAtRef = useRef<number | null>(null);
 
   // Resume an apply already in flight (a reload, or another tab/CLI
   // triggered it), or a countdown already ticking, the moment the first
@@ -122,13 +136,29 @@ export function UpdateModal() {
   }, [statusQuery.data]);
 
   // Reset the stall clock on every fresh entry into `'progress'` (including
-  // a retry out of `'timeout'`).
+  // a retry out of `'timeout'`). Entering auto-pending sets the current
+  // record aside: once the countdown settles, a status read can still return
+  // it until the backend records staging.
   useEffect(() => {
     if (phase === "progress") {
       lastProgressAtRef.current = Date.now();
       lastSeenRef.current = { step: null, detail: null };
     }
+    if (phase === "auto-pending") {
+      pendingGoneAtRef.current = null;
+      const apply = qc.getQueryData<UpdateStatusResult>(queryKeys.updateStatus.all)?.apply;
+      setSupersededApply(apply && !isApplyBusy(apply) ? apply : null);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phase]);
+
+  // The set-aside record stops mattering the moment the server reports the
+  // new attempt itself.
+  useEffect(() => {
+    const next = supersededAfter(statusQuery.data?.apply, supersededApply);
+    if (next !== supersededApply) setSupersededApply(next);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [statusQuery.dataUpdatedAt]);
 
   // The progress phase's actual state machine — keyed on
   // `dataUpdatedAt`/`errorUpdatedAt` rather than `data` itself, so a poll
@@ -139,13 +169,13 @@ export function UpdateModal() {
   useEffect(() => {
     if (phase !== "progress") return;
     const apply = qc.getQueryData<UpdateStatusResult>(queryKeys.updateStatus.all)?.apply;
-    if (apply) {
+    if (apply && !isSupersededApply(apply, supersededApply)) {
       if (apply.state === "switching") setEverSwitching(true);
       if (apply.step !== lastSeenRef.current.step || (apply.detail ?? null) !== lastSeenRef.current.detail) {
         lastSeenRef.current = { step: apply.step, detail: apply.detail ?? null };
         lastProgressAtRef.current = Date.now();
       }
-      if (apply.state === "done" || apply.state === "failed" || apply.state === "rolled_back") {
+      if (isApplyTerminal(apply)) {
         setPhase("terminal");
         return;
       }
@@ -162,16 +192,20 @@ export function UpdateModal() {
     if (phase !== "auto-pending") return;
     const data = qc.getQueryData<UpdateStatusResult>(queryKeys.updateStatus.all);
     if (!data) return;
-    if (data.apply.state === "staging" || data.apply.state === "switching") {
+    if (data.auto.pending) pendingGoneAtRef.current = null;
+    else pendingGoneAtRef.current ??= Date.now();
+    const goneMs = pendingGoneAtRef.current === null ? 0 : Date.now() - pendingGoneAtRef.current;
+    const next = autoPendingNext(data, supersededApply, goneMs);
+    if (next === "progress") {
       setEverSwitching(data.apply.state === "switching");
       setPhase("progress");
-      return;
+    } else if (next === "terminal" || next === "idle") {
+      setPhase(next);
     }
-    if (!data.auto.pending) setPhase("idle");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [statusQuery.dataUpdatedAt, phase]);
 
-  const apply = statusQuery.data?.apply ?? null;
+  const apply = visibleApply(statusQuery.data?.apply, supersededApply);
 
   // Terminal phase's auto-close countdown — auto-triggered AND successful
   // only: a failed/rolled-back outcome needs a human's attention regardless
@@ -193,42 +227,63 @@ export function UpdateModal() {
     setAutoPendingError(null);
   }
 
+  // The backend answers `POST` before its staging thread records `staging`,
+  // so a status read in between still returns the previous attempt's
+  // outcome — `superseded` is that record, never read as this one's until
+  // the new attempt is evidenced (`supersededAfter`, `update_progress`).
+  function beginAttempt(tag: string, trigger: "manual" | "auto", superseded: UpdateApplyState | null) {
+    setSupersededApply(superseded);
+    qc.setQueryData<UpdateStatusResult>(queryKeys.updateStatus.all, (old) =>
+      old ? { ...old, apply: seedAttempt(old.apply, tag, trigger, superseded) ?? old.apply } : old,
+    );
+    setEverSwitching(false);
+    setPhase("progress");
+  }
+
   async function confirmApply() {
     const tag = statusQuery.data?.latest_known.tag;
     if (!tag) return;
-    setEverSwitching(false);
-    setPhase("progress");
+    const previous = statusQuery.data?.apply;
+    beginAttempt(tag, "manual", previous && isApplyTerminal(previous) ? previous : null);
     try {
       await applyMutation.mutateAsync(tag);
     } catch (err) {
-      // Rejected before anything started (stale target, one already
-      // running) — nothing was touched. Reported the same way a later
+      // Another tab, the CLI or the auto-apply timer got there first: that
+      // run IS the update this click asked for, so follow it instead.
+      if (err instanceof ApiError && err.code === "update_in_progress") {
+        void statusQuery.refetch();
+        return;
+      }
+      // Rejected before anything started (stale target, anything else) —
+      // nothing was touched. Reported the same way a later
       // failure is, just without ever having left "confirm".
       let message = err instanceof Error ? err.message : String(err);
       if (err instanceof ApiError && err.code === "stale_target") {
         const latestTag = err.detail?.latest_tag;
         if (typeof latestTag === "string") message = t("update.confirm.staleTarget", { tag: latestTag });
       }
+      // This rejection is the attempt's own outcome, even when it reads the
+      // same as the record set aside.
+      setSupersededApply(null);
       qc.setQueryData<UpdateStatusResult>(queryKeys.updateStatus.all, (old) =>
-        old
-          ? {
-              ...old,
-              apply: {
-                state: "failed", tag, step: null, detail: null, error: message,
-                started_at: null, finished_at: null, trigger: "manual",
-              },
-            }
-          : old,
+        old ? { ...old, apply: rejectedApply(tag, message) } : old,
       );
       setPhase("terminal");
     }
   }
 
   async function confirmAuto() {
+    const tag = statusQuery.data?.auto.pending?.tag;
     try {
       await confirmAutoMutation.mutateAsync();
-      setEverSwitching(false);
-      setPhase("progress");
+      if (tag) {
+        // Set aside on entering auto-pending, and already dropped if this
+        // attempt was evidenced during the await.
+        beginAttempt(tag, "auto", useUpdateModalStore.getState().supersededApply);
+      } else {
+        setEverSwitching(false);
+        setPhase("progress");
+      }
     } catch (err) {
       if (err instanceof ApiError && err.code === "auto_not_pending") {
         await statusQuery.refetch(); // race: settled or cancelled elsewhere

@@ -751,6 +751,57 @@ def test_watch_pip_progress(work: Path) -> None:
           detail=str(emitted))
 
 
+def test_cyrillic_progress_detail_reaches_update_status_intact(work: Path) -> None:
+    """MN-57: a Cyrillic ``apply.detail`` must leave the server as UTF-8.
+
+    The mojibake seen live (``"\\u00d0\\u00b2\\u00d1\\udc81..."``) is exactly
+    what a Windows Python produces reading a piped response through its
+    default cp1252+surrogateescape stdin — this pins the server side of that
+    path: BOM progress file -> watcher -> listener -> ``GET /api/update/status``.
+    """
+    from fastapi.testclient import TestClient
+
+    from src import api
+
+    progress_file = work / "cyrillic-progress.json"
+    progress_file.write_bytes(
+        b"\xef\xbb\xbf" + json.dumps({"phase": "collecting", "count": 64}).encode("utf-8")
+    )
+    expected = engine_update._pip_progress_detail({"phase": "collecting", "count": 64})
+    reported = threading.Event()
+    release = threading.Event()
+
+    def _fake_stage(tag: str) -> Path:
+        stop = threading.Event()
+        stop.set()
+        engine_update._watch_pip_progress(tag, progress_file, stop)
+        reported.set()
+        release.wait(10.0)
+        raise RuntimeError("stop before update-apply is spawned")
+
+    saved = dict(api._apply_progress)
+    saved_touched_at = api._apply_progress_touched_at
+    try:
+        with patch.object(engine_update, "stage_release", _fake_stage):
+            runner = threading.Thread(target=api._run_staged_apply, args=("v9.9.9",), daemon=True)
+            runner.start()
+            check("the fake staging relayed its progress", reported.wait(10.0))
+            resp = TestClient(api.app).get("/api/update/status")
+            release.set()
+            runner.join(timeout=10.0)
+        raw = resp.content.decode("utf-8")
+        detail = json.loads(raw)["apply"]["detail"]
+        check("apply.detail round-trips Cyrillic byte-exact as UTF-8",
+              detail == expected, detail=ascii(detail))
+        check("the wire carries real UTF-8, not latin-1/cp1252 mojibake",
+              expected.encode("utf-8") in resp.content and "Ð" not in raw,
+              detail=ascii(raw[:200]))
+    finally:
+        api._apply_progress.clear()
+        api._apply_progress.update(saved)
+        api._apply_progress_touched_at = saved_touched_at
+
+
 def _make_local_release_tarball(dest: Path) -> Path:
     """Package THIS repo's own working tree the way GitHub's auto-archive
     wraps a release -- one top-level directory -- so the FULL step-7
@@ -1203,6 +1254,7 @@ def main() -> int:
 
         test_safe_members_rejects_path_traversal(work)
         test_watch_pip_progress(work)
+        test_cyrillic_progress_detail_reaches_update_status_intact(work)
         test_check_disk_space_arithmetic(work)
         test_check_disk_space_target_and_version_size_overrides(work)
         test_cmd_warmup_refuses_to_download_when_disk_full(work)

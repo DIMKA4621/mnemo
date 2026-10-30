@@ -4,7 +4,8 @@ import { queryKeys } from "../query/keys";
 import { useIndexProgressStore } from "../store/index-progress";
 import { useUpdateModalStore } from "../store/update-modal";
 import type { StatusResult, TreeResult } from "../api/memory";
-import type { UpdateApplyState, UpdateStatusResult } from "../api/settings";
+import type { UpdateStatusResult } from "../api/settings";
+import { applyProgressEvent, isApplyTerminal, isSupersededApply, type UpdateProgressEvent } from "../update/apply-state";
 
 /** Contract 9.7's envelope shape. */
 export interface WsEnvelope<T = Record<string, unknown>> {
@@ -161,18 +162,13 @@ const handlers: Record<string, Handler> = {
   // Self-update — machine-level, bank_id is always null. A faster preview of
   // download/venv while the OLD process is still alive to send it (contract:
   // `engine_update._emit_progress`) — `GET /api/update/status` polling
-  // (`useUpdateProgressPolling`, active only while `UpdateModal`'s phase is
-  // `'progress'`) is the actual source of truth once the switch severs this
-  // socket. Ported from the vanilla console's `onUpdateProgress`
-  // (`update.js`): direct `setQueryData` patches, never `invalidateQueries`
+  // (`useUpdateProgressPolling`, active while `UpdateModal`'s phase is
+  // `'progress'` or an apply is running) is the actual source of truth once
+  // the switch severs this socket. Ported from the vanilla console's
+  // `onUpdateProgress` (`update.js`): direct `setQueryData` patches, never `invalidateQueries`
   // — this can fire faster than a round-trip refetch would keep up with.
   update_progress: (envelope, qc) => {
-    const data = envelope.data as {
-      step?: UpdateApplyState["step"];
-      tag?: string;
-      detail?: string | null;
-      error?: string | null;
-    };
+    const data = envelope.data as UpdateProgressEvent;
 
     // A stale/duplicate broadcast for a cycle that has already resolved —
     // observed live against `devserver.py`'s fixture: `_force_disconnect_
@@ -190,8 +186,14 @@ const handlers: Record<string, Handler> = {
     const alreadyTerminal =
       !!before &&
       before.apply.tag === data.tag &&
-      (before.apply.state === "done" || before.apply.state === "failed" || before.apply.state === "rolled_back");
+      isApplyTerminal(before.apply) &&
+      // An earlier attempt's outcome for the same tag, which a status read
+      // can still return right after the new attempt started.
+      !isSupersededApply(before.apply, useUpdateModalStore.getState().supersededApply);
     if (alreadyTerminal) return;
+    // Progress at all is the new attempt's own evidence: from here on no
+    // record is set aside.
+    useUpdateModalStore.getState().setSupersededApply(null);
 
     const wasAutoPending = useUpdateModalStore.getState().phase === "auto-pending";
 
@@ -203,14 +205,7 @@ const handlers: Record<string, Handler> = {
         // `UpdateModal`'s docstring) — progress arriving at all, while a
         // countdown was pending, IS that signal, so it is cleared here.
         auto: old.auto.pending ? { ...old.auto, pending: null } : old.auto,
-        apply: {
-          ...old.apply,
-          tag: data.tag ?? old.apply.tag,
-          step: data.step ?? old.apply.step,
-          detail: data.detail ?? null,
-          state: data.step === "failed" ? "failed" : data.step === "done" ? "switching" : "staging",
-          error: data.step === "failed" ? (data.error ?? null) : old.apply.error,
-        },
+        apply: applyProgressEvent(old.apply, data),
       };
     });
 
