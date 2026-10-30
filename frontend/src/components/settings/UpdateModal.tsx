@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Button } from "antd";
+import { Button, Progress } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { ModalShell } from "@/components/common/ModalShell";
 import { useUpdateStatus, useUpdateProgressPolling, useAutoPendingPolling } from "@/hooks/useSettingsQueries";
@@ -18,6 +18,7 @@ import {
   isSupersededApply,
   rejectedApply,
   seedAttempt,
+  staleTargetRetryTag,
   supersededAfter,
   visibleApply,
 } from "@/lib/update/apply-state";
@@ -105,6 +106,8 @@ export function UpdateModal() {
   const setAutoPendingError = useUpdateModalStore((s) => s.setAutoPendingError);
   const supersededApply = useUpdateModalStore((s) => s.supersededApply);
   const setSupersededApply = useUpdateModalStore((s) => s.setSupersededApply);
+  const newerTag = useUpdateModalStore((s) => s.newerTag);
+  const setNewerTag = useUpdateModalStore((s) => s.setNewerTag);
 
   const statusQuery = useUpdateStatus();
   useUpdateProgressPolling(phase === "progress");
@@ -144,6 +147,9 @@ export function UpdateModal() {
       lastProgressAtRef.current = Date.now();
       lastSeenRef.current = { step: null, detail: null };
     }
+    // The server's checker moves `latest_known` without telling this tab;
+    // the dialog should name what OK will actually send.
+    if (phase === "confirm") void qc.invalidateQueries({ queryKey: queryKeys.updateStatus.all });
     if (phase === "auto-pending") {
       pendingGoneAtRef.current = null;
       const apply = qc.getQueryData<UpdateStatusResult>(queryKeys.updateStatus.all)?.apply;
@@ -254,17 +260,29 @@ export function UpdateModal() {
         void statusQuery.refetch();
         return;
       }
-      // Rejected before anything started (stale target, anything else) —
-      // nothing was touched. Reported the same way a later
-      // failure is, just without ever having left "confirm".
+      // A newer release than the one shown: offer it, rather than fail. The
+      // record set aside stays set until the refetch lands, so the earlier
+      // outcome it returns cannot flash up as this attempt's.
+      if (err instanceof ApiError && err.code === "stale_target") {
+        const fresh = await statusQuery.refetch();
+        const retryTag = fresh.isError ? null : staleTargetRetryTag(fresh.data, tag);
+        if (retryTag) {
+          setSupersededApply(null);
+          setPhase("confirm");
+          setNewerTag(retryTag);
+          return;
+        }
+      }
+      // This rejection is the attempt's own outcome, even when it reads the
+      // same as the record set aside.
+      setSupersededApply(null);
+      // Rejected before anything started — nothing was touched. Reported the
+      // same way a later failure is, just without ever having left "confirm".
       let message = err instanceof Error ? err.message : String(err);
       if (err instanceof ApiError && err.code === "stale_target") {
         const latestTag = err.detail?.latest_tag;
         if (typeof latestTag === "string") message = t("update.confirm.staleTarget", { tag: latestTag });
       }
-      // This rejection is the attempt's own outcome, even when it reads the
-      // same as the record set aside.
-      setSupersededApply(null);
       qc.setQueryData<UpdateStatusResult>(queryKeys.updateStatus.all, (old) =>
         old ? { ...old, apply: rejectedApply(tag, message) } : old,
       );
@@ -323,6 +341,7 @@ export function UpdateModal() {
         <p className="upd-row">
           {t("update.confirm.newLabel")} <strong>{latestTag || "—"}</strong>
         </p>
+        {newerTag && <p className="upd-note">{t("update.confirm.newerFound", { tag: newerTag })}</p>}
         <div className="tok-confirm">
           <p className="tok-confirm-text">{t("update.confirm.warning")}</p>
         </div>
@@ -331,7 +350,9 @@ export function UpdateModal() {
     footer = (
       <>
         <Button onClick={() => setPhase("idle")}>{t("common.btn.cancel")}</Button>
-        <Button type="primary" disabled={!latestTag} onClick={confirmApply}>
+        {/* Entering confirm refetches the status; OK waits for it, or it
+            would send the tag from before. */}
+        <Button type="primary" disabled={!latestTag || statusQuery.isFetching} onClick={confirmApply}>
           {t("update.confirm.okBtn")}
         </Button>
       </>
@@ -375,17 +396,22 @@ export function UpdateModal() {
               <div key={step.key} className={`upd-step is-${status}`}>
                 <span className="upd-step-mark">{status === "done" ? "✓" : i + 1}</span>
                 <span className="upd-step-label">{t(step.labelKey)}</span>
-                {status === "active" && (
-                  <div className="upd-step-bar">
-                    <i />
-                  </div>
-                )}
               </div>
             );
           })}
         </div>
         {apply?.step === "venv" && apply.detail && <p className="upd-note">{apply.detail}</p>}
         {everSwitching && <p className="upd-note">{t("update.progress.switchingNote")}</p>}
+        {/* No real percentage exists (pip reports no total); a full bar in
+            `active` status is antd's own running sweep. */}
+        <Progress
+          percent={100}
+          status="active"
+          showInfo={false}
+          size="small"
+          classNames={{ track: "upd-progress-track" }}
+          aria-label={t("update.progress.title", { tag })}
+        />
       </>
     );
     footer = null; // no buttons while this is running (nothing to press)

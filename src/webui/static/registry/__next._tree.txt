@@ -1,5 +1,5 @@
 :HL["/ui/_next/static/chunks/3u25ndttir6d9.css","style"]
-:HL["/ui/_next/static/chunks/1ng5r7iz7j87p.css","style"]
+:HL["/ui/_next/static/chunks/2ztlk8wahkmg0.css","style"]
 :HL["/ui/_next/static/chunks/2a4v9hk6wqecr.css","style"]
 :HL["/ui/_next/static/chunks/36eu4ehqutgku.css","style"]
 :HL["/ui/_next/static/chunks/3buwbimy37-66.css","style"]

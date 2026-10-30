@@ -101,6 +101,18 @@ export function applyProgressEvent(old: UpdateApplyState, event: UpdateProgressE
   };
 }
 
+/** The release to offer again after a `stale_target` rejection, read from a
+ *  status fetched after it — `null` when there is nothing to update to any
+ *  more (applied elsewhere, or the check now says up to date), or when it is
+ *  the very tag the server just rejected. */
+export function staleTargetRetryTag(
+  status: Pick<UpdateStatusResult, "latest_known"> | undefined,
+  sentTag: string,
+): string | null {
+  const latest = status?.latest_known;
+  return latest?.tag && latest.update_available && latest.tag !== sentTag ? latest.tag : null;
+}
+
 export type AutoPendingNext = "stay" | "progress" | "terminal" | "idle";
 
 /** Auto-pending's re-sync: where the modal goes after a status read.

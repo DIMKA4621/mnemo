@@ -22,10 +22,14 @@ interface UpdateModalState {
   // backend's staging thread records the new one. Never shown as this
   // attempt's result.
   supersededApply: UpdateApplyState | null;
+  // The release a `stale_target` rejection turned up, noted on the confirm
+  // screen it returned to. Gone with any other phase.
+  newerTag: string | null;
   setPhase: (phase: UpdateModalPhase) => void;
   setEverSwitching: (v: boolean) => void;
   setAutoPendingError: (msg: string | null) => void;
   setSupersededApply: (apply: UpdateApplyState | null) => void;
+  setNewerTag: (tag: string | null) => void;
 }
 
 /**
@@ -43,9 +47,11 @@ export const useUpdateModalStore = create<UpdateModalState>((set) => ({
   everSwitching: false,
   autoPendingError: null,
   supersededApply: null,
+  newerTag: null,
 
-  setPhase: (phase) => set({ phase }),
+  setPhase: (phase) => set(phase === "confirm" ? { phase } : { phase, newerTag: null }),
   setEverSwitching: (v) => set({ everSwitching: v }),
   setAutoPendingError: (msg) => set({ autoPendingError: msg }),
   setSupersededApply: (apply) => set({ supersededApply: apply }),
+  setNewerTag: (tag) => set({ newerTag: tag }),
 }));
