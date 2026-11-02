@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { Button, Progress } from "antd";
+import { Button } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { ModalShell } from "@/components/common/ModalShell";
 import { useUpdateStatus, useUpdateProgressPolling, useAutoPendingPolling } from "@/hooks/useSettingsQueries";
@@ -22,22 +22,11 @@ import {
   supersededAfter,
   visibleApply,
 } from "@/lib/update/apply-state";
+import { UpdateSteps } from "./UpdateSteps";
 import "@/components/common/dialogs.css";
 import "./settings.css";
 
 const UPDATE_POLL_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes of silence before giving up
-
-function updateStepIndex(apply: UpdateApplyState): number {
-  if (apply.state === "switching") return 2;
-  if (apply.step === "venv") return 1;
-  return 0; // 'download', or staging with no step reported yet
-}
-
-const UPDATE_STEPS = [
-  { key: "download", labelKey: "update.steps.download" },
-  { key: "venv", labelKey: "update.steps.venv" },
-  { key: "switching", labelKey: "update.steps.switching" },
-] as const;
 
 /** A countdown ticking display, seeded to a plain literal and advanced only
  *  from inside the interval's own callback — never a raw `Date.now()` call
@@ -107,6 +96,9 @@ export function UpdateModal() {
   const supersededApply = useUpdateModalStore((s) => s.supersededApply);
   const setSupersededApply = useUpdateModalStore((s) => s.setSupersededApply);
   const newerTag = useUpdateModalStore((s) => s.newerTag);
+  const stepProgress = useUpdateModalStore((s) => s.stepProgress);
+  const noteProgress = useUpdateModalStore((s) => s.noteProgress);
+  const resetStepProgress = useUpdateModalStore((s) => s.resetStepProgress);
   const setNewerTag = useUpdateModalStore((s) => s.setNewerTag);
 
   const statusQuery = useUpdateStatus();
@@ -118,7 +110,11 @@ export function UpdateModal() {
 
   const bootstrappedRef = useRef(false);
   const lastProgressAtRef = useRef(0);
-  const lastSeenRef = useRef<{ step: string | null; detail: string | null }>({ step: null, detail: null });
+  const lastSeenRef = useRef<{ step: string | null; detail: string | null; count: number | null }>({
+    step: null,
+    detail: null,
+    count: null,
+  });
   const pendingGoneAtRef = useRef<number | null>(null);
 
   // Resume an apply already in flight (a reload, or another tab/CLI
@@ -145,7 +141,7 @@ export function UpdateModal() {
   useEffect(() => {
     if (phase === "progress") {
       lastProgressAtRef.current = Date.now();
-      lastSeenRef.current = { step: null, detail: null };
+      lastSeenRef.current = { step: null, detail: null, count: null };
     }
     // The server's checker moves `latest_known` without telling this tab;
     // the dialog should name what OK will actually send.
@@ -177,8 +173,11 @@ export function UpdateModal() {
     const apply = qc.getQueryData<UpdateStatusResult>(queryKeys.updateStatus.all)?.apply;
     if (apply && !isSupersededApply(apply, supersededApply)) {
       if (apply.state === "switching") setEverSwitching(true);
-      if (apply.step !== lastSeenRef.current.step || (apply.detail ?? null) !== lastSeenRef.current.detail) {
-        lastSeenRef.current = { step: apply.step, detail: apply.detail ?? null };
+      noteProgress(apply);
+      const seen = { step: apply.step, detail: apply.detail ?? null, count: apply.progress?.current ?? null };
+      const last = lastSeenRef.current;
+      if (seen.step !== last.step || seen.detail !== last.detail || seen.count !== last.count) {
+        lastSeenRef.current = seen;
         lastProgressAtRef.current = Date.now();
       }
       if (isApplyTerminal(apply)) {
@@ -239,6 +238,7 @@ export function UpdateModal() {
   // the new attempt is evidenced (`supersededAfter`, `update_progress`).
   function beginAttempt(tag: string, trigger: "manual" | "auto", superseded: UpdateApplyState | null) {
     setSupersededApply(superseded);
+    resetStepProgress();
     qc.setQueryData<UpdateStatusResult>(queryKeys.updateStatus.all, (old) =>
       old ? { ...old, apply: seedAttempt(old.apply, tag, trigger, superseded) ?? old.apply } : old,
     );
@@ -385,32 +385,21 @@ export function UpdateModal() {
     );
   } else if (phase === "progress") {
     const tag = apply?.tag || u?.latest_known.tag || "—";
-    const activeIndex = apply ? updateStepIndex(apply) : 0;
     body = (
       <>
         <p className="upd-row">{t("update.progress.title", { tag })}</p>
-        <div className="upd-steps">
-          {UPDATE_STEPS.map((step, i) => {
-            const status = i < activeIndex ? "done" : i === activeIndex ? "active" : "pending";
-            return (
-              <div key={step.key} className={`upd-step is-${status}`}>
-                <span className="upd-step-mark">{status === "done" ? "✓" : i + 1}</span>
-                <span className="upd-step-label">{t(step.labelKey)}</span>
-              </div>
-            );
-          })}
-        </div>
-        {apply?.step === "venv" && apply.detail && <p className="upd-note">{apply.detail}</p>}
-        {everSwitching && <p className="upd-note">{t("update.progress.switchingNote")}</p>}
-        {/* No real percentage exists (pip reports no total); a full bar in
-            `active` status is antd's own running sweep. */}
-        <Progress
-          percent={100}
-          status="active"
-          showInfo={false}
-          size="small"
-          classNames={{ track: "upd-progress-track" }}
-          aria-label={t("update.progress.title", { tag })}
+        <UpdateSteps
+          apply={apply}
+          stepProgress={stepProgress}
+          activeNote={
+            everSwitching
+              ? t("update.progress.switchingNote")
+              : // The step's own counter says the same; this stays for a
+                // backend that sends no `progress`.
+                apply?.step === "venv" && apply.detail && !apply.progress
+                ? apply.detail
+                : null
+          }
         />
       </>
     );

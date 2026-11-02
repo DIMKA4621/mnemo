@@ -740,7 +740,7 @@ def test_watch_pip_progress(work: Path) -> None:
     # buggy "wait first, read only after a full timeout" shape whenever the
     # test happened to run slower than the timeout.
     with patch.object(engine_update, "_emit_progress",
-                       lambda t, step, detail=None, error=None:
+                       lambda t, step, detail=None, error=None, **_:
                            emitted.append({"tag": t, "step": step, "detail": detail})):
         stop_event.set()
         watcher.join(timeout=5.0)
@@ -749,6 +749,20 @@ def test_watch_pip_progress(work: Path) -> None:
     check("a BOM-prefixed progress file still parses and gets relayed",
           any(e["tag"] == "watchtag" and e["detail"] and "3" in e["detail"] for e in emitted),
           detail=str(emitted))
+
+    emitted.clear()
+    progress_file.write_text(json.dumps({"phase": "collecting", "count": "abc"}), encoding="utf-8")
+    stop_event = threading.Event()
+    stop_event.set()
+    with patch.object(engine_update, "_emit_progress",
+                       lambda t, step, detail=None, error=None, **_: emitted.append(detail)):
+        try:
+            engine_update._watch_pip_progress("watchtag", progress_file, stop_event)
+            survived = True
+        except Exception:  # noqa: BLE001
+            survived = False
+    check("a non-numeric count is skipped, not fatal to the watcher",
+          survived and emitted == [], detail=str(emitted))
 
 
 def test_cyrillic_progress_detail_reaches_update_status_intact(work: Path) -> None:
@@ -796,6 +810,158 @@ def test_cyrillic_progress_detail_reaches_update_status_intact(work: Path) -> No
         check("the wire carries real UTF-8, not latin-1/cp1252 mojibake",
               expected.encode("utf-8") in resp.content and "Ð" not in raw,
               detail=ascii(raw[:200]))
+    finally:
+        api._apply_progress.clear()
+        api._apply_progress.update(saved)
+        api._apply_progress_touched_at = saved_touched_at
+
+
+def test_byte_progress_is_throttled(work: Path) -> None:
+    """MN-59: download progress is throttled to ~4/s or 1% of a known total,
+    and the final count always goes out."""
+    emitted: list[dict] = []
+    now = [0.0]
+
+    def _capture(tag, step, *, detail=None, error=None, progress=None):
+        emitted.append({"step": step, "detail": detail, "progress": progress})
+
+    with patch.object(engine_update, "_emit_progress", _capture):
+        bp = engine_update._ByteProgress("t", "u", clock=lambda: now[0])
+        bp.update(0, None)
+        for n in range(1, 1000):  # 1000 tiny chunks inside 0.1 s, no total
+            now[0] = n * 0.0001
+            bp.update(n * 10, None)
+        check("an unknown total throttles by time alone", len(emitted) == 1, detail=str(len(emitted)))
+        now[0] = 0.3
+        bp.update(10_000, None)
+        check("the interval elapsing lets one through", len(emitted) == 2)
+        bp.finish(10_005, None)
+        check("finish always emits the final count",
+              emitted[-1]["progress"] == {"current": 10_005, "total": None, "unit": "bytes"},
+              detail=str(emitted[-1]))
+
+        emitted.clear()
+        total = 100_000
+        bp = engine_update._ByteProgress("t", "u", clock=lambda: 0.0)
+        bp.update(0, total)
+        for n in range(1, 10_001):  # frozen clock: only the 1% rule can fire
+            bp.update(n * 10, total)
+        check("a known total emits about once per 1%", 95 <= len(emitted) <= 102, detail=str(len(emitted)))
+        check("every event carries the download step, url and unit",
+              all(e["step"] == "download" and e["detail"] == "u"
+                  and e["progress"]["unit"] == "bytes" and e["progress"]["total"] == total
+                  for e in emitted))
+
+    import http.server
+
+    body = os.urandom(300_000)
+
+    class _Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            self.send_response(200)
+            if self.path != "/no-length":
+                self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            for i in range(0, len(body), 4096):
+                self.wfile.write(body[i:i + 4096])
+
+        def log_message(self, *args) -> None:
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    emitted.clear()
+    unsized: list[dict] = []
+    try:
+        url = f"http://127.0.0.1:{server.server_address[1]}/a.tar.gz"
+        with patch.object(engine_update, "_emit_progress", _capture):
+            engine_update._download(url, work / "dl.bin", progress=engine_update._ByteProgress("t", url))
+        sized, emitted[:] = list(emitted), []
+        # HTTP/1.0 with no Content-Length: the body runs until close. A
+        # frozen clock leaves only the time rule, so just start + finish.
+        url = f"http://127.0.0.1:{server.server_address[1]}/no-length"
+        with patch.object(engine_update, "_emit_progress", _capture):
+            engine_update._download(url, work / "dl-unsized.bin",
+                                    progress=engine_update._ByteProgress("t", url, clock=lambda: 0.0))
+        unsized, emitted[:] = list(emitted), sized
+    finally:
+        server.shutdown()
+        server.server_close()
+    check("no Content-Length: the file is intact", (work / "dl-unsized.bin").read_bytes() == body)
+    check("no Content-Length: every event has total None",
+          bool(unsized) and all(e["progress"]["total"] is None for e in unsized), detail=str(unsized))
+    check("no Content-Length: throttled by time only (start + finish under a frozen clock)",
+          len(unsized) == 2, detail=str(len(unsized)))
+    check("no Content-Length: the finishing event carries the full byte count",
+          bool(unsized) and unsized[-1]["progress"]["current"] == len(body), detail=str(unsized[-1:]))
+    check("the downloaded file is intact", (work / "dl.bin").read_bytes() == body)
+    check("the first event is 0 of Content-Length",
+          emitted and emitted[0]["progress"] == {"current": 0, "total": len(body), "unit": "bytes"},
+          detail=str(emitted[:1]))
+    check("the last event is the full Content-Length",
+          emitted and emitted[-1]["progress"]["current"] == len(body), detail=str(emitted[-1:]))
+    check("byte events are throttled, not one per chunk",
+          len(emitted) <= 103 and len(emitted) < len(body) // 4096, detail=str(len(emitted)))
+
+
+def test_progress_field_on_update_status(work: Path) -> None:
+    """MN-59: ``apply.progress`` mirrors the latest ``update_progress``
+    event and is null outside a step that reports one."""
+    from fastapi.testclient import TestClient
+
+    from src import api
+
+    progress_file = work / "progress-field.json"
+    progress_file.write_bytes(
+        b"\xef\xbb\xbf" + json.dumps({"phase": "collecting", "count": 12}).encode("utf-8")
+    )
+    gates = {name: (threading.Event(), threading.Event()) for name in ("download", "venv", "done")}
+
+    def _pause(name: str) -> None:
+        reached, go = gates[name]
+        reached.set()
+        go.wait(10.0)
+
+    def _fake_stage(tag: str) -> Path:
+        engine_update._ByteProgress(tag, "u").finish(5_000, 20_000)
+        _pause("download")
+        stop = threading.Event()
+        stop.set()
+        engine_update._watch_pip_progress(tag, progress_file, stop)
+        _pause("venv")
+        engine_update._emit_progress(tag, "done", detail="x")
+        _pause("done")
+        raise RuntimeError("stop before update-apply is spawned")
+
+    def _apply_at(name: str) -> dict:
+        reached, go = gates[name]
+        check(f"the fake staging reached {name}", reached.wait(10.0))
+        body = client.get("/api/update/status").json()["apply"]
+        go.set()
+        return body
+
+    saved = dict(api._apply_progress)
+    saved_touched_at = api._apply_progress_touched_at
+    client = TestClient(api.app)
+    try:
+        with patch.object(engine_update, "stage_release", _fake_stage):
+            runner = threading.Thread(target=api._run_staged_apply, args=("v9.9.8",), daemon=True)
+            runner.start()
+            download = _apply_at("download")
+            venv = _apply_at("venv")
+            done = _apply_at("done")
+            runner.join(timeout=10.0)
+        check("download: bytes with a total",
+              download.get("progress") == {"current": 5_000, "total": 20_000, "unit": "bytes"},
+              detail=str(download))
+        check("venv: packages with no total, detail unchanged",
+              venv.get("progress") == {"current": 12, "total": None, "unit": "packages"}
+              and venv.get("detail") == engine_update._pip_progress_detail({"phase": "collecting", "count": 12}),
+              detail=str(venv))
+        check("done: progress is null", "progress" in done and done["progress"] is None, detail=str(done))
+        final = client.get("/api/update/status").json()["apply"]
+        check("a failed stage reports progress null", final.get("state") == "failed"
+              and "progress" in final and final["progress"] is None, detail=str(final))
     finally:
         api._apply_progress.clear()
         api._apply_progress.update(saved)
@@ -867,7 +1033,7 @@ def test_stage_release_real_pipeline(work: Path) -> None:
         with patch.object(config, "VERSIONS_DIR", versions_dir), \
              patch.object(config, "STATE_DIR", state_dir), \
              patch.object(engine_update, "_emit_progress",
-                          lambda t, step, detail=None, error=None:
+                          lambda t, step, detail=None, error=None, **_:
                               progress.append({"tag": t, "step": step,
                                                 "detail": detail, "error": error})):
             final_dir = engine_update.stage_release(tag, tarball_url=url, build_timeout=1800)
@@ -960,11 +1126,11 @@ exec env PYTHONPATH="$CURRENT_DIR" MNEMO_HOME="$HOME_DIR" \\
             # lines; _watch_pip_progress now relays those as extra "venv"
             # progress events while the build call blocks, so this can no
             # longer assert an exact single "venv" in the middle.
+            # MN-59 adds throttled byte events to "download" the same way.
             steps = [p["step"] for p in progress]
-            check("progress went download -> venv(*) -> done",
-                  steps[0] == "download" and steps[-1] == "done"
-                  and all(s == "venv" for s in steps[1:-1]),
-                  detail=str(steps))
+            collapsed = [s for i, s in enumerate(steps) if i == 0 or s != steps[i - 1]]
+            check("progress went download(*) -> venv(*) -> done",
+                  collapsed == ["download", "venv", "done"], detail=str(steps))
 
             # Re-staging the SAME tag must be idempotent (fresh build, old
             # one replaced) -- exercises stage_release's "stale final_dir"
@@ -1000,7 +1166,7 @@ def test_stage_release_failure_leaves_nothing_behind(work: Path) -> None:
     with patch.object(config, "VERSIONS_DIR", versions_dir), \
          patch.object(config, "STATE_DIR", state_dir), \
          patch.object(engine_update, "_emit_progress",
-                      lambda t, step, detail=None, error=None:
+                      lambda t, step, detail=None, error=None, **_:
                           progress.append({"step": step, "error": error})):
         try:
             engine_update.stage_release(
@@ -1146,7 +1312,7 @@ def test_stage_release_raises_before_download_when_disk_full(work: Path) -> None
          patch.object(config, "STATE_DIR", state_dir), \
          patch.object(shutil, "disk_usage", return_value=_FakeDiskUsage(0)), \
          patch.object(engine_update, "_emit_progress",
-                      lambda t, step, detail=None, error=None:
+                      lambda t, step, detail=None, error=None, **_:
                           progress.append({"step": step, "error": error})), \
          patch.object(engine_update, "_download") as download_spy:
         try:
@@ -1255,6 +1421,8 @@ def main() -> int:
         test_safe_members_rejects_path_traversal(work)
         test_watch_pip_progress(work)
         test_cyrillic_progress_detail_reaches_update_status_intact(work)
+        test_byte_progress_is_throttled(work)
+        test_progress_field_on_update_status(work)
         test_check_disk_space_arithmetic(work)
         test_check_disk_space_target_and_version_size_overrides(work)
         test_cmd_warmup_refuses_to_download_when_disk_full(work)

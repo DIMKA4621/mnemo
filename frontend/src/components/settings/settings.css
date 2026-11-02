@@ -298,7 +298,13 @@
 .upd-countdown { font-family: var(--mono); color: var(--accent); }
 
 .upd-steps { display: flex; flex-direction: column; gap: 10px; margin-top: 4px; }
-.upd-step { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--fg-dim); }
+.upd-step { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--fg-dim); }
+.upd-step-head { display: flex; align-items: center; gap: 9px; }
+.upd-step-body { display: flex; flex-direction: column; gap: 1px; margin-left: 29px; font-weight: 400; }
+.upd-step-meta { font: 11px/1.4 var(--mono); color: var(--fg-mute); }
+.upd-step-note { font-size: 12px; line-height: 1.5; color: var(--fg-mute); }
+.upd-step-progress { margin: 4px 0; }
+.upd-step.is-done .upd-step-meta { color: var(--success-fg); }
 .upd-step.is-active { color: var(--fg); font-weight: 600; }
 .upd-step.is-done { color: var(--success-fg); }
 .upd-step-mark {
@@ -315,10 +321,57 @@
 .upd-step.is-active .upd-step-mark { border-color: var(--accent); color: var(--accent); }
 .upd-step.is-done .upd-step-mark { border-color: var(--success-border); background: var(--success-bg); color: var(--success-fg); }
 
+/* Indeterminate bar — antd's Progress has none. The segment is 35% of the
+   track and travels from fully off the left edge to fully off the right one:
+   translateX is relative to its own width, so 100% / 35% = 286%. */
+.upd-sweep { position: relative; height: 4px; margin: 4px 0; }
+.upd-sweep-track {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--line);
+}
+.upd-sweep-seg {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  width: 35%;
+  border-radius: 999px;
+  background: var(--accent);
+  animation: upd-sweep 1.2s cubic-bezier(.45, 0, .55, 1) infinite;
+}
+@keyframes upd-sweep {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(286%); }
+}
+
+/* A new package count: a flash over the whole bar and the counter, replayed
+   by remounting just these two (keyed on the count). */
+.upd-sweep-flash {
+  position: absolute;
+  inset: 0;
+  border-radius: 999px;
+  background: var(--accent);
+  opacity: 0;
+  pointer-events: none;
+  animation: upd-sweep-flash 420ms ease-out;
+}
+@keyframes upd-sweep-flash {
+  0% { opacity: .55; transform: scaleY(2); }
+  100% { opacity: 0; transform: scaleY(1); }
+}
+.upd-step-meta.upd-bump { animation: upd-meta-flash 420ms ease-out; }
+@keyframes upd-meta-flash { 0%, 30% { color: var(--accent); } 100% { color: var(--fg-mute); } }
+
 /* antd's `active` sweep is a `::after` on the track, which neither a token
    nor the `styles` slot reaches, and its own selector outranks this one. */
 @media (prefers-reduced-motion: reduce) {
   .upd-progress-track::after { animation: none !important; }
+  .upd-sweep-seg { animation: none; width: 40%; }
+  .upd-sweep-flash,
+  .upd-step-meta.upd-bump { animation: none; }
 }
 
 .upd-note { margin: 6px 0 0; color: var(--fg-mute); font-size: 12px; line-height: 1.5; }

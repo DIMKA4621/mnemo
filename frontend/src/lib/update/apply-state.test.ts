@@ -156,3 +156,31 @@ describe("staleTargetRetryTag", () => {
     expect(staleTargetRetryTag(undefined, "v3.4.0")).toBeNull();
   });
 });
+
+describe("applyProgressEvent progress", () => {
+  const download = { current: 5, total: 23, unit: "bytes" as const };
+  const running: UpdateApplyState = {
+    state: "staging", tag: "v3.4.1", step: "download", detail: null, error: null,
+    started_at: null, finished_at: null, progress: download,
+  };
+
+  it("takes the event's count, including an explicit null", () => {
+    const next = { current: 12, total: 23, unit: "bytes" as const };
+    expect(applyProgressEvent(running, { step: "download", progress: next }).progress).toEqual(next);
+    expect(applyProgressEvent(running, { step: "download", progress: null }).progress).toBeNull();
+  });
+
+  it("keeps the count when an event without the field stays on the same step", () => {
+    expect(applyProgressEvent(running, { step: "download" }).progress).toEqual(download);
+  });
+
+  it("drops it when the step moves on without a count", () => {
+    expect(applyProgressEvent(running, { step: "venv" }).progress).toBeNull();
+    expect(applyProgressEvent(running, { step: "done" }).progress).toBeNull();
+  });
+
+  it("never carries a finished record's count into a new one", () => {
+    const finished = { ...previousFailure, progress: { current: 64, total: null, unit: "packages" as const } };
+    expect(applyProgressEvent(finished, { step: "download" }).progress).toBeNull();
+  });
+});

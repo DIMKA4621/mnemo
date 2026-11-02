@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { UpdateApplyState } from "../api/settings";
+import { noteStepProgress, type StepProgress } from "../update/step-progress";
 
 /** `'idle'` (not shown) | manual: `'confirm'` -> `'progress'` -> `'terminal'`
  *  | auto: `'auto-pending'` -> `'progress'` -> `'terminal'` | `'timeout'` is
@@ -25,11 +26,16 @@ interface UpdateModalState {
   // The release a `stale_target` rejection turned up, noted on the confirm
   // screen it returned to. Gone with any other phase.
   newerTag: string | null;
+  // The last count each staging step reported this attempt, so a finished
+  // step can still show what it did. Gone with the idle phase.
+  stepProgress: StepProgress;
   setPhase: (phase: UpdateModalPhase) => void;
   setEverSwitching: (v: boolean) => void;
   setAutoPendingError: (msg: string | null) => void;
   setSupersededApply: (apply: UpdateApplyState | null) => void;
   setNewerTag: (tag: string | null) => void;
+  noteProgress: (apply: UpdateApplyState | null | undefined) => void;
+  resetStepProgress: () => void;
 }
 
 /**
@@ -48,10 +54,24 @@ export const useUpdateModalStore = create<UpdateModalState>((set) => ({
   autoPendingError: null,
   supersededApply: null,
   newerTag: null,
+  stepProgress: {},
 
-  setPhase: (phase) => set(phase === "confirm" ? { phase } : { phase, newerTag: null }),
+  setPhase: (phase) =>
+    set(
+      phase === "confirm"
+        ? { phase }
+        : phase === "idle"
+          ? { phase, newerTag: null, stepProgress: {} }
+          : { phase, newerTag: null },
+    ),
   setEverSwitching: (v) => set({ everSwitching: v }),
   setAutoPendingError: (msg) => set({ autoPendingError: msg }),
   setSupersededApply: (apply) => set({ supersededApply: apply }),
   setNewerTag: (tag) => set({ newerTag: tag }),
+  noteProgress: (apply) =>
+    set((s) => {
+      const next = noteStepProgress(s.stepProgress, apply);
+      return next === s.stepProgress ? s : { stepProgress: next };
+    }),
+  resetStepProgress: () => set({ stepProgress: {} }),
 }));

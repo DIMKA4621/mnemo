@@ -824,7 +824,10 @@
     },
     "progress": {
       "title": "Updating to {tag}…",
-      "switchingNote": "The service is restarting — the page will lose its connection for a few seconds. This is expected: the result becomes known as soon as the connection recovers."
+      "switchingNote": "The service is restarting — the page will lose its connection for a few seconds. This is expected: the result becomes known as soon as the connection recovers.",
+      "size": "{size} MB",
+      "sizeOfTotal": "{current} / {total} MB",
+      "packages": "{n, plural, one {~# package} other {~# packages}}"
     },
     "timeout": {
       "text": "Couldn''t learn the update''s outcome within the allotted time. The service may still be restarting, or the console can''t reach it right now. Check manually (mnemo doctor) or try again.",
