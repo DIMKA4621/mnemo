@@ -3501,6 +3501,7 @@ def api_autostart_set(payload: dict = Body(...)) -> dict:
 # is nothing here worth surviving a restart.
 _apply_progress: dict[str, Any] = {
     "state": "idle", "tag": None, "step": None, "detail": None, "error": None,
+    "progress": None,
     "started_at": None, "finished_at": None, "trigger": None,
 }
 # Wall-clock time of the last _apply_progress mutation — see _apply_view's
@@ -3732,11 +3733,12 @@ def _run_staged_apply(tag: str, *, trigger: str = "manual") -> None:
         _touch_apply_progress(
             step=payload.get("step"),
             detail=payload.get("detail"),
+            progress=payload.get("progress"),
             error=payload.get("error") if payload.get("step") == "failed" else _apply_progress["error"],
         )
 
     _touch_apply_progress(
-        state="staging", tag=tag, step="download", error=None,
+        state="staging", tag=tag, step="download", detail=None, progress=None, error=None,
         started_at=_now_iso(), finished_at=None, trigger=trigger,
     )
     engine_update.add_progress_listener(_on_progress)
@@ -3744,13 +3746,13 @@ def _run_staged_apply(tag: str, *, trigger: str = "manual") -> None:
         engine_update.stage_release(tag)
     except Exception as exc:  # noqa: BLE001 - reported via _apply_progress, not raised into a void
         _touch_apply_progress(
-            state="failed", step="failed", error=str(exc), finished_at=_now_iso()
+            state="failed", step="failed", progress=None, error=str(exc), finished_at=_now_iso()
         )
         return
     finally:
         engine_update.remove_progress_listener(_on_progress)
 
-    _touch_apply_progress(state="switching", step=None, finished_at=None)
+    _touch_apply_progress(state="switching", step=None, progress=None, finished_at=None)
     engine_root = Path(__file__).resolve().parent.parent
     cmd = [service_ctl.windowless_python(), "-m", "src.cli", "update-apply"]
     engine_update.set_pending_trigger(tag, trigger)
@@ -3806,13 +3808,15 @@ def _apply_view(state: dict) -> dict:
             }
             return {
                 "state": result_to_state.get(last_apply.get("result"), "failed"),
-                "tag": disk_tag, "step": None, "detail": None, "error": last_apply.get("error"),
+                "tag": disk_tag, "step": None, "detail": None, "progress": None,
+                "error": last_apply.get("error"),
                 "started_at": last_apply.get("started_at"),
                 "finished_at": last_apply.get("finished_at"),
                 "trigger": last_apply.get("trigger"),
             }
         return {
-            "state": "switching", "tag": disk_tag, "step": None, "detail": None, "error": None,
+            "state": "switching", "tag": disk_tag, "step": None, "detail": None, "progress": None,
+            "error": None,
             "started_at": last_apply.get("started_at"), "finished_at": None,
             "trigger": last_apply.get("trigger"),
         }

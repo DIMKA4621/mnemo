@@ -1601,7 +1601,7 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 | `bank_status` | стан банку змінився | `{"bank": BankInfo}` |
 | `query` | виконано пошук (жива стрічка журналу) | `{"face","query","status","n_hits","took_ms"}` |
 | `ping` | кожні 30 с | `{}` |
-| `update_progress` | під час стейджингу самооновлення (9.9) | `{"step","tag","detail","error"}` — `bank_id: null`, як і решта подій рівня сервісу **[NEW]** |
+| `update_progress` | під час стейджингу самооновлення (9.9) | `{"step","tag","detail","error","progress"}` — `bank_id: null`, як і решта подій рівня сервісу **[NEW]**; `progress` — адитивне поле (MN-59), див. 9.9 |
 
 Клієнт → сервер: тільки `{"type":"subscribe","bank_id":"…"|null}` і `{"type":"pong"}`.
 Будь-що інше ігнорується.
@@ -1695,7 +1695,8 @@ JSON тут не «структурує відповідь по-своєму», 
 {"current": {"tag": "v3.1.0", "installed_at": "…", "commit": null},
  "latest_known": {"tag": "v3.2.0", "checked_at": "…", "update_available": true},
  "check": {"in_progress": false, "error": null},
- "apply": {"state": "idle", "tag": null, "step": null, "error": null,
+ "apply": {"state": "idle", "tag": null, "step": null, "detail": null,
+           "progress": null, "error": null,
            "started_at": null, "finished_at": null},
  "history": [ /* engine_version.json's installed[] */ ],
  "retention": {"keep": 3}}
@@ -1721,10 +1722,21 @@ Guards: `stale_target` (409) — `tag` не збігається з поточн
 **WS `update_progress`** (конверт 9.7, `bank_id: null`), лише під час стейджингу — до передачі detached `update-apply`:
 
 ```json
-{"step": "download", "tag": "v3.2.0", "detail": "https://codeload…", "error": null}
+{"step": "download", "tag": "v3.2.0", "detail": "https://codeload…", "error": null,
+ "progress": {"current": 4194304, "total": 24117248, "unit": "bytes"}}
 ```
 
 `step` — `download | venv | done | failed`.
+
+`progress` — `{"current": int, "total": int | null, "unit": "bytes" | "packages"} | null`, адитивне поле (MN-59); той самий обʼєкт дзеркалиться в `apply.progress` у `GET /api/update/status`:
+
+* `download` — завантажені байти архіву; `total` — `Content-Length`, або `null`, коли сервер його не надіслав (codeload часто віддає chunked).
+  Події тротляться: щонайменше 0,25 с між подіями або кожен 1 % відомого `total`, плюс завжди фінальна.
+  Перша подія кроку (до заголовків відповіді) — ще з `progress: null`.
+* `venv` — `current` = приблизна кількість побачених `Collecting` з heartbeat-а `install.ps1` (та сама, що в `detail`), `total` завжди `null`, `unit: "packages"` — точного «N з M» pip не дає.
+* `done`, `failed` і перша подія `venv` — `progress: null`; `apply.progress` теж `null` поза `staging` (`switching`, термінальні стани, значення з диска).
+  Останній прогрес завершеного кроку окремо не зберігається: `apply` — один запис про поточний крок, тож підсумок на кшталт «✓ 23 MB» клієнт бере з останньої побаченої події цього кроку.
+
 Сам момент switch не породжує подій цим каналом узагалі: WS обслуговує той самий процес, який зупиняється в цю мить, тож обрив зʼєднання рівно тут — задокументована точка (design §13 #33), яку клієнт має трактувати як «ще працює», а не як помилку, і чекати фінальний стан через реконект + поллінг `GET /api/update/status`.
 
 ---

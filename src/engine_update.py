@@ -38,6 +38,7 @@ import subprocess
 import sys
 import tarfile
 import threading
+import time
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -738,10 +739,15 @@ def remove_progress_listener(fn: Callable[[dict[str, Any]], None]) -> None:
 
 
 def _emit_progress(
-    tag: str, step: str, *, detail: str | None = None, error: str | None = None
+    tag: str,
+    step: str,
+    *,
+    detail: str | None = None,
+    error: str | None = None,
+    progress: dict[str, Any] | None = None,
 ) -> None:
     """Broadcast an ``update_progress`` event over the existing WS Hub
-    (contracts §9.7): ``{"step","tag","detail","error"}``, ``bank_id=None``
+    (contracts §9.7): ``{"step","tag","detail","error","progress"}``, ``bank_id=None``
     (a machine-level event, same convention every other service-wide event
     in ``api.py`` already uses) — and hand the same payload to every
     in-process listener registered via :func:`add_progress_listener`.
@@ -755,7 +761,7 @@ def _emit_progress(
     broadcast to — swallowed, the same as every other best-effort
     ``hub.publish`` call already is in ``api.py`` itself.
     """
-    payload = {"step": step, "tag": tag, "detail": detail, "error": error}
+    payload = {"step": step, "tag": tag, "detail": detail, "error": error, "progress": progress}
     with suppress(Exception):
         from . import api  # noqa: PLC0415
 
@@ -878,7 +884,49 @@ def _tarball_url(tag: str) -> str:
     return f"https://codeload.github.com/{config.GITHUB_REPO}/tar.gz/refs/tags/{tag}"
 
 
-def _download(url: str, dest: Path, *, timeout: float | None = None) -> None:
+class _ByteProgress:
+    """Throttles download byte counts into ``download`` progress events:
+    at most one per ``interval`` seconds, or one per 1% of a known total,
+    plus always the final count."""
+
+    def __init__(
+        self, tag: str, detail: str, *, interval: float = 0.25,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._tag = tag
+        self._detail = detail
+        self._interval = interval
+        self._clock = clock
+        self._last_at: float | None = None
+        self._last_bytes = 0
+
+    def update(self, current: int, total: int | None) -> None:
+        now = self._clock()
+        due = self._last_at is None or now - self._last_at >= self._interval
+        if total and current - self._last_bytes >= total / 100:
+            due = True
+        if due:
+            self._send(current, total, now)
+
+    def finish(self, current: int, total: int | None) -> None:
+        self._send(current, total, self._clock())
+
+    def _send(self, current: int, total: int | None, now: float) -> None:
+        self._last_at = now
+        self._last_bytes = current
+        _emit_progress(
+            self._tag, "download", detail=self._detail,
+            progress={"current": current, "total": total, "unit": "bytes"},
+        )
+
+
+def _download(
+    url: str,
+    dest: Path,
+    *,
+    timeout: float | None = None,
+    progress: _ByteProgress | None = None,
+) -> None:
     import httpx
 
     dest.parent.mkdir(parents=True, exist_ok=True)
@@ -886,9 +934,19 @@ def _download(url: str, dest: Path, *, timeout: float | None = None) -> None:
         "GET", url, follow_redirects=True, timeout=timeout or 60.0
     ) as resp:
         resp.raise_for_status()
+        # Content-Length counts wire bytes, so compare it with
+        # num_bytes_downloaded, not with the (possibly decoded) chunk sizes.
+        length = resp.headers.get("content-length")
+        total = int(length) if length and length.isdigit() else None
+        if progress is not None:
+            progress.update(0, total)
         with open(dest, "wb") as fh:
             for chunk in resp.iter_bytes():
                 fh.write(chunk)
+                if progress is not None:
+                    progress.update(resp.num_bytes_downloaded, total)
+        if progress is not None:
+            progress.finish(resp.num_bytes_downloaded, total)
 
 
 def _safe_members(tar: tarfile.TarFile, dest: Path) -> list[tarfile.TarInfo]:
@@ -1252,10 +1310,19 @@ def _watch_pip_progress(tag: str, progress_file: Path, stop_event: threading.Eve
                 status = json.loads(raw)
             except ValueError:
                 status = None
+            if not isinstance(status, dict):
+                status = None
             if status is not None:
                 detail = _pip_progress_detail(status)
+                try:
+                    count = int(status.get("count") or 0)
+                except (TypeError, ValueError):
+                    detail = None
                 if detail:
-                    _emit_progress(tag, "venv", detail=detail)
+                    _emit_progress(
+                        tag, "venv", detail=detail,
+                        progress={"current": count, "total": None, "unit": "packages"},
+                    )
         if stopped:
             return
 
@@ -1315,9 +1382,10 @@ def stage_release(
     alike ("не лишити напіврозпаковану теку").
 
     Emits ``update_progress`` (§9.7) at each step: ``download``, ``venv``,
-    then ``done`` or ``failed`` — plus zero or more extra ``venv`` events
-    with an approximate ``detail`` while pip install runs (see
-    :func:`_watch_pip_progress`). Raises on any failure — the caller (the
+    then ``done`` or ``failed`` — plus throttled ``download`` events with
+    byte ``progress`` (:class:`_ByteProgress`) and extra ``venv`` events
+    with an approximate ``detail`` and package ``progress`` while pip
+    install runs (see :func:`_watch_pip_progress`). Raises on any failure — the caller (the
     apply handler) decides what a failed stage means for the running
     service; this function's only side effect on failure is that nothing
     usable exists under ``versions/<tag>/`` (no ``VERSION`` marker, and the
@@ -1341,7 +1409,7 @@ def stage_release(
         python = _build_interpreter()
 
         _emit_progress(tag, "download", detail=url)
-        _download(url, archive, timeout=download_timeout)
+        _download(url, archive, timeout=download_timeout, progress=_ByteProgress(tag, url))
 
         repo_root = _extract_tarball(archive, extract_dir)
 

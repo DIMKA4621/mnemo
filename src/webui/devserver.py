@@ -702,8 +702,8 @@ _UPDATE_STATE: dict[str, Any] = {
     "update_available": True,
     "check_error": None,
     "apply": {
-        "state": "idle", "tag": None, "step": None, "error": None,
-        "started_at": None, "finished_at": None,
+        "state": "idle", "tag": None, "step": None, "detail": None, "progress": None,
+        "error": None, "started_at": None, "finished_at": None,
     },
     "history": [
         {"tag": "v3.1.0", "installed_at": "2026-08-15T10:00:00+03:00",
@@ -815,8 +815,8 @@ def _settle_auto_pending(tag: str) -> None:
         _AUTO_STATE["pending"] = None
         _AUTO_STATE["timer"] = None
         _UPDATE_STATE["apply"] = {
-            "state": "staging", "tag": tag, "step": "download", "error": None,
-            "started_at": now_iso(), "finished_at": None,
+            "state": "staging", "tag": tag, "step": "download", "detail": None,
+            "progress": None, "error": None, "started_at": now_iso(), "finished_at": None,
         }
     if timer is not None:
         timer.cancel()
@@ -867,21 +867,48 @@ def _force_disconnect_all() -> None:
             pass
 
 
+def _emit_update_progress(tag: str, step: str, detail: str | None, progress: dict | None) -> None:
+    """One `update_progress` event, mirrored into `apply` the way
+    `api._run_staged_apply`'s listener does it."""
+    with _UPDATE_LOCK:
+        _UPDATE_STATE["apply"].update({"step": step, "detail": detail, "progress": progress})
+    broadcast("update_progress", None,
+              {"step": step, "tag": tag, "detail": detail, "error": None, "progress": progress})
+
+
 def simulate_update_apply(tag: str) -> None:
     """Fixture body for `POST /api/update/apply`'s background thread —
     mirrors `_run_staged_apply` (staging: download/venv/done over WS) plus
     `update-apply`'s stop/switch/start/health window (simulated by severing
     every socket, then sleeping), never a real download, venv build or
     process restart."""
-    broadcast("update_progress", None, {"step": "download", "tag": tag, "detail": None, "error": None})
-    time.sleep(1.5)
-    broadcast("update_progress", None, {"step": "venv", "tag": tag, "detail": None, "error": None})
-    time.sleep(1.5)
-    broadcast("update_progress", None, {"step": "done", "tag": tag, "detail": None, "error": None})
+    url = f"https://codeload.github.com/DIMKA4621/mnemo/tar.gz/refs/tags/{tag}"
+    total = 23 * 1024 * 1024
+    _emit_update_progress(tag, "download", url, {"current": 0, "total": total, "unit": "bytes"})
+    for i in range(1, 17):
+        time.sleep(0.25)
+        current = total * i // 16
+        _emit_update_progress(tag, "download", url, {"current": current, "total": total, "unit": "bytes"})
+
+    _emit_update_progress(tag, "venv", None, None)
+    count = 0
+    steps = zip((0.6, 0.1, 0.1, 0.4, 0.05, 0.05, 0.3, 0.9, 0.1, 0.2, 0.05, 0.6, 0.15, 0.3, 0.1, 0.5),
+                (1, 3, 2, 5, 4, 1, 6, 3, 8, 2, 5, 4, 7, 3, 6, 4))
+    for gap, seen in steps:
+        time.sleep(gap)
+        count += seen
+        _emit_update_progress(tag, "venv", f"встановлення пакетів… (побачено ~{count})",
+                              {"current": count, "total": None, "unit": "packages"})
+    time.sleep(0.5)
+    _emit_update_progress(tag, "venv", "завершення встановлення пакетів…",
+                          {"current": count, "total": None, "unit": "packages"})
+    time.sleep(0.8)
+    _emit_update_progress(tag, "done", None, None)
 
     with _UPDATE_LOCK:
         _UPDATE_STATE["apply"]["state"] = "switching"
         _UPDATE_STATE["apply"]["step"] = None
+        _UPDATE_STATE["apply"]["progress"] = None
 
     _force_disconnect_all()
     time.sleep(2.5)  # simulated stop -> repoint junction -> start -> health
@@ -2186,6 +2213,21 @@ class Handler(BaseHTTPRequestHandler):
             self.json_out(200, out)
             return
 
+        # Dev-only: "publish" a release the way the real background checker
+        # sees one — `last_check` changes and nothing is broadcast, which is
+        # exactly how a console's cached status drifts (MN-58).
+        if parsed.path == "/api/__dev/release":
+            tag = str(body.get("tag") or "")
+            if not tag:
+                self.fail(400, "bad_request", "tag is required")
+                return
+            with _UPDATE_LOCK:
+                _UPDATE_STATE["latest_tag"] = tag
+                _UPDATE_STATE["update_available"] = tag != _UPDATE_STATE["current_tag"]
+                _UPDATE_STATE["checked_at"] = now_iso()
+            self.json_out(200, {"latest_tag": tag})
+            return
+
         if parsed.path == "/api/update/apply":
             tag = str(body.get("tag") or "")
             with _UPDATE_LOCK:
@@ -2201,8 +2243,8 @@ class Handler(BaseHTTPRequestHandler):
                               f"(tag {_UPDATE_STATE['apply'].get('tag')!r})")
                     return
                 _UPDATE_STATE["apply"] = {
-                    "state": "staging", "tag": tag, "step": "download", "error": None,
-                    "started_at": now_iso(), "finished_at": None,
+                    "state": "staging", "tag": tag, "step": "download", "detail": None,
+                    "progress": None, "error": None, "started_at": now_iso(), "finished_at": None,
                 }
             threading.Thread(target=simulate_update_apply, args=(tag,), daemon=True).start()
             self.json_out(202, {"accepted": True, "tag": tag})

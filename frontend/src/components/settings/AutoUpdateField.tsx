@@ -64,7 +64,10 @@ export function AutoUpdateField({ settings, want, onChoose, busy, saveResult }: 
     setCheckResult(null);
     try {
       const result = await checkMutation.mutateAsync();
-      await qc.fetchQuery({ queryKey: queryKeys.updateStatus.all, queryFn: getUpdateStatus });
+      // `staleTime: 0`: within the client's default window `fetchQuery` hands
+      // back the cached status, so the confirm dialog would offer the tag
+      // from before this check.
+      await qc.fetchQuery({ queryKey: queryKeys.updateStatus.all, queryFn: getUpdateStatus, staleTime: 0 });
       if (result.error) {
         setCheckError(result.error);
         return;

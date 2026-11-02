@@ -1,4 +1,4 @@
-import type { UpdateApplyState, UpdateStatusResult } from "../api/settings";
+import type { UpdateApplyState, UpdateProgress, UpdateStatusResult } from "../api/settings";
 
 /** How long auto-pending waits, after the countdown vanished with no sign of
  *  a new apply, before reading it as a cancellation rather than the gap
@@ -10,6 +10,7 @@ export interface UpdateProgressEvent {
   tag?: string;
   detail?: string | null;
   error?: string | null;
+  progress?: UpdateProgress | null;
 }
 
 export function isApplyBusy(apply: UpdateApplyState | null | undefined): boolean {
@@ -89,16 +90,32 @@ export function rejectedApply(tag: string, message: string): UpdateApplyState {
  *  outcome (timestamps, error) carries over into it. */
 export function applyProgressEvent(old: UpdateApplyState, event: UpdateProgressEvent): UpdateApplyState {
   const base = isApplyTerminal(old)
-    ? { ...old, started_at: null, finished_at: null, error: null }
+    ? { ...old, started_at: null, finished_at: null, error: null, progress: null }
     : old;
+  const step = event.step ?? base.step;
   return {
     ...base,
     tag: event.tag ?? base.tag,
-    step: event.step ?? base.step,
+    step,
     detail: event.detail ?? null,
     state: event.step === "failed" ? "failed" : event.step === "done" ? "switching" : "staging",
     error: event.step === "failed" ? (event.error ?? null) : base.error,
+    // An event without the field (an older backend) keeps the count only
+    // while the step it belongs to is still running.
+    progress: event.progress !== undefined ? event.progress : step === base.step ? (base.progress ?? null) : null,
   };
+}
+
+/** The release to offer again after a `stale_target` rejection, read from a
+ *  status fetched after it — `null` when there is nothing to update to any
+ *  more (applied elsewhere, or the check now says up to date), or when it is
+ *  the very tag the server just rejected. */
+export function staleTargetRetryTag(
+  status: Pick<UpdateStatusResult, "latest_known"> | undefined,
+  sentTag: string,
+): string | null {
+  const latest = status?.latest_known;
+  return latest?.tag && latest.update_available && latest.tag !== sentTag ? latest.tag : null;
 }
 
 export type AutoPendingNext = "stay" | "progress" | "terminal" | "idle";

@@ -243,6 +243,15 @@ export interface CleanOrphansResult {
   freed_bytes: number;
 }
 
+/** How far the current staging step is: bytes downloaded (`total` known
+ *  when the server sends a length) or packages pip has collected so far
+ *  (`total` always `null` — pip reports no denominator). */
+export interface UpdateProgress {
+  current: number;
+  total: number | null;
+  unit: "bytes" | "packages";
+}
+
 /** One `/api/update/*` apply cycle's state — `GET /api/update/status`'s
  *  `apply` block, and the same shape a `POST /api/update/apply` failure is
  *  synthesised into locally (see `UpdateModal`'s `confirmApply`). `trigger`
@@ -256,6 +265,8 @@ export interface UpdateApplyState {
   started_at: string | null;
   finished_at: string | null;
   trigger?: "manual" | "auto" | null;
+  /** Absent from a backend older than MN-59. */
+  progress?: UpdateProgress | null;
 }
 
 export interface AutoPendingInfo {

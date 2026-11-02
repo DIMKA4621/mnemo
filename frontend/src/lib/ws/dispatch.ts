@@ -249,6 +249,8 @@ const handlers: Record<string, Handler> = {
             }
           : old,
       );
+      // Armed by a check that just ran server-side: `latest_known` moved too.
+      void qc.invalidateQueries({ queryKey: queryKeys.updateStatus.all });
       // Never steals the screen from something already open — an apply
       // already running or a dialog the user opened outranks a countdown by
       // construction (the backend never arms one while an apply is mid-flight).
