@@ -12,10 +12,11 @@ interface BankListProps {
   selectedBankId: string | null;
   onSelect: (bankId: string) => void;
   onOpenToken: (bank: BankInfo) => void;
+  onOpenRename: (bank: BankInfo) => void;
   onOpenRemoval: (bank: BankInfo) => void;
 }
 
-export function BankList({ selectedBankId, onSelect, onOpenToken, onOpenRemoval }: BankListProps) {
+export function BankList({ selectedBankId, onSelect, onOpenToken, onOpenRename, onOpenRemoval }: BankListProps) {
   const t = useT();
   const banksQuery = useBankCards();
   const reindexMutation = useReindex();
@@ -90,6 +91,7 @@ export function BankList({ selectedBankId, onSelect, onOpenToken, onOpenRemoval 
           onSync={(b) => handleReindex(b, false)}
           onRebuild={(b) => handleReindex(b, true)}
           onOpenToken={onOpenToken}
+          onRename={onOpenRename}
           onSetState={handleSetState}
           onRemove={onOpenRemoval}
         />

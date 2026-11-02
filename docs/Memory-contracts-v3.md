@@ -1560,10 +1560,14 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 **`GET /api/doctor`**, **`POST /api/clean-orphans`** — structured report і явна cleanup-дія з §6.6.5.
 Обидва приватні, під сервісним токеном і `include_in_schema=False`; `GET` не видаляє, `POST` не приймає «all».
 
-**`GET /api/logs?kind=query&bank=<ref>&since=&until=&limit=200&offset=0`**
+**`GET /api/logs?kind=query&bank=<ref>&since=&until=&q=&limit=200&offset=0`**
 
 * `kind` — `query` | `index` (обовʼязково).
 * `since` / `until` — ISO-8601 або epoch-секунди.
+* `q` — фільтр підрядком (MN-54): для `kind=query` — за текстом запиту, для `kind=index` — за `path` (рядки без шляху, як-от `bulk`, тоді відпадають).
+  Без урахування регістру за Unicode (`str.casefold`, тож і кирилиця), обрізається від пробілів; порожній чи відсутній → без фільтра.
+  Текст буквальний: `%`, `_` і `\` нічого не означають.
+  Фільтр діє і на `events`, і на `total`, тож пагінація лишається узгодженою.
 * `bank` відсутній → **усі банки** (design §6 вимагає обидва режими).
 
 ```json

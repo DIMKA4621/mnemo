@@ -25,11 +25,12 @@ interface BankCardProps {
   onSync: (bank: BankInfo) => void;
   onRebuild: (bank: BankInfo) => void;
   onOpenToken: (bank: BankInfo) => void;
+  onRename: (bank: BankInfo) => void;
   onSetState: (bank: BankInfo, state: BankInfo["state"]) => void;
   onRemove: (bank: BankInfo) => void;
 }
 
-export function BankCard({ bank, selected, note, onSelect, onSync, onRebuild, onOpenToken, onSetState, onRemove }: BankCardProps) {
+export function BankCard({ bank, selected, note, onSelect, onSync, onRebuild, onOpenToken, onRename, onSetState, onRemove }: BankCardProps) {
   const t = useT();
   const state = bankState(bank);
   const classes = ["bank"];
@@ -70,6 +71,7 @@ export function BankCard({ bank, selected, note, onSelect, onSync, onRebuild, on
           onSync={onSync}
           onRebuild={onRebuild}
           onOpenToken={onOpenToken}
+          onRename={onRename}
           onSetState={onSetState}
           onRemove={onRemove}
         />

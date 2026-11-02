@@ -1,5 +1,7 @@
 "use client";
 
+import type { ReactNode } from "react";
+import { Typography } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { StatusBadge } from "@/components/common/StatusBadge";
 import { fmtDateTime } from "@/lib/memory/format";
@@ -21,17 +23,35 @@ function fmtWhen(iso: string): string {
   return d.toDateString() === new Date().toDateString() ? full.slice(11) : full;
 }
 
+/** Marks the first case-insensitive occurrence of `needle`. Skipped when
+ *  lowercasing changes the length (e.g. "İ"), since offsets would drift. */
+function markMatch(text: string, needle: string): ReactNode {
+  if (!needle) return text;
+  const lower = text.toLowerCase();
+  if (lower.length !== text.length) return text;
+  const at = lower.indexOf(needle.toLowerCase());
+  if (at < 0) return text;
+  return (
+    <>
+      {text.slice(0, at)}
+      <Typography.Text mark>{text.slice(at, at + needle.length)}</Typography.Text>
+      {text.slice(at + needle.length)}
+    </>
+  );
+}
+
 interface EventCardProps {
   kind: "query" | "index";
   event: QueryLogEvent | IndexLogEvent;
   bankName: string;
+  highlight: string;
   selected: boolean;
   onSelect: () => void;
 }
 
 /** One `.ev` card — a query or an index event read as its own two-line
  *  block, not a table row (ported layout, `page-journal.js`'s `evCard`). */
-export function EventCard({ kind, event, bankName, selected, onSelect }: EventCardProps) {
+export function EventCard({ kind, event, bankName, highlight, selected, onSelect }: EventCardProps) {
   const t = useT();
 
   let title: string;
@@ -60,7 +80,7 @@ export function EventCard({ kind, event, bankName, selected, onSelect }: EventCa
   return (
     <button type="button" className={`ev${selected ? " is-selected" : ""}`} onClick={onSelect}>
       <div className="ev-top">
-        <span className="ev-q">{title}</span>
+        <span className="ev-q">{markMatch(title, highlight)}</span>
         <span className="ev-n">
           {count} · {fmtDuration(t, event.took_ms)}
         </span>

@@ -1,27 +1,37 @@
 "use client";
 
-import { Button, Select } from "antd";
-import { ReloadOutlined } from "@ant-design/icons";
+import { Button, Input, Select } from "antd";
+import { ReloadOutlined, SearchOutlined } from "@ant-design/icons";
 import { useT } from "@/lib/i18n/hooks";
 import { useBanks } from "@/hooks/useMemoryQueries";
 
 export type JournalPeriod = "1h" | "24h" | "7d" | "30d" | "all";
 
 interface JournalFiltersProps {
+  kind: "query" | "index";
   bank: string;
   onBankChange: (bank: string) => void;
   period: JournalPeriod;
   onPeriodChange: (period: JournalPeriod) => void;
+  search: string;
+  onSearchChange: (search: string) => void;
   onRefresh: () => void;
   refreshing: boolean;
 }
 
-/** Bank filter matches by NAME, not id — `GET /api/logs`'s `bank` param
- *  resolves a name/id/path ref the same way every other bank-ref endpoint
- *  does (contract 6.4), and the vanilla console filtered by name for the
- *  same reason: `bank_id` on a log row is a stable hash, not something a
- *  person picks out of a dropdown. */
-export function JournalFilters({ bank, onBankChange, period, onPeriodChange, onRefresh, refreshing }: JournalFiltersProps) {
+/** The bank filter's value is the bank id (labelled by name), so a rename
+ *  keeps the selection; `GET /api/logs` resolves an id ref first (contract 6.4). */
+export function JournalFilters({
+  kind,
+  bank,
+  onBankChange,
+  period,
+  onPeriodChange,
+  search,
+  onSearchChange,
+  onRefresh,
+  refreshing,
+}: JournalFiltersProps) {
   const t = useT();
   const banksQuery = useBanks();
   const banks = banksQuery.data ?? [];
@@ -35,7 +45,7 @@ export function JournalFilters({ bank, onBankChange, period, onPeriodChange, onR
         onChange={onBankChange}
         options={[
           { value: "", label: t("journal.filter.allBanks") },
-          ...banks.map((b) => ({ value: b.name, label: b.name })),
+          ...banks.map((b) => ({ value: b.id, label: b.name })),
         ]}
         aria-label={t("journal.filter.bankLabel")}
       />
@@ -52,6 +62,18 @@ export function JournalFilters({ bank, onBankChange, period, onPeriodChange, onR
           { value: "all", label: t("journal.filter.periodAll") },
         ]}
         aria-label={t("journal.filter.periodLabel")}
+      />
+      <Input
+        size="small"
+        style={{ width: 220 }}
+        allowClear
+        prefix={<SearchOutlined />}
+        value={search}
+        onChange={(e) => onSearchChange(e.target.value)}
+        placeholder={t(kind === "query" ? "journal.filter.searchQuery" : "journal.filter.searchPath")}
+        aria-label={t(kind === "query" ? "journal.filter.searchQuery" : "journal.filter.searchPath")}
+        spellCheck={false}
+        autoComplete="off"
       />
       <Button
         size="small"

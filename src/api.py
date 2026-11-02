@@ -4052,6 +4052,7 @@ def api_logs(
     since: str | None = None,
     until: str | None = None,
     event_kind: str | None = None,
+    q: str | None = None,
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
@@ -4059,20 +4060,20 @@ def api_logs(
     t_since, t_until = _parse_time(since), _parse_time(until)
     if kind == "query":
         events = servicelog.read_queries(
-            bank_id=bank_id, since=t_since, until=t_until,
+            bank_id=bank_id, since=t_since, until=t_until, q=q,
             limit=limit, offset=offset,
         )
         total = servicelog.count(
-            "query", bank_id=bank_id, since=t_since, until=t_until
+            "query", bank_id=bank_id, since=t_since, until=t_until, q=q
         )
     else:
         events = servicelog.read_index(
             bank_id=bank_id, since=t_since, until=t_until, kind=event_kind,
-            limit=limit, offset=offset,
+            q=q, limit=limit, offset=offset,
         )
         total = servicelog.count(
             "index", bank_id=bank_id, since=t_since, until=t_until,
-            kind=event_kind,
+            kind=event_kind, q=q,
         )
     return {
         "kind": kind,
