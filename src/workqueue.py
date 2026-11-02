@@ -57,8 +57,8 @@ log = logging.getLogger("mnemo.queue")
 
 class Priority(IntEnum):
     HIGH = 0     # a single edit — jumps the queue and preempts bulk work
-    NORMAL = 1   # an explicit per-file reindex from the UI or CLI
-    LOW = 2      # bulk: a new bank, a full rebuild, startup reconcile
+    NORMAL = 1   # an explicit per-file reindex; a bulk/rebuild dispatch
+    LOW = 2      # the file tasks a bulk scan streams
 
 
 TaskKind = Literal["file", "bulk", "prune", "rebuild"]
@@ -181,6 +181,11 @@ _running: dict[str, "_Running"] = {}
 # reads `empty`/`ready` while a scan is discovering 500 changed files, which
 # is the single most visible moment to get wrong.
 _scanning: set[str] = set()
+# bank_id -> a rebuild that arrived while that bank's scan was walking.
+# Wiping under a live scan leaves the bank half empty (the scan diffs against
+# hashes read before the wipe), so the rebuild waits here and the scan thread
+# re-enqueues it as it exits — no polling, no worker spin.
+_parked: dict[str, Task] = {}
 # Banks being removed. `enqueue` refuses them and a running scan stops at its
 # next file, so a removal is not racing a scanner that refills the queue.
 _cancelled: set[str] = set()
@@ -266,12 +271,28 @@ def _emit_queue(force: bool = False) -> None:
 # --------------------------------------------------------------- inspect
 
 
+def _is_work(task: Task) -> bool:
+    """A waiting `bulk` is a hash check that usually finds nothing, so it is
+    not depth: counting it painted every watched bank as indexing (MN-31).
+    A `rebuild` wipes the index and is real work."""
+    return task.kind != "bulk"
+
+
 def depth(bank_id: str | None = None) -> int:
     """Tasks waiting. Running work is `busy`, not depth."""
     with _lock:
-        if bank_id is None:
-            return len(_waiting)
-        return sum(1 for t in _waiting.values() if t.bank_id == bank_id)
+        return sum(
+            1 for t in _waiting.values()
+            if _is_work(t) and (bank_id is None or t.bank_id == bank_id)
+        )
+
+
+def scan_pending(bank_id: str) -> bool:
+    """Is a `bulk` check for this bank waiting to be dispatched?"""
+    with _lock:
+        return any(
+            t.bank_id == bank_id and t.kind == "bulk" for t in _waiting.values()
+        )
 
 
 def pending_paths(bank_id: str) -> set[str]:
@@ -316,7 +337,8 @@ def snapshot() -> QueueSnapshot:
     with _lock:
         counts = {Priority.HIGH: 0, Priority.NORMAL: 0, Priority.LOW: 0}
         by_bank: dict[str, dict[str, Any]] = {}
-        for task in _waiting.values():
+        work = [t for t in _waiting.values() if _is_work(t)]
+        for task in work:
             counts[task.priority] = counts.get(task.priority, 0) + 1
             entry = by_bank.setdefault(
                 task.bank_id, {"depth": 0, "indexing": False}
@@ -332,7 +354,7 @@ def snapshot() -> QueueSnapshot:
             ] = True
         first = next(iter(_running.values()), None)
         return QueueSnapshot(
-            depth=len(_waiting),
+            depth=len(work),
             high=counts[Priority.HIGH],
             normal=counts[Priority.NORMAL],
             low=counts[Priority.LOW],
@@ -359,10 +381,25 @@ def _effective(priority: Priority) -> Priority:
 
 def enqueue(task: Task) -> str:
     """Queue a task. A `file`/`prune` task for a path already waiting is
-    deduplicated: same-or-lower priority is dropped, higher replaces it."""
+    deduplicated: same-or-lower priority is dropped, higher replaces it.
+    A bank holds at most one waiting `bulk`/`rebuild`: a rebuild absorbs a
+    waiting bulk, anything else returns the one already waiting."""
     with _cv:
         if task.bank_id in _cancelled:
             return task.id      # bank is being removed; queueing is pointless
+        if task.kind in ("bulk", "rebuild"):
+            pending = next(
+                (t for t in _waiting.values()
+                 if t.bank_id == task.bank_id and t.kind in ("bulk", "rebuild")),
+                None,
+            )
+            if pending is not None:
+                trigger = _merged_trigger(pending.trigger, task.trigger)
+                if pending.kind == "rebuild" or task.kind == "bulk":
+                    _waiting[pending.id] = replace(pending, trigger=trigger)
+                    return pending.id
+                del _waiting[pending.id]        # tombstone the absorbed bulk
+                task = replace(task, trigger=trigger)
         priority = _effective(task.priority)
         key = (task.bank_id, task.path) if task.path else None
         start_batch = task.start_batch
@@ -489,8 +526,11 @@ def enqueue_prune(
 def enqueue_bulk(
     bank_id: str, *, trigger: str = "api", rebuild: bool = False
 ) -> str:
+    # NORMAL, not LOW: dispatching a scan only starts its thread, and at LOW
+    # it waited behind another bank's whole first build (MN-31). The files
+    # the scan streams stay LOW.
     kind: TaskKind = "rebuild" if rebuild else "bulk"
-    return enqueue(_task(bank_id, kind, Priority.LOW, trigger))
+    return enqueue(_task(bank_id, kind, Priority.NORMAL, trigger))
 
 
 # ------------------------------------------------------------- execution
@@ -688,20 +728,35 @@ def _run_bulk(task: Task, bank: registry.Bank, *, rebuild: bool) -> None:
         )
     finally:
         conn.close()
-    if rebuild or stale:
-        conn, _provider = _open_for_rebuild(bank)   # wipe, THEN record meta
-        conn.close()
-
+    wipe = rebuild or stale
     with _lock:
-        if bank.id in _scanning:
-            # A scan is already walking this bank; a second one would only
-            # enqueue the same paths again.
+        in_flight = bank.id in _scanning
+        if in_flight and wipe:
+            prev = _parked.get(bank.id)
+            trigger = (task.trigger if prev is None
+                       else _merged_trigger(prev.trigger, task.trigger))
+            _parked[bank.id] = replace(prev or task, kind="rebuild",
+                                       trigger=trigger)
+        elif not in_flight:
+            _scanning.add(bank.id)      # reserved before the wipe, not after
+    if in_flight:
+        # A scan is already walking this bank: a second one would only
+        # enqueue the same paths again. A parked wipe reports nothing yet —
+        # it reports when it actually runs.
+        if not wipe:
             _emit("index_done", bank.id, task_id=task.id, kind=task.kind,
                   path=None, trigger=task.trigger, result="skipped",
                   files_indexed=0, chunks_indexed=0, files_pruned=0,
                   took_ms=0.0)
-            return
-        _scanning.add(bank.id)
+        return
+
+    if wipe:
+        try:
+            conn, _provider = _open_for_rebuild(bank)   # wipe, THEN record meta
+            conn.close()
+        except BaseException:
+            _release_scan(bank.id)
+            raise
 
     thread = threading.Thread(
         target=_scan_bank_streaming,
@@ -712,6 +767,16 @@ def _run_bulk(task: Task, bank: registry.Bank, *, rebuild: bool) -> None:
     with _lock:
         _scanners.append(thread)
     thread.start()
+
+
+def _release_scan(bank_id: str) -> None:
+    """End a bank's scan and queue the rebuild parked behind it, if any."""
+    with _lock:
+        _scanning.discard(bank_id)
+        parked = _parked.pop(bank_id, None)
+    if parked is not None and not _stop.is_set():
+        enqueue(replace(parked, id=""))
+    _emit_queue(force=True)
 
 
 def _scan_bank_streaming(task: Task, bank: registry.Bank) -> None:
@@ -748,7 +813,7 @@ def _scan_bank_streaming(task: Task, bank: registry.Bank) -> None:
         for rel in sorted(set(indexed) - seen):
             if bank.id in _cancelled:
                 return
-            enqueue_prune(bank.id, rel, priority=task.priority,
+            enqueue_prune(bank.id, rel, priority=Priority.LOW,
                           trigger=task.trigger)
             pruned += 1
     except Exception as exc:  # noqa: BLE001
@@ -758,9 +823,7 @@ def _scan_bank_streaming(task: Task, bank: registry.Bank) -> None:
               error=f"{type(exc).__name__}: {exc}")
         return
     finally:
-        with _lock:
-            _scanning.discard(bank.id)
-        _emit_queue(force=True)
+        _release_scan(bank.id)
 
     _emit("index_done", bank.id, task_id=task.id, kind=task.kind,
           path=None, trigger=task.trigger, result="ok",
@@ -794,6 +857,14 @@ def _run_prune(task: Task, bank: registry.Bank) -> None:
 # Triggers that mean "a person asked for this, now". Everything else
 # (`watcher`, `startup`) is the system deciding on its own.
 _EXPLICIT_TRIGGERS = frozenset({"api", "cli", "mcp", "ui"})
+
+
+def _merged_trigger(kept: str, incoming: str) -> str:
+    """An explicit request folded into a system-queued scan keeps its trigger,
+    or `_may_run` would skip it on a frozen bank."""
+    if incoming in _EXPLICIT_TRIGGERS and kept not in _EXPLICIT_TRIGGERS:
+        return incoming
+    return kept
 
 
 def _may_run(bank: registry.Bank, task: Task) -> bool:
@@ -903,6 +974,7 @@ def stop(timeout: float = 10.0) -> None:
         _scanners.clear()
         _running.clear()
         _scanning.clear()
+        _parked.clear()
         _cancelled.clear()
         _consecutive_high = 0
         _on_event = None
@@ -927,6 +999,7 @@ def drop_bank(bank_id: str, *, timeout: float = 15.0) -> bool:
     """
     with _cv:
         _cancelled.add(bank_id)
+        _parked.pop(bank_id, None)
         doomed = [t for t in _waiting.values() if t.bank_id == bank_id]
         for task in doomed:
             del _waiting[task.id]
