@@ -763,7 +763,8 @@
           "invalid_json": "The MCP config in this folder is not a readable JSON object. It was left untouched — fix it by hand first.",
           "tracked": "The file the service token would land in is tracked by git. Untrack it and add it to .gitignore first:",
           "index_unreadable": "The git index here cannot be read, so it is unknown whether the file is tracked — refused rather than guessed.",
-          "needs_migrate": "The mnemo-memory entry in .mcp.json is in an old format, so no template can be built from it. Run «mnemo init --migrate» in the project first, or choose the form with the token directly in .mcp.json."
+          "needs_migrate": "The mnemo-memory entry in .mcp.json is in an old format, so no template can be built from it. Run «mnemo init --migrate» in the project first, or choose the form with the token directly in .mcp.json.",
+          "env_conflict": ".mcp.env already has a token variable with a different value (or two mnemo entries need the same variable) — the template was not built, so no entry silently switches to another bank. Fix .mcp.env by hand, or choose the form with the token directly in .mcp.json."
         },
         "already": {
           "title": "mnemo-admin is already in {target}",

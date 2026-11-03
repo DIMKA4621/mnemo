@@ -232,7 +232,9 @@ Never run `git add` or `git commit` yourself.
   They copy their machine's token for that bank from the console (`mnemo ui`) into `.mcp.env` and re-run mcp-setup.
   Never paste a token into a git-tracked file to shortcut this.
 - **The project already has other MCP servers** — `init` carries them into the template rather than losing them, and names them when it does.
-  Their values are copied verbatim: if one of them is a secret, that is the user's call to move into `.mcp.env`, and worth pointing out.
+  Every mnemo entry among them (any key whose URL is a loopback `/mcp` or `/mcp-admin` with a literal token) gets its token moved to `.mcp.env` under the console's variable name (`mnemo-notes` → `MNEMO_NOTES_TOKEN`).
+  Everything else is copied verbatim: if one of them is a secret, that is the user's call to move into `.mcp.env`, and worth pointing out.
+  If `.mcp.env` already holds one of those variables with a different value, `init` refuses and writes nothing — resolve the variable by hand, never by pasting the token into the template.
 - **Agent deliberately on non-project memory** — still required to be `project` here; explain why (shared team memory) and apply with the diff.
 - **Foreign hooks / settings keys** — every merge is additive; never reorder or rewrite foreign entries.
 - **No `CLAUDE.md` and the user resists** — the team-lead `CLAUDE.md` is mandatory; without it the main session has no standing instruction to act as lead.

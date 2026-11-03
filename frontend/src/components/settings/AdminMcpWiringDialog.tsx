@@ -131,7 +131,7 @@ function errorText(err: unknown): string {
 
 /** Whether the other form would change the outcome — a missing folder or broken JSON stays refused either way. */
 function modeMatters(preview: AdminWiringPreview): boolean {
-  return preview.action === "create" || preview.action === "add" || preview.reason === "tracked" || preview.reason === "needs_migrate";
+  return preview.action === "create" || preview.action === "add" || preview.reason === "tracked" || preview.reason === "needs_migrate" || preview.reason === "env_conflict";
 }
 
 function FileTags({ files }: { files: string[] }) {

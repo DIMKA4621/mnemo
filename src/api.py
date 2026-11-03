@@ -1762,6 +1762,9 @@ _ADMIN_REFUSALS = {
                         "відстежується — відмовлено, а не вгадано",
     "needs_migrate": "запис памʼяті mnemo у .mcp.json має стару форму — "
                      "спершу `mnemo init --migrate`",
+    "env_conflict": "токен іншого запису mnemo мав би лягти в змінну "
+                    ".mcp.env, яка вже має інше значення — розвʼяжіть це "
+                    "вручну",
 }
 
 
@@ -1789,7 +1792,8 @@ def api_admin_mcp_wire(req: AdminMcpWiringRequest) -> dict:
         code = {"not_found": "root_not_found",
                 "not_a_directory": "root_not_found",
                 "invalid_json": "mcp_config_invalid",
-                "needs_migrate": "mcp_config_invalid"}.get(exc.reason,
+                "needs_migrate": "mcp_config_invalid",
+                "env_conflict": "mcp_config_invalid"}.get(exc.reason,
                                                           "mcp_file_tracked")
         raise ApiError(code, _ADMIN_REFUSALS[exc.reason], root=str(root),
                        preview=exc.preview) from exc

@@ -30,7 +30,8 @@ export type AdminWiringReason =
   | "invalid_json"
   | "tracked"
   | "index_unreadable"
-  | "needs_migrate";
+  | "needs_migrate"
+  | "env_conflict";
 
 /** `GET /api/admin-mcp/wiring` — what wiring would do in one folder; writes nothing. */
 export interface AdminWiringPreview {

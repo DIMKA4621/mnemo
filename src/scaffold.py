@@ -58,6 +58,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from . import config
 from .config import resolve
@@ -110,6 +111,13 @@ _VAR_INSTANCE = "mnemo"
 def _var_prefix(instance: str) -> str:
     """`mnemo` -> `MNEMO`; `mnemo-notes` -> `MNEMO_NOTES`."""
     return re.sub(r"[^A-Za-z0-9]+", "_", instance).strip("_").upper() or "MNEMO"
+
+
+def _token_var(instance: str) -> str:
+    """An entry's token variable, named as the console's `tokenVar` names it."""
+    if instance in (_INSTANCE, _LEGACY_INSTANCE):
+        return f"{_var_prefix(_VAR_INSTANCE)}_TOKEN"
+    return f"{_var_prefix(instance)}_TOKEN"
 
 
 def _api_port() -> str:
@@ -199,6 +207,42 @@ def _is_mnemo_http(entry: object) -> bool:
         and isinstance(entry.get("url"), str)
         and "/mcp" in entry["url"]
     )
+
+
+# mnemo only ever binds loopback (or the configured host), so a `/mcp` URL on
+# any other host is somebody else's server. On another loopback port only the
+# exact face paths count, and only the token is lifted -- path and address stay
+# as written, so a local tool that happens to share the shape still works.
+# The superseded `/mcp/<bank>` path is rewritten only on mnemo's own port:
+# elsewhere `/mcp/sse` is somebody else's route.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+_MNEMO_FACES = ("/mcp", "/mcp-admin")
+_SUPERSEDED_FACE = re.compile(r"/mcp/(?:[^/]+/?)?")
+
+
+def _mnemo_face_token(entry: object) -> tuple[SplitResult, str, str] | None:
+    """`(url parts, token, path to write)` for an entry pointing at a mnemo
+    face with a literal token in its URL — recognised by shape, never by key —
+    else None."""
+    if not _is_mnemo_http(entry):
+        return None
+    parts = urlsplit(entry["url"])
+    host = (parts.hostname or "").lower()
+    if (parts.scheme not in ("http", "https")
+            or host not in (*_LOOPBACK_HOSTS, _api_host().lower())):
+        return None
+    try:
+        own_port = parts.port == int(_api_port())
+    except ValueError:
+        return None
+    if parts.path in _MNEMO_FACES:
+        path = parts.path
+    elif own_port and _SUPERSEDED_FACE.fullmatch(parts.path):
+        path = "/mcp"
+    else:
+        return None
+    match = _TOKEN_IN_URL.search("?" + parts.query)
+    return (parts, match.group(1), path) if match else None
 
 
 # The two legacy generations `--migrate` must recognise (§15.2). L1 predates
@@ -520,6 +564,11 @@ class _Refuse(Exception):
     call for the adopt skill, not for this primitive."""
 
 
+class _EnvConflict(_Refuse):
+    """A token a template entry needs would contradict a value already owed
+    to, or present in, `.mcp.env`."""
+
+
 def _load_json(path: Path) -> dict:
     """Parse an existing JSON object. A present-but-broken or non-object
     file is a refusal, never something we silently clobber."""
@@ -746,7 +795,8 @@ def _env_comment(instance: str) -> str:
 
 def _plan_env(path: Path, log: list[str], label: str, prefix: str,
               values: dict[str, str], comment: str,
-              *, update: bool = True, migrate: bool = False) -> str | None:
+              *, update: bool = True, migrate: bool = False,
+              extra: dict[str, str] | None = None) -> str | None:
     """Set mnemo's own `NAME=value` lines in a `.env`-shaped file.
 
     Surgical in both directions: a variable that is already there has its
@@ -762,7 +812,8 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
     original = _read_text(path)
     eol = _newline(original)
     lines = original.splitlines()
-    wanted = {f"{prefix}_{k}": v for k, v in values.items()}
+    # `extra` is keyed by full variable name: other mnemo entries' tokens.
+    wanted = {f"{prefix}_{k}": v for k, v in values.items()} | (extra or {})
     # Variables mnemo used to write and no longer does — `MNEMO_BANK` today.
     # Pruned rather than left: nothing substitutes them any more, so what
     # stays behind is a value that looks authoritative and is read by nothing.
@@ -794,8 +845,7 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
         kept.append(line)
     lines = kept
 
-    missing = {k[len(prefix) + 1:]: v for k, v in wanted.items()
-               if k not in seen}
+    missing = [k for k in wanted if k not in seen]
     if missing:
         if lines and lines[-1].strip():
             lines.append("")
@@ -803,7 +853,7 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
         # a block joined with `\n` and dropped into a CRLF file would carry LF
         # inside itself and CRLF around it.
         lines.extend(comment.splitlines())
-        lines.extend(f"{prefix}_{k}={v}" for k, v in missing.items())
+        lines.extend(f"{k}={wanted[k]}" for k in missing)
 
     # Rejoined with the file's OWN line ending, not with `\n`: a `.mcp.env`
     # edited on Windows is CRLF, and converting it wholesale would turn a
@@ -1076,9 +1126,16 @@ def _sed_line(prefix: str, name: str) -> str:
     return f'  -e "s|{{{{{prefix}_{name}}}}}|${{{prefix}_{name}}}|g" \\'
 
 
-def _sed_lines(prefix: str) -> list[str]:
-    """The substitutions `mcp-setup.sh` needs, one per placeholder."""
-    return [_sed_line(prefix, name) for name in _ENV_VARS]
+def _sed_lines(prefix: str, extra: Iterable[str] = ()) -> list[str]:
+    """The substitutions `mcp-setup.sh` needs, one per placeholder; `extra`
+    are further full variable names (other mnemo entries' tokens)."""
+    return ([_sed_line(prefix, name) for name in _ENV_VARS]
+            + [_sed_var_line(var) for var in extra])
+
+
+def _sed_var_line(var: str) -> str:
+    """`_sed_line` for a full variable name (`MNEMO_NOTES_TOKEN`)."""
+    return _sed_line(*var.rsplit("_", 1))
 
 
 def _setup_state(path: Path, current: str) -> str:
@@ -1896,6 +1953,9 @@ class _Wiring:
         # project's current `.mcp.json`, so converting to the template layer
         # keeps every server it already had.
         self.template_base: dict | None = None
+        # `{variable: token}` lifted out of the other mnemo entries in that
+        # seed, owed to `.mcp.env` (`_placeholder_entries`).
+        self.template_secrets: dict[str, str] = {}
 
     def add(self, path: Path, text: str | None) -> None:
         if text is not None:
@@ -2025,8 +2085,12 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
             # not written here. Writing it would be overwritten moments later:
             # that merge reads the template off disk, finds nothing, and plans
             # a second write to the same path which wins by being last.
+            servers = doc["mcpServers"]
+            wiring.template_secrets = _placeholder_entries(
+                servers, proj / ".mcp.env", wiring.log)
             wiring.template_base = doc
-            carried = bool(doc["mcpServers"])
+            carried = [key for key, entry in servers.items()
+                       if not _is_ours_in_template(key, entry)]
 
     if carried:
         # Said, never guessed at. The template is the file that goes into git,
@@ -2034,13 +2098,81 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
         # a port is fine, an API key in the next entry is not, and both look
         # like strings. Moving them is a judgement only the owner can make.
         wiring.notes.append(
-            "the existing .mcp.json servers were carried into "
-            ".mcp.json.template, which IS tracked by git.\n"
-            "  mnemo's own entry uses placeholders; the others were copied "
+            f"the existing .mcp.json servers ({', '.join(carried)}) were "
+            "carried into .mcp.json.template, which IS tracked by git.\n"
+            "  mnemo's own entries use placeholders; these were copied "
             "verbatim.\n"
             "  If any of them holds a literal secret, move it to .mcp.env and "
             "leave a {{PLACEHOLDER}} behind."
         )
+
+
+def _is_ours_in_template(key: str, entry: object) -> bool:
+    """Whether a seeded entry reaches the template in placeholder form."""
+    if key in (_INSTANCE, _LEGACY_INSTANCE):
+        return _is_mnemo_http(entry) or _is_legacy_mcp(entry) is not None
+    url = entry.get("url") if isinstance(entry, dict) else None
+    return (isinstance(url, str) and "{{" in url
+            and urlsplit(url).path in _MNEMO_FACES)
+
+
+def _placeholder_entries(servers: dict, env: Path,
+                         log: list[str]) -> dict[str, str]:
+    """Lift the literal token out of every other mnemo entry in a seed.
+
+    Mutates `servers` in place and returns `{variable: token}` owed to
+    `.mcp.env`. `mnemo-memory` and the former `mnemo` key are skipped:
+    `_plan_servers` owns those. Host and port become the shared placeholders
+    only where they are the configured ones; anything else stays literal, so
+    the regenerated `.mcp.json` still points where it pointed. Raises
+    `_EnvConflict` rather than let two different tokens share one variable.
+    """
+    prefix = _var_prefix(_VAR_INSTANCE)
+    reserved = f"{prefix}_TOKEN"
+    present = _env_values(env)
+    here = f"{_api_host()}:{_api_port()}"
+    secrets: dict[str, str] = {}
+    for key, entry in servers.items():
+        if key in (_INSTANCE, _LEGACY_INSTANCE):
+            continue
+        found = _mnemo_face_token(entry)
+        if found is None:
+            continue
+        parts, token, path = found
+        var = _token_var(key)
+        if var == reserved:
+            raise _EnvConflict(
+                f"mcpServers.{key} would take {var}, which belongs to "
+                f"{_INSTANCE}; rename the entry and re-run (left untouched)")
+        if secrets.get(var, present.get(var, token)) != token:
+            raise _EnvConflict(
+                f"mcpServers.{key} needs {var}, which .mcp.env or another "
+                f"entry already sets to a different token; resolve it by "
+                f"hand and re-run (left untouched)")
+        secrets[var] = token
+        netloc = (f"{{{{{prefix}_HOST}}}}:{{{{{prefix}_PORT}}}}"
+                  if parts.netloc == here else parts.netloc)
+        query = re.sub(r"(^|&)token=[0-9a-fA-F]{32,}",
+                       lambda m: m.group(1) + "token={{" + var + "}}",
+                       parts.query)
+        entry["url"] = urlunsplit((parts.scheme, netloc, path, query,
+                                   parts.fragment))
+        moved = "" if parts.path == path else f", {parts.path} -> {path}"
+        log.append(f"  {'.mcp.json.template':<20} mcpServers.{key}: token "
+                   f"-> {{{{{var}}}}}{moved}")
+    return secrets
+
+
+def _env_values(path: Path) -> dict[str, str]:
+    """`NAME -> value` of a `.env`-shaped file, surrounding quotes dropped."""
+    values = {}
+    for line in _read_text(path).splitlines():
+        name, sep, value = line.partition("=")
+        if sep and not name.lstrip().startswith("#"):
+            values[name.strip()] = value.strip().strip("'\"")
+    return values
+
+
 def _plan_setup_scripts(proj: Path, wiring: _Wiring) -> None:
     """Write the two regeneration scripts, or refresh an older revision.
 
@@ -2135,6 +2267,7 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
         {"HOST": _api_host(), "PORT": _api_port(), "TOKEN": ""},
         _ENV_EXAMPLE_COMMENT.format(instance=_INSTANCE),
         update=False, migrate=migrate,
+        extra=dict.fromkeys(wiring.template_secrets, ""),
     ))
 
     # `.mcp.env` holds the real values and is git-ignored. It is now written
@@ -2155,9 +2288,11 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
         env, wiring.log, ".mcp.env", prefix,
         {"HOST": _api_host(), "PORT": _api_port(), "TOKEN": token},
         _env_comment(_INSTANCE), migrate=migrate,
+        extra=wiring.template_secrets,
     ))
 
     setup = proj / "mcp-setup.sh"
+    sed_lines = _sed_lines(prefix, wiring.template_secrets)
     if wiring.seeded_setup:
         pass                    # just written by `_bootstrap_layer`, and ours
     elif not setup.exists():
@@ -2165,7 +2300,7 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
             "there is a .mcp.json.template but no mcp-setup.sh, so nothing "
             "regenerates .mcp.json.\n"
             "  Add these lines to whatever does:\n"
-            + "\n".join(f"    {line}" for line in _sed_lines(prefix))
+            + "\n".join(f"    {line}" for line in sed_lines)
         )
     elif _SETUP_MARKER_ANY in _read_text(setup):
         # mnemo's own script, of ANY revision: it discovers its substitutions
@@ -2180,11 +2315,14 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
         )
     else:
         planned = _plan_setup_sh(setup, wiring.log, prefix, wiring.notes,
-                                 migrate=migrate)
+                                 migrate=migrate, lines_wanted=sed_lines)
         # `None` means either "already correct" or "no anchor to insert at",
-        # and only the second needs saying. The placeholder's presence is what
+        # and only the second needs saying. The placeholders' presence is what
         # separates them.
-        if planned is None and f"{{{{{prefix}_TOKEN}}}}" not in _read_text(setup):
+        script = _read_text(setup)
+        if planned is None and any(
+                "{{" + var + "}}" not in script
+                for var in (f"{prefix}_TOKEN", *wiring.template_secrets)):
             wiring.notes.append(
                 "mcp-setup.sh has no recognisable `sed … \"$TEMPLATE\"` "
                 "invocation, so it was left untouched.\n"
@@ -2192,7 +2330,7 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
                 "script still exits 0\n"
                 "  and writes a .mcp.json whose URL literally says "
                 "{{MNEMO_TOKEN}}, which never connects:\n"
-                + "\n".join(f"    {line}" for line in _sed_lines(prefix))
+                + "\n".join(f"    {line}" for line in sed_lines)
             )
         wiring.add(setup, planned)
 
@@ -2276,7 +2414,7 @@ _ADMIN_INSTANCE = "mnemo-admin"
 # `MNEMO_ADMIN_TOKEN` beside the shared `MNEMO_HOST`/`MNEMO_PORT`: the split a
 # second bank entry uses (see `_VAR_INSTANCE`), and the name the console's
 # `tokenVar("mnemo-admin")` derives.
-_ADMIN_VAR = f"{_var_prefix(_ADMIN_INSTANCE)}_TOKEN"
+_ADMIN_VAR = _token_var(_ADMIN_INSTANCE)
 _ADMIN_MODES = ("literal", "template")
 _ADMIN_ENV_EXAMPLE_COMMENT = (
     f"# {_ADMIN_INSTANCE} — the console (`mnemo ui`, Settings) shows the "
@@ -2351,11 +2489,6 @@ def _admin_entry(path: Path) -> object | None:
     return servers.get(_ADMIN_INSTANCE)
 
 
-def _env_keys(path: Path) -> set[str]:
-    return {line.partition("=")[0].strip()
-            for line in _read_text(path).splitlines() if "=" in line}
-
-
 def _merge_admin_entry(data: dict, entry: dict) -> str:
     servers = data.get("mcpServers") or {}
     servers[_ADMIN_INSTANCE] = entry
@@ -2399,6 +2532,10 @@ def _plan_admin_template(proj: Path, token: str) -> _Wiring:
         if memory_token:
             env_values["TOKEN"] = memory_token
             example_values["TOKEN"] = ""
+        if wiring.template_secrets.get(_ADMIN_VAR, token) != token:
+            raise _EnvConflict(f"the seed maps another token to {_ADMIN_VAR}")
+    secrets = {var: value for var, value in wiring.template_secrets.items()
+               if var != _ADMIN_VAR}
     _plan_setup_scripts(proj, wiring)
     wiring.add(template, _merge_admin_entry(data, _admin_server_template()))
     wiring.log.append(f"  {'.mcp.json.template':<20} "
@@ -2410,28 +2547,32 @@ def _plan_admin_template(proj: Path, token: str) -> _Wiring:
     example = proj / ".mcp.env.example"
     wiring.add(example, _plan_env(example, wiring.log, ".mcp.env.example",
                                   prefix, example_values,
-                                  _ADMIN_ENV_EXAMPLE_COMMENT, update=False))
+                                  _ADMIN_ENV_EXAMPLE_COMMENT, update=False,
+                                  extra=dict.fromkeys(secrets, "")))
     # Host and port only where missing: the project's memory entry shares
     # them and may deliberately point elsewhere. The tokens are set.
     env = proj / ".mcp.env"
-    present = _env_keys(env)
+    present = _env_values(env)
     shared = {name: value for name, value in (("HOST", _api_host()),
                                               ("PORT", _api_port()))
               if f"{prefix}_{name}" not in present}
     wiring.add(env, _plan_env(env, wiring.log, ".mcp.env", prefix,
                               {**shared, **env_values},
-                              _env_comment(_ADMIN_INSTANCE)))
+                              _env_comment(_ADMIN_INSTANCE), extra=secrets))
 
     setup = proj / "mcp-setup.sh"
     if setup.exists() and _SETUP_MARKER_ANY not in _read_text(setup):
+        sed_lines = _admin_sed_lines() + [_sed_var_line(v) for v in secrets]
         planned = _plan_setup_sh(setup, wiring.log, prefix, wiring.notes,
-                                 lines_wanted=_admin_sed_lines())
-        if planned is None and f"{{{{{_ADMIN_VAR}}}}}" not in _read_text(setup):
+                                 lines_wanted=sed_lines)
+        script = _read_text(setup)
+        if planned is None and any("{{" + var + "}}" not in script
+                                   for var in (_ADMIN_VAR, *secrets)):
             wiring.notes.append(
                 "mcp-setup.sh has no recognisable `sed ... \"$TEMPLATE\"` "
                 "invocation, so it was left untouched. Add these lines to "
                 "its sed call by hand:\n"
-                + "\n".join(f"    {line}" for line in _admin_sed_lines()))
+                + "\n".join(f"    {line}" for line in sed_lines))
         wiring.add(setup, planned)
     return wiring
 
@@ -2547,6 +2688,9 @@ def _admin_plan(proj: Path, token: str,
     try:
         wiring = (_plan_admin_template(proj, token) if mode == "template"
                   else _plan_admin_literal(proj, token))
+    except _EnvConflict:
+        out["reason"] = "env_conflict"
+        return out, None
     except _Refuse:
         # Only the seeded memory entry can still refuse here: a shape
         # `init` itself will rewrite only under `--migrate`.

@@ -2433,6 +2433,7 @@ class Handler(BaseHTTPRequestHandler):
                 "not_a_directory": ("root_not_found", 400),
                 "invalid_json": ("mcp_config_invalid", 409),
                 "needs_migrate": ("mcp_config_invalid", 409),
+                "env_conflict": ("mcp_config_invalid", 409),
             }.get(preview["reason"], ("mcp_file_tracked", 409))
             self.fail(status, code, f"refused (fixture): {preview['reason']}",
                       {"root": root, "preview": preview})
