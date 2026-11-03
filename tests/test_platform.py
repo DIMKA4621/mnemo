@@ -1191,13 +1191,13 @@ def test_removal_lifts_the_queue_cancellation() -> None:
 
     workqueue.resume_bank(bank_id)          # start from a known state
     workqueue.enqueue(bulk())
-    check("a live bank accepts work", workqueue.depth(bank_id) > 0)
+    check("a live bank accepts work", workqueue.scan_pending(bank_id))
     workqueue.clear()
 
     workqueue.drop_bank(bank_id)
     workqueue.enqueue(bulk())
     check("a cancelled bank silently drops work",
-          workqueue.depth(bank_id) == 0)
+          not workqueue.scan_pending(bank_id))
     check("...which is exactly why it must be lifted",
           workqueue.is_cancelled(bank_id))
 
@@ -1207,7 +1207,7 @@ def test_removal_lifts_the_queue_cancellation() -> None:
     check("resume_bank lifts it", not workqueue.is_cancelled(bank_id))
     workqueue.enqueue(bulk())
     check("a re-registered bank at the same root indexes again",
-          workqueue.depth(bank_id) > 0)
+          workqueue.scan_pending(bank_id))
     workqueue.clear()
 
     # The guard that makes this a regression test rather than a description

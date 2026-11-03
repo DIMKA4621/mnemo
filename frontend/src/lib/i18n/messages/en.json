@@ -56,7 +56,9 @@
       "mcpTitle": "This bank''s token and a ready-made config fragment for a project",
       "stateLabel": "State",
       "remove": "Remove bank",
-      "removeTitle": "Unregister the bank; .md files are untouched"
+      "removeTitle": "Unregister the bank; .md files are untouched",
+      "rename": "Rename",
+      "renameTitle": "Change the bank's name — folder, token and MCP connection stay the same"
     },
     "btn": {
       "cancel": "Cancel",
@@ -147,6 +149,13 @@
         "part3": ". Without it the placeholder lands in .mcp.json verbatim, and the script still reports success — so the failure only shows up when the server silently fails to connect."
       },
       "generatedFileNote": ".mcp.json is a generated file: it is in .gitignore, and mcp-setup.sh rewrites it from the template. The entry must live in .mcp.json.template, or the next run of the script will wipe it."
+    },
+    "rename": {
+      "title": "Rename bank",
+      "label": "New name",
+      "submit": "Save",
+      "hint": "The folder on disk, the token and the MCP connection stay the same. Commands that address the bank by name (mnemo … --bank) need the new name from now on.",
+      "taken": "A bank with this name already exists"
     },
     "removal": {
       "submit": "Remove",
@@ -431,13 +440,16 @@
       "period1h": "Last hour",
       "period7d": "7 days",
       "period30d": "30 days",
-      "periodAll": "All time"
+      "periodAll": "All time",
+      "searchQuery": "Search queries",
+      "searchPath": "Search by path"
     },
     "list": {
       "caption": "Events",
       "shownOf": "Showing {shown} of {total}",
       "empty": "Empty",
-      "noEvents": "No events found"
+      "noEvents": "No events found",
+      "noMatches": "Nothing matches the filter"
     },
     "header": {
       "segQuery": "Queries",

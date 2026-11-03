@@ -38,6 +38,15 @@ export default function JournalPage() {
     query: null,
     index: null,
   });
+  // Per tab, like the selection: query text and file paths are different
+  // haystacks, so one tab's needle means nothing on the other.
+  const [search, setSearch] = useState({ query: "", index: "" });
+  const [debounced, setDebounced] = useState({ query: "", index: "" });
+  useEffect(() => {
+    const id = setTimeout(() => setDebounced({ query: search.query.trim(), index: search.index.trim() }), 300);
+    return () => clearTimeout(id);
+  }, [search]);
+  const q = debounced[kind];
 
   useEffect(() => {
     hydrateWidth();
@@ -61,6 +70,7 @@ export default function JournalPage() {
     kind,
     bank: bank || undefined,
     since,
+    q: q || undefined,
   });
 
   const events = logsQuery.data?.events ?? [];
@@ -71,10 +81,13 @@ export default function JournalPage() {
     <div style={{ display: "flex", flexDirection: "column", height: "100%", minHeight: 0 }}>
       <JournalHeader kind={kind} onKindChange={setKind} />
       <JournalFilters
+        kind={kind}
         bank={bank}
         onBankChange={setBank}
         period={period}
         onPeriodChange={setPeriod}
+        search={search[kind]}
+        onSearchChange={(value) => setSearch((prev) => ({ ...prev, [kind]: value }))}
         onRefresh={() => logsQuery.refetch()}
         refreshing={logsQuery.isFetching}
       />
@@ -85,6 +98,7 @@ export default function JournalPage() {
           total={total}
           loading={logsQuery.isLoading}
           error={logsQuery.error ? logsQuery.error.message : null}
+          highlight={q}
           selectedId={selected?.id ?? null}
           onSelect={(id) => setSelectedId((prev) => ({ ...prev, [kind]: id }))}
           bankLabel={bankLabel}

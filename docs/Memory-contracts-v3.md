@@ -577,9 +577,12 @@ class SearchResult:
 
 ```
 if queued > 0 or worker_busy:      status = "indexing"
-elif store.chunk_count(conn) == 0: status = "empty"
+elif store.chunk_count(conn) == 0: status = "indexing" if scan_pending else "empty"
 else:                              status = "ready"
 ```
+
+`queued` не рахує чекаючий `bulk` (§8.3): банк із базою, якому лише належить перевірка хешів, — `ready`.
+На порожньому банку чекаючий `bulk` — це перший білд, що ще не стартував, тому `indexing`, а не «нічого не планується».
 
 `indexing` має **пріоритет** над `empty`.
 Причина — придатність до повтору: `{"status":"empty"}` спонукає агента вирішити, що банк непотрібний, і більше не питати; `{"status":"indexing","chunk_count":0}` каже «повернись пізніше».
@@ -1110,8 +1113,8 @@ def prune(retention_days: int, max_rows: int | None = None) -> tuple[int, int]
 ```python
 class Priority(IntEnum):
     HIGH   = 0     # single/incremental edit — jumps the queue
-    NORMAL = 1     # explicit per-file reindex from UI/CLI
-    LOW    = 2     # bulk: new bank, full reindex, startup reconcile
+    NORMAL = 1     # explicit per-file reindex from UI/CLI; bulk/rebuild dispatch
+    LOW    = 2     # the file tasks a bulk scan streams
 
 
 TaskKind = Literal["file", "bulk", "prune", "rebuild"]
@@ -1138,9 +1141,9 @@ class Task:
 | `kind` | Що робить | Типовий пріоритет |
 |---|---|---|
 | `file` | індексує **один** файл (`index_file`) | `HIGH` від watcher, `NORMAL` від кнопки «переіндексувати файл» |
-| `bulk` | **не ембедить сам**: `scan_bank` + `build_plan`, далі кладе в чергу один `file` на кожен змінений файл (`LOW`) + один `prune` | `LOW` |
-| `prune` | знімає з індексу перелічені зниклі шляхи | той самий, що в породжуючого `bulk`; від watcher — `HIGH` |
-| `rebuild` | `reset_index` + `bulk` (зміна провайдера / схеми) | `LOW` |
+| `bulk` | **не ембедить сам**: `scan_bank` + `build_plan`, далі кладе в чергу один `file` на кожен змінений файл (`LOW`) + один `prune` | `NORMAL` |
+| `prune` | знімає з індексу перелічені зниклі шляхи | `LOW` від скану `bulk`; від watcher — `HIGH` |
+| `rebuild` | `reset_index` + `bulk` (зміна провайдера / схеми) | `NORMAL` |
 
 Такий розклад — це і є «почанкова гранульованість» рішення #10: у черзі ніколи не лежить одна монолітна годинна задача, лежать окремі файли.
 
@@ -1165,6 +1168,22 @@ class Task:
 * Файл зник → задача завершується як `skipped`, шлях іде в `prune`.
 
 **Дедуплікація.** Enqueue `file`-задачі для `(bank_id, path)`, яка вже чекає в черзі, **не додає другу**: якщо новий пріоритет вищий — наявна підвищується (видаляється й кладеться заново з новим `seq`), інакше ігнорується.
+Для `bulk`/`rebuild` ключ — сам банк: у черзі чекає щонайбільше одна така задача на банк (MN-31).
+Новий `bulk` при вже чекаючому `bulk` або `rebuild` не додається — повертається id наявної; новий `rebuild` поглинає чекаючий `bulk` (rebuild — його надмножина), два `rebuild` зливаються в один.
+Явний тригер (`api`/`cli`/`mcp`/`ui`), злитий у системну задачу (`watcher`/`startup`), переходить на неї — інакше заморожений банк проігнорував би явний запит.
+
+**Чому `bulk`/`rebuild` — `NORMAL`, а не `LOW`.** Диспатч скану дешевий: воркер лише запускає потік, що хешує файли й стрімить `file`-задачі `LOW`.
+На `LOW` періодичний перескан watcher-а (`MNEMO_RESCAN_INTERVAL_S`) стояв за всіма `LOW`-файлами чужого першого білду й не запускався годинами (MN-31).
+`NORMAL` не витісняє `LOW`-файл між батчами (`should_yield` реагує лише на `HIGH`), тож скан чекає щонайбільше одну задачу, що вже виконується.
+
+**Глибина не рахує чекаючий `bulk`.** `depth()`, `snapshot()` (`depth`/`high`/`normal`/`low` і `by_bank[...].depth`) пропускають `bulk`, що ще чекає: це перевірка хешів, яка зазвичай нічого не знаходить, і її підрахунок фарбував кожен банк у «індексується».
+`rebuild` рахується (він стирає індекс), а скан, що вже йде (`_scanning`), — це `indexing: true`.
+Сума `by_bank[...].depth` завжди дорівнює загальному `depth`.
+
+**`rebuild` не стирає індекс під живим сканом.** Перевірка «скан цього банку вже йде» (`_scanning`) відбувається **до** `reset_index`, і банк резервується в `_scanning` теж до стирання.
+Якщо скан уже йде, `rebuild` (або `bulk`, що виявив застарілий провайдер) не пропускається, а паркується — одна на банк, явний тригер зберігається — і потік скану ставить її назад у чергу, коли завершується.
+Запаркована задача не лежить у черзі, тож воркер її не вибирає й не крутиться вхолосту; `index_done` вона дає лише тоді, коли справді виконається.
+Інакше стирання посеред скану лишало банк напівпорожнім: скан порівнював файли з хешами, прочитаними до стирання, і не ставив їх у чергу.
 
 **Прапорець.** `MNEMO_QUEUE_PRIORITY`, типово `1`.
 `0` → усе стає `NORMAL`, `should_yield()` завжди `False`, чиста FIFO (рішення #10: «за потреби пріоритезацію можна вимкнути»).
@@ -1188,8 +1207,9 @@ def stop(timeout: float = 10.0) -> None
 def enqueue(task: Task) -> str                  # returns task.id
 def enqueue_file(bank_id, path, *, priority, trigger) -> str
 def enqueue_bulk(bank_id, *, trigger, rebuild: bool = False) -> str
-def depth(bank_id: str | None = None) -> int
+def depth(bank_id: str | None = None) -> int   # без чекаючих bulk
 def busy(bank_id: str | None = None) -> bool
+def scan_pending(bank_id: str) -> bool          # чекає bulk цього банку
 def snapshot() -> QueueSnapshot
 ```
 
@@ -1397,7 +1417,7 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 Їхня нерівність дає `rebuild_pending`; порівнюється весь ключ, не лише `dim`, бо e5-large і bge-m3 обидві мають 1024 виміри й усе одно живуть у різних просторах.
 
 **`POST /api/banks`** — тіло `{"root": "...", "name": null, "provider": null}` → `201` + `BankInfo`.
-Побічний ефект: ставить `bulk`-задачу з `trigger="api"`, `priority=LOW`, і починає стежити (фаза 3).
+Побічний ефект: ставить `bulk`-задачу з `trigger="api"`, `priority=NORMAL`, і починає стежити (фаза 3).
 
 **`PATCH /api/banks/{bank_id}`** **[NEW]** — тіло `{"state": "frozen"}` (також `name`, `provider`; пропущене = без змін) → `200` + `BankInfo` і подія `bank_status`.
 `root` не редагується: `id` похідний від нього, тож переїзд кореня — це `remove` + `add`, а не правка, що тихо осиротить базу.
@@ -1477,8 +1497,8 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 | Комбінація | Дія | Пріоритет |
 |---|---|---|
 | `path` задано | `file`-задача на цей файл | `NORMAL` |
-| `path=null, full=false` | `bulk` (hash-diff реконсиляція) | `LOW` |
-| `path=null, full=true` | `rebuild` (`reset_index` + bulk) | `LOW` |
+| `path=null, full=false` | `bulk` (hash-diff реконсиляція) | `NORMAL` |
+| `path=null, full=true` | `rebuild` (`reset_index` + bulk) | `NORMAL` |
 
 Відповідь `202`: `{"ok": true, "task_ids": ["7c1e…"], "queued": 5}`.
 
@@ -1540,10 +1560,14 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 **`GET /api/doctor`**, **`POST /api/clean-orphans`** — structured report і явна cleanup-дія з §6.6.5.
 Обидва приватні, під сервісним токеном і `include_in_schema=False`; `GET` не видаляє, `POST` не приймає «all».
 
-**`GET /api/logs?kind=query&bank=<ref>&since=&until=&limit=200&offset=0`**
+**`GET /api/logs?kind=query&bank=<ref>&since=&until=&q=&limit=200&offset=0`**
 
 * `kind` — `query` | `index` (обовʼязково).
 * `since` / `until` — ISO-8601 або epoch-секунди.
+* `q` — фільтр підрядком (MN-54): для `kind=query` — за текстом запиту, для `kind=index` — за `path` (рядки без шляху, як-от `bulk`, тоді відпадають).
+  Без урахування регістру за Unicode (`str.casefold`, тож і кирилиця), обрізається від пробілів; порожній чи відсутній → без фільтра.
+  Текст буквальний: `%`, `_` і `\` нічого не означають.
+  Фільтр діє і на `events`, і на `total`, тож пагінація лишається узгодженою.
 * `bank` відсутній → **усі банки** (design §6 вимагає обидва режими).
 
 ```json

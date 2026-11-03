@@ -54,6 +54,8 @@ export interface GetLogsParams {
   bank?: string;
   since?: string;
   until?: string;
+  /** Substring of the query text (`kind=query`) or the event path (`kind=index`). */
+  q?: string;
   limit?: number;
   offset?: number;
 }
@@ -65,6 +67,7 @@ export function getLogs<E = QueryLogEvent | IndexLogEvent>(
   if (params.bank) q.set("bank", params.bank);
   if (params.since) q.set("since", params.since);
   if (params.until) q.set("until", params.until);
+  if (params.q) q.set("q", params.q);
   q.set("limit", String(params.limit ?? 200));
   q.set("offset", String(params.offset ?? 0));
   return api(`/api/logs?${q.toString()}`);

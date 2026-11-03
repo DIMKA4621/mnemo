@@ -10,6 +10,7 @@ import { BankList } from "@/components/memory/BankList";
 import { BankPicker } from "@/components/memory/BankPicker";
 import { BankTokenPanel } from "@/components/memory/BankTokenPanel";
 import { RemovalDialog } from "@/components/memory/RemovalDialog";
+import { RenameDialog } from "@/components/memory/RenameDialog";
 import { FileTree } from "@/components/memory/FileTree";
 import { FileViewer } from "@/components/memory/FileViewer";
 import { PaneResizer } from "@/components/common/PaneResizer";
@@ -57,6 +58,7 @@ function MemoryPageInner() {
   const [pickerOpen, setPickerOpen] = useState(false);
   const [tokenBank, setTokenBank] = useState<BankInfo | null>(null);
   const [removalBank, setRemovalBank] = useState<BankInfo | null>(null);
+  const [renameBank, setRenameBank] = useState<BankInfo | null>(null);
   const [pickerNote, setPickerNote] = useInlineNote();
 
   useEffect(() => {
@@ -131,6 +133,7 @@ function MemoryPageInner() {
               selectedBankId={selectedBankId}
               onSelect={selectBank}
               onOpenToken={setTokenBank}
+              onOpenRename={setRenameBank}
               onOpenRemoval={setRemovalBank}
             />
           </div>
@@ -168,6 +171,7 @@ function MemoryPageInner() {
         }}
       />
       <BankTokenPanel key={`token-${tokenBank?.id ?? "none"}`} bank={tokenBank} onClose={() => setTokenBank(null)} />
+      <RenameDialog key={`rename-${renameBank?.id ?? "none"}`} bank={renameBank} onClose={() => setRenameBank(null)} />
       <RemovalDialog
         key={`removal-${removalBank?.id ?? "none"}`}
         bank={removalBank}

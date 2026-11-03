@@ -11,6 +11,8 @@ interface JournalEventListProps {
   total: number;
   loading: boolean;
   error: string | null;
+  /** The active text filter; non-empty switches the empty copy and marks matches. */
+  highlight: string;
   selectedId: number | null;
   onSelect: (id: number) => void;
   bankLabel: (bankId: string) => string;
@@ -22,6 +24,7 @@ export function JournalEventList({
   total,
   loading,
   error,
+  highlight,
   selectedId,
   onSelect,
   bankLabel,
@@ -45,12 +48,13 @@ export function JournalEventList({
       <div className="events-body">
         {loading && <Skeleton active title={false} paragraph={{ rows: 6 }} />}
         {error && <Alert type="error" showIcon title={error} />}
-        {!loading && !error && events.length === 0 && <p className="mnemo-empty-hint">{t("journal.list.noEvents")}</p>}
+        {!loading && !error && events.length === 0 && <p className="mnemo-empty-hint">{t(highlight ? "journal.list.noMatches" : "journal.list.noEvents")}</p>}
         {events.map((ev) => (
           <EventCard
             key={ev.id}
             kind={kind}
             event={ev}
+            highlight={highlight}
             bankName={bankLabel(ev.bank_id)}
             selected={ev.id === selectedId}
             onSelect={() => onSelect(ev.id)}

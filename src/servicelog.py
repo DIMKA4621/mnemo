@@ -81,6 +81,7 @@ CREATE INDEX IF NOT EXISTS idx_ag_ts ON agent_events(ts_epoch DESC);
 """
 
 TABLES = {"query": "query_events", "index": "index_events"}
+_Q_COLUMN = {"query_events": "query", "index_events": "path"}
 # `agent_events` (MN-45a) is deliberately NOT in `TABLES`/wired through
 # `count()`'s generic `_where()` -- that helper's `bank_id`/`kind` filters are
 # shaped for the query/index tables specifically, and `agent_events` has
@@ -197,6 +198,8 @@ def _reader() -> sqlite3.Connection:
     conn = sqlite3.connect(path, timeout=10.0)
     conn.execute("PRAGMA busy_timeout=5000")
     conn.row_factory = sqlite3.Row
+    # SQLite's own lower()/LIKE fold ASCII only; the journal is mostly Cyrillic.
+    conn.create_function("casefold", 1, _casefold, deterministic=True)
     _readers.conn, _readers.path = conn, path
     return conn
 
@@ -309,12 +312,17 @@ def log_agent_call(
 # ------------------------------------------------------------------- read
 
 
+def _casefold(value: str | None) -> str | None:
+    return value.casefold() if isinstance(value, str) else None
+
+
 def _where(
     *,
     bank_id: str | None,
     since: float | None,
     until: float | None,
     kind: str | None = None,
+    contains: tuple[str, str | None] | None = None,
 ) -> tuple[str, list[Any]]:
     clauses: list[str] = []
     args: list[Any] = []
@@ -330,6 +338,13 @@ def _where(
     if kind:
         clauses.append("kind = ?")
         args.append(kind)
+    if contains is not None:
+        column, needle = contains
+        needle = (needle or "").strip()
+        if needle:
+            # instr(), not LIKE: the text stays literal, no wildcard escaping.
+            clauses.append(f"instr(casefold({column}), ?) > 0")
+            args.append(needle.casefold())
     return (" WHERE " + " AND ".join(clauses)) if clauses else "", args
 
 
@@ -338,11 +353,13 @@ def read_queries(
     bank_id: str | None = None,
     since: float | None = None,
     until: float | None = None,
+    q: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict]:
     """Newest first. ``hits_json`` comes back unpacked as ``hits``."""
-    where, args = _where(bank_id=bank_id, since=since, until=until)
+    where, args = _where(bank_id=bank_id, since=since, until=until,
+                         contains=("query", q))
     rows = _reader().execute(
         f"SELECT * FROM query_events{where} "
         f"ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
@@ -366,11 +383,13 @@ def read_index(
     since: float | None = None,
     until: float | None = None,
     kind: str | None = None,
+    q: str | None = None,
     limit: int = 200,
     offset: int = 0,
 ) -> list[dict]:
-    """Newest first."""
-    where, args = _where(bank_id=bank_id, since=since, until=until, kind=kind)
+    """Newest first. ``q`` matches the file path, so path-less bulk rows drop out."""
+    where, args = _where(bank_id=bank_id, since=since, until=until, kind=kind,
+                         contains=("path", q))
     rows = _reader().execute(
         f"SELECT * FROM index_events{where} "
         f"ORDER BY ts_epoch DESC, id DESC LIMIT ? OFFSET ?",
@@ -417,6 +436,7 @@ def count(table: str, **filters: Any) -> int:
         since=filters.get("since"),
         until=filters.get("until"),
         kind=filters.get("kind") if name == "index_events" else None,
+        contains=(_Q_COLUMN[name], filters.get("q")),
     )
     row = _reader().execute(
         f"SELECT count(*) AS n FROM {name}{where}", args

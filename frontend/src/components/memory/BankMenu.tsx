@@ -10,6 +10,7 @@ interface BankMenuProps {
   onSync: (bank: BankInfo) => void;
   onRebuild: (bank: BankInfo) => void;
   onOpenToken: (bank: BankInfo) => void;
+  onRename: (bank: BankInfo) => void;
   onSetState: (bank: BankInfo, state: BankInfo["state"]) => void;
   onRemove: (bank: BankInfo) => void;
 }
@@ -19,7 +20,7 @@ interface BankMenuProps {
  * card itself (`CLAUDE.md`'s recorded decision, ported from the vanilla
  * console's single `···` button).
  */
-export function BankMenu({ bank, onSync, onRebuild, onOpenToken, onSetState, onRemove }: BankMenuProps) {
+export function BankMenu({ bank, onSync, onRebuild, onOpenToken, onRename, onSetState, onRemove }: BankMenuProps) {
   const t = useT();
   const { token } = theme.useToken();
   const current = bankState(bank);
@@ -45,6 +46,12 @@ export function BankMenu({ bank, onSync, onRebuild, onOpenToken, onSetState, onR
       onClick: () => onRebuild(bank),
     },
     { type: "divider" },
+    {
+      key: "rename",
+      label: t("common.bankMenu.rename"),
+      title: t("common.bankMenu.renameTitle"),
+      onClick: () => onRename(bank),
+    },
     {
       key: "token",
       label: t("common.token.title"),

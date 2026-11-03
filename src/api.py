@@ -478,6 +478,16 @@ def _busy(bank_id: str | None = None) -> bool:
         return False
 
 
+def _scan_pending(bank_id: str) -> bool:
+    q = _queue()
+    if q is None:
+        return False
+    try:
+        return bool(q.scan_pending(bank_id))
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _pending_paths(bank_id: str) -> list[str]:
     q = _queue()
     if q is None:
@@ -565,29 +575,34 @@ def _bank_conn(bank: Bank):
         conn.close()
 
 
-def _queue_state(bank: Bank) -> tuple[int, bool]:
-    """This bank's queue depth and whether work for it is in flight.
+def _queue_state(bank: Bank) -> tuple[int, bool, bool]:
+    """This bank's queue depth, whether work for it is in flight, and whether
+    a scan of it is waiting.
 
     Read **before** the chunk count, never after: between the two reads a
     bank can finish its first build, and reading chunks first would then
     report ``empty`` for a bank that is fully indexed — the one answer that
     makes an agent give up on it.
     """
-    return _queued(bank.id), _busy(bank.id)
+    return _queued(bank.id), _busy(bank.id), _scan_pending(bank.id)
 
 
-def _status_from(state: tuple[int, bool], chunk_count: int) -> tuple[str, int]:
+def _status_from(
+    state: tuple[int, bool, bool], chunk_count: int
+) -> tuple[str, int]:
     """``indexing`` > ``empty`` > ``ready`` (§5.2).
 
     ``indexing`` wins over ``empty`` on purpose: ``empty`` tells an agent the
     bank is pointless and it stops asking; ``indexing`` with ``chunk_count=0``
     tells it to come back.
     """
-    queued, busy = state
+    queued, busy, scan_pending = state
     if queued > 0 or busy:
         return "indexing", queued
     if chunk_count == 0:
-        return "empty", queued
+        # A waiting scan is not depth (MN-31), but on an empty bank it is the
+        # first build that has not started yet — not "nothing scheduled".
+        return ("indexing" if scan_pending else "empty"), queued
     return "ready", queued
 
 
@@ -4037,6 +4052,7 @@ def api_logs(
     since: str | None = None,
     until: str | None = None,
     event_kind: str | None = None,
+    q: str | None = None,
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict:
@@ -4044,20 +4060,20 @@ def api_logs(
     t_since, t_until = _parse_time(since), _parse_time(until)
     if kind == "query":
         events = servicelog.read_queries(
-            bank_id=bank_id, since=t_since, until=t_until,
+            bank_id=bank_id, since=t_since, until=t_until, q=q,
             limit=limit, offset=offset,
         )
         total = servicelog.count(
-            "query", bank_id=bank_id, since=t_since, until=t_until
+            "query", bank_id=bank_id, since=t_since, until=t_until, q=q
         )
     else:
         events = servicelog.read_index(
             bank_id=bank_id, since=t_since, until=t_until, kind=event_kind,
-            limit=limit, offset=offset,
+            q=q, limit=limit, offset=offset,
         )
         total = servicelog.count(
             "index", bank_id=bank_id, since=t_since, until=t_until,
-            kind=event_kind,
+            kind=event_kind, q=q,
         )
     return {
         "kind": kind,

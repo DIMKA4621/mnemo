@@ -16,7 +16,12 @@ export function useLogs<E = QueryLogEvent | IndexLogEvent>(filters: LogFilters) 
         bank: filters.bank,
         since: filters.since,
         until: filters.until,
+        q: filters.q,
       }),
     enabled: !!filters.kind,
+    // Keeps the list on screen while a refined filter fetches, but never
+    // across a kind switch: the other tab's rows have the other shape.
+    placeholderData: (prev, prevQuery) =>
+      (prevQuery?.queryKey[1] as LogFilters | undefined)?.kind === filters.kind ? prev : undefined,
   });
 }

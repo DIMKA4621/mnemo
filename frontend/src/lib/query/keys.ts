@@ -11,6 +11,7 @@ export type LogFilters = {
   since?: string;
   until?: string;
   kind?: "query" | "index";
+  q?: string;
 };
 
 export const queryKeys = {

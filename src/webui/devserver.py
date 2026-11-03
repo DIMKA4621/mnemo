@@ -1949,19 +1949,34 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         state = body.get("state")
-        if state is None:
+        name = body.get("name")
+        if state is None and name is None:
             self.fail(400, "bad_request", "nothing to change")
             return
-        if state not in ("enabled", "frozen", "disabled"):
+        if state is not None and state not in ("enabled", "frozen", "disabled"):
             self.fail(400, "bad_request",
                       f"unknown state {state!r} — expected one of "
                       f"enabled, frozen, disabled")
             return
+        if name is not None:
+            name = str(name).strip()
+            if not name:
+                self.fail(400, "bad_request", "name cannot be empty", {"ref": ref})
+                return
+            # Same rule as registry.update: stripped, case-insensitive, never auto-suffixed.
+            if any(b["id"] != bank["id"] and b["name"].strip().casefold() == name.casefold()
+                   for b in BANKS):
+                self.fail(409, "bank_exists", f"another bank is already named {name!r}",
+                          {"ref": ref})
+                return
 
         with _lock:
-            bank["state"] = state
-            # Derived on the real side too, and the card still reads it.
-            bank["enabled"] = state == "enabled"
+            if name is not None:
+                bank["name"] = name
+            if state is not None:
+                bank["state"] = state
+                # Derived on the real side too, and the card still reads it.
+                bank["enabled"] = state == "enabled"
         broadcast("bank_status", bank["id"], {"bank": bank_info(bank)})
         self.json_out(200, bank_info(bank))
 
@@ -2544,6 +2559,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(404, "bank_not_found", "no bank matches", {"ref": ref})
                 return
             rows = [r for r in rows if r["bank_id"] == bank["id"]]
+
+        needle = ((query.get("q") or [""])[0]).strip().casefold()
+        if needle:
+            field = "query" if kind == "query" else "path"
+            rows = [r for r in rows if needle in (r.get(field) or "").casefold()]
 
         total = len(rows)
         self.json_out(200, {"kind": kind, "total": total, "limit": limit,
