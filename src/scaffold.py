@@ -563,10 +563,21 @@ class _Refuse(Exception):
     """A different mnemo entry already exists — migration is a judgement
     call for the adopt skill, not for this primitive."""
 
+    # The console's code for the refusal (`init_preview`); the message is
+    # what the CLI prints.
+    reason = "conflict"
+
+    def __init__(self, message: str, reason: str | None = None) -> None:
+        super().__init__(message)
+        if reason:
+            self.reason = reason
+
 
 class _EnvConflict(_Refuse):
     """A token a template entry needs would contradict a value already owed
     to, or present in, `.mcp.env`."""
+
+    reason = "env_conflict"
 
 
 def _load_json(path: Path) -> dict:
@@ -578,9 +589,10 @@ def _load_json(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, ValueError, OSError) as exc:
         raise _Refuse(f"{path} exists but is not readable JSON ({exc}); "
-                      f"left untouched") from exc
+                      f"left untouched", "invalid_json") from exc
     if not isinstance(data, dict):
-        raise _Refuse(f"{path} is not a JSON object; left untouched")
+        raise _Refuse(f"{path} is not a JSON object; left untouched",
+                      "invalid_json")
     return data
 
 
@@ -624,7 +636,8 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
     if servers is None:
         servers = {}
     elif not isinstance(servers, dict):
-        raise _Refuse(f"{path}: 'mcpServers' is not an object; left untouched")
+        raise _Refuse(f"{path}: 'mcpServers' is not an object; left untouched",
+                      "invalid_json")
 
     # The key was renamed (`mnemo` -> `mnemo-memory`). A project wired before
     # that carries the old one, and simply writing the new key beside it would
@@ -656,7 +669,8 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
                 f"exists.\n"
                 f"      found:    {json.dumps(legacy_key)}\n"
                 f"      expected: {_redacted(target)} under '{_INSTANCE}'\n"
-                f"      (left untouched — re-run with `--migrate`)")
+                f"      (left untouched — re-run with `--migrate`)",
+                "needs_migrate")
         del servers[_LEGACY_INSTANCE]
         renamed = True
         log.append(f"  {label:<20} migrated mnemo server "
@@ -674,7 +688,8 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
                 f"does not recognise.\n"
                 f"      found:    {json.dumps(existing)}\n"
                 f"      expected: {_redacted(target)}\n"
-                f"      (left untouched — resolve via the adopt skill)")
+                f"      (left untouched — resolve via the adopt skill)",
+                "unrecognised_entry")
         if not migrate:
             raise _Refuse(
                 f"{path}: 'mcpServers.{_INSTANCE}' is the legacy "
@@ -682,7 +697,8 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
                 f"subcommand that no longer exists.\n"
                 f"      found:    {json.dumps(existing)}\n"
                 f"      expected: {_redacted(target)}\n"
-                f"      (left untouched — re-run with `--migrate`)")
+                f"      (left untouched — re-run with `--migrate`)",
+                "needs_migrate")
         log.append(f"  {label:<20} migrated mnemo server {generation} -> http")
     elif existing == target and not renamed:
         log.append(f"  {label:<20} mnemo server already present")
@@ -1441,7 +1457,8 @@ def _refuse_if_tracked(proj: Path, name: str) -> None:
             f"exists at {proj / '.git'} but could not be parsed.\n"
             f"      `mnemo init` would write a literal bank token into that "
             f"file, so this is refused rather than guessed.\n"
-            f"      Check with:  git ls-files --error-unmatch {name}")
+            f"      Check with:  git ls-files --error-unmatch {name}",
+            "index_unreadable")
 
 
 def _git_tracked(proj: Path, name: str) -> bool | None:
@@ -1483,10 +1500,12 @@ def _ignored_memory_note(proj: Path) -> str | None:
         ".claude/memory/MEMORY.md",
         ".claude/rules/mnemo-memory.md",
     ]
+    # Reached from the windowless service (add-bank init, init preview).
+    kwargs = {"creationflags": 0x08000000} if os.name == "nt" else {}  # CREATE_NO_WINDOW
     try:
         done = subprocess.run(
             ["git", "check-ignore", "-v", "--", *targets],
-            cwd=str(proj), capture_output=True, text=True, timeout=15,
+            cwd=str(proj), capture_output=True, text=True, timeout=15, **kwargs,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1600,7 +1619,8 @@ def _plan_settings(path: Path, log: list[str],
     if hooks is None:
         hooks = {}
     elif not isinstance(hooks, dict):
-        raise _Refuse(f"{path}: 'hooks' is not an object; left untouched")
+        raise _Refuse(f"{path}: 'hooks' is not an object; left untouched",
+                      "invalid_json")
 
     if not _drop_retired_hooks(hooks, path, log, _RETIRED_HOOKS):
         return None
@@ -1616,23 +1636,32 @@ def _seed_tree(claude: Path, log: list[str]) -> None:
     actually written. Per-agent memory stubs are the adopt skill's job,
     created after the agent roster is decided.
     """
+    writes = _plan_seed(claude, log)
+    for d in (claude / "memory", claude / "rules"):
+        d.mkdir(parents=True, exist_ok=True)
+    for path, text in writes:
+        _write(path, text)
+
+
+def _plan_seed(claude: Path, log: list[str]) -> list[tuple[Path, str]]:
+    """What `_seed_tree` writes, without writing it."""
     mem = claude / "memory"
     rules = claude / "rules"
     for d in (mem, rules):
         if not d.exists():
-            d.mkdir(parents=True)
             log.append(f"  created              {d}")
 
+    writes: list[tuple[Path, str]] = []
     index = mem / "MEMORY.md"
     if not index.exists():
-        _write(index, f"# Memory Index — {claude.parent.name}\n")
+        writes.append((index, f"# Memory Index — {claude.parent.name}\n"))
         log.append(f"  created              {index} (one-line anchor)")
     else:
         log.append(f"  kept                 {index} (already present)")
 
     rule = rules / "mnemo-memory.md"
     if not rule.exists():
-        _write(rule, _MEMORY_RULE)
+        writes.append((rule, _MEMORY_RULE))
         log.append(f"  created              {rule}")
     else:
         # The one file here mnemo may rewrite, and only while the bytes prove
@@ -1643,13 +1672,14 @@ def _seed_tree(claude: Path, log: list[str]) -> None:
         if state == "current":
             log.append(f"  kept                 {rule} (already current)")
         elif state == "stale":
-            _write(rule, _MEMORY_RULE)
+            writes.append((rule, _MEMORY_RULE))
             log.append(f"  updated              {rule} (superseded redaction)")
         else:
             log.append(
                 f"  kept                 {rule} (edited here — left alone; "
                 f"mnemo's current text differs)"
             )
+    return writes
 
 
 def ensure_memory_structure(claude_dir: Path) -> list[str]:
@@ -1956,6 +1986,8 @@ class _Wiring:
         # `{variable: token}` lifted out of the other mnemo entries in that
         # seed, owed to `.mcp.env` (`_placeholder_entries`).
         self.template_secrets: dict[str, str] = {}
+        # Foreign servers that seed copied verbatim into the tracked template.
+        self.carried: list[str] = []
 
     def add(self, path: Path, text: str | None) -> None:
         if text is not None:
@@ -2091,6 +2123,7 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
             wiring.template_base = doc
             carried = [key for key, entry in servers.items()
                        if not _is_ours_in_template(key, entry)]
+            wiring.carried = carried
 
     if carried:
         # Said, never guessed at. The template is the file that goes into git,
@@ -2165,8 +2198,12 @@ def _placeholder_entries(servers: dict, env: Path,
 
 def _env_values(path: Path) -> dict[str, str]:
     """`NAME -> value` of a `.env`-shaped file, surrounding quotes dropped."""
+    return _env_text_values(_read_text(path))
+
+
+def _env_text_values(text: str) -> dict[str, str]:
     values = {}
-    for line in _read_text(path).splitlines():
+    for line in text.splitlines():
         name, sep, value = line.partition("=")
         if sep and not name.lstrip().startswith("#"):
             values[name.strip()] = value.strip().strip("'\"")
@@ -2761,6 +2798,147 @@ def _regenerate_for_admin(proj: Path, result: dict) -> None:
             f"the regenerated .mcp.json does not carry a resolved "
             f"{_ADMIN_INSTANCE} url — the setup script is missing the "
             f"{{{{{_ADMIN_VAR}}}}} substitution.")
+
+
+# ------------------------------------------------------ init preview (MN-62)
+#
+# The console's add-bank dialog shows what `init` will do before the bank
+# exists. Built from the same planners `init_project` runs (`_plan_seed`,
+# `_plan_wiring`), with the probe token: nothing is written, no script runs,
+# no bank is registered, and git is only read.
+
+_INIT_FILES = ("mcp-setup.sh", "mcp-setup.ps1", ".mcp.json.template",
+               ".gitignore", ".mcp.env.example", ".mcp.env")
+_PLACEHOLDER = re.compile(r"\{\{([A-Za-z0-9_]+)\}\}")
+_SCRIPTS = ("mcp-setup.sh", "mcp-setup.ps1")
+
+
+def init_preview(proj: Path) -> dict:
+    """What `init_project` would do in `proj`, as the console renders it."""
+    proj = proj.resolve()
+    out: dict = {
+        "project_root": str(proj),
+        "exists": proj.exists(),
+        "mcp_json_exists": (proj / ".mcp.json").is_file(),
+        "uses_template": (proj / ".mcp.json.template").is_file(),
+        "tracked": False,
+        "tracked_files": [],
+        "files": [],
+        "writes": [],
+        "setup_script": None,
+        "carried_servers": [],
+        "warnings": [],
+        "notes": [],
+        "log": [],
+        "action": "refused",
+        "reason": None,
+        "detail": None,
+    }
+    if out["exists"] and not proj.is_dir():
+        out["reason"] = "not_a_directory"
+        return out
+    out["tracked_files"] = [name for name in (".mcp.json", ".mcp.env")
+                            if _git_tracked(proj, name)]
+    out["tracked"] = bool(out["tracked_files"])
+    try:
+        wiring = _plan_wiring(proj, token=_TOKEN_PROBE, migrate=False)
+    except _NeedsUntrack:
+        out["reason"] = "tracked"
+        return out
+    except _Refuse as exc:
+        out["reason"] = exc.reason
+        out["detail"] = re.sub(r"token=[0-9a-fA-F]{8,}", "token=<token>",
+                               str(exc))
+        return out
+
+    log: list[str] = []
+    planned = dict(_plan_seed(proj / ".claude", log))
+    planned.update(wiring.writes)
+    out["log"] = log + wiring.log
+    out["notes"] = list(wiring.notes)
+    out["carried_servers"] = list(wiring.carried)
+    if wiring.carried:
+        out["warnings"].append("carried_servers")
+    if out["exists"]:
+        ignored = _ignored_memory_note(proj)
+        if ignored:
+            out["notes"].append(ignored)
+            out["warnings"].append("memory_ignored")
+
+    paths = [proj / ".claude" / "memory" / "MEMORY.md",
+             proj / ".claude" / "rules" / "mnemo-memory.md",
+             *(proj / name for name in _INIT_FILES)]
+    for path in paths:
+        entry = _preview_file(proj, path, path in planned)
+        if entry is not None:
+            out["files"].append(entry)
+            if entry["reason"] == "edited":
+                out["warnings"].append(
+                    "rule_edited" if path.name == "mnemo-memory.md"
+                    else "setup_edited")
+    _preview_regeneration(proj, planned, out)
+
+    out["writes"] = [f["path"] for f in out["files"]
+                     if f["action"] != "unchanged"]
+    out["action"] = ("add" if out["mcp_json_exists"] or out["uses_template"]
+                     else "create")
+    out["reason"] = None
+    return out
+
+
+def _preview_file(proj: Path, path: Path, planned: bool) -> dict | None:
+    rel = path.relative_to(proj).as_posix()
+    if not path.is_file():
+        return {"path": rel, "action": "create", "reason": "new"} if planned \
+            else None
+    if path.name == "mnemo-memory.md":
+        state = _rule_state(path)
+    elif path.name in _SCRIPTS:
+        state = _setup_state(path, _SETUP_SH if path.name.endswith(".sh")
+                             else _SETUP_PS1)
+    else:
+        state = "kept" if path.name == "MEMORY.md" else "current"
+    if planned:
+        reason = "refresh" if state == "stale" else "merge"
+        return {"path": rel, "action": "update", "reason": reason}
+    if state not in ("edited", "kept"):
+        state = "current"
+    return {"path": rel, "action": "unchanged", "reason": state}
+
+
+def _preview_regeneration(proj: Path, planned: dict[Path, str],
+                          out: dict) -> None:
+    """`.mcp.json`, as the platform's setup script would write it after init.
+
+    Only mnemo's own script can be read for the outcome: it refuses when a
+    template placeholder has no `.mcp.env` value. A foreign one is assumed to
+    succeed.
+    """
+    script = _platform_setup_script(proj)
+    text = planned.get(script)
+    if text is None and script.is_file():
+        text = _read_text(script)
+    out["setup_script"] = {"name": script.name, "runs": text is not None,
+                           "missing": []}
+    if text is None:
+        return
+    template = proj / ".mcp.json.template"
+    env = proj / ".mcp.env"
+    if _SETUP_MARKER_ANY in text:
+        names = set(_PLACEHOLDER.findall(
+            planned.get(template) or _read_text(template)))
+        have = _env_text_values(planned.get(env) or _read_text(env))
+        out["setup_script"]["missing"] = sorted(names - set(have))
+    target = proj / ".mcp.json"
+    if out["setup_script"]["missing"]:
+        out["warnings"].append("setup_missing_values")
+        if target.is_file():
+            out["files"].append({"path": ".mcp.json", "action": "unchanged",
+                                 "reason": "not_regenerated"})
+        return
+    out["files"].append({"path": ".mcp.json",
+                         "action": "update" if target.is_file() else "create",
+                         "reason": "regenerate"})
 
 
 def _register_bank(bank_root: Path, report: list[str]) -> str:

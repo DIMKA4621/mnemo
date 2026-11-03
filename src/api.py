@@ -1626,6 +1626,30 @@ def api_add_bank(req: AddBankRequest) -> dict:
     return info
 
 
+@app.get("/api/init-preview", include_in_schema=False)
+def api_init_preview(root: str = "", create_structure: bool = False) -> dict:
+    """What `POST /api/banks {"init": true}` would do to the project, before
+    the bank exists. Writes nothing and registers nothing (MN-62)."""
+    bank_root = _admin_mcp_root(root)
+    project_root = _project_root_from_bank(bank_root)
+    out = {"bank_root": str(bank_root), "create_structure": create_structure,
+           "project_root": str(project_root) if project_root else None}
+    if project_root is None:
+        return {**out, "action": "skipped", "reason": "not_project_shaped",
+                "files": [], "writes": [], "warnings": [], "notes": []}
+    refusal = None
+    if not bank_root.is_dir() and not create_structure:
+        refusal = "root_not_found"
+    elif any(b.id == registry.derive_bank_id(bank_root)
+             for b in registry.load()):
+        refusal = "bank_exists"
+    from . import scaffold
+    preview = {**scaffold.init_preview(project_root), **out}
+    if refusal:
+        preview.update(action="refused", reason=refusal, files=[], writes=[])
+    return preview
+
+
 @app.get("/api/banks/{bank_id}", include_in_schema=False)
 def api_bank(bank_id: str) -> dict:
     return _bank_info(_resolve_bank(bank_id, require_enabled=False))

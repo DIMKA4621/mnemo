@@ -102,7 +102,65 @@
       "mcpSkipped": "MCP not connected",
       "mcpConnected": "MCP connected",
       "mcpFailed": "MCP connection failed",
-      "addedNote": "bank added · indexing queued"
+      "addedNote": "bank added · indexing queued",
+      "preview": {
+        "title": "Add bank — what connecting MCP will do",
+        "next": "Next: what will be written →",
+        "bankRoot": "Bank:",
+        "confirm": "Create bank and connect MCP",
+        "withoutMcp": "Create bank without MCP",
+        "loadFailed": "Could not load the preview — nothing was written",
+        "log": "mnemo init log",
+        "action": {
+          "create": "mnemo init will set MCP up in the project from scratch:",
+          "add": "mnemo init will add mnemo-memory to the project's existing MCP configuration; other servers stay:"
+        },
+        "group": {
+          "create": "Will be created ({n}):",
+          "update": "Will be changed ({n}):",
+          "unchanged": "Unchanged ({n}):"
+        },
+        "reason": {
+          "new": "new file",
+          "merge": "mnemo's entry is merged in",
+          "refresh": "outdated mnemo version — refreshed",
+          "regenerate": "built by the setup script",
+          "kept": "existing content is kept",
+          "current": "already up to date",
+          "edited": "edited by hand — left alone",
+          "not_regenerated": "not rebuilt — .mcp.env is missing values"
+        },
+        "script": {
+          "runs": "After writing, {script} runs to build .mcp.json from the template.",
+          "blocked": "{script} cannot build .mcp.json while .mcp.env is missing values.",
+          "none": "No setup script will run."
+        },
+        "warn": {
+          "carried_servers": "Servers from the existing .mcp.json ({servers}) are moved into .mcp.json.template as they are — and that file goes into git. Make sure they hold no secrets.",
+          "memory_ignored": "A .gitignore rule hides .claude/memory from git — the bank will not travel with commits. mnemo does not change that rule (details below).",
+          "rule_edited": "The rule file .claude/rules/mnemo-memory.md was edited by hand — it is kept, not refreshed.",
+          "setup_edited": "The setup script (mcp-setup) was edited by hand — it is kept, not refreshed.",
+          "setup_missing_values": "Template placeholders have no value in .mcp.env: {missing}. .mcp.json will not be rebuilt — fill them in and run {script}."
+        },
+        "refused": {
+          "title": "mnemo init would refuse here — nothing will be written",
+          "root_not_found": "This folder does not exist.",
+          "bank_exists": "This folder is already registered as a bank.",
+          "not_a_directory": "The project root {project} is a file, not a folder.",
+          "tracked": "The file the bank token would go into is tracked by git. Untrack it and add it to .gitignore first:",
+          "index_unreadable": "The git index here cannot be read, so it is unknown whether the file is tracked — refused rather than guessed.",
+          "invalid_json": "The project's MCP config does not parse as a JSON object. It was left untouched — fix it by hand first.",
+          "needs_migrate": "The .mcp.json carries a legacy mnemo entry. Run «mnemo init --migrate» in the project.",
+          "unrecognised_entry": "The MCP config already has a mnemo-memory entry that mnemo did not write. It will not be overwritten — rename or remove it by hand.",
+          "env_conflict": "The .mcp.env already sets the token variable to a different value — it is not changed, so the connection does not silently switch banks. Fix .mcp.env by hand.",
+          "offer": "You can create the bank without connecting MCP and wire the project later.",
+          "noOffer": "The bank cannot be created here either — go back and pick another folder."
+        },
+        "skipped": {
+          "title": "MCP cannot be wired automatically for this folder",
+          "body": "The bank {root} is not at «‹project›/.claude/memory», so mnemo init does not know which project to wire. The bank can be created without MCP."
+        }
+      }
     },
     "token": {
       "title": "MCP access",

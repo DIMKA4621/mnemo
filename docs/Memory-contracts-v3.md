@@ -1420,6 +1420,42 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 
 **`POST /api/banks`** — тіло `{"root": "...", "name": null, "provider": null}` → `201` + `BankInfo`.
 Побічний ефект: ставить `bulk`-задачу з `trigger="api"`, `priority=NORMAL`, і починає стежити (фаза 3).
+Діалог додавання шле ще два прапорці: `create_structure` (засіяти `<project>/.claude/memory` до реєстрації) і `init` (після реєстрації запустити `mnemo init` для проєкту, який випливає з кореня; результат — ключ `init` у відповіді, банк лишається зареєстрованим за будь-якого результату).
+
+**`GET /api/init-preview?root=<абс. корінь банку>&create_structure=<bool>`** **[NEW, MN-62]** — що зробить `init: true`, показане **до** того, як банк існує; нічого не пише, не запускає скриптів, не змінює git і не реєструє банк:
+
+```json
+{"bank_root": "E:/work/proj/.claude/memory", "create_structure": false,
+ "project_root": "E:/work/proj",
+ "exists": true, "mcp_json_exists": true, "uses_template": false,
+ "tracked": false, "tracked_files": [],
+ "files": [{"path": ".claude/memory/MEMORY.md", "action": "unchanged", "reason": "kept"},
+           {"path": ".mcp.json.template", "action": "create", "reason": "new"},
+           {"path": ".gitignore", "action": "update", "reason": "merge"},
+           {"path": ".mcp.json", "action": "update", "reason": "regenerate"}],
+ "writes": [".mcp.json.template", ".gitignore", ".mcp.json"],
+ "setup_script": {"name": "mcp-setup.ps1", "runs": true, "missing": []},
+ "carried_servers": ["github"],
+ "warnings": ["carried_servers"], "notes": ["…"], "log": ["…"],
+ "action": "add", "reason": null, "detail": null}
+```
+
+* План будує той самий код, що й `init_project` (`_plan_seed`, `_plan_wiring` з пробним токеном), а не окремий передбачувач; тест порівнює `writes` зі справжнім диффом дерева після `init` для свіжого проєкту, `.mcp.json` з чужими серверами, наявного шару шаблону, повторного підключення й трекнутого `.mcp.json`.
+* `files` — кожен файл, який `init` розглядає: `.claude/memory/MEMORY.md`, `.claude/rules/mnemo-memory.md`, `mcp-setup.sh`, `mcp-setup.ps1`, `.mcp.json.template`, `.gitignore`, `.mcp.env.example`, `.mcp.env`, і останнім `.mcp.json`, який пише скрипт платформи.
+  Відсутній файл, якого `init` не створить, не показується.
+* `action` файлу: `create` | `update` | `unchanged`; `reason`: `new`, `merge` (адитивне злиття), `refresh` (застаріла ревізія mnemo — правило чи скрипт), `regenerate` (`.mcp.json` зі скрипта), `kept` (кураторський `MEMORY.md` не чіпається ніколи), `current`, `edited` (правило чи скрипт змінені тут — їх лишають), `not_regenerated`.
+* `writes` — шляхи з `files`, крім `unchanged`.
+  `.mcp.env` і `.mcp.json` змінюються завжди: банк новий, тож і токен у них новий.
+* `setup_script.missing` — плейсхолдери шаблону без значення в `.mcp.env`; читається лише зі скрипта mnemo, який тоді відмовляє й `.mcp.json` не пише (`warnings: ["setup_missing_values"]`).
+  Чужий скрипт вважається успішним.
+* `warnings`: `carried_servers` (чужі сервери з `.mcp.json` ідуть у трекнутий шаблон як є — `carried_servers` їх називає), `memory_ignored` (git ігнорує засіяну памʼять; текст у `notes`), `rule_edited`, `setup_edited`, `setup_missing_values`.
+* `action` плану: `create` (у проєкті ще нема ні `.mcp.json`, ні шаблону) | `add` | `refused` | `skipped`.
+* `skipped` + `reason: "not_project_shaped"`, `project_root: null` — корінь не закінчується на `.claude/memory`, тож `init` для нього не запуститься (POST поверне `init.skipped`).
+* `reason` для `refused`: `root_not_found` (кореня нема, а `create_structure` вимкнено — POST відмовив би ще до реєстрації), `bank_exists`, `not_a_directory`, `tracked` (`tracked_files` називає `.mcp.json` / `.mcp.env`; без терміналу `init` не виконує `git rm --cached`, а лише відмовляє), `index_unreadable`, `invalid_json` (шаблон чи `mcpServers` — не JSON-обʼєкт), `needs_migrate` (legacy stdio-запис, який `init` переписує лише з `--migrate`), `unrecognised_entry` (`mnemo-memory` у формі, яку mnemo не впізнає), `env_conflict`.
+  `detail` — англійський текст відмови `init` з вирізаними токенами.
+* Непридатний `.mcp.json` **без** шаблону — не відмова: засів його пропускає, а скрипт потім перезапише `.mcp.json` з шаблону; так поводиться й сам `init`.
+* Неабсолютний `root` → `400 bad_request`; усе інше — `200`.
+  `/api`, `include_in_schema=False`.
 
 **`PATCH /api/banks/{bank_id}`** **[NEW]** — тіло `{"state": "frozen"}` (також `name`, `provider`; пропущене = без змін) → `200` + `BankInfo` і подія `bank_status`.
 `root` не редагується: `id` похідний від нього, тож переїзд кореня — це `remove` + `add`, а не правка, що тихо осиротить базу.

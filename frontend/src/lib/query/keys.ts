@@ -27,6 +27,9 @@ export const queryKeys = {
   fsDirs: {
     at: (path: string | null) => ["fsDirs", path ?? null] as const,
   },
+  initPreview: {
+    at: (root: string, createStructure: boolean) => ["initPreview", root, createStructure] as const,
+  },
   tree: {
     all: ["tree"] as const,
     bank: (bankId: string) => ["tree", bankId] as const,

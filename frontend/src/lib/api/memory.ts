@@ -204,6 +204,55 @@ export function getBankMcpWiring(bankId: string): Promise<BankMcpWiring> {
   return api(`/api/banks/${encodeURIComponent(bankId)}/mcp-wiring`);
 }
 
+export type InitPreviewAction = "create" | "add" | "refused" | "skipped";
+export type InitPreviewReason =
+  | "not_project_shaped"
+  | "root_not_found"
+  | "bank_exists"
+  | "not_a_directory"
+  | "tracked"
+  | "index_unreadable"
+  | "invalid_json"
+  | "needs_migrate"
+  | "unrecognised_entry"
+  | "env_conflict";
+export type InitFileAction = "create" | "update" | "unchanged";
+export type InitFileReason = "new" | "merge" | "refresh" | "regenerate" | "kept" | "current" | "edited" | "not_regenerated";
+export type InitPreviewWarning = "carried_servers" | "memory_ignored" | "rule_edited" | "setup_edited" | "setup_missing_values";
+
+export interface InitPreviewFile {
+  path: string;
+  action: InitFileAction;
+  reason: InitFileReason;
+}
+
+/** `GET /api/init-preview` — what `POST /api/banks {init: true}` would do to the project; writes nothing. */
+export interface InitPreview {
+  bank_root: string;
+  create_structure: boolean;
+  project_root: string | null;
+  exists?: boolean;
+  mcp_json_exists?: boolean;
+  uses_template?: boolean;
+  tracked?: boolean;
+  tracked_files?: string[];
+  files: InitPreviewFile[];
+  writes: string[];
+  setup_script?: { name: string; runs: boolean; missing: string[] } | null;
+  carried_servers?: string[];
+  warnings: InitPreviewWarning[];
+  notes: string[];
+  log?: string[];
+  action: InitPreviewAction;
+  reason: InitPreviewReason | null;
+  detail?: string | null;
+}
+
+export function getInitPreview(root: string, createStructure: boolean): Promise<InitPreview> {
+  const qs = new URLSearchParams({ root, create_structure: String(createStructure) });
+  return api(`/api/init-preview?${qs.toString()}`);
+}
+
 export function getFsDirs(path: string | null): Promise<FsDirsResult> {
   const q = path ? `?path=${encodeURIComponent(path)}` : "";
   return api(`/api/fs/dirs${q}`);

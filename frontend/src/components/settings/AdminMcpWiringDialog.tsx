@@ -1,10 +1,11 @@
 "use client";
 
 import { useState } from "react";
-import { Alert, Button, Flex, Skeleton, Tag } from "antd";
+import { Alert, Button, Flex, Skeleton } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { ModalShell } from "@/components/common/ModalShell";
 import { FolderBrowser } from "@/components/agents/FolderBrowser";
+import { FileTags, NoteAlerts, UntrackHint } from "@/components/common/WiringPreviewParts";
 import { useAdminWiringPreview } from "@/hooks/useSettingsQueries";
 import { useWireAdminMcp } from "@/hooks/useSettingsMutations";
 import { ApiError } from "@/lib/api/fetcher";
@@ -134,16 +135,6 @@ function modeMatters(preview: AdminWiringPreview): boolean {
   return preview.action === "create" || preview.action === "add" || preview.reason === "tracked" || preview.reason === "needs_migrate" || preview.reason === "env_conflict";
 }
 
-function FileTags({ files }: { files: string[] }) {
-  return (
-    <Flex gap={4} wrap style={{ marginTop: 4 }}>
-      {files.map((f) => (
-        <Tag key={f}>{f}</Tag>
-      ))}
-    </Flex>
-  );
-}
-
 interface PreviewViewProps {
   preview: AdminWiringPreview;
   onModeChange: (next: McpMode) => void;
@@ -176,9 +167,7 @@ function PreviewView({ preview, onModeChange, switchDisabled }: PreviewViewProps
         />
       )}
 
-      {preview.notes.map((note) => (
-        <Alert key={note} type="info" title={<span style={{ whiteSpace: "pre-wrap" }}>{note}</span>} />
-      ))}
+      <NoteAlerts notes={preview.notes} />
     </Flex>
   );
 }
@@ -198,10 +187,7 @@ function ActionSummary({ preview, modeLabel }: { preview: AdminWiringPreview; mo
           <>
             {t(`settings.admin.dialog.refused.${reason}`, { target })}
             {reason === "tracked" && (
-              <>
-                <FileTags files={preview.tracked_files} />
-                <pre className="tok-code">{`git rm --cached ${preview.tracked_files.join(" ")}`}</pre>
-              </>
+              <UntrackHint files={preview.tracked_files} />
             )}
           </>
         }
@@ -256,9 +242,7 @@ function WiringDone({ result, onClose, onAnother }: { result: AdminWiringResult;
           description={regen.output.length ? <pre className="tok-code">{regen.output.join("\n")}</pre> : undefined}
         />
       )}
-      {result.notes.map((note) => (
-        <Alert key={note} type="info" title={<span style={{ whiteSpace: "pre-wrap" }}>{note}</span>} />
-      ))}
+      <NoteAlerts notes={result.notes} />
       <p className="tok-note">{t("settings.admin.done.restartHint")}</p>
       <Flex gap={8} justify="flex-end">
         <Button onClick={onAnother}>{t("settings.admin.dialog.otherFolder")}</Button>

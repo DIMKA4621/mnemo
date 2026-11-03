@@ -169,17 +169,25 @@ FS_FIXTURE: dict[str, list[str]] = {
     "/home/dev/projects/voice-agent/.claude/memory": [],
     "/home/dev/empty-folder": [],
     # Settings' admin MCP wiring: each name carries the word
-    # `admin_mcp_preview` keys its fixture outcome on (MN-27).
+    # `admin_mcp_preview` keys its fixture outcome on (MN-27), and the same
+    # words drive the add-bank `init_preview` (MN-62).
     "/home/dev/mcp-cases": ["busy-project", "template-project", "wired-project",
-                            "tracked-repo", "broken-json", "file-not-folder",
-                            "missing-project"],
+                            "tracked-repo", "broken-json", "legacy-entry",
+                            "file-not-folder", "missing-project",
+                            "edited-project", "unset-values", "env-conflict",
+                            "foreign-entry"],
     "/home/dev/mcp-cases/busy-project": [],
     "/home/dev/mcp-cases/template-project": [],
     "/home/dev/mcp-cases/wired-project": [],
     "/home/dev/mcp-cases/tracked-repo": [],
     "/home/dev/mcp-cases/broken-json": [],
+    "/home/dev/mcp-cases/legacy-entry": [],
     "/home/dev/mcp-cases/file-not-folder": [],
     "/home/dev/mcp-cases/missing-project": [],
+    "/home/dev/mcp-cases/edited-project": [],
+    "/home/dev/mcp-cases/unset-values": [],
+    "/home/dev/mcp-cases/env-conflict": [],
+    "/home/dev/mcp-cases/foreign-entry": [],
     "/srv": [],
 }
 
@@ -1288,6 +1296,121 @@ def admin_mcp_preview(root: str, mode: str | None = None) -> dict:
     return out
 
 
+# --------------------------------------------------------------------------
+# init preview (MN-62: GET /api/init-preview?root=<bank root>&create_structure=)
+# --------------------------------------------------------------------------
+#
+# Keyed by a word in the project path, like the admin previews above, so the
+# add-bank picker reaches every outcome under /home/dev/mcp-cases: `busy`
+# (foreign servers carried into the template), `template` / `wired` (the layer
+# is already there), `tracked` and voice-agent (tracked .mcp.json), `broken`,
+# `legacy`, `file`, `env-conflict`, `foreign` (refusals), `edited` (hand-edited
+# rule + setup script, memory hidden by .gitignore), `unset-values` (a
+# template placeholder with no .mcp.env value); anything else is fresh.
+
+_INIT_FRESH = ["mcp-setup.sh", "mcp-setup.ps1", ".mcp.json.template",
+               ".gitignore", ".mcp.env.example", ".mcp.env"]
+
+
+def _init_file(path: str, action: str, reason: str) -> dict:
+    return {"path": path, "action": action, "reason": reason}
+
+
+def init_preview(root: str, create_structure: bool, *,
+                 after_add: bool = False) -> dict:
+    suffix = "/.claude/memory"
+    head = {"bank_root": root, "create_structure": create_structure}
+    if not root.endswith(suffix):
+        return {**head, "project_root": None, "action": "skipped",
+                "reason": "not_project_shaped", "files": [], "writes": [],
+                "warnings": [], "notes": []}
+    project = root[: -len(suffix)]
+    word = project.lower()
+    template = any(w in word for w in ("template", "wired", "edited",
+                                       "unset-values", "env-conflict"))
+    mcp_json = template or any(w in word for w in ("busy", "tracked", "broken",
+                                                   "legacy", "voice-agent"))
+    out = {**head, "project_root": project, "exists": project in FS_FIXTURE,
+           "mcp_json_exists": mcp_json, "uses_template": template,
+           "tracked": False, "tracked_files": [], "files": [], "writes": [],
+           "setup_script": None, "carried_servers": [], "warnings": [],
+           "notes": [], "log": [], "action": "refused", "reason": None,
+           "detail": None}
+    with _lock:
+        registered = not after_add and any(b["root"].rstrip("/") == root
+                                           for b in BANKS)
+    if root not in FS_FIXTURE and not create_structure:
+        out["reason"] = "root_not_found"
+    elif registered:
+        out["reason"] = "bank_exists"
+    elif "file" in word:
+        out["reason"] = "not_a_directory"
+    elif "broken" in word:
+        out.update(reason="invalid_json",
+                   detail=f"{project}/.mcp.json.template exists but is not readable "
+                          "JSON; left untouched (fixture)")
+    elif "legacy" in word:
+        out.update(reason="needs_migrate",
+                   detail="'mcpServers.mnemo' is the legacy L2 stdio form "
+                          "(left untouched — re-run with `--migrate`) (fixture)")
+    elif "tracked" in word or "voice-agent" in word:
+        out.update(tracked=True, tracked_files=[".mcp.json"], reason="tracked")
+    elif "env-conflict" in word:
+        out.update(reason="env_conflict",
+                   detail=".mcp.env already sets MNEMO_MEMORY_TOKEN to a different "
+                          "value; left untouched (fixture)")
+    elif "foreign" in word:
+        out.update(reason="unrecognised_entry",
+                   detail="'mcpServers.mnemo-memory' was not written by mnemo; "
+                          "left untouched (fixture)")
+    if out["reason"]:
+        return out
+
+    has_memory = root in FS_FIXTURE
+    files = [_init_file(".claude/memory/MEMORY.md",
+                        "unchanged" if has_memory else "create",
+                        "kept" if has_memory else "new"),
+             _init_file(".claude/rules/mnemo-memory.md", "create", "new")]
+    if "edited" in word:
+        files[1] = _init_file(".claude/rules/mnemo-memory.md", "unchanged", "edited")
+        out.update(warnings=["memory_ignored", "rule_edited", "setup_edited"],
+                   notes=["git ignores .claude/memory/MEMORY.md (rule "
+                          "`**/.claude` in .gitignore:3) — the bank will not "
+                          "travel with commits. (fixture)"])
+    if template:
+        edited = "edited" if "edited" in word else "current"
+        files += [_init_file("mcp-setup.sh", "unchanged", edited),
+                  _init_file("mcp-setup.ps1", "unchanged", edited),
+                  _init_file(".mcp.json.template",
+                             "unchanged" if "wired" in word else "update",
+                             "current" if "wired" in word else "merge"),
+                  _init_file(".gitignore", "unchanged", "current"),
+                  _init_file(".mcp.env.example", "unchanged", "current"),
+                  _init_file(".mcp.env", "update", "merge")]
+    else:
+        files += [_init_file(name, "create", "new") for name in _INIT_FRESH]
+        if "busy" in word:
+            out.update(carried_servers=["github", "postgres"],
+                       warnings=["carried_servers"],
+                       notes=["the existing .mcp.json servers (github, postgres) "
+                              "were carried into .mcp.json.template, which IS "
+                              "tracked by git. (fixture)"])
+    missing = ["GITHUB_TOKEN"] if "unset-values" in word else []
+    if missing:
+        out["warnings"].append("setup_missing_values")
+        files.append(_init_file(".mcp.json", "unchanged", "not_regenerated"))
+    else:
+        files.append(_init_file(".mcp.json", "update" if mcp_json else "create",
+                                "regenerate"))
+    out.update(files=files,
+               writes=[f["path"] for f in files if f["action"] != "unchanged"],
+               setup_script={"name": "mcp-setup.ps1", "runs": True,
+                             "missing": missing},
+               log=["  (fixture) init plan for " + project],
+               action="add" if mcp_json else "create")
+    return out
+
+
 def _admin_root_ok(root: str) -> bool:
     return root.startswith("/") or (len(root) > 2 and root[1] == ":"
                                     and root[2] in "\\/")
@@ -1661,6 +1784,13 @@ def _mock_init_result(root: str) -> dict:
         return {"ok": False, "skipped": True,
                 "reason": "bank root is not <project>/.claude/memory"}
     project = root[: -len(suffix)]
+    preview = init_preview(root, True, after_add=True)
+    if project.startswith("/home/dev/mcp-cases/") and preview["action"] == "refused":
+        # Same outcome the add dialog's preview promised (MN-62).
+        return {"ok": False, "log": [
+            f"mnemo init: refused — {preview['reason']} (fixture)",
+            "mnemo init: NOTHING was written.",
+        ]}
     if project.endswith("voice-agent"):
         return {"ok": True, "log": [
             ".mcp.json уже відстежується git — mnemo не переписує токен "
@@ -2517,6 +2647,15 @@ class Handler(BaseHTTPRequestHandler):
             self.json_out(200, admin_mcp_preview(root, mode))
             return
 
+        if path == "/api/init-preview":
+            root = (query.get("root") or [""])[0].strip().replace("\\", "/").rstrip("/")
+            if not _admin_root_ok(root):
+                self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root})
+                return
+            flag = (query.get("create_structure") or [""])[0].lower()
+            self.json_out(200, init_preview(root, flag in ("1", "true", "yes", "on")))
+            return
+
         if path.startswith("/api/banks/"):
             # `/token` and `/mcp-wiring` first: the generic bank lookup below
             # would otherwise try to resolve "<id>/token" (or "<id>/mcp-wiring")
@@ -2739,6 +2878,18 @@ class Handler(BaseHTTPRequestHandler):
         if not root:
             self.fail(400, "bad_request", "root is required", {"root": root})
             return
+        project = root[: -len("/.claude/memory")]
+        if (body.get("create_structure") and root.endswith("/.claude/memory")
+                and project in FS_FIXTURE):
+            # The fixture's `ensure_memory_structure`: the folders appear in
+            # the picker from now on.
+            with _lock:
+                for parent, child in ((project, ".claude"),
+                                      (project + "/.claude", "memory")):
+                    FS_FIXTURE.setdefault(parent, [])
+                    if child not in FS_FIXTURE[parent]:
+                        FS_FIXTURE[parent].append(child)
+                FS_FIXTURE.setdefault(root, [])
         if root not in FS_FIXTURE:
             self.fail(400, "root_not_found", "нема такої теки (фікстура)",
                       {"root": root})
