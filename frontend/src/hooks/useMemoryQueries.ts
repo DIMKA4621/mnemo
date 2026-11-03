@@ -100,10 +100,10 @@ export function useFsDirs(path: string | null, enabled: boolean) {
   });
 }
 
-export function useInitPreview(root: string | null, createStructure: boolean) {
+export function useInitPreview(root: string | null, createStructure: boolean, overwriteInvalid: boolean) {
   return useQuery({
-    queryKey: queryKeys.initPreview.at(root ?? "", createStructure),
-    queryFn: () => getInitPreview(root!, createStructure),
+    queryKey: queryKeys.initPreview.at(root ?? "", createStructure, overwriteInvalid),
+    queryFn: () => getInitPreview(root!, createStructure, overwriteInvalid),
     enabled: root != null,
     retry: false,
     staleTime: 0,

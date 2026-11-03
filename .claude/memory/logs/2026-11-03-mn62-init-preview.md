@@ -13,5 +13,9 @@ Decisions:
 - The `.mcp.json` row is a forecast of the platform setup script: only mnemo's own script is read for its one failure mode (a template placeholder with no `.mcp.env` key → `setup_missing_values`, no `.mcp.json`); a foreign script is assumed to succeed.
 - Guarantee test (`test_platform.py::test_init_preview_matches_init`): for fresh / `.mcp.json` with foreign + another-bank servers / existing template layer / re-wire with an edited rule and a missing value / tracked `.mcp.json`, the preview leaves the tree byte-identical and its `writes` equal the real `init_project` tree diff.
 
-Finding, not fixed (init behaviour was out of scope): an unparsable `.mcp.json` with no template is **not** a refusal — `_bootstrap_layer` skips the seed, the template starts empty, and the setup script then overwrites that `.mcp.json` from the template, dropping whatever it held.
-The preview reports it faithfully as `.mcp.json` `update`/`regenerate`.
+Finding, fixed in MN-63: an unparsable `.mcp.json` with no template used to be silently skipped by `_bootstrap_layer` — the template started empty and the setup script then overwrote `.mcp.json`, dropping whatever it held.
+It is now an `_InvalidMcpJson` refusal (`invalid_json`, line/column from the parser; also non-object top level, non-object `mcpServers`, non-UTF-8; a whitespace-only file counts as absent).
+`init --overwrite-invalid` / `POST /api/banks {"overwrite_invalid": true}` / `GET /api/init-preview?overwrite_invalid=true` back it up byte-for-byte to the first free `.mcp.json.bak[.N]`, add `.mcp.json.bak*` to `.gitignore`, then proceed as if `.mcp.json` were absent.
+The backup is a planned write in `_Wiring.writes` (bytes, via `_Wiring.backup`), so the preview still derives from init's own plan.
+Reviewer catch: the `.gitignore` edit and the backup go at the **head** of the write order — once the template exists a plain re-run no longer refuses, so a backup that fails after the template landed would let the next run drop the servers.
+`.mcp.json` is decoded `utf-8-sig`, since Windows PowerShell 5.1 writes a BOM.

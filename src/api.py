@@ -1361,6 +1361,9 @@ class AddBankRequest(BaseModel):
     # dialog — seeds the bare memory tree at `root` before registration, so
     # a bare folder with no `.claude` yet can become a bank in one step.
     create_structure: bool = False
+    # With `init`: back up an unparsable `.mcp.json` and rebuild it, where
+    # `init` would otherwise refuse (`invalid_json`).
+    overwrite_invalid: bool = False
 
 
 class ReindexRequest(BaseModel):
@@ -1557,7 +1560,7 @@ def _project_root_from_bank(bank_root: Path) -> Path | None:
     return None
 
 
-def _run_init_for_bank(bank: Bank) -> dict:
+def _run_init_for_bank(bank: Bank, *, overwrite_invalid: bool = False) -> dict:
     """Run `mnemo init` for the project this bank's root implies.
 
     Uses the bank's *registered* root, never the client-supplied one —
@@ -1578,7 +1581,8 @@ def _run_init_for_bank(bank: Bank) -> dict:
     buf = io.StringIO()
     with redirect_stdout(buf):
         exit_code = scaffold.init_project(
-            root=str(project_root), yes=False, migrate=False
+            root=str(project_root), yes=False, migrate=False,
+            overwrite_invalid=overwrite_invalid,
         )
     log_lines = [line for line in buf.getvalue().splitlines() if line.strip()]
     return {"ok": exit_code == 0, "log": log_lines}
@@ -1622,12 +1626,14 @@ def api_add_bank(req: AddBankRequest) -> dict:
         # The bank is already registered and must not be undone by an init
         # that fails or is skipped — hence a key on the response, not a
         # raised error.
-        info["init"] = _run_init_for_bank(bank)
+        info["init"] = _run_init_for_bank(
+            bank, overwrite_invalid=req.overwrite_invalid)
     return info
 
 
 @app.get("/api/init-preview", include_in_schema=False)
-def api_init_preview(root: str = "", create_structure: bool = False) -> dict:
+def api_init_preview(root: str = "", create_structure: bool = False,
+                     overwrite_invalid: bool = False) -> dict:
     """What `POST /api/banks {"init": true}` would do to the project, before
     the bank exists. Writes nothing and registers nothing (MN-62)."""
     bank_root = _admin_mcp_root(root)
@@ -1644,9 +1650,11 @@ def api_init_preview(root: str = "", create_structure: bool = False) -> dict:
              for b in registry.load()):
         refusal = "bank_exists"
     from . import scaffold
-    preview = {**scaffold.init_preview(project_root), **out}
+    preview = {**scaffold.init_preview(
+        project_root, overwrite_invalid=overwrite_invalid), **out}
     if refusal:
-        preview.update(action="refused", reason=refusal, files=[], writes=[])
+        preview.update(action="refused", reason=refusal, files=[], writes=[],
+                       overridable=False, json_error=None)
     return preview
 
 

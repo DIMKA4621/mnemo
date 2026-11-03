@@ -17,9 +17,15 @@ export function canAddWithoutMcp(preview: InitPreview): boolean {
   return preview.action === "refused" && !BLOCKS_BANK.includes(preview.reason ?? "root_not_found");
 }
 
+/** An unparsable `.mcp.json` that `overwrite_invalid` would back up and rebuild. */
+export function canOverwriteInvalid(preview: InitPreview): boolean {
+  return preview.action === "refused" && preview.reason === "invalid_json" && !!preview.overridable;
+}
+
 export function InitPreviewView({ preview }: { preview: InitPreview }) {
   const t = useT();
   const log = preview.log ?? [];
+  const backup = preview.overwrite_invalid ? preview.files.find((f) => f.reason === "backup") : undefined;
 
   if (preview.action === "skipped") {
     return (
@@ -34,6 +40,9 @@ export function InitPreviewView({ preview }: { preview: InitPreview }) {
 
   if (preview.action === "refused") {
     const reason = preview.reason ?? "root_not_found";
+    const jsonError = canOverwriteInvalid(preview) ? preview.json_error : null;
+    let offer = canAddWithoutMcp(preview) ? "common.picker.preview.refused.offer" : "common.picker.preview.refused.noOffer";
+    if (canOverwriteInvalid(preview)) offer = "common.picker.preview.overwrite.offer";
     return (
       <Alert
         type="error"
@@ -41,12 +50,22 @@ export function InitPreviewView({ preview }: { preview: InitPreview }) {
         title={t("common.picker.preview.refused.title")}
         description={
           <>
-            {t(`common.picker.preview.refused.${reason}`, { project: preview.project_root ?? "" })}
+            {jsonError
+              ? t("common.picker.preview.overwrite.refused")
+              : t(`common.picker.preview.refused.${reason}`, { project: preview.project_root ?? "" })}
             {reason === "tracked" && <UntrackHint files={preview.tracked_files ?? []} />}
-            {preview.detail && <pre className="tok-code">{preview.detail}</pre>}
-            <p className="tok-note">
-              {t(canAddWithoutMcp(preview) ? "common.picker.preview.refused.offer" : "common.picker.preview.refused.noOffer")}
-            </p>
+            {jsonError ? (
+              <pre className="tok-code">
+                {t("common.picker.preview.overwrite.location", {
+                  line: jsonError.line,
+                  column: jsonError.column,
+                  message: jsonError.message,
+                })}
+              </pre>
+            ) : (
+              preview.detail && <pre className="tok-code">{preview.detail}</pre>
+            )}
+            <p className="tok-note">{t(offer)}</p>
           </>
         }
       />
@@ -57,8 +76,18 @@ export function InitPreviewView({ preview }: { preview: InitPreview }) {
   return (
     <Flex vertical gap={10}>
       <p className="tok-lead" style={{ marginTop: 0 }}>
-        {t(`common.picker.preview.action.${preview.action}`)} <code>{preview.project_root}</code>
+        {backup ? t("common.picker.preview.overwrite.lead") : t(`common.picker.preview.action.${preview.action}`)}{" "}
+        <code>{preview.project_root}</code>
       </p>
+
+      {backup && (
+        <Alert
+          type="warning"
+          showIcon
+          title={t("common.picker.preview.overwrite.planTitle")}
+          description={t("common.picker.preview.overwrite.planBody", { backup: backup.path })}
+        />
+      )}
 
       {preview.warnings.map((w) => (
         <Alert

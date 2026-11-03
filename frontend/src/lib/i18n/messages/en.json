@@ -128,7 +128,8 @@
           "kept": "existing content is kept",
           "current": "already up to date",
           "edited": "edited by hand — left alone",
-          "not_regenerated": "not rebuilt — .mcp.env is missing values"
+          "not_regenerated": "not rebuilt — .mcp.env is missing values",
+          "backup": "backup of the broken .mcp.json"
         },
         "script": {
           "runs": "After writing, {script} runs to build .mcp.json from the template.",
@@ -159,6 +160,15 @@
         "skipped": {
           "title": "MCP cannot be wired automatically for this folder",
           "body": "The bank {root} is not at «‹project›/.claude/memory», so mnemo init does not know which project to wire. The bank can be created without MCP."
+        },
+        "overwrite": {
+          "button": "Overwrite .mcp.json",
+          "refused": "The project's .mcp.json does not parse as JSON — it has not been touched yet. Fix it by hand, or overwrite it: the broken file is saved to a backup and .mcp.json is rebuilt.",
+          "location": ".mcp.json — line {line}, column {column}: {message}",
+          "offer": "You can overwrite .mcp.json (with a backup), or create the bank without MCP and connect the project later.",
+          "planTitle": "The broken .mcp.json will be overwritten",
+          "planBody": "The current file is saved as {backup}, byte for byte, and .mcp.json is rebuilt. Nothing from the broken file is carried into the new one: copy any servers you need back from the backup by hand.",
+          "lead": "mnemo init will rebuild the project's MCP config from scratch, in place of the broken .mcp.json:"
         }
       }
     },

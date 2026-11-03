@@ -135,6 +135,7 @@ A plain `init` will not rewrite a legacy form unasked.
   Relay it, do not swallow it.
 - **`refused — …`** — it wrote **nothing**.
   Carry the found/expected detail to Step 4 and re-run once resolved.
+  An `.mcp.json` that is not usable JSON is refused with its line and column: fix it by hand, or — only if the user agrees to lose what it holds — re-run with `--overwrite-invalid`, which copies it to `.mcp.json.bak` (never over an existing backup) and rebuilds it.
 
 `init` then prints the regeneration command.
 Run it, because until it does there is no `.mcp.json` at all:

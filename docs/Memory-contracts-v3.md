@@ -1421,8 +1421,9 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 **`POST /api/banks`** — тіло `{"root": "...", "name": null, "provider": null}` → `201` + `BankInfo`.
 Побічний ефект: ставить `bulk`-задачу з `trigger="api"`, `priority=NORMAL`, і починає стежити (фаза 3).
 Діалог додавання шле ще два прапорці: `create_structure` (засіяти `<project>/.claude/memory` до реєстрації) і `init` (після реєстрації запустити `mnemo init` для проєкту, який випливає з кореня; результат — ключ `init` у відповіді, банк лишається зареєстрованим за будь-якого результату).
+Третій, `overwrite_invalid` (за замовчуванням `false`, діє лише з `init`), — це `mnemo init --overwrite-invalid` **[NEW, MN-63]**: непридатний `.mcp.json` без шаблону спершу копіюється в бекап, а потім перебудовується зі шаблону.
 
-**`GET /api/init-preview?root=<абс. корінь банку>&create_structure=<bool>`** **[NEW, MN-62]** — що зробить `init: true`, показане **до** того, як банк існує; нічого не пише, не запускає скриптів, не змінює git і не реєструє банк:
+**`GET /api/init-preview?root=<абс. корінь банку>&create_structure=<bool>&overwrite_invalid=<bool>`** **[NEW, MN-62]** — що зробить `init: true`, показане **до** того, як банк існує; нічого не пише, не запускає скриптів, не змінює git і не реєструє банк:
 
 ```json
 {"bank_root": "E:/work/proj/.claude/memory", "create_structure": false,
@@ -1437,13 +1438,14 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
  "setup_script": {"name": "mcp-setup.ps1", "runs": true, "missing": []},
  "carried_servers": ["github"],
  "warnings": ["carried_servers"], "notes": ["…"], "log": ["…"],
- "action": "add", "reason": null, "detail": null}
+ "action": "add", "reason": null, "detail": null,
+ "overwrite_invalid": false, "overridable": false, "json_error": null}
 ```
 
 * План будує той самий код, що й `init_project` (`_plan_seed`, `_plan_wiring` з пробним токеном), а не окремий передбачувач; тест порівнює `writes` зі справжнім диффом дерева після `init` для свіжого проєкту, `.mcp.json` з чужими серверами, наявного шару шаблону, повторного підключення й трекнутого `.mcp.json`.
 * `files` — кожен файл, який `init` розглядає: `.claude/memory/MEMORY.md`, `.claude/rules/mnemo-memory.md`, `mcp-setup.sh`, `mcp-setup.ps1`, `.mcp.json.template`, `.gitignore`, `.mcp.env.example`, `.mcp.env`, і останнім `.mcp.json`, який пише скрипт платформи.
   Відсутній файл, якого `init` не створить, не показується.
-* `action` файлу: `create` | `update` | `unchanged`; `reason`: `new`, `merge` (адитивне злиття), `refresh` (застаріла ревізія mnemo — правило чи скрипт), `regenerate` (`.mcp.json` зі скрипта), `kept` (кураторський `MEMORY.md` не чіпається ніколи), `current`, `edited` (правило чи скрипт змінені тут — їх лишають), `not_regenerated`.
+* `action` файлу: `create` | `update` | `unchanged`; `reason`: `new`, `backup` (копія непридатного `.mcp.json`, лише з `overwrite_invalid`), `merge` (адитивне злиття), `refresh` (застаріла ревізія mnemo — правило чи скрипт), `regenerate` (`.mcp.json` зі скрипта), `kept` (кураторський `MEMORY.md` не чіпається ніколи), `current`, `edited` (правило чи скрипт змінені тут — їх лишають), `not_regenerated`.
 * `writes` — шляхи з `files`, крім `unchanged`.
   `.mcp.env` і `.mcp.json` змінюються завжди: банк новий, тож і токен у них новий.
 * `setup_script.missing` — плейсхолдери шаблону без значення в `.mcp.env`; читається лише зі скрипта mnemo, який тоді відмовляє й `.mcp.json` не пише (`warnings: ["setup_missing_values"]`).
@@ -1451,9 +1453,15 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 * `warnings`: `carried_servers` (чужі сервери з `.mcp.json` ідуть у трекнутий шаблон як є — `carried_servers` їх називає), `memory_ignored` (git ігнорує засіяну памʼять; текст у `notes`), `rule_edited`, `setup_edited`, `setup_missing_values`.
 * `action` плану: `create` (у проєкті ще нема ні `.mcp.json`, ні шаблону) | `add` | `refused` | `skipped`.
 * `skipped` + `reason: "not_project_shaped"`, `project_root: null` — корінь не закінчується на `.claude/memory`, тож `init` для нього не запуститься (POST поверне `init.skipped`).
-* `reason` для `refused`: `root_not_found` (кореня нема, а `create_structure` вимкнено — POST відмовив би ще до реєстрації), `bank_exists`, `not_a_directory`, `tracked` (`tracked_files` називає `.mcp.json` / `.mcp.env`; без терміналу `init` не виконує `git rm --cached`, а лише відмовляє), `index_unreadable`, `invalid_json` (шаблон чи `mcpServers` — не JSON-обʼєкт), `needs_migrate` (legacy stdio-запис, який `init` переписує лише з `--migrate`), `unrecognised_entry` (`mnemo-memory` у формі, яку mnemo не впізнає), `env_conflict`.
+* `reason` для `refused`: `root_not_found` (кореня нема, а `create_structure` вимкнено — POST відмовив би ще до реєстрації), `bank_exists`, `not_a_directory`, `tracked` (`tracked_files` називає `.mcp.json` / `.mcp.env`; без терміналу `init` не виконує `git rm --cached`, а лише відмовляє), `index_unreadable`, `invalid_json` (шаблон, `.mcp.json`, з якого засівався б новий шаблон, чи `mcpServers` — не JSON-обʼєкт), `needs_migrate` (legacy stdio-запис, який `init` переписує лише з `--migrate`), `unrecognised_entry` (`mnemo-memory` у формі, яку mnemo не впізнає), `env_conflict`.
   `detail` — англійський текст відмови `init` з вирізаними токенами.
-* Непридатний `.mcp.json` **без** шаблону — не відмова: засів його пропускає, а скрипт потім перезапише `.mcp.json` з шаблону; так поводиться й сам `init`.
+* Непридатний `.mcp.json` **без** шаблону — відмова `invalid_json` **[MN-63]**: інакше шаблон почався б з нуля, а скрипт перезаписав би `.mcp.json`, мовчки викинувши чужі сервери.
+  Непридатний — це не JSON, не UTF-8, верхній рівень не обʼєкт або `mcpServers` не обʼєкт; порожній чи з самих пробілів файл нічого не тримає й рахується відсутнім.
+  Така відмова несе `overridable: true` і `json_error: {"line", "column", "message"}` (1-based, повідомлення парсера); ті самі рядок і колонка є в `detail` і в тексті відмови CLI.
+  Решта відмов — `overridable: false`, `json_error: null`.
+* `overwrite_invalid=true` показує план, який виконає `init --overwrite-invalid`: рядок `{"path": ".mcp.json.bak", "action": "create", "reason": "backup"}` (або перший вільний `.mcp.json.bak.N` — наявний бекап не перезаписується ніколи), `.gitignore` з доданим `.mcp.json.bak*` (бекап може тримати токени) і `.mcp.json` як `update` / `regenerate`.
+  Бекап — байт-у-байт копія оригіналу; далі `init` працює так, ніби `.mcp.json` не було.
+  Шар, що вже має шаблон, від прапорця не залежить: там `.mcp.json` — продукт збирання.
 * Неабсолютний `root` → `400 bad_request`; усе інше — `200`.
   `/api`, `include_in_schema=False`.
 
@@ -2150,7 +2158,7 @@ Negation-рядок у verbose-виводі (`!.claude/memory/**`) не плут
 | Команда | Тип | Що робить |
 |---|---|---|
 | `mnemo warmup [--force]` | **локальна** | явне завантаження моделі (єдиний шлях). **Пропускає, коли на машині ніщо не ембедить локально** — ні машинний `provider`, ні жоден банк своїм полем **[NEW]**: 2.2 ГБ заради моделі, яку ніхто не завантажить, — це і є вся ціна помилки, а інваріант «ніколи неявно» ріже в обидва боки. `--force` качає попри це (напр. перед поверненням на `local`) |
-| `mnemo init [--root] [--migrate]` | **локальна** | вирівнює `.mcp.json` / `.claude/` проєкту; **не пише жодного хука, і прапорця для цього немає**; `--migrate` знімає всі хуки, які mnemo колись писала **[NEW]** |
+| `mnemo init [--root] [--migrate] [--yes] [--overwrite-invalid]` | **локальна** | вирівнює `.mcp.json` / `.claude/` проєкту; **не пише жодного хука, і прапорця для цього немає**; `--migrate` знімає всі хуки, які mnemo колись писала **[NEW]**; `--overwrite-invalid` замість відмови на непридатному `.mcp.json` без шаблону копіює його в `.mcp.json.bak[.N]` і перебудовує **[NEW, MN-63]** |
 | `mnemo service start\|stop\|status\|restart` | **локальна** | FR-9, розділ 11.2 |
 | `mnemo embed-server` | **локальна** | резидент моделі (руками не запускають) |
 | `mnemo doctor` | **локальна** | діагностика: venv, deps, **провайдер**, модель, токени, порти, банки; **осиротілі індекси** — лише рядок-підсумок `orphan indexes N (розмір)` і вказівка на команду; **нічого не видаляє** **[NEW]** |

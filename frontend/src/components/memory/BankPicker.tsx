@@ -7,7 +7,7 @@ import { useFsDirs, useInitPreview } from "@/hooks/useMemoryQueries";
 import { useAddBank } from "@/hooks/useMemoryMutations";
 import { ModalShell } from "@/components/common/ModalShell";
 import type { AddBankRequest, BankInfo } from "@/lib/api/memory";
-import { InitPreviewView, canAddWithoutMcp } from "./InitPreviewView";
+import { InitPreviewView, canAddWithoutMcp, canOverwriteInvalid } from "./InitPreviewView";
 import { effectiveBankRoot, projectRootForBankPath } from "@/lib/memory/bankRoot";
 
 interface BankPickerProps {
@@ -28,7 +28,11 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
   const [pendingBody, setPendingBody] = useState<AddBankRequest | null>(null);
 
   const fsQuery = useFsDirs(browsePath, open);
-  const previewQuery = useInitPreview(pendingBody?.root ?? null, pendingBody?.create_structure ?? false);
+  const previewQuery = useInitPreview(
+    pendingBody?.root ?? null,
+    pendingBody?.create_structure ?? false,
+    pendingBody?.overwrite_invalid ?? false,
+  );
   const addBankMutation = useAddBank();
   const data = fsQuery.data ?? null;
   const currentPath = data?.path ?? null;
@@ -113,14 +117,21 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
     void create(body);
   }
 
-  function backToFolder() {
+  // Back from the overridden plan lands on the refusal it overrode, not on the folder step.
+  function back() {
     setSubmitError(null);
-    setPendingBody(null);
+    setPendingBody(pendingBody?.overwrite_invalid ? { ...pendingBody, overwrite_invalid: false } : null);
+  }
+
+  function overwriteInvalid() {
+    if (!pendingBody) return;
+    setSubmitError(null);
+    setPendingBody({ ...pendingBody, overwrite_invalid: true });
   }
 
   function createWithoutMcp() {
     if (!pendingBody) return;
-    void create({ ...pendingBody, init: false });
+    void create({ ...pendingBody, init: false, overwrite_invalid: false });
   }
 
   async function create(body: AddBankRequest) {
@@ -142,6 +153,7 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
     const preview = previewQuery.data ?? null;
     const canConfirm = preview != null && (preview.action === "create" || preview.action === "add");
     const offerWithout = previewQuery.isError || (preview != null && canAddWithoutMcp(preview));
+    const offerOverwrite = preview != null && !pendingBody.overwrite_invalid && canOverwriteInvalid(preview);
     const busy = addBankMutation.isPending;
     return (
       <ModalShell
@@ -153,15 +165,20 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
         wide
         footer={
           <>
-            <Button onClick={backToFolder} disabled={busy}>
+            <Button onClick={back} disabled={busy}>
               {t("common.btn.back")}
             </Button>
             <Button onClick={onClose} disabled={busy}>
               {t("common.btn.cancel")}
             </Button>
             {offerWithout && (
-              <Button type={canConfirm ? "default" : "primary"} loading={busy} onClick={createWithoutMcp}>
+              <Button type={canConfirm || offerOverwrite ? "default" : "primary"} loading={busy} onClick={createWithoutMcp}>
                 {t("common.picker.preview.withoutMcp")}
+              </Button>
+            )}
+            {offerOverwrite && (
+              <Button type="primary" danger disabled={busy} onClick={overwriteInvalid}>
+                {t("common.picker.preview.overwrite.button")}
               </Button>
             )}
             {canConfirm && (

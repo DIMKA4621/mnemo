@@ -1386,7 +1386,8 @@ def test_setup_scripts_agree() -> None:
 
 
 def _init_project_offline(proj: Path, *, migrate: bool = False,
-                          yes: bool = True) -> tuple[int, str]:
+                          yes: bool = True,
+                          overwrite_invalid: bool = False) -> tuple[int, str]:
     """Run `init_project()` for real, with the live-service probe forced
     down so `_register_bank` takes the offline `registry.add()` path.
 
@@ -1405,7 +1406,8 @@ def _init_project_offline(proj: Path, *, migrate: bool = False,
         mock_client_cls.return_value.add_bank.side_effect = ServiceDown()
         with contextlib.redirect_stdout(buf):
             code = scaffold.init_project(root=str(proj), migrate=migrate,
-                                         yes=yes)
+                                         yes=yes,
+                                         overwrite_invalid=overwrite_invalid)
     return code, buf.getvalue()
 
 
@@ -1848,8 +1850,8 @@ def test_init_preview_reports() -> None:
 
         broken = Path(raw) / "broken"
         broken.mkdir()
-        # A broken `.mcp.json` alone is not a refusal: no template exists yet,
-        # and the seed skips what it cannot parse. A broken template is.
+        # A broken template refuses; so does a broken `.mcp.json` a new
+        # template would be seeded from (`test_init_refuses_invalid_mcp_json`).
         _write(broken / ".mcp.json.template", "{nope")
         legacy = Path(raw) / "legacy"
         legacy.mkdir()
@@ -1873,6 +1875,199 @@ def test_init_preview_reports() -> None:
         check("a refusal's detail never carries a token",
               "c" * 48 not in json.dumps(pre) and "d" * 48 not in json.dumps(pre),
               detail=str(pre.get("detail")))
+
+
+_BROKEN_MCP_JSON = ('{\n  "mcpServers": {\n    "github": {"command": "npx"},\n'
+                    '    oops\n  }\n}\n')
+
+
+def test_init_refuses_invalid_mcp_json() -> None:
+    """An unparsable `.mcp.json` with no template is a refusal that writes
+    nothing; `overwrite_invalid` backs it up and rebuilds it, and the
+    preview agrees with both runs (MN-63)."""
+    import shutil
+    import subprocess
+
+    with tempfile.TemporaryDirectory(prefix="mnemo init-invalid ") as raw:
+        state = Path(raw) / "state"
+        state.mkdir()
+
+        def run(proj: Path, **kw) -> tuple[int, str]:
+            with patch.object(config, "STATE_DIR", state), \
+                    patch.object(scaffold, "_interactive", return_value=False):
+                return _init_project_offline(proj, yes=False, **kw)
+
+        proj = Path(raw) / "refuse"
+        proj.mkdir()
+        _write(proj / ".mcp.json", _BROKEN_MCP_JSON)
+        before = _tree_state(proj)
+        preview = scaffold.init_preview(proj)
+        check("preview refuses invalid_json, overridable, with a location",
+              preview["action"] == "refused"
+              and preview["reason"] == "invalid_json"
+              and preview["overridable"] is True
+              and preview["json_error"]["line"] == 4
+              and preview["json_error"]["column"] == 5
+              and "line 4, column 5" in preview["detail"]
+              and preview["writes"] == [], detail=str(preview))
+        code, out = run(proj)
+        check("init refuses, naming line and column",
+              code == 1 and "refused" in out and "line 4, column 5" in out
+              and "--overwrite-invalid" in out and "NOTHING was written" in out,
+              detail=out)
+        check("and the tree is byte-identical", _tree_state(proj) == before,
+              detail=str(_tree_state(proj)))
+        check("and no bank was registered",
+              not (state / "banks.json").exists()
+              or "refuse" not in _read(state / "banks.json"))
+
+        for name, data, where in (
+                ("list", b"[1, 2]\n", "line 1, column 1"),
+                ("servers", b'{\n  "mcpServers": []\n}\n', "line 2, column 3"),
+                ("not-utf8", b'{"a": "\xff"}', "line 1, column 8")):
+            other = Path(raw) / name
+            other.mkdir()
+            (other / ".mcp.json").write_bytes(data)
+            snap = _tree_state(other)
+            code, out = run(other)
+            check(f"[{name}] JSON a template cannot carry whole refuses too",
+                  code == 1 and where in out and _tree_state(other) == snap,
+                  detail=out)
+
+        empty = Path(raw) / "empty"
+        empty.mkdir()
+        _write(empty / ".mcp.json", "\n")
+        check("an empty .mcp.json holds nothing to lose, so it is no refusal",
+              scaffold.init_preview(empty)["action"] == "add")
+
+        # The override, beside an existing `.bak` that must survive.
+        proj = Path(raw) / "override"
+        proj.mkdir()
+        _write(proj / ".mcp.json", _BROKEN_MCP_JSON)
+        _write(proj / ".mcp.json.bak", "an older backup\n")
+        _write(proj / ".gitignore", "node_modules/\n")
+        original = (proj / ".mcp.json").read_bytes()
+        before = _tree_state(proj)
+        preview = scaffold.init_preview(proj, overwrite_invalid=True)
+        check("the preview with the override mutates nothing",
+              _tree_state(proj) == before)
+        planned = {f["path"]: f for f in preview["files"]}
+        check("the overridden preview lists the numbered backup and the "
+              "rebuilt .mcp.json",
+              preview["reason"] is None and preview["overwrite_invalid"]
+              and planned.get(".mcp.json.bak.1") == {
+                  "path": ".mcp.json.bak.1", "action": "create",
+                  "reason": "backup"}
+              and planned[".mcp.json"]["action"] == "update"
+              and ".mcp.json.bak" not in preview["writes"],
+              detail=str(preview["files"]))
+        code, out = run(proj, overwrite_invalid=True)
+        after = _tree_state(proj)
+        changed = {rel for rel, digest in after.items()
+                   if digest != "<dir>" and before.get(rel) != digest}
+        check("init with the override succeeds", code == 0, detail=out)
+        check("the preview's writes are init's writes",
+              set(preview["writes"]) == changed,
+              detail=f"preview={sorted(preview['writes'])} "
+                     f"init={sorted(changed)}")
+        check("the backup holds the original bytes; the old one is untouched",
+              (proj / ".mcp.json.bak.1").read_bytes() == original
+              and _read(proj / ".mcp.json.bak") == "an older backup\n")
+        regenerated = json.loads(_read(proj / ".mcp.json"))
+        check(".mcp.json is rebuilt from the template",
+              "mnemo-memory" in regenerated.get("mcpServers", {}),
+              detail=_read(proj / ".mcp.json"))
+        check(".gitignore covers the backups",
+              ".mcp.json.bak*" in _read(proj / ".gitignore").splitlines(),
+              detail=_read(proj / ".gitignore"))
+        if shutil.which("git"):
+            subprocess.run(["git", "init", "-q", str(proj)], check=True)
+            ignored = subprocess.run(
+                ["git", "check-ignore", ".mcp.json.bak", ".mcp.json.bak.1"],
+                cwd=proj, capture_output=True, text=True)
+            check("git really ignores both backups",
+                  ignored.stdout.split() == [".mcp.json.bak",
+                                             ".mcp.json.bak.1"],
+                  detail=ignored.stdout + ignored.stderr)
+
+        # A backup that cannot be written must fail before the template
+        # lands, or the next plain run stops refusing and drops the servers.
+        locked = Path(raw) / "locked"
+        locked.mkdir()
+        _write(locked / ".mcp.json", _BROKEN_MCP_JSON)
+        before = _tree_state(locked)
+        real_write = scaffold._write
+
+        def failing_write(path: Path, text) -> None:
+            if path.name.startswith(".mcp.json.bak"):
+                raise OSError(28, "No space left on device")
+            real_write(path, text)
+
+        raised = None
+        with patch.object(scaffold, "_write", failing_write):
+            try:
+                run(locked, overwrite_invalid=True)
+            except OSError as exc:
+                raised = exc
+        after = _tree_state(locked)
+        check("a failed backup write stops the run", raised is not None)
+        # The memory seed lands before any wiring by design (the bank root
+        # must exist to be registered); it is not what a re-run keys on.
+        check("and leaves only the .gitignore rule and the memory seed behind",
+              {rel: d for rel, d in after.items() if rel != ".gitignore"
+               and not rel.startswith(".claude")} == before
+              and ".mcp.json.bak*" in _read(locked / ".gitignore"),
+              detail=str(after))
+        code, out = run(locked)
+        check("so a plain re-run still refuses",
+              code == 1 and "line 4, column 5" in out
+              and _read(locked / ".mcp.json") == _BROKEN_MCP_JSON, detail=out)
+
+        bom = Path(raw) / "bom"
+        bom.mkdir()
+        (bom / ".mcp.json").write_bytes(b"\xef\xbb\xbf" + json.dumps(
+            {"mcpServers": {"github": {"command": "npx"}}}).encode())
+        pre = scaffold.init_preview(bom)
+        check("a BOM-prefixed .mcp.json (PowerShell 5.1) is carried, not "
+              "refused", pre["action"] == "add"
+              and pre["carried_servers"] == ["github"], detail=str(pre))
+        code, out = run(bom)
+        check("and init keeps its server",
+              code == 0 and "github" in json.loads(
+                  _read(bom / ".mcp.json"))["mcpServers"], detail=out)
+
+        plain = Path(raw) / "plain-bak"
+        plain.mkdir()
+        _write(plain / ".mcp.json", "{nope")
+        code, out = run(plain, overwrite_invalid=True)
+        check("with no earlier backup it is plain .mcp.json.bak",
+              code == 0 and _read(plain / ".mcp.json.bak") == "{nope",
+              detail=out)
+        code, out = run(plain)
+        check("a re-run finds the template and has nothing left to refuse",
+              code == 0 and not (plain / ".mcp.json.bak.1").exists(),
+              detail=out)
+
+
+def test_cli_overwrite_invalid_flag() -> None:
+    """`mnemo init --overwrite-invalid` reaches `init_project` (MN-63)."""
+    from src import cli
+
+    seen: dict = {}
+
+    def fake(root, **kw):
+        seen.update(root=root, **kw)
+        return 0
+
+    with patch.object(scaffold, "init_project", fake):
+        cli.main(["init", "--root", "x", "--overwrite-invalid"])
+    check("the flag is passed through", seen.get("overwrite_invalid") is True,
+          detail=str(seen))
+    seen.clear()
+    with patch.object(scaffold, "init_project", fake):
+        cli.main(["init", "--root", "x"])
+    check("and defaults to off", seen.get("overwrite_invalid") is False,
+          detail=str(seen))
 
 
 def _admin_servers(path: Path) -> dict:
@@ -3621,6 +3816,8 @@ def main() -> int:
     test_scaffold_refuses_a_tracked_file()
     test_init_preview_matches_init()
     test_init_preview_reports()
+    test_init_refuses_invalid_mcp_json()
+    test_cli_overwrite_invalid_flag()
     test_admin_mcp_snippet()
     test_admin_mcp_literal_wiring()
     test_admin_mcp_template_wiring()

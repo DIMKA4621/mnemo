@@ -573,6 +573,24 @@ class _Refuse(Exception):
             self.reason = reason
 
 
+class _InvalidMcpJson(_Refuse):
+    """`.mcp.json` cannot be carried into a new template. Overridable with
+    `--overwrite-invalid`, which backs the file up first."""
+
+    reason = "invalid_json"
+
+    def __init__(self, path: Path, line: int, column: int,
+                 message: str) -> None:
+        super().__init__(
+            f"{path} is not usable JSON at line {line}, column {column}: "
+            f"{message}.\n"
+            f"      The template layer would regenerate it and drop whatever "
+            f"it holds, so it was left untouched.\n"
+            f"      Fix it by hand, or re-run with `--overwrite-invalid` to "
+            f"back it up to {_backup_path(path).name} and rebuild it.")
+        self.location = {"line": line, "column": column, "message": message}
+
+
 class _EnvConflict(_Refuse):
     """A token a template entry needs would contradict a value already owed
     to, or present in, `.mcp.env`."""
@@ -792,7 +810,7 @@ def _newline(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
 
 
-def _write(path: Path, text: str) -> None:
+def _write(path: Path, text: str | bytes) -> None:
     """Write exactly the bytes we built — no platform translation.
 
     `newline=""` is the whole point: without it Python rewrites every `\\n` as
@@ -801,6 +819,9 @@ def _write(path: Path, text: str) -> None:
     `mcp-setup.sh` — where `set -euo pipefail\\r` is a syntax error on any real
     Linux shell.
     """
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+        return
     with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write(text)
 
@@ -1961,6 +1982,7 @@ def strip_mcp_wiring(project_root: Path) -> dict:
 # run before a bank has been registered — which is what keeps "writes NOTHING
 # on refusal" true of the registry as well as of the project's files.
 _TOKEN_PROBE = "\x00probe\x00"
+_BACKUP_IGNORE = ".mcp.json.bak*"
 
 
 class _Wiring:
@@ -1988,8 +2010,11 @@ class _Wiring:
         self.template_secrets: dict[str, str] = {}
         # Foreign servers that seed copied verbatim into the tracked template.
         self.carried: list[str] = []
+        # `(path, original bytes)` of an unusable `.mcp.json` the run was
+        # told to overwrite (`--overwrite-invalid`).
+        self.backup: tuple[Path, bytes] | None = None
 
-    def add(self, path: Path, text: str | None) -> None:
+    def add(self, path: Path, text: str | bytes | None) -> None:
         if text is not None:
             self.writes.append((path, text))
 
@@ -2083,7 +2108,8 @@ def _untrack(proj: Path, name: str, *, assume_yes: bool) -> bool:
     return True
 
 
-def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
+def _bootstrap_layer(proj: Path, wiring: _Wiring, *,
+                     overwrite_invalid: bool = False) -> None:
     """Seed the template layer in a project that has none.
 
     Only the pieces that are missing, and only the ones with no content of
@@ -2109,9 +2135,14 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
     carried = False
     if existing.is_file():
         try:
-            doc = json.loads(existing.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            doc = _seed_document(existing)
+        except _InvalidMcpJson:
+            if not overwrite_invalid:
+                raise
+            wiring.backup = (_backup_path(existing), existing.read_bytes())
             doc = None
+        if isinstance(doc, dict) and "mcpServers" not in doc:
+            wiring.template_base = doc
         if isinstance(doc, dict) and isinstance(doc.get("mcpServers"), dict):
             # Handed back as a value for `_plan_mcp_template` to merge into,
             # not written here. Writing it would be overwritten moments later:
@@ -2138,6 +2169,46 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
             "  If any of them holds a literal secret, move it to .mcp.env and "
             "leave a {{PLACEHOLDER}} behind."
         )
+
+
+def _seed_document(path: Path) -> dict:
+    """The `.mcp.json` a new template starts as. Raises `_InvalidMcpJson`
+    for anything the seed could not carry whole."""
+    raw = path.read_bytes()
+    if not raw.strip():
+        return {}
+    try:
+        doc = json.loads(raw.decode("utf-8-sig"))
+    except UnicodeDecodeError as exc:
+        raise _InvalidMcpJson(path, *_line_column(raw, exc.start),
+                              "not UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        raise _InvalidMcpJson(path, exc.lineno, exc.colno, exc.msg) from exc
+    if not isinstance(doc, dict):
+        raise _InvalidMcpJson(path, 1, 1, f"the top level is a "
+                              f"{type(doc).__name__}, not an object")
+    if "mcpServers" in doc and not isinstance(doc["mcpServers"], dict):
+        at = max(raw.find(b'"mcpServers"'), 0)
+        raise _InvalidMcpJson(path, *_line_column(raw, at),
+                              "'mcpServers' is not an object")
+    return doc
+
+
+def _line_column(raw: bytes, offset: int) -> tuple[int, int]:
+    """1-based line and column of a byte offset."""
+    line_start = raw.rfind(b"\n", 0, offset) + 1
+    return raw.count(b"\n", 0, offset) + 1, offset - line_start + 1
+
+
+def _backup_path(path: Path) -> Path:
+    """`<name>.bak`, else the first free `<name>.bak.N` — never an existing
+    backup."""
+    candidate = path.with_name(path.name + ".bak")
+    n = 0
+    while candidate.exists():
+        n += 1
+        candidate = path.with_name(f"{path.name}.bak.{n}")
+    return candidate
 
 
 def _is_ours_in_template(key: str, entry: object) -> bool:
@@ -2256,7 +2327,8 @@ def _plan_setup_scripts(proj: Path, wiring: _Wiring) -> None:
     wiring.seeded_setup = not (proj / "mcp-setup.sh").exists()
 
 
-def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
+def _plan_wiring(proj: Path, *, token: str, migrate: bool,
+                 overwrite_invalid: bool = False) -> _Wiring:
     """Plan the MCP wiring for one project. Raises `_Refuse`, writes nothing.
 
     One shape, built where it is missing: the entry with `{{VAR}}`
@@ -2268,13 +2340,15 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
 
     A project without the layer gets it seeded by `_bootstrap_layer`, with the
     template starting as its existing `.mcp.json` so no foreign server is lost.
+    An `.mcp.json` that cannot seed it is a refusal unless `overwrite_invalid`,
+    which backs it up first.
     """
     wiring = _Wiring()
     prefix = _var_prefix(_VAR_INSTANCE)
     template = proj / ".mcp.json.template"
 
     if not template.exists():
-        _bootstrap_layer(proj, wiring)
+        _bootstrap_layer(proj, wiring, overwrite_invalid=overwrite_invalid)
     # Outside the branch above on purpose: the scripts are reviewed on every
     # run, so a fix reaches a project that was adopted long ago — the only
     # kind that can be carrying an old one.
@@ -2295,8 +2369,20 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
     # and nothing in the run that would have mentioned it.
     _refuse_if_tracked(proj, ".mcp.json")
     gitignore = proj / ".gitignore"
-    wiring.add(gitignore, _plan_gitignore(gitignore, wiring.log,
-                                          [".mcp.json", ".mcp.env"]))
+    ignored = [".mcp.json", ".mcp.env"] + ([_BACKUP_IGNORE] if wiring.backup
+                                           else [])
+    ignore_text = _plan_gitignore(gitignore, wiring.log, ignored)
+    if wiring.backup:
+        # Ignore rule, then backup, before anything else: once the template
+        # exists a plain re-run no longer refuses, so a failed backup must
+        # fail before it lands. The backup may hold tokens, hence the rule.
+        backup, original = wiring.backup
+        head = [(gitignore, ignore_text)] if ignore_text is not None else []
+        wiring.writes[:0] = head + [(backup, original)]
+        wiring.log.append(f"  {'backed up':<20} .mcp.json -> {backup.name} "
+                          f"(not usable JSON; rebuilt from the template)")
+    else:
+        wiring.add(gitignore, ignore_text)
 
     example = proj / ".mcp.env.example"
     wiring.add(example, _plan_env(
@@ -2813,7 +2899,7 @@ _PLACEHOLDER = re.compile(r"\{\{([A-Za-z0-9_]+)\}\}")
 _SCRIPTS = ("mcp-setup.sh", "mcp-setup.ps1")
 
 
-def init_preview(proj: Path) -> dict:
+def init_preview(proj: Path, *, overwrite_invalid: bool = False) -> dict:
     """What `init_project` would do in `proj`, as the console renders it."""
     proj = proj.resolve()
     out: dict = {
@@ -2833,6 +2919,9 @@ def init_preview(proj: Path) -> dict:
         "action": "refused",
         "reason": None,
         "detail": None,
+        "overwrite_invalid": overwrite_invalid,
+        "overridable": False,
+        "json_error": None,
     }
     if out["exists"] and not proj.is_dir():
         out["reason"] = "not_a_directory"
@@ -2841,11 +2930,15 @@ def init_preview(proj: Path) -> dict:
                             if _git_tracked(proj, name)]
     out["tracked"] = bool(out["tracked_files"])
     try:
-        wiring = _plan_wiring(proj, token=_TOKEN_PROBE, migrate=False)
+        wiring = _plan_wiring(proj, token=_TOKEN_PROBE, migrate=False,
+                              overwrite_invalid=overwrite_invalid)
     except _NeedsUntrack:
         out["reason"] = "tracked"
         return out
     except _Refuse as exc:
+        if isinstance(exc, _InvalidMcpJson):
+            out["overridable"] = True
+            out["json_error"] = exc.location
         out["reason"] = exc.reason
         out["detail"] = re.sub(r"token=[0-9a-fA-F]{8,}", "token=<token>",
                                str(exc))
@@ -2868,8 +2961,12 @@ def init_preview(proj: Path) -> dict:
     paths = [proj / ".claude" / "memory" / "MEMORY.md",
              proj / ".claude" / "rules" / "mnemo-memory.md",
              *(proj / name for name in _INIT_FILES)]
+    if wiring.backup:
+        paths.append(wiring.backup[0])
     for path in paths:
         entry = _preview_file(proj, path, path in planned)
+        if entry is not None and wiring.backup and path == wiring.backup[0]:
+            entry["reason"] = "backup"
         if entry is not None:
             out["files"].append(entry)
             if entry["reason"] == "edited":
@@ -2986,7 +3083,7 @@ def _register_bank(bank_root: Path, report: list[str]) -> str:
 
 
 def init_project(root: str | None, *, migrate: bool = False,
-                 yes: bool = False) -> int:
+                 yes: bool = False, overwrite_invalid: bool = False) -> int:
     """Wire mnemo into a project. Returns 0 on success, 1 on refusal
     (in which case NOTHING was written).
 
@@ -3004,6 +3101,7 @@ def init_project(root: str | None, *, migrate: bool = False,
     paths = resolve(root)
     proj = paths.root
     settings_path = proj / ".claude" / "settings.json"
+    plan = {"migrate": migrate, "overwrite_invalid": overwrite_invalid}
 
     # Pass 1 — validation only. Nothing is written and no bank is registered.
     #
@@ -3013,7 +3111,7 @@ def init_project(root: str | None, *, migrate: bool = False,
     # `git rm` that silently fails cannot spin here.
     for _ in range(4):
         try:
-            _plan_wiring(proj, token=_TOKEN_PROBE, migrate=migrate)
+            _plan_wiring(proj, token=_TOKEN_PROBE, **plan)
             _plan_settings(settings_path, [], migrate)
             break
         except _NeedsUntrack as exc:
@@ -3053,7 +3151,7 @@ def init_project(root: str | None, *, migrate: bool = False,
         return 1
 
     # Pass 2 — the same plan, rendered with the real token.
-    wiring = _plan_wiring(proj, token=token, migrate=migrate)
+    wiring = _plan_wiring(proj, token=token, **plan)
     new_settings = _plan_settings(settings_path, wiring.log, migrate)
     for path, text in wiring.writes:
         _write(path, text)

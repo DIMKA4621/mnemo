@@ -1317,7 +1317,8 @@ def _init_file(path: str, action: str, reason: str) -> dict:
 
 
 def init_preview(root: str, create_structure: bool, *,
-                 after_add: bool = False) -> dict:
+                 after_add: bool = False,
+                 overwrite_invalid: bool = False) -> dict:
     suffix = "/.claude/memory"
     head = {"bank_root": root, "create_structure": create_structure}
     if not root.endswith(suffix):
@@ -1335,7 +1336,8 @@ def init_preview(root: str, create_structure: bool, *,
            "tracked": False, "tracked_files": [], "files": [], "writes": [],
            "setup_script": None, "carried_servers": [], "warnings": [],
            "notes": [], "log": [], "action": "refused", "reason": None,
-           "detail": None}
+           "detail": None, "overwrite_invalid": overwrite_invalid,
+           "overridable": False, "json_error": None}
     with _lock:
         registered = not after_add and any(b["root"].rstrip("/") == root
                                            for b in BANKS)
@@ -1345,10 +1347,16 @@ def init_preview(root: str, create_structure: bool, *,
         out["reason"] = "bank_exists"
     elif "file" in word:
         out["reason"] = "not_a_directory"
-    elif "broken" in word:
-        out.update(reason="invalid_json",
-                   detail=f"{project}/.mcp.json.template exists but is not readable "
-                          "JSON; left untouched (fixture)")
+    elif "broken" in word and not overwrite_invalid:
+        # MN-63: overridable — `overwrite_invalid=true` backs it up and
+        # shows the rebuilt plan below.
+        out.update(reason="invalid_json", overridable=True,
+                   json_error={"line": 4, "column": 5,
+                               "message": "Expecting property name enclosed "
+                                          "in double quotes"},
+                   detail=f"{project}/.mcp.json is not usable JSON at line 4, "
+                          "column 5: Expecting property name enclosed in "
+                          "double quotes. (fixture)")
     elif "legacy" in word:
         out.update(reason="needs_migrate",
                    detail="'mcpServers.mnemo' is the legacy L2 stdio form "
@@ -1389,6 +1397,8 @@ def init_preview(root: str, create_structure: bool, *,
                   _init_file(".mcp.env", "update", "merge")]
     else:
         files += [_init_file(name, "create", "new") for name in _INIT_FRESH]
+        if "broken" in word:
+            files.append(_init_file(".mcp.json.bak", "create", "backup"))
         if "busy" in word:
             out.update(carried_servers=["github", "postgres"],
                        warnings=["carried_servers"],
@@ -1768,7 +1778,7 @@ def bank_info(bank: dict) -> dict:
         return out
 
 
-def _mock_init_result(root: str) -> dict:
+def _mock_init_result(root: str, *, overwrite_invalid: bool = False) -> dict:
     """Fixture-only stand-in for what `POST /api/banks`'s optional `init`
     would report from a real `mnemo init --root <project>` run (contract:
     `{"ok": true, "log": [...]}` or `{"ok": false, "skipped": true,
@@ -1784,7 +1794,8 @@ def _mock_init_result(root: str) -> dict:
         return {"ok": False, "skipped": True,
                 "reason": "bank root is not <project>/.claude/memory"}
     project = root[: -len(suffix)]
-    preview = init_preview(root, True, after_add=True)
+    preview = init_preview(root, True, after_add=True,
+                           overwrite_invalid=overwrite_invalid)
     if project.startswith("/home/dev/mcp-cases/") and preview["action"] == "refused":
         # Same outcome the add dialog's preview promised (MN-62).
         return {"ok": False, "log": [
@@ -2653,7 +2664,10 @@ class Handler(BaseHTTPRequestHandler):
                 self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root})
                 return
             flag = (query.get("create_structure") or [""])[0].lower()
-            self.json_out(200, init_preview(root, flag in ("1", "true", "yes", "on")))
+            overwrite = (query.get("overwrite_invalid") or [""])[0].lower()
+            truthy = ("1", "true", "yes", "on")
+            self.json_out(200, init_preview(root, flag in truthy,
+                                            overwrite_invalid=overwrite in truthy))
             return
 
         if path.startswith("/api/banks/"):
@@ -2934,7 +2948,8 @@ class Handler(BaseHTTPRequestHandler):
         ).start()
         info = bank_info(bank)
         if body.get("init"):
-            info["init"] = _mock_init_result(root)
+            info["init"] = _mock_init_result(
+                root, overwrite_invalid=bool(body.get("overwrite_invalid")))
         self.json_out(201, info)
 
     def post_agent(self, body: dict) -> None:

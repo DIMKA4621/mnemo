@@ -95,6 +95,50 @@ def main() -> int:
               code == 200 and body["action"] == "refused"
               and body["reason"] == "invalid_json" and body["detail"], body)
 
+        broken = Path(raw) / "broken"
+        (broken / ".claude" / "memory").mkdir(parents=True)
+        (broken / ".mcp.json").write_text('{"mcpServers": {,}}',
+                                          encoding="utf-8")
+        code, body = _preview(client, broken / ".claude" / "memory")
+        check("an unparsable .mcp.json is an overridable refusal with a "
+              "location",
+              code == 200 and body["action"] == "refused"
+              and body["reason"] == "invalid_json"
+              and body["overridable"] is True
+              and body["json_error"]["line"] == 1
+              and body["json_error"]["column"] == 17, body)
+        code, body = _preview(client, broken / ".claude" / "memory",
+                              overwrite_invalid="true")
+        files = {f["path"]: f for f in body.get("files", [])}
+        check("overwrite_invalid=true previews the backup and the rebuild",
+              code == 200 and body["action"] == "add"
+              and body["overwrite_invalid"] is True
+              and files.get(".mcp.json.bak", {}).get("reason") == "backup"
+              and files[".mcp.json"]["action"] == "update", body)
+        check("and still wrote nothing",
+              sorted(p.name for p in broken.iterdir()) == [".claude",
+                                                           ".mcp.json"])
+
+        seen: dict = {}
+
+        def fake_init(**kw):
+            seen.update(kw)
+            print("mnemo init: refused (fake)")
+            return 1
+
+        from src import scaffold
+        original = scaffold.init_project
+        scaffold.init_project = fake_init
+        try:
+            resp = client.post("/api/banks", json={
+                "root": str(broken / ".claude" / "memory"), "init": True,
+                "overwrite_invalid": True})
+        finally:
+            scaffold.init_project = original
+        check("POST /api/banks hands overwrite_invalid to init",
+              resp.status_code == 201 and seen.get("overwrite_invalid") is True
+              and resp.json()["init"]["ok"] is False, (resp.text, seen))
+
     print(f"\n{'FAILED' if failures else 'OK'}: {failures} failure(s)")
     return 1 if failures else 0
 
