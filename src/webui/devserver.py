@@ -147,7 +147,7 @@ FS_HOME = "/home/dev"
 FS_FIXTURE: dict[str, list[str]] = {
     "/": ["home", "srv"],
     "/home": ["dev"],
-    "/home/dev": [".claude", "notes", "projects", "empty-folder"],
+    "/home/dev": [".claude", "notes", "projects", "empty-folder", "mcp-cases"],
     "/home/dev/.claude": ["memory", "skills"],
     "/home/dev/.claude/memory": ["logs"],
     "/home/dev/.claude/memory/logs": [],
@@ -168,6 +168,18 @@ FS_FIXTURE: dict[str, list[str]] = {
     "/home/dev/projects/voice-agent/.claude": ["memory"],
     "/home/dev/projects/voice-agent/.claude/memory": [],
     "/home/dev/empty-folder": [],
+    # Settings' admin MCP wiring: each name carries the word
+    # `admin_mcp_preview` keys its fixture outcome on (MN-27).
+    "/home/dev/mcp-cases": ["busy-project", "template-project", "wired-project",
+                            "tracked-repo", "broken-json", "file-not-folder",
+                            "missing-project"],
+    "/home/dev/mcp-cases/busy-project": [],
+    "/home/dev/mcp-cases/template-project": [],
+    "/home/dev/mcp-cases/wired-project": [],
+    "/home/dev/mcp-cases/tracked-repo": [],
+    "/home/dev/mcp-cases/broken-json": [],
+    "/home/dev/mcp-cases/file-not-folder": [],
+    "/home/dev/mcp-cases/missing-project": [],
     "/srv": [],
 }
 
@@ -1182,6 +1194,105 @@ def regenerate_bank_token(bank_id: str) -> str:
         return token
 
 
+# --------------------------------------------------------------------------
+# admin MCP wiring (MN-27: GET /api/admin-mcp, GET/POST /api/admin-mcp/wiring)
+# --------------------------------------------------------------------------
+#
+# A fixed fake service token, and previews picked by a word in the root path
+# rather than by any filesystem: `missing`, `file`, `broken`, `tracked`,
+# `template` (the project already has the layer), `wired`, `busy`; anything
+# else is an empty folder. `mode` defaults to the suggested one, as for real.
+# A POST that succeeds remembers the root, so its next preview says `already`.
+
+DEV_ADMIN_TOKEN = "ad31" * 12
+ADMIN_WIRED: set[str] = set()
+
+
+def admin_mcp_payload(host: str, port: int) -> dict:
+    url = f"http://{host}:{port}/mcp-admin?token={DEV_ADMIN_TOKEN}"
+    return {
+        "token": DEV_ADMIN_TOKEN,
+        "url": url,
+        "host": host,
+        "port": port,
+        "entry_name": "mnemo-admin",
+        "snippet": {
+            "literal": {"mcpServers": {"mnemo-admin": {"type": "http", "url": url}}},
+            "template": {
+                "template_entry": {"mcpServers": {"mnemo-admin": {
+                    "type": "http",
+                    "url": "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp-admin"
+                           "?token={{MNEMO_ADMIN_TOKEN}}",
+                }}},
+                "env_var": "MNEMO_ADMIN_TOKEN",
+                "env_line": f"MNEMO_ADMIN_TOKEN={DEV_ADMIN_TOKEN}",
+                "env_block": (f"MNEMO_HOST={host}\nMNEMO_PORT={port}\n"
+                              f"MNEMO_ADMIN_TOKEN={DEV_ADMIN_TOKEN}"),
+                "sed_line": '-e "s|{{MNEMO_ADMIN_TOKEN}}|${MNEMO_ADMIN_TOKEN}|g"',
+            },
+        },
+    }
+
+
+def admin_mcp_preview(root: str, mode: str | None = None) -> dict:
+    word = root.replace("\\", "/").lower()
+    uses_template = "template" in word
+    suggested = "template" if uses_template else "literal"
+    mode = mode or suggested
+    out = {
+        "project_root": root,
+        "mode": mode,
+        "suggested_mode": suggested,
+        "exists": "missing" not in word,
+        "mcp_json_exists": any(w in word for w in ("busy", "wired", "tracked", "broken")),
+        "uses_template": uses_template,
+        "target": ".mcp.json.template" if mode == "template" else ".mcp.json",
+        "has_entry": False,
+        "entry_current": False,
+        "tracked": False,
+        "tracked_files": [],
+        "writes": [],
+        "warnings": ["template_layer"] if mode == "literal" and uses_template else [],
+        "notes": [],
+        "action": "refused",
+        "reason": None,
+    }
+    if not out["exists"]:
+        out.update(mcp_json_exists=False, uses_template=False, warnings=[],
+                   reason="not_found")
+    elif "file" in word:
+        out.update(mcp_json_exists=False, uses_template=False, warnings=[],
+                   reason="not_a_directory")
+    elif "broken" in word:
+        out["reason"] = "invalid_json"
+    elif "wired" in word or root in ADMIN_WIRED:
+        out.update(has_entry=True, entry_current=True, action="already",
+                   reason="present")
+    elif "tracked" in word:
+        files = [".mcp.json", ".mcp.env"] if mode == "template" else [".mcp.json"]
+        out.update(tracked=True, tracked_files=files, reason="tracked")
+    elif mode == "template" and uses_template:
+        out.update(action="add", writes=[".mcp.json.template", ".mcp.env.example",
+                                         ".mcp.env", ".mcp.json"])
+    elif mode == "template":
+        out.update(action="create",
+                   writes=["mcp-setup.sh", "mcp-setup.ps1", ".mcp.json.template",
+                           ".gitignore", ".mcp.env.example", ".mcp.env", ".mcp.json"])
+        if "busy" in word:
+            out["notes"] = ["the existing .mcp.json servers were carried into "
+                            ".mcp.json.template, which IS tracked by git. (fixture)"]
+    elif "busy" in word or uses_template:
+        out.update(action="add", writes=[".mcp.json"])
+    else:
+        out.update(action="create", writes=[".gitignore", ".mcp.json"])
+    return out
+
+
+def _admin_root_ok(root: str) -> bool:
+    return root.startswith("/") or (len(root) > 2 and root[1] == ":"
+                                    and root[2] in "\\/")
+
+
 def _memory_dir_for(target: str) -> str:
     """Mirrors `api._memory_dir_for`: never doubles a `.claude` already
     picked. `target` already has no trailing slash here."""
@@ -2107,6 +2218,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/reindex":
             self.post_reindex(body)
             return
+        if parsed.path == "/api/admin-mcp/wiring":
+            self.post_admin_mcp_wiring(body)
+            return
         if parsed.path == "/api/banks":
             self.post_bank(body)
             return
@@ -2303,6 +2417,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.fail(404, "internal", "no route " + parsed.path)
 
+    def post_admin_mcp_wiring(self, body: dict) -> None:
+        root = str(body.get("root") or "").strip()
+        if not _admin_root_ok(root):
+            self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root})
+            return
+        mode = body.get("mode") or None
+        if mode not in (None, "literal", "template"):
+            self.fail(400, "bad_request", "mode: literal або template", {"mode": mode})
+            return
+        preview = admin_mcp_preview(root, mode)
+        if preview["action"] == "refused":
+            code, status = {
+                "not_found": ("root_not_found", 400),
+                "not_a_directory": ("root_not_found", 400),
+                "invalid_json": ("mcp_config_invalid", 409),
+                "needs_migrate": ("mcp_config_invalid", 409),
+            }.get(preview["reason"], ("mcp_file_tracked", 409))
+            self.fail(status, code, f"refused (fixture): {preview['reason']}",
+                      {"root": root, "preview": preview})
+            return
+        written = [] if preview["action"] == "already" else preview["writes"]
+        with _lock:
+            ADMIN_WIRED.add(root)
+        regenerated = None
+        if preview["mode"] == "template" and written:
+            regenerated = {"script": "mcp-setup.ps1", "ok": True,
+                           "output": ["mcp-setup: wrote .mcp.json (fixture)"]}
+        self.json_out(200, {"written": written, "log": [],
+                            "notes": preview["notes"],
+                            "regenerated": regenerated,
+                            "preview": admin_mcp_preview(root, preview["mode"])})
+
     # -- static ----------------------------------------------------------
 
     def serve_static(self, path: str) -> None:
@@ -2351,6 +2497,23 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/banks":
             self.json_out(200, {"banks": [bank_info(b) for b in BANKS]})
+            return
+
+        if path == "/api/admin-mcp":
+            self.json_out(200, admin_mcp_payload(self.server.server_address[0],
+                                                 self.server.server_port))
+            return
+
+        if path == "/api/admin-mcp/wiring":
+            root = (query.get("root") or [""])[0].strip()
+            if not _admin_root_ok(root):
+                self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root})
+                return
+            mode = (query.get("mode") or [""])[0] or None
+            if mode not in (None, "literal", "template"):
+                self.fail(400, "bad_request", "mode: literal або template", {"mode": mode})
+                return
+            self.json_out(200, admin_mcp_preview(root, mode))
             return
 
         if path.startswith("/api/banks/"):

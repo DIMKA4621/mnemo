@@ -1685,6 +1685,402 @@ def test_scaffold_refuses_a_tracked_file() -> None:
         check("and names .mcp.env", name == ".mcp.env", detail=name)
 
 
+def _admin_servers(path: Path) -> dict:
+    return json.loads(_read(path)).get("mcpServers", {})
+
+
+def test_admin_mcp_snippet() -> None:
+    """MN-27: the admin entry the console shows, in both forms."""
+    snap = scaffold.admin_mcp_snippet(_FAKE_TOKEN)
+    literal = snap["snippet"]["literal"]["mcpServers"]
+    check("admin snippet keyed mnemo-admin",
+          list(literal) == ["mnemo-admin"] and snap["entry_name"] == "mnemo-admin",
+          detail=str(literal))
+    url = literal.get("mnemo-admin", {}).get("url", "")
+    check("admin literal url is loopback /mcp-admin with the token",
+          re.fullmatch(r"http://(127\.0\.0\.1|localhost|\[::1\]):\d+"
+                       r"/mcp-admin\?token=" + _FAKE_TOKEN, url) is not None,
+          detail=url)
+    check("admin url field equals the literal entry's", snap["url"] == url)
+    tpl = snap["snippet"]["template"]
+    turl = tpl["template_entry"]["mcpServers"]["mnemo-admin"]["url"]
+    check("admin template url is all placeholders",
+          turl == "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp-admin"
+                  "?token={{MNEMO_ADMIN_TOKEN}}", detail=turl)
+    check("admin template carries no literal token", _FAKE_TOKEN not in turl)
+    check("admin env var is its own, not MNEMO_TOKEN",
+          tpl["env_var"] == "MNEMO_ADMIN_TOKEN"
+          and tpl["env_line"] == f"MNEMO_ADMIN_TOKEN={_FAKE_TOKEN}",
+          detail=str(tpl))
+    check("admin sed line matches the console's shape",
+          tpl["sed_line"] == '-e "s|{{MNEMO_ADMIN_TOKEN}}|${MNEMO_ADMIN_TOKEN}|g"',
+          detail=tpl["sed_line"])
+
+
+def test_admin_mcp_literal_wiring() -> None:
+    """MN-27: create, then additive next to other servers, then idempotent."""
+    with tempfile.TemporaryDirectory(prefix="mnemo admin-mcp ") as raw:
+        empty = Path(raw) / "empty"
+        empty.mkdir()
+        pre = scaffold.admin_mcp_preview(empty, _FAKE_TOKEN)
+        check("admin preview on an empty folder is create",
+              pre["action"] == "create" and pre["target"] == ".mcp.json"
+              and not pre["uses_template"] and not pre["mcp_json_exists"],
+              detail=str(pre))
+        check("admin create plans .gitignore before .mcp.json",
+              pre["writes"] == [".gitignore", ".mcp.json"]
+              and pre["mode"] == pre["suggested_mode"] == "literal",
+              detail=str(pre))
+        done = scaffold.wire_admin_mcp(empty, _FAKE_TOKEN)
+        servers = _admin_servers(empty / ".mcp.json")
+        check("admin create writes the literal entry",
+              servers.get("mnemo-admin", {}).get("url", "").endswith(
+                  f"/mcp-admin?token={_FAKE_TOKEN}"), detail=str(servers))
+        check("admin create ignores .mcp.json",
+              ".mcp.json" in _read(empty / ".gitignore").splitlines())
+        check("admin create reports already afterwards",
+              done["preview"]["action"] == "already"
+              and done["preview"]["entry_current"], detail=str(done["preview"]))
+        again = scaffold.wire_admin_mcp(empty, _FAKE_TOKEN)
+        check("admin re-wire writes nothing", again["written"] == [],
+              detail=str(again["written"]))
+        other = scaffold.admin_mcp_preview(empty, _FAKE_TOKEN, "template")
+        check("a literal entry counts as present for template mode too",
+              other["action"] == "already" and not other["entry_current"],
+              detail=str(other))
+        bad_mode = None
+        try:
+            scaffold.admin_mcp_preview(empty, _FAKE_TOKEN, "both")
+        except ValueError as exc:
+            bad_mode = str(exc)
+        check("an unknown mode is a ValueError", bad_mode is not None)
+
+        proj = Path(raw) / "busy"
+        proj.mkdir()
+        others = {
+            "mnemo-memory": {"type": "http",
+                             "url": "http://127.0.0.1:4646/mcp?token=" + "b" * 48},
+            "ssh": {"command": "npx", "args": ["-y", "ssh-mcp"],
+                    "env": {"KEY": "secret"}},
+        }
+        _write(proj / ".mcp.json",
+               json.dumps({"mcpServers": others, "other": 1}, indent=2) + "\n")
+        _write(proj / ".gitignore", ".mcp.json\n")
+        pre = scaffold.admin_mcp_preview(proj, _FAKE_TOKEN)
+        check("admin preview next to other servers is add",
+              pre["action"] == "add" and pre["writes"] == [".mcp.json"],
+              detail=str(pre))
+        scaffold.wire_admin_mcp(proj, _FAKE_TOKEN)
+        doc = json.loads(_read(proj / ".mcp.json"))
+        check("admin wiring keeps every other server verbatim",
+              all(doc["mcpServers"].get(k) == v for k, v in others.items()),
+              detail=str(doc))
+        check("admin wiring keeps other top-level keys", doc.get("other") == 1)
+        check("admin wiring leaves a covering .gitignore alone",
+              _read(proj / ".gitignore") == ".mcp.json\n")
+
+        foreign = {"type": "http", "url": "http://10.0.0.5:9/mcp-admin?token=x"}
+        _write(proj / ".mcp.json",
+               json.dumps({"mcpServers": {"mnemo-admin": foreign}}) + "\n")
+        before = _read(proj / ".mcp.json")
+        pre = scaffold.admin_mcp_preview(proj, _FAKE_TOKEN)
+        check("an existing different mnemo-admin is 'already', not current",
+              pre["action"] == "already" and pre["has_entry"]
+              and not pre["entry_current"], detail=str(pre))
+        scaffold.wire_admin_mcp(proj, _FAKE_TOKEN)
+        check("an existing mnemo-admin is never overwritten",
+              _read(proj / ".mcp.json") == before)
+
+        bad = Path(raw) / "bad"
+        bad.mkdir()
+        _write(bad / ".mcp.json", "{not json")
+        pre = scaffold.admin_mcp_preview(bad, _FAKE_TOKEN)
+        check("unreadable .mcp.json is refused",
+              pre["action"] == "refused" and pre["reason"] == "invalid_json",
+              detail=str(pre))
+        missing = scaffold.admin_mcp_preview(Path(raw) / "nope", _FAKE_TOKEN)
+        check("missing folder is refused not_found",
+              not missing["exists"] and missing["reason"] == "not_found",
+              detail=str(missing))
+        afile = scaffold.admin_mcp_preview(bad / ".mcp.json", _FAKE_TOKEN)
+        check("a file is refused not_a_directory",
+              afile["reason"] == "not_a_directory", detail=str(afile))
+        raised = None
+        try:
+            scaffold.wire_admin_mcp(bad, _FAKE_TOKEN)
+        except scaffold.AdminWiringRefused as exc:
+            raised = exc.reason
+        check("wire raises the refusal", raised == "invalid_json",
+              detail=str(raised))
+        check("a refused wire leaves the file alone",
+              _read(bad / ".mcp.json") == "{not json")
+
+
+def test_admin_mcp_template_wiring() -> None:
+    """MN-27: template mode — placeholders in git, the token in .mcp.env,
+    the layer built where missing the way `init` builds it."""
+    with tempfile.TemporaryDirectory(prefix="mnemo admin-mcp tpl ") as raw:
+        bank_tok = "c" * 48
+        proj = Path(raw) / "tpl"
+        proj.mkdir()
+        _write(proj / ".mcp.json.template", json.dumps({"mcpServers": {
+            "mnemo-memory": {"type": "http", "url":
+                             "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp"
+                             "?token={{MNEMO_TOKEN}}"}}}, indent=2) + "\n")
+        _write(proj / ".mcp.env",
+               "# mnemo-memory\r\nMNEMO_HOST=127.0.0.1\r\nMNEMO_PORT=4747\r\n"
+               f"MNEMO_TOKEN={bank_tok}\r\n")
+        _write(proj / ".mcp.env.example",
+               "MNEMO_HOST=127.0.0.1\nMNEMO_PORT=4646\nMNEMO_TOKEN=\n")
+        _write(proj / ".gitignore", ".mcp.json\n.mcp.env\n")
+
+        pre = scaffold.admin_mcp_preview(proj, _FAKE_TOKEN)
+        check("a template project suggests template mode",
+              pre["suggested_mode"] == pre["mode"] == "template"
+              and pre["target"] == ".mcp.json.template"
+              and pre["action"] == "add", detail=str(pre))
+        check("template mode plans the scripts init would add, then regen",
+              set(pre["writes"]) == {"mcp-setup.sh", "mcp-setup.ps1",
+                                     ".mcp.json.template", ".mcp.env.example",
+                                     ".mcp.env", ".mcp.json"}
+              and pre["writes"][-1] == ".mcp.json", detail=str(pre["writes"]))
+        lit = scaffold.admin_mcp_preview(proj, _FAKE_TOKEN, "literal")
+        check("literal mode in a template project warns",
+              lit["target"] == ".mcp.json" and lit["writes"] == [".mcp.json"]
+              and lit["warnings"] == ["template_layer"], detail=str(lit))
+
+        done = scaffold.wire_admin_mcp(proj, _FAKE_TOKEN, "template")
+        tpl = _read(proj / ".mcp.json.template")
+        servers = json.loads(tpl)["mcpServers"]
+        check("admin template entry has placeholders only",
+              servers.get("mnemo-admin", {}).get("url")
+              == "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp-admin"
+                 "?token={{MNEMO_ADMIN_TOKEN}}" and _FAKE_TOKEN not in tpl,
+              detail=tpl)
+        check("admin template keeps the memory entry",
+              "mnemo-memory" in servers)
+        env = _read(proj / ".mcp.env")
+        check("admin token lands in .mcp.env",
+              f"MNEMO_ADMIN_TOKEN={_FAKE_TOKEN}\r\n" in env, detail=env)
+        check("a deliberate MNEMO_PORT and the CRLF survive",
+              "MNEMO_PORT=4747\r\n" in env
+              and "\n" not in env.replace("\r\n", ""), detail=repr(env))
+        example = _read(proj / ".mcp.env.example")
+        check("admin example gets a blank MNEMO_ADMIN_TOKEN",
+              "MNEMO_ADMIN_TOKEN=\n" in example
+              and _FAKE_TOKEN not in example, detail=example)
+        check("the setup script regenerated .mcp.json",
+              (done["regenerated"] or {}).get("ok")
+              and ".mcp.json" in done["written"], detail=str(done))
+        gen = (_admin_servers(proj / ".mcp.json")
+               if (proj / ".mcp.json").exists() else {})
+        url = gen.get("mnemo-admin", {}).get("url", "")
+        check("regenerated .mcp.json carries the literal admin url",
+              url == f"http://127.0.0.1:4747/mcp-admin?token={_FAKE_TOKEN}",
+              detail=url)
+        check("and the memory entry still resolves",
+              gen.get("mnemo-memory", {}).get("url", "").endswith(bank_tok),
+              detail=str(gen))
+        check("template wiring is 'already' afterwards",
+              done["preview"]["action"] == "already"
+              and done["preview"]["entry_current"], detail=str(done["preview"]))
+
+        # No layer yet: seeded from .mcp.json, as `init` seeds it — but the
+        # literal bank token must not ride into the tracked template.
+        seed = Path(raw) / "seed"
+        seed.mkdir()
+        ssh = {"command": "npx", "args": ["-y", "ssh-mcp"]}
+        _write(seed / ".mcp.json", json.dumps({"mcpServers": {
+            "mnemo-memory": {"type": "http", "url":
+                             f"http://127.0.0.1:4646/mcp?token={bank_tok}"},
+            "ssh": ssh}}, indent=2) + "\n")
+        pre = scaffold.admin_mcp_preview(seed, _FAKE_TOKEN, "template")
+        check("template mode without a layer is 'create'",
+              pre["action"] == "create" and not pre["uses_template"]
+              and ".gitignore" in pre["writes"], detail=str(pre))
+        done = scaffold.wire_admin_mcp(seed, _FAKE_TOKEN, "template")
+        tpl = _read(seed / ".mcp.json.template")
+        servers = json.loads(tpl)["mcpServers"]
+        check("seeded template carries no literal token of either kind",
+              bank_tok not in tpl and _FAKE_TOKEN not in tpl, detail=tpl)
+        check("seeded template turned the memory entry into placeholders",
+              servers.get("mnemo-memory", {}).get("url", "").endswith(
+                  "{{MNEMO_TOKEN}}") and servers.get("ssh") == ssh,
+              detail=tpl)
+        env_keys = dict(line.split("=", 1)
+                        for line in _read(seed / ".mcp.env").splitlines()
+                        if "=" in line)
+        check("seeded .mcp.env holds host, port and both tokens",
+              env_keys.get("MNEMO_TOKEN") == bank_tok
+              and env_keys.get("MNEMO_ADMIN_TOKEN") == _FAKE_TOKEN
+              and "MNEMO_HOST" in env_keys and "MNEMO_PORT" in env_keys,
+              detail=str(env_keys))
+        check("seeding says the other servers were carried into git",
+              any("carried" in note for note in done["notes"]),
+              detail=str(done["notes"]))
+        gen = (_admin_servers(seed / ".mcp.json")
+               if (seed / ".mcp.json").exists() else {})
+        check("seeded regeneration resolves every entry",
+              (done["regenerated"] or {}).get("ok")
+              and gen.get("mnemo-memory", {}).get("url", "").endswith(bank_tok)
+              and gen.get("mnemo-admin", {}).get("url", "").endswith(_FAKE_TOKEN)
+              and gen.get("ssh") == ssh, detail=str(done))
+        ignored = _read(seed / ".gitignore").splitlines()
+        check("seeded project ignores both secret files",
+              ".mcp.json" in ignored and ".mcp.env" in ignored,
+              detail=str(ignored))
+
+        # Both the current key and the former `mnemo` key, each with its own
+        # literal bank token: neither may reach the tracked template.
+        both = Path(raw) / "both"
+        both.mkdir()
+        old_tok = "d" * 48
+        _write(both / ".mcp.json", json.dumps({"mcpServers": {
+            "mnemo-memory": {"type": "http", "url":
+                             f"http://127.0.0.1:4646/mcp?token={bank_tok}"},
+            "mnemo": {"type": "http", "url":
+                      f"http://127.0.0.1:4646/mcp/notes?token={old_tok}"},
+        }}, indent=2) + "\n")
+        done = scaffold.wire_admin_mcp(both, _FAKE_TOKEN, "template")
+        tpl = _read(both / ".mcp.json.template")
+        servers = json.loads(tpl)["mcpServers"]
+        check("both keys: no literal token of any kind in the template",
+              not re.search(r"[0-9a-f]{32,}", tpl), detail=tpl)
+        check("both keys: the former key is dropped, as init drops it",
+              "mnemo" not in servers
+              and servers.get("mnemo-memory", {}).get("url", "").endswith(
+                  "{{MNEMO_TOKEN}}"), detail=tpl)
+        check("both keys: the current key's token is the one kept",
+              f"MNEMO_TOKEN={bank_tok}" in _read(both / ".mcp.env"),
+              detail=_read(both / ".mcp.env"))
+
+        legacy = Path(raw) / "legacy"
+        legacy.mkdir()
+        _write(legacy / ".mcp.json", json.dumps({"mcpServers": {
+            "mnemo": {"type": "http", "url":
+                      f"http://127.0.0.1:4646/mcp?token={old_tok}"}}}) + "\n")
+        scaffold.wire_admin_mcp(legacy, _FAKE_TOKEN, "template")
+        tpl = _read(legacy / ".mcp.json.template")
+        check("former key alone: renamed, token moved to .mcp.env",
+              old_tok not in tpl and "mnemo-memory" in json.loads(tpl)["mcpServers"]
+              and f"MNEMO_TOKEN={old_tok}" in _read(legacy / ".mcp.env"),
+              detail=tpl)
+
+        stdio = Path(raw) / "stdio"
+        stdio.mkdir()
+        stdio_doc = json.dumps({"mcpServers": {"mnemo": {
+            "type": "stdio", "command": "${HOME}/.claude/mnemo/bin/mnemo",
+            "args": ["mcp"]}}}) + "\n"
+        _write(stdio / ".mcp.json", stdio_doc)
+        pre = scaffold.admin_mcp_preview(stdio, _FAKE_TOKEN, "template")
+        check("a legacy stdio memory entry asks for init --migrate",
+              pre["action"] == "refused" and pre["reason"] == "needs_migrate",
+              detail=str(pre))
+        check("and nothing was written for it",
+              _read(stdio / ".mcp.json") == stdio_doc
+              and not (stdio / ".mcp.json.template").exists())
+
+        # A foreign sed-list script gets the admin substitutions added, the
+        # way `init` adds its own lines to one.
+        foreign = Path(raw) / "foreign"
+        foreign.mkdir()
+        _write(foreign / ".mcp.json.template", '{"mcpServers": {}}\n')
+        _write(foreign / "mcp-setup.sh", "\n".join([
+            "#!/usr/bin/env bash",
+            "set -euo pipefail",
+            "TEMPLATE=.mcp.json.template",
+            "set -a; . ./.mcp.env; set +a",
+            "sed \\",
+            '  -e "s|{{MNEMO_HOST}}|${MNEMO_HOST}|g" \\',
+            '  "$TEMPLATE" > .mcp.json',
+            "",
+        ]))
+        (foreign / "mcp-setup.sh").chmod(0o755)
+        scaffold.wire_admin_mcp(foreign, _FAKE_TOKEN, "template")
+        text = _read(foreign / "mcp-setup.sh")
+        check("a foreign script gets the admin sed lines once",
+              text.count("{{MNEMO_HOST}}") == 1
+              and "{{MNEMO_PORT}}" in text and "{{MNEMO_ADMIN_TOKEN}}" in text
+              and text.index("{{MNEMO_ADMIN_TOKEN}}") < text.index('"$TEMPLATE"'),
+              detail=text)
+
+
+def test_admin_mcp_refuses_tracked() -> None:
+    """MN-27: the service token never goes into a git-tracked file."""
+    import subprocess
+
+    def git(cwd: Path, *args: str) -> None:
+        subprocess.run(["git", *args], cwd=cwd, check=True,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    with tempfile.TemporaryDirectory(prefix="mnemo admin tracked ") as raw:
+        proj = Path(raw) / "repo"
+        proj.mkdir()
+        try:
+            git(proj, "init", "-q")
+        except (OSError, subprocess.CalledProcessError):
+            print("SKIP  admin tracked refusal: no usable git binary")
+            return
+        _write(proj / ".mcp.json", '{"mcpServers": {}}\n')
+        git(proj, "add", "-f", ".mcp.json")
+        pre = scaffold.admin_mcp_preview(proj, _FAKE_TOKEN, "literal")
+        check("tracked .mcp.json refuses admin wiring",
+              pre["action"] == "refused" and pre["reason"] == "tracked"
+              and pre["tracked_files"] == [".mcp.json"], detail=str(pre))
+        raised = None
+        try:
+            scaffold.wire_admin_mcp(proj, _FAKE_TOKEN, "literal")
+        except scaffold.AdminWiringRefused as exc:
+            raised = exc.reason
+        check("tracked wire raises", raised == "tracked", detail=str(raised))
+        check("tracked .mcp.json stays untouched",
+              _read(proj / ".mcp.json") == '{"mcpServers": {}}\n'
+              and not (proj / ".gitignore").exists())
+        pre = scaffold.admin_mcp_preview(proj, _FAKE_TOKEN, "template")
+        check("tracked .mcp.json refuses the template form too",
+              pre["reason"] == "tracked"
+              and pre["tracked_files"] == [".mcp.json"], detail=str(pre))
+
+        git(proj, "rm", "--cached", "-q", ".mcp.json")
+        _write(proj / ".mcp.json.template", '{"mcpServers": {}}\n')
+        _write(proj / ".mcp.env", "MNEMO_PORT=4646\n")
+        git(proj, "add", "-f", ".mcp.env")
+        pre = scaffold.admin_mcp_preview(proj, _FAKE_TOKEN, "template")
+        check("tracked .mcp.env refuses the template form",
+              pre["reason"] == "tracked"
+              and pre["tracked_files"] == [".mcp.env"], detail=str(pre))
+        raised = None
+        try:
+            scaffold.wire_admin_mcp(proj, _FAKE_TOKEN, "template")
+        except scaffold.AdminWiringRefused as exc:
+            raised = exc.reason
+        check("tracked .mcp.env: template wire raises and writes nothing",
+              raised == "tracked"
+              and _read(proj / ".mcp.env") == "MNEMO_PORT=4646\n"
+              and _read(proj / ".mcp.json.template") == '{"mcpServers": {}}\n'
+              and not (proj / "mcp-setup.sh").exists(), detail=str(raised))
+        pre = scaffold.admin_mcp_preview(proj, _FAKE_TOKEN, "literal")
+        check("a tracked .mcp.env does not block literal mode",
+              pre["action"] in ("create", "add") and not pre["tracked"],
+              detail=str(pre))
+
+        # A project folder inside a bigger repository: the index lives at
+        # the parent, and the path it must find is `sub/.mcp.json`.
+        sub = proj / "packages" / "sub"
+        sub.mkdir(parents=True)
+        _write(sub / ".mcp.json", '{"mcpServers": {}}\n')
+        git(proj, "add", "-f", "packages/sub/.mcp.json")
+        pre = scaffold.admin_mcp_preview(sub, _FAKE_TOKEN, "literal")
+        check("a subfolder of a parent repo sees its tracked .mcp.json",
+              pre["reason"] == "tracked"
+              and pre["tracked_files"] == [".mcp.json"], detail=str(pre))
+        other = proj / "packages" / "other"
+        other.mkdir()
+        pre = scaffold.admin_mcp_preview(other, _FAKE_TOKEN, "literal")
+        check("an untracked sibling subfolder may be wired",
+              pre["action"] == "create" and not pre["tracked"], detail=str(pre))
+
+
 def test_git_index_probe() -> None:
     """`init` answers "is this tracked?" by reading .git/index, never by git.
 
@@ -2806,6 +3202,10 @@ def main() -> int:
     test_scaffold_gitignore()
     test_scaffold_warns_when_memory_is_ignored()
     test_scaffold_refuses_a_tracked_file()
+    test_admin_mcp_snippet()
+    test_admin_mcp_literal_wiring()
+    test_admin_mcp_template_wiring()
+    test_admin_mcp_refuses_tracked()
     test_git_index_probe()
     test_project_resolution()
     test_index_paths()

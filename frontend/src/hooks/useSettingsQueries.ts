@@ -9,6 +9,8 @@ import {
   getSettings,
   getUpdateStatus,
 } from "@/lib/api/settings";
+import { getAdminMcp, getAdminWiring } from "@/lib/api/adminMcp";
+import type { McpMode } from "@/lib/memory/tokenSnippets";
 import { isApplyBusy } from "@/lib/update/apply-state";
 
 export function useSettings() {
@@ -93,5 +95,23 @@ export function useAutoPendingPolling(enabled: boolean) {
     enabled,
     refetchInterval: enabled ? 2000 : false,
     retry: false,
+  });
+}
+
+export function useAdminMcp() {
+  return useQuery({
+    queryKey: queryKeys.adminMcp.all,
+    queryFn: getAdminMcp,
+  });
+}
+
+/** The dry-run for one picked folder; `retry: false` — a 400 on a bad path is an answer, not a blip. */
+export function useAdminWiringPreview(root: string | null, mode: McpMode) {
+  return useQuery({
+    queryKey: queryKeys.adminMcp.wiring(root ?? "", mode),
+    queryFn: () => getAdminWiring(root!, mode),
+    enabled: root != null,
+    retry: false,
+    staleTime: 0,
   });
 }

@@ -15,6 +15,8 @@ import {
   unloadEmbed,
   type SettingsPutPayload,
 } from "@/lib/api/settings";
+import { wireAdminMcp } from "@/lib/api/adminMcp";
+import type { McpMode } from "@/lib/memory/tokenSnippets";
 
 export function usePutSettings() {
   const qc = useQueryClient();
@@ -83,5 +85,13 @@ export function useConfirmAutoPending() {
 export function useCancelAutoPending() {
   return useMutation({
     mutationFn: () => cancelAutoPending(),
+  });
+}
+
+export function useWireAdminMcp() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ root, mode }: { root: string; mode: McpMode }) => wireAdminMcp(root, mode),
+    onSettled: () => qc.invalidateQueries({ queryKey: ["adminMcp", "wiring"] }),
   });
 }

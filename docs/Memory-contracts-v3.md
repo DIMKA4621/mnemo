@@ -1318,6 +1318,8 @@ def snapshot() -> QueueSnapshot
 | `orphan_cleanup_refused` | 409 | **[NEW]** registry/orphan-list не можна вважати достовірним; нічого не видалено |
 | `stale_target` | 409 | **[NEW]** `POST /api/update/apply`'s `tag` не збігається з поточним `last_check.latest_tag`, або `update_available` вже `false` — клієнт побачив застарілий екран, треба перевірити знову (9.9) |
 | `update_in_progress` | 409 | **[NEW]** `POST /api/update/apply` уже стейджиться цим процесом — друга спроба відхиляється, а не стає в чергу (9.9) |
+| `mcp_file_tracked` | 409 | **[NEW, MN-27]** `POST /api/admin-mcp/wiring`: файл, куди ліг би сервісний токен, відстежується git, або індекс git не розбирається (9.5) |
+| `mcp_config_invalid` | 409 | **[NEW, MN-27]** `POST /api/admin-mcp/wiring`: `.mcp.json` / `.mcp.json.template` не JSON-обʼєкт або `mcpServers` не обʼєкт, або запис памʼяті mnemo в ньому має форму, яку `init` переписує лише з `--migrate`; файл не чіпали (9.5) |
 | `internal` | 500 | усе інше |
 
 **Маршрут, якого немає, конверта НЕ має — тіло порожнє.** **[NEW]** Конверт описує **доменну** невдачу; шлях, якого ніхто не реєстрував, нею не є: немає ні банку, ні запиту, ні порушеного правила — лише адреса, що тут нічого не означає.
@@ -1436,6 +1438,69 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 
 Обидва — під `/api`, тобто **сервісний токен** і `include_in_schema=False`.
 Токен свідомо винесено з `BankInfo` в окремий ендпоінт на один банк: його показує рівно та в'юха консолі, яка для цього й існує, а не кожен лістинг.
+
+**`GET /api/admin-mcp`** **[NEW, MN-27]** — запис адмін-обличчя `/mcp-admin` для секції «Admin MCP» у налаштуваннях консолі:
+
+```json
+{"token": "<сервісний токен>",
+ "url": "http://127.0.0.1:4646/mcp-admin?token=<сервісний токен>",
+ "host": "127.0.0.1", "port": 4646, "entry_name": "mnemo-admin",
+ "snippet": {
+   "literal": {"mcpServers": {"mnemo-admin": {"type": "http", "url": "…?token=<сервісний токен>"}}},
+   "template": {
+     "template_entry": {"mcpServers": {"mnemo-admin": {"type": "http",
+       "url": "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp-admin?token={{MNEMO_ADMIN_TOKEN}}"}}},
+     "env_var": "MNEMO_ADMIN_TOKEN",
+     "env_line": "MNEMO_ADMIN_TOKEN=<сервісний токен>",
+     "env_block": "MNEMO_HOST=127.0.0.1\nMNEMO_PORT=4646\nMNEMO_ADMIN_TOKEN=<сервісний токен>",
+     "sed_line": "-e \"s|{{MNEMO_ADMIN_TOKEN}}|${MNEMO_ADMIN_TOKEN}|g\""}}}
+```
+
+Токен — **сервісний**, не токен банку, і мінтиться ліниво тим самим `api_token()`, що й для самого `/mcp-admin`.
+Імена — ті самі, що в панелі доступу банку: ключ `mnemo-admin`, власна змінна токена `MNEMO_ADMIN_TOKEN` (`tokenVar("mnemo-admin")`), спільні `MNEMO_HOST`/`MNEMO_PORT`.
+
+**`GET /api/admin-mcp/wiring?root=<абс. тека>&mode=literal|template`** **[NEW, MN-27]** — попередній перегляд для вибраної теки, нічого не пише:
+
+```json
+{"project_root": "E:/work/proj", "mode": "template", "suggested_mode": "template",
+ "exists": true, "mcp_json_exists": true, "uses_template": true,
+ "target": ".mcp.json.template",
+ "has_entry": false, "entry_current": false,
+ "tracked": false, "tracked_files": [],
+ "writes": ["mcp-setup.ps1", ".mcp.json.template", ".mcp.env.example", ".mcp.env", ".mcp.json"],
+ "warnings": [], "notes": [],
+ "action": "add", "reason": null}
+```
+
+* `mode` пропущено → `suggested_mode`: `template`, якщо в теці вже є `.mcp.json.template`, інакше `literal`.
+  Режим обирає користувач тим самим перемикачем literal/template, що й у панелі банку; підказка лише пропонує.
+* `action`: `create` (цільового файлу ще нема) | `add` (є, без `mnemo-admin`) | `already` (`reason: "present"`) | `refused`.
+* `reason` для `refused`: `not_found`, `not_a_directory`, `invalid_json` (файл чи `mcpServers` — не JSON-обʼєкт), `tracked` (`tracked_files` називає які), `index_unreadable` (індекс git не розбирається — відмова, а не здогадка), `needs_migrate` (`template` без шару, а в `.mcp.json` запис памʼяті mnemo у формі, яку `init` переписує лише з `--migrate`, — legacy stdio чи нерозпізнана).
+* `already` рахується за файлом, куди ліг би запис: `.mcp.json` для `literal`; для `template` — шаблон, а без шару — `.mcp.json`, з якого його було б засіяно.
+  `entry_current: false` при `already` = там лежить інший `mnemo-admin` (старий токен, інший порт, чужий сервер); його **не переписують**, лише показують.
+* `has_entry` — `mnemo-admin` є хоч у якому з двох файлів.
+* `tracked` перевіряє `.mcp.json` для `literal` і `.mcp.json` + `.mcp.env` для `template`: в обох режимах літеральний токен зрештою опиняється в `.mcp.json`.
+* `warnings: ["template_layer"]` — `literal` у теці з шаблоном: наступний запуск `mcp-setup.*` перезапише `.mcp.json` і запис зникне.
+* `writes` — файли, які запише POST.
+  Для `template` останнім іде `.mcp.json`, лише якщо для цієї платформи є (або буде записаний) `mcp-setup.*`, — це обіцянка запустити скрипт, а не його успіху: у відповіді POST `.mcp.json` потрапляє в `written` тільки після вдалого запуску.
+
+**`POST /api/admin-mcp/wiring`** **[NEW, MN-27]** — тіло `{"root": "...", "mode": "literal" | "template" | null}` → `200`:
+
+```json
+{"written": [".gitignore", ".mcp.json"], "log": ["…"], "notes": [],
+ "regenerated": null,
+ "preview": { /* та сама форма, тепер action: "already" */ }}
+```
+
+* Строго адитивно: інші сервери й ключі лишаються як були, наявний `mnemo-admin` не переписується ніколи — `already` дає `200` з порожнім `written`.
+* `literal` — запис із літеральним токеном у `.mcp.json` і `.mcp.json` у `.gitignore`.
+* `template` — запис із плейсхолдерами в `.mcp.json.template`, токен у `.mcp.env` (`MNEMO_HOST`/`MNEMO_PORT` лише дописуються, якщо їх нема — їх ділить запис памʼяті й вони можуть свідомо вказувати деінде), порожній `MNEMO_ADMIN_TOKEN=` у `.mcp.env.example`, обидва файли в `.gitignore`.
+  Шар добудовується так само, як це робить `mnemo init`: відсутні `mcp-setup.sh`/`.ps1` створюються, застарілі mnemo-ревізії оновлюються, чужий sed-скрипт отримує рядки `-e` для `MNEMO_HOST`/`MNEMO_PORT`/`MNEMO_ADMIN_TOKEN`.
+  Без шару шаблон засівається з наявного `.mcp.json`, і засів проходить те саме злиття, що й в `init` (`_plan_servers`): запис памʼяті mnemo стає плейсхолдерним, колишній ключ `mnemo` перейменовується або відкидається, а токен банку (поточного ключа, якщо є обидва) переїжджає в `.mcp.env` — інакше він поїхав би в git.
+  Після запису запускається скрипт платформи, як і після `init`; `regenerated: {"script", "ok", "output"}`, а невдача — це нотатка, не помилка: файли вже записані.
+* Відмови: `400 bad_request` (не абсолютний шлях, невідомий `mode`), `400 root_not_found` (нема теки / це файл), `409 mcp_file_tracked` (`tracked`, `index_unreadable`), `409 mcp_config_invalid` (`invalid_json`, `needs_migrate`); `detail.preview` несе той самий перегляд.
+  При відмові не пишеться нічого.
+* Усі три — під `/api`, `include_in_schema=False`; файли пише `scaffold.py` (`admin_mcp_snippet`, `admin_mcp_preview`, `wire_admin_mcp`), `api.py` лише маршрутизує.
 
 **`DELETE /api/banks/{bank_id}?drop_index=true`** → `200 {"ok": true}`.
 `drop_index=true` (типово) видаляє `<bank_id>.db`.

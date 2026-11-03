@@ -62,6 +62,10 @@ export const queryKeys = {
   autostart: {
     all: ["autostart"] as const,
   },
+  adminMcp: {
+    all: ["adminMcp"] as const,
+    wiring: (root: string, mode: string) => ["adminMcp", "wiring", root, mode] as const,
+  },
   catalog: {
     all: ["catalog"] as const,
     list: (category?: string) => ["catalog", category ?? null] as const,

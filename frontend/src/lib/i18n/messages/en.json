@@ -553,11 +553,13 @@
     "tabs": {
       "general": "General",
       "embed": "Embedding model",
+      "admin": "Admin MCP",
       "maint": "Maintenance"
     },
     "lede": {
       "general": "What concerns the console and the machine as a whole — not one bank, and not the embedding backend.",
       "embed": "Which backend computes vectors for search across banks, and how much RAM it takes for that.",
+      "admin": "Connect a Claude Code session to this service itself — the admin MCP face and its service token.",
       "maint": "The same structured doctor report the CLI prints as text. Checks run only when this section is opened."
     },
     "messages": {
@@ -721,6 +723,66 @@
         "restartRequired": "Saved. Takes effect after the service restarts.",
         "appliedNoPending": "Saved and applied. Check the backend with the button above.",
         "appliedPending": "Saved and applied. Check the backend with the button above, then regenerate the banks with REBUILD PENDING on the main screen."
+      }
+    },
+    "admin": {
+      "intro": "The admin MCP face (/mcp-admin, server name mnemo-admin) lets a Claude Code session manage this mnemo service itself, not search one bank. Its tools:",
+      "warning": "This is the SERVICE token: whoever holds it can add and remove banks, reindex and read the journal of the whole service. Keep it out of git — only in a git-ignored .mcp.json or in .mcp.env.",
+      "retry": "Retry",
+      "tokenLabel": "Service token",
+      "tokenNote": "The entry is named {entry}, so its tools show up as mcp__{entry}__banks and so on. It is the same token the CLI and /mcp-tools use — no bank token opens this face.",
+      "templateLead": "The button below writes all of this for you: the entry into .mcp.json.template, the token into .mcp.env, the substitution line into mcp-setup.sh — and then runs the setup script so .mcp.json is assembled with the real value. Below is exactly what it writes, if you would rather do it by hand.",
+      "wireBtn": "Add to .mcp.json…",
+      "wireHint": "Pick a project folder — you will see exactly what would change there before anything is written. Uses the form selected above.",
+      "dialog": {
+        "title": "Admin MCP — add to a project",
+        "pickHint": "Choose the project root — the folder where .mcp.json lives or should live.",
+        "folder": "Folder:",
+        "writeFailed": "Nothing was written",
+        "otherFolder": "Another folder",
+        "confirm": "Write to {target}",
+        "mode": {
+          "literal": "with values",
+          "template": "with placeholders"
+        },
+        "switchTo": {
+          "literal": "Switch to «with values»",
+          "template": "Switch to «with placeholders»"
+        },
+        "warn": {
+          "templateLayer": "This project uses the template layer (.mcp.json.template + mcp-setup). A literal entry in .mcp.json would be wiped by the next mcp-setup run — the template form is the one that survives."
+        },
+        "suggest": {
+          "literal": "This project has no template layer. The «with placeholders» form will create it here (setup scripts, .mcp.json.template, .mcp.env) — if you only need the server, «with values» is enough.",
+          "template": "This project uses the template layer — the «with placeholders» form fits it."
+        },
+        "refused": {
+          "title": "Cannot write here",
+          "not_found": "There is no such folder.",
+          "not_a_directory": "This is a file, not a folder.",
+          "invalid_json": "The MCP config in this folder is not a readable JSON object. It was left untouched — fix it by hand first.",
+          "tracked": "The file the service token would land in is tracked by git. Untrack it and add it to .gitignore first:",
+          "index_unreadable": "The git index here cannot be read, so it is unknown whether the file is tracked — refused rather than guessed.",
+          "needs_migrate": "The mnemo-memory entry in .mcp.json is in an old format, so no template can be built from it. Run «mnemo init --migrate» in the project first, or choose the form with the token directly in .mcp.json."
+        },
+        "already": {
+          "title": "mnemo-admin is already in {target}",
+          "current": "The entry is exactly what would be written — nothing to do.",
+          "different": "A different mnemo-admin entry is there (another URL or token). It will not be overwritten — edit or remove it by hand if it is stale."
+        },
+        "action": {
+          "create": "{target} will be created with the mnemo-admin entry ({mode}).",
+          "add": "The mnemo-admin entry will be added to the existing {target} ({mode}); other servers stay as they are."
+        },
+        "writes": "Files that will be written:",
+        "templateRun": "Afterwards the project''s setup script runs to assemble .mcp.json from the template."
+      },
+      "done": {
+        "title": "mnemo-admin added",
+        "nothing": "Nothing to write — the entry was already there",
+        "regenOk": "{script} ran — .mcp.json assembled",
+        "regenFailed": "{script} failed — .mcp.json was not regenerated; run it by hand",
+        "restartHint": "A running Claude Code session picks up a new MCP server only after a restart."
       }
     },
     "maint": {

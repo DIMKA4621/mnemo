@@ -411,6 +411,11 @@ _ERROR_STATUS: dict[str, int] = {
     # launch` — no `.claude/agents/*.md` under the source agent matches
     # `name` (or it could not be read). Same shape as `chat_not_found`.
     "subagent_not_found": 404,
+    # [NEW beyond §9.2, MN-27] `POST /api/admin-mcp/wiring` refused: the file
+    # the service token would land in is tracked by git (or the index cannot
+    # say), or the project's MCP config is not a readable JSON object.
+    "mcp_file_tracked": 409,
+    "mcp_config_invalid": 409,
     "internal": 500,
 }
 
@@ -1718,6 +1723,82 @@ def _mcp_wiring_info(bank: Bank) -> dict:
 def api_bank_mcp_wiring(bank_id: str) -> dict:
     bank = _resolve_bank(bank_id, require_enabled=False)
     return _mcp_wiring_info(bank)
+
+
+# ------------------------------------------------- admin MCP wiring (MN-27)
+#
+# The console's Settings wires `/mcp-admin` into a project the user picks.
+# The token here is the SERVICE token, minted lazily exactly as the face
+# itself does; `scaffold` owns every `.mcp.json` mutation, this only routes.
+
+
+class AdminMcpWiringRequest(BaseModel):
+    root: str
+    # "literal" | "template"; omitted = the form the project already uses.
+    mode: str | None = None
+
+
+def _admin_mcp_root(raw: str) -> Path:
+    root = Path(raw.strip()).expanduser() if raw and raw.strip() else None
+    if root is None or not root.is_absolute():
+        raise ApiError("bad_request", "потрібен абсолютний шлях", root=raw)
+    return root.resolve()
+
+
+def _admin_mcp_mode(mode: str | None) -> str | None:
+    if mode in (None, "", "literal", "template"):
+        return mode or None
+    raise ApiError("bad_request", "mode: literal або template", mode=mode)
+
+
+_ADMIN_REFUSALS = {
+    "not_found": "немає такої теки",
+    "not_a_directory": "це файл, а не тека",
+    "invalid_json": "конфіг MCP у цій теці не читається як JSON-обʼєкт — "
+                    "його не чіпали",
+    "tracked": "файл, куди ліг би сервісний токен, відстежується git — "
+               "спершу `git rm --cached` і .gitignore",
+    "index_unreadable": "індекс git не читається, тож невідомо, чи файл "
+                        "відстежується — відмовлено, а не вгадано",
+    "needs_migrate": "запис памʼяті mnemo у .mcp.json має стару форму — "
+                     "спершу `mnemo init --migrate`",
+}
+
+
+@app.get("/api/admin-mcp", include_in_schema=False)
+def api_admin_mcp() -> dict:
+    from . import scaffold
+    return scaffold.admin_mcp_snippet(api_token())
+
+
+@app.get("/api/admin-mcp/wiring", include_in_schema=False)
+def api_admin_mcp_wiring(root: str = "", mode: str | None = None) -> dict:
+    from . import scaffold
+    return scaffold.admin_mcp_preview(_admin_mcp_root(root), api_token(),
+                                      _admin_mcp_mode(mode))
+
+
+@app.post("/api/admin-mcp/wiring", include_in_schema=False)
+def api_admin_mcp_wire(req: AdminMcpWiringRequest) -> dict:
+    from . import scaffold
+    root = _admin_mcp_root(req.root)
+    mode = _admin_mcp_mode(req.mode)
+    try:
+        result = scaffold.wire_admin_mcp(root, api_token(), mode)
+    except scaffold.AdminWiringRefused as exc:
+        code = {"not_found": "root_not_found",
+                "not_a_directory": "root_not_found",
+                "invalid_json": "mcp_config_invalid",
+                "needs_migrate": "mcp_config_invalid"}.get(exc.reason,
+                                                          "mcp_file_tracked")
+        raise ApiError(code, _ADMIN_REFUSALS[exc.reason], root=str(root),
+                       preview=exc.preview) from exc
+    except OSError as exc:
+        raise ApiError("internal", f"cannot write MCP wiring under {root}: "
+                       f"{exc}", root=str(root)) from exc
+    log.info("wired mnemo-admin (%s) into %s (%s)", result["preview"]["mode"],
+             root, ", ".join(result["written"]) or "already present")
+    return result
 
 
 @app.delete("/api/banks/{bank_id}", include_in_schema=False)
