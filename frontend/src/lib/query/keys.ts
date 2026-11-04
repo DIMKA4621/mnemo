@@ -27,6 +27,10 @@ export const queryKeys = {
   fsDirs: {
     at: (path: string | null) => ["fsDirs", path ?? null] as const,
   },
+  initPreview: {
+    at: (root: string, createStructure: boolean, overwriteInvalid: boolean) =>
+      ["initPreview", root, createStructure, overwriteInvalid] as const,
+  },
   tree: {
     all: ["tree"] as const,
     bank: (bankId: string) => ["tree", bankId] as const,
@@ -61,6 +65,10 @@ export const queryKeys = {
   },
   autostart: {
     all: ["autostart"] as const,
+  },
+  adminMcp: {
+    all: ["adminMcp"] as const,
+    wiring: (root: string, mode: string) => ["adminMcp", "wiring", root, mode] as const,
   },
   catalog: {
     all: ["catalog"] as const,

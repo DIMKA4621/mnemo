@@ -1,12 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { Button, Checkbox, Input } from "antd";
+import { Alert, Button, Checkbox, Input, Skeleton } from "antd";
 import { useT } from "@/lib/i18n/hooks";
-import { useFsDirs } from "@/hooks/useMemoryQueries";
+import { useFsDirs, useInitPreview } from "@/hooks/useMemoryQueries";
 import { useAddBank } from "@/hooks/useMemoryMutations";
 import { ModalShell } from "@/components/common/ModalShell";
-import type { BankInfo } from "@/lib/api/memory";
+import type { AddBankRequest, BankInfo } from "@/lib/api/memory";
+import { InitPreviewView, canAddWithoutMcp, canOverwriteInvalid } from "./InitPreviewView";
 import { effectiveBankRoot, projectRootForBankPath } from "@/lib/memory/bankRoot";
 
 interface BankPickerProps {
@@ -23,8 +24,15 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
   const [createChecked, setCreateChecked] = useState(false);
   const [mcpChecked, setMcpChecked] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
+  // Set while the init preview step is shown: the exact body Confirm will send.
+  const [pendingBody, setPendingBody] = useState<AddBankRequest | null>(null);
 
   const fsQuery = useFsDirs(browsePath, open);
+  const previewQuery = useInitPreview(
+    pendingBody?.root ?? null,
+    pendingBody?.create_structure ?? false,
+    pendingBody?.overwrite_invalid ?? false,
+  );
   const addBankMutation = useAddBank();
   const data = fsQuery.data ?? null;
   const currentPath = data?.path ?? null;
@@ -92,15 +100,42 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
     go(pathInput.trim());
   }
 
-  async function submit() {
+  function submit() {
     if (!currentPath || fsQuery.isFetching || addBankMutation.isPending) return;
     setSubmitError(null);
-    const body = {
+    const body: AddBankRequest = {
       root: effectiveBankRoot(currentPath, createEffective, data),
       name: name.trim() || null,
       create_structure: createEffective,
       init: mcpChecked,
     };
+    // `init` writes into the project, so the user sees exactly what first.
+    if (body.init) {
+      setPendingBody(body);
+      return;
+    }
+    void create(body);
+  }
+
+  // Back from the overridden plan lands on the refusal it overrode, not on the folder step.
+  function back() {
+    setSubmitError(null);
+    setPendingBody(pendingBody?.overwrite_invalid ? { ...pendingBody, overwrite_invalid: false } : null);
+  }
+
+  function overwriteInvalid() {
+    if (!pendingBody) return;
+    setSubmitError(null);
+    setPendingBody({ ...pendingBody, overwrite_invalid: true });
+  }
+
+  function createWithoutMcp() {
+    if (!pendingBody) return;
+    void create({ ...pendingBody, init: false, overwrite_invalid: false });
+  }
+
+  async function create(body: AddBankRequest) {
+    setSubmitError(null);
     try {
       const info = await addBankMutation.mutateAsync(body);
       const initSuffix = info.init
@@ -112,6 +147,68 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
     } catch (err) {
       setSubmitError(err instanceof Error ? err.message : String(err));
     }
+  }
+
+  if (pendingBody) {
+    const preview = previewQuery.data ?? null;
+    const canConfirm = preview != null && (preview.action === "create" || preview.action === "add");
+    const offerWithout = previewQuery.isError || (preview != null && canAddWithoutMcp(preview));
+    const offerOverwrite = preview != null && !pendingBody.overwrite_invalid && canOverwriteInvalid(preview);
+    const busy = addBankMutation.isPending;
+    return (
+      <ModalShell
+        open={open}
+        title={t("common.picker.preview.title")}
+        ariaLabel={t("common.picker.ariaLabel")}
+        onClose={onClose}
+        busy={busy}
+        wide
+        footer={
+          <>
+            <Button onClick={back} disabled={busy}>
+              {t("common.btn.back")}
+            </Button>
+            <Button onClick={onClose} disabled={busy}>
+              {t("common.btn.cancel")}
+            </Button>
+            {offerWithout && (
+              <Button type={canConfirm || offerOverwrite ? "default" : "primary"} loading={busy} onClick={createWithoutMcp}>
+                {t("common.picker.preview.withoutMcp")}
+              </Button>
+            )}
+            {offerOverwrite && (
+              <Button type="primary" danger disabled={busy} onClick={overwriteInvalid}>
+                {t("common.picker.preview.overwrite.button")}
+              </Button>
+            )}
+            {canConfirm && (
+              <Button type="primary" loading={busy} onClick={() => void create(pendingBody)}>
+                {t("common.picker.preview.confirm")}
+              </Button>
+            )}
+          </>
+        }
+      >
+        <p className="tok-note" style={{ marginTop: 0 }}>
+          {t("common.picker.preview.bankRoot")} <code>{pendingBody.root}</code>
+        </p>
+        {previewQuery.isPending ? (
+          <Skeleton active title={false} paragraph={{ rows: 5 }} />
+        ) : previewQuery.isError ? (
+          <Alert
+            type="error"
+            showIcon
+            title={t("common.picker.preview.loadFailed")}
+            description={previewQuery.error instanceof Error ? previewQuery.error.message : String(previewQuery.error)}
+          />
+        ) : preview ? (
+          <InitPreviewView preview={preview} />
+        ) : null}
+        {submitError && (
+          <Alert type="error" showIcon style={{ marginTop: 10 }} title={submitError} />
+        )}
+      </ModalShell>
+    );
   }
 
   const mdCount = data ? (data.md_capped ? `≥${data.md}` : String(data.md)) : "";
@@ -134,7 +231,11 @@ export function BankPicker({ open, onClose, onAdded }: BankPickerProps) {
             disabled={fsQuery.isFetching || !data || !!data.registered}
             onClick={submit}
           >
-            {fsQuery.isFetching ? t("common.picker.reading") : t("common.picker.addDir")}
+            {fsQuery.isFetching
+              ? t("common.picker.reading")
+              : mcpChecked
+                ? t("common.picker.preview.next")
+                : t("common.picker.addDir")}
           </Button>
         </>
       }

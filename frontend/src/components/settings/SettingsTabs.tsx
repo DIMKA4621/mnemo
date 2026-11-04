@@ -8,11 +8,12 @@ import { usePageHeaderSlotStore } from "@/lib/store/page-header-slot";
 import { GeneralSection } from "./GeneralSection";
 import { EmbedSection } from "./EmbedSection";
 import { MaintenanceSection } from "./MaintenanceSection";
+import { AdminMcpSection } from "./AdminMcpSection";
 import "@/components/common/dialogs.css";
 import "./settings.css";
 
 /** What a Save-gated section (Загальні, Модель ембедингу) hands the shared
- *  footer button — Обслуговування registers none, so the button is hidden
+ *  footer button — Admin MCP and Обслуговування register none, so the button is hidden
  *  entirely there, not disabled. */
 export interface SectionController {
   hasPendingChange: boolean;
@@ -20,7 +21,7 @@ export interface SectionController {
   submit: () => void | Promise<void>;
 }
 
-type SectionId = "general" | "embed" | "maint";
+type SectionId = "general" | "embed" | "admin" | "maint";
 
 /**
  * Horizontal tabs under the page header (AntD `Tabs`) — the current
@@ -58,6 +59,7 @@ export function SettingsTabs() {
         items={[
           { key: "general", label: t("settings.tabs.general") },
           { key: "embed", label: t("settings.tabs.embed") },
+          { key: "admin", label: t("settings.tabs.admin") },
           { key: "maint", label: t("settings.tabs.maint") },
         ]}
         styles={{ header: { margin: 0, padding: "0 12px", background: "var(--ant-color-bg-container)" } }}
@@ -68,6 +70,7 @@ export function SettingsTabs() {
           <p className="lede">{t(`settings.lede.${active}`)}</p>
           {active === "general" && <GeneralSection onController={setController} />}
           {active === "embed" && <EmbedSection onController={setController} />}
+          {active === "admin" && <AdminMcpSection />}
           {active === "maint" && <MaintenanceSection />}
         </div>
       </div>

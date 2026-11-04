@@ -58,6 +58,7 @@ import subprocess
 import sys
 from pathlib import Path
 from typing import Iterable
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from . import config
 from .config import resolve
@@ -110,6 +111,13 @@ _VAR_INSTANCE = "mnemo"
 def _var_prefix(instance: str) -> str:
     """`mnemo` -> `MNEMO`; `mnemo-notes` -> `MNEMO_NOTES`."""
     return re.sub(r"[^A-Za-z0-9]+", "_", instance).strip("_").upper() or "MNEMO"
+
+
+def _token_var(instance: str) -> str:
+    """An entry's token variable, named as the console's `tokenVar` names it."""
+    if instance in (_INSTANCE, _LEGACY_INSTANCE):
+        return f"{_var_prefix(_VAR_INSTANCE)}_TOKEN"
+    return f"{_var_prefix(instance)}_TOKEN"
 
 
 def _api_port() -> str:
@@ -199,6 +207,42 @@ def _is_mnemo_http(entry: object) -> bool:
         and isinstance(entry.get("url"), str)
         and "/mcp" in entry["url"]
     )
+
+
+# mnemo only ever binds loopback (or the configured host), so a `/mcp` URL on
+# any other host is somebody else's server. On another loopback port only the
+# exact face paths count, and only the token is lifted -- path and address stay
+# as written, so a local tool that happens to share the shape still works.
+# The superseded `/mcp/<bank>` path is rewritten only on mnemo's own port:
+# elsewhere `/mcp/sse` is somebody else's route.
+_LOOPBACK_HOSTS = ("127.0.0.1", "localhost", "::1")
+_MNEMO_FACES = ("/mcp", "/mcp-admin")
+_SUPERSEDED_FACE = re.compile(r"/mcp/(?:[^/]+/?)?")
+
+
+def _mnemo_face_token(entry: object) -> tuple[SplitResult, str, str] | None:
+    """`(url parts, token, path to write)` for an entry pointing at a mnemo
+    face with a literal token in its URL — recognised by shape, never by key —
+    else None."""
+    if not _is_mnemo_http(entry):
+        return None
+    parts = urlsplit(entry["url"])
+    host = (parts.hostname or "").lower()
+    if (parts.scheme not in ("http", "https")
+            or host not in (*_LOOPBACK_HOSTS, _api_host().lower())):
+        return None
+    try:
+        own_port = parts.port == int(_api_port())
+    except ValueError:
+        return None
+    if parts.path in _MNEMO_FACES:
+        path = parts.path
+    elif own_port and _SUPERSEDED_FACE.fullmatch(parts.path):
+        path = "/mcp"
+    else:
+        return None
+    match = _TOKEN_IN_URL.search("?" + parts.query)
+    return (parts, match.group(1), path) if match else None
 
 
 # The two legacy generations `--migrate` must recognise (§15.2). L1 predates
@@ -519,6 +563,40 @@ class _Refuse(Exception):
     """A different mnemo entry already exists — migration is a judgement
     call for the adopt skill, not for this primitive."""
 
+    # The console's code for the refusal (`init_preview`); the message is
+    # what the CLI prints.
+    reason = "conflict"
+
+    def __init__(self, message: str, reason: str | None = None) -> None:
+        super().__init__(message)
+        if reason:
+            self.reason = reason
+
+
+class _InvalidMcpJson(_Refuse):
+    """`.mcp.json` is not usable JSON, and the setup script would regenerate
+    it. Overridable with `--overwrite-invalid`, which backs it up first."""
+
+    reason = "invalid_json"
+
+    def __init__(self, path: Path, line: int, column: int,
+                 message: str) -> None:
+        super().__init__(
+            f"{path} is not usable JSON at line {line}, column {column}: "
+            f"{message}.\n"
+            f"      The template layer would regenerate it and drop whatever "
+            f"it holds, so it was left untouched.\n"
+            f"      Fix it by hand, or re-run with `--overwrite-invalid` to "
+            f"back it up to {_backup_path(path).name} and rebuild it.")
+        self.location = {"line": line, "column": column, "message": message}
+
+
+class _EnvConflict(_Refuse):
+    """A token a template entry needs would contradict a value already owed
+    to, or present in, `.mcp.env`."""
+
+    reason = "env_conflict"
+
 
 def _load_json(path: Path) -> dict:
     """Parse an existing JSON object. A present-but-broken or non-object
@@ -529,9 +607,10 @@ def _load_json(path: Path) -> dict:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, ValueError, OSError) as exc:
         raise _Refuse(f"{path} exists but is not readable JSON ({exc}); "
-                      f"left untouched") from exc
+                      f"left untouched", "invalid_json") from exc
     if not isinstance(data, dict):
-        raise _Refuse(f"{path} is not a JSON object; left untouched")
+        raise _Refuse(f"{path} is not a JSON object; left untouched",
+                      "invalid_json")
     return data
 
 
@@ -575,7 +654,8 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
     if servers is None:
         servers = {}
     elif not isinstance(servers, dict):
-        raise _Refuse(f"{path}: 'mcpServers' is not an object; left untouched")
+        raise _Refuse(f"{path}: 'mcpServers' is not an object; left untouched",
+                      "invalid_json")
 
     # The key was renamed (`mnemo` -> `mnemo-memory`). A project wired before
     # that carries the old one, and simply writing the new key beside it would
@@ -607,7 +687,8 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
                 f"exists.\n"
                 f"      found:    {json.dumps(legacy_key)}\n"
                 f"      expected: {_redacted(target)} under '{_INSTANCE}'\n"
-                f"      (left untouched — re-run with `--migrate`)")
+                f"      (left untouched — re-run with `--migrate`)",
+                "needs_migrate")
         del servers[_LEGACY_INSTANCE]
         renamed = True
         log.append(f"  {label:<20} migrated mnemo server "
@@ -625,7 +706,8 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
                 f"does not recognise.\n"
                 f"      found:    {json.dumps(existing)}\n"
                 f"      expected: {_redacted(target)}\n"
-                f"      (left untouched — resolve via the adopt skill)")
+                f"      (left untouched — resolve via the adopt skill)",
+                "unrecognised_entry")
         if not migrate:
             raise _Refuse(
                 f"{path}: 'mcpServers.{_INSTANCE}' is the legacy "
@@ -633,7 +715,8 @@ def _plan_servers(path: Path, label: str, log: list[str], target: dict,
                 f"subcommand that no longer exists.\n"
                 f"      found:    {json.dumps(existing)}\n"
                 f"      expected: {_redacted(target)}\n"
-                f"      (left untouched — re-run with `--migrate`)")
+                f"      (left untouched — re-run with `--migrate`)",
+                "needs_migrate")
         log.append(f"  {label:<20} migrated mnemo server {generation} -> http")
     elif existing == target and not renamed:
         log.append(f"  {label:<20} mnemo server already present")
@@ -727,7 +810,7 @@ def _newline(text: str) -> str:
     return "\r\n" if "\r\n" in text else "\n"
 
 
-def _write(path: Path, text: str) -> None:
+def _write(path: Path, text: str | bytes) -> None:
     """Write exactly the bytes we built — no platform translation.
 
     `newline=""` is the whole point: without it Python rewrites every `\\n` as
@@ -736,6 +819,9 @@ def _write(path: Path, text: str) -> None:
     `mcp-setup.sh` — where `set -euo pipefail\\r` is a syntax error on any real
     Linux shell.
     """
+    if isinstance(text, bytes):
+        path.write_bytes(text)
+        return
     with open(path, "w", encoding="utf-8", newline="") as handle:
         handle.write(text)
 
@@ -746,7 +832,8 @@ def _env_comment(instance: str) -> str:
 
 def _plan_env(path: Path, log: list[str], label: str, prefix: str,
               values: dict[str, str], comment: str,
-              *, update: bool = True, migrate: bool = False) -> str | None:
+              *, update: bool = True, migrate: bool = False,
+              extra: dict[str, str] | None = None) -> str | None:
     """Set mnemo's own `NAME=value` lines in a `.env`-shaped file.
 
     Surgical in both directions: a variable that is already there has its
@@ -762,7 +849,8 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
     original = _read_text(path)
     eol = _newline(original)
     lines = original.splitlines()
-    wanted = {f"{prefix}_{k}": v for k, v in values.items()}
+    # `extra` is keyed by full variable name: other mnemo entries' tokens.
+    wanted = {f"{prefix}_{k}": v for k, v in values.items()} | (extra or {})
     # Variables mnemo used to write and no longer does — `MNEMO_BANK` today.
     # Pruned rather than left: nothing substitutes them any more, so what
     # stays behind is a value that looks authoritative and is read by nothing.
@@ -794,8 +882,7 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
         kept.append(line)
     lines = kept
 
-    missing = {k[len(prefix) + 1:]: v for k, v in wanted.items()
-               if k not in seen}
+    missing = [k for k in wanted if k not in seen]
     if missing:
         if lines and lines[-1].strip():
             lines.append("")
@@ -803,7 +890,7 @@ def _plan_env(path: Path, log: list[str], label: str, prefix: str,
         # a block joined with `\n` and dropped into a CRLF file would carry LF
         # inside itself and CRLF around it.
         lines.extend(comment.splitlines())
-        lines.extend(f"{prefix}_{k}={v}" for k, v in missing.items())
+        lines.extend(f"{k}={wanted[k]}" for k in missing)
 
     # Rejoined with the file's OWN line ending, not with `\n`: a `.mcp.env`
     # edited on Windows is CRLF, and converting it wholesale would turn a
@@ -1076,9 +1163,16 @@ def _sed_line(prefix: str, name: str) -> str:
     return f'  -e "s|{{{{{prefix}_{name}}}}}|${{{prefix}_{name}}}|g" \\'
 
 
-def _sed_lines(prefix: str) -> list[str]:
-    """The substitutions `mcp-setup.sh` needs, one per placeholder."""
-    return [_sed_line(prefix, name) for name in _ENV_VARS]
+def _sed_lines(prefix: str, extra: Iterable[str] = ()) -> list[str]:
+    """The substitutions `mcp-setup.sh` needs, one per placeholder; `extra`
+    are further full variable names (other mnemo entries' tokens)."""
+    return ([_sed_line(prefix, name) for name in _ENV_VARS]
+            + [_sed_var_line(var) for var in extra])
+
+
+def _sed_var_line(var: str) -> str:
+    """`_sed_line` for a full variable name (`MNEMO_NOTES_TOKEN`)."""
+    return _sed_line(*var.rsplit("_", 1))
 
 
 def _setup_state(path: Path, current: str) -> str:
@@ -1109,7 +1203,8 @@ def _setup_state(path: Path, current: str) -> str:
 
 
 def _plan_setup_sh(path: Path, log: list[str], prefix: str,
-                   notes: list[str], *, migrate: bool = False) -> str | None:
+                   notes: list[str], *, migrate: bool = False,
+                   lines_wanted: list[str] | None = None) -> str | None:
     """Reconcile mnemo's `sed -e` lines inside the script's single invocation.
 
     Both directions, because a generation change needs both: missing
@@ -1133,7 +1228,7 @@ def _plan_setup_sh(path: Path, log: list[str], prefix: str,
 
     The anchor is the `"$TEMPLATE"` argument, which is the last thing in that
     invocation by construction (`templates/setup.sh.head`): every `-e` line
-    goes before it.
+    goes before it. `lines_wanted` replaces the default set for `prefix`.
     """
     original = _read_text(path)
     if not original:
@@ -1169,7 +1264,8 @@ def _plan_setup_sh(path: Path, log: list[str], prefix: str,
     else:
         dropped = 0
 
-    wanted = [line for line in _sed_lines(prefix)
+    candidates = _sed_lines(prefix) if lines_wanted is None else lines_wanted
+    wanted = [line for line in candidates
               if line.strip() not in {existing.strip() for existing in lines}]
     if wanted:
         anchor = next(
@@ -1382,7 +1478,8 @@ def _refuse_if_tracked(proj: Path, name: str) -> None:
             f"exists at {proj / '.git'} but could not be parsed.\n"
             f"      `mnemo init` would write a literal bank token into that "
             f"file, so this is refused rather than guessed.\n"
-            f"      Check with:  git ls-files --error-unmatch {name}")
+            f"      Check with:  git ls-files --error-unmatch {name}",
+            "index_unreadable")
 
 
 def _git_tracked(proj: Path, name: str) -> bool | None:
@@ -1424,10 +1521,12 @@ def _ignored_memory_note(proj: Path) -> str | None:
         ".claude/memory/MEMORY.md",
         ".claude/rules/mnemo-memory.md",
     ]
+    # Reached from the windowless service (add-bank init, init preview).
+    kwargs = {"creationflags": 0x08000000} if os.name == "nt" else {}  # CREATE_NO_WINDOW
     try:
         done = subprocess.run(
             ["git", "check-ignore", "-v", "--", *targets],
-            cwd=str(proj), capture_output=True, text=True, timeout=15,
+            cwd=str(proj), capture_output=True, text=True, timeout=15, **kwargs,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -1541,7 +1640,8 @@ def _plan_settings(path: Path, log: list[str],
     if hooks is None:
         hooks = {}
     elif not isinstance(hooks, dict):
-        raise _Refuse(f"{path}: 'hooks' is not an object; left untouched")
+        raise _Refuse(f"{path}: 'hooks' is not an object; left untouched",
+                      "invalid_json")
 
     if not _drop_retired_hooks(hooks, path, log, _RETIRED_HOOKS):
         return None
@@ -1557,23 +1657,32 @@ def _seed_tree(claude: Path, log: list[str]) -> None:
     actually written. Per-agent memory stubs are the adopt skill's job,
     created after the agent roster is decided.
     """
+    writes = _plan_seed(claude, log)
+    for d in (claude / "memory", claude / "rules"):
+        d.mkdir(parents=True, exist_ok=True)
+    for path, text in writes:
+        _write(path, text)
+
+
+def _plan_seed(claude: Path, log: list[str]) -> list[tuple[Path, str]]:
+    """What `_seed_tree` writes, without writing it."""
     mem = claude / "memory"
     rules = claude / "rules"
     for d in (mem, rules):
         if not d.exists():
-            d.mkdir(parents=True)
             log.append(f"  created              {d}")
 
+    writes: list[tuple[Path, str]] = []
     index = mem / "MEMORY.md"
     if not index.exists():
-        _write(index, f"# Memory Index — {claude.parent.name}\n")
+        writes.append((index, f"# Memory Index — {claude.parent.name}\n"))
         log.append(f"  created              {index} (one-line anchor)")
     else:
         log.append(f"  kept                 {index} (already present)")
 
     rule = rules / "mnemo-memory.md"
     if not rule.exists():
-        _write(rule, _MEMORY_RULE)
+        writes.append((rule, _MEMORY_RULE))
         log.append(f"  created              {rule}")
     else:
         # The one file here mnemo may rewrite, and only while the bytes prove
@@ -1584,13 +1693,14 @@ def _seed_tree(claude: Path, log: list[str]) -> None:
         if state == "current":
             log.append(f"  kept                 {rule} (already current)")
         elif state == "stale":
-            _write(rule, _MEMORY_RULE)
+            writes.append((rule, _MEMORY_RULE))
             log.append(f"  updated              {rule} (superseded redaction)")
         else:
             log.append(
                 f"  kept                 {rule} (edited here — left alone; "
                 f"mnemo's current text differs)"
             )
+    return writes
 
 
 def ensure_memory_structure(claude_dir: Path) -> list[str]:
@@ -1872,6 +1982,7 @@ def strip_mcp_wiring(project_root: Path) -> dict:
 # run before a bank has been registered — which is what keeps "writes NOTHING
 # on refusal" true of the registry as well as of the project's files.
 _TOKEN_PROBE = "\x00probe\x00"
+_BACKUP_IGNORE = ".mcp.json.bak*"
 
 
 class _Wiring:
@@ -1894,8 +2005,16 @@ class _Wiring:
         # project's current `.mcp.json`, so converting to the template layer
         # keeps every server it already had.
         self.template_base: dict | None = None
+        # `{variable: token}` lifted out of the other mnemo entries in that
+        # seed, owed to `.mcp.env` (`_placeholder_entries`).
+        self.template_secrets: dict[str, str] = {}
+        # Foreign servers that seed copied verbatim into the tracked template.
+        self.carried: list[str] = []
+        # `(path, original bytes)` of an unusable `.mcp.json` the run was
+        # told to overwrite (`--overwrite-invalid`).
+        self.backup: tuple[Path, bytes] | None = None
 
-    def add(self, path: Path, text: str | None) -> None:
+    def add(self, path: Path, text: str | bytes | None) -> None:
         if text is not None:
             self.writes.append((path, text))
 
@@ -1989,7 +2108,8 @@ def _untrack(proj: Path, name: str, *, assume_yes: bool) -> bool:
     return True
 
 
-def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
+def _bootstrap_layer(proj: Path, wiring: _Wiring, *,
+                     overwrite_invalid: bool = False) -> None:
     """Seed the template layer in a project that has none.
 
     Only the pieces that are missing, and only the ones with no content of
@@ -2014,17 +2134,22 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
     existing = proj / ".mcp.json"
     carried = False
     if existing.is_file():
-        try:
-            doc = json.loads(existing.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-            doc = None
+        doc = _usable_mcp_json(existing, wiring,
+                               overwrite_invalid=overwrite_invalid)
+        if isinstance(doc, dict) and "mcpServers" not in doc:
+            wiring.template_base = doc
         if isinstance(doc, dict) and isinstance(doc.get("mcpServers"), dict):
             # Handed back as a value for `_plan_mcp_template` to merge into,
             # not written here. Writing it would be overwritten moments later:
             # that merge reads the template off disk, finds nothing, and plans
             # a second write to the same path which wins by being last.
+            servers = doc["mcpServers"]
+            wiring.template_secrets = _placeholder_entries(
+                servers, proj / ".mcp.env", wiring.log)
             wiring.template_base = doc
-            carried = bool(doc["mcpServers"])
+            carried = [key for key, entry in servers.items()
+                       if not _is_ours_in_template(key, entry)]
+            wiring.carried = carried
 
     if carried:
         # Said, never guessed at. The template is the file that goes into git,
@@ -2032,13 +2157,138 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring) -> None:
         # a port is fine, an API key in the next entry is not, and both look
         # like strings. Moving them is a judgement only the owner can make.
         wiring.notes.append(
-            "the existing .mcp.json servers were carried into "
-            ".mcp.json.template, which IS tracked by git.\n"
-            "  mnemo's own entry uses placeholders; the others were copied "
+            f"the existing .mcp.json servers ({', '.join(carried)}) were "
+            "carried into .mcp.json.template, which IS tracked by git.\n"
+            "  mnemo's own entries use placeholders; these were copied "
             "verbatim.\n"
             "  If any of them holds a literal secret, move it to .mcp.env and "
             "leave a {{PLACEHOLDER}} behind."
         )
+
+
+def _usable_mcp_json(path: Path, wiring: _Wiring, *,
+                     overwrite_invalid: bool) -> dict | None:
+    """`path` parsed, or None once a backup of it is planned. Raises
+    `_InvalidMcpJson` when it is unusable and `overwrite_invalid` is off."""
+    try:
+        return _seed_document(path)
+    except _InvalidMcpJson:
+        if not overwrite_invalid:
+            raise
+        wiring.backup = (_backup_path(path), path.read_bytes())
+        return None
+
+
+def _seed_document(path: Path) -> dict:
+    """The `.mcp.json` a new template starts as. Raises `_InvalidMcpJson`
+    for anything the seed could not carry whole."""
+    raw = path.read_bytes()
+    if not raw.strip():
+        return {}
+    try:
+        doc = json.loads(raw.decode("utf-8-sig"))
+    except UnicodeDecodeError as exc:
+        raise _InvalidMcpJson(path, *_line_column(raw, exc.start),
+                              "not UTF-8") from exc
+    except json.JSONDecodeError as exc:
+        raise _InvalidMcpJson(path, exc.lineno, exc.colno, exc.msg) from exc
+    if not isinstance(doc, dict):
+        raise _InvalidMcpJson(path, 1, 1, f"the top level is a "
+                              f"{type(doc).__name__}, not an object")
+    if "mcpServers" in doc and not isinstance(doc["mcpServers"], dict):
+        at = max(raw.find(b'"mcpServers"'), 0)
+        raise _InvalidMcpJson(path, *_line_column(raw, at),
+                              "'mcpServers' is not an object")
+    return doc
+
+
+def _line_column(raw: bytes, offset: int) -> tuple[int, int]:
+    """1-based line and column of a byte offset."""
+    line_start = raw.rfind(b"\n", 0, offset) + 1
+    return raw.count(b"\n", 0, offset) + 1, offset - line_start + 1
+
+
+def _backup_path(path: Path) -> Path:
+    """`<name>.bak`, else the first free `<name>.bak.N` — never an existing
+    backup."""
+    candidate = path.with_name(path.name + ".bak")
+    n = 0
+    while candidate.exists():
+        n += 1
+        candidate = path.with_name(f"{path.name}.bak.{n}")
+    return candidate
+
+
+def _is_ours_in_template(key: str, entry: object) -> bool:
+    """Whether a seeded entry reaches the template in placeholder form."""
+    if key in (_INSTANCE, _LEGACY_INSTANCE):
+        return _is_mnemo_http(entry) or _is_legacy_mcp(entry) is not None
+    url = entry.get("url") if isinstance(entry, dict) else None
+    return (isinstance(url, str) and "{{" in url
+            and urlsplit(url).path in _MNEMO_FACES)
+
+
+def _placeholder_entries(servers: dict, env: Path,
+                         log: list[str]) -> dict[str, str]:
+    """Lift the literal token out of every other mnemo entry in a seed.
+
+    Mutates `servers` in place and returns `{variable: token}` owed to
+    `.mcp.env`. `mnemo-memory` and the former `mnemo` key are skipped:
+    `_plan_servers` owns those. Host and port become the shared placeholders
+    only where they are the configured ones; anything else stays literal, so
+    the regenerated `.mcp.json` still points where it pointed. Raises
+    `_EnvConflict` rather than let two different tokens share one variable.
+    """
+    prefix = _var_prefix(_VAR_INSTANCE)
+    reserved = f"{prefix}_TOKEN"
+    present = _env_values(env)
+    here = f"{_api_host()}:{_api_port()}"
+    secrets: dict[str, str] = {}
+    for key, entry in servers.items():
+        if key in (_INSTANCE, _LEGACY_INSTANCE):
+            continue
+        found = _mnemo_face_token(entry)
+        if found is None:
+            continue
+        parts, token, path = found
+        var = _token_var(key)
+        if var == reserved:
+            raise _EnvConflict(
+                f"mcpServers.{key} would take {var}, which belongs to "
+                f"{_INSTANCE}; rename the entry and re-run (left untouched)")
+        if secrets.get(var, present.get(var, token)) != token:
+            raise _EnvConflict(
+                f"mcpServers.{key} needs {var}, which .mcp.env or another "
+                f"entry already sets to a different token; resolve it by "
+                f"hand and re-run (left untouched)")
+        secrets[var] = token
+        netloc = (f"{{{{{prefix}_HOST}}}}:{{{{{prefix}_PORT}}}}"
+                  if parts.netloc == here else parts.netloc)
+        query = re.sub(r"(^|&)token=[0-9a-fA-F]{32,}",
+                       lambda m: m.group(1) + "token={{" + var + "}}",
+                       parts.query)
+        entry["url"] = urlunsplit((parts.scheme, netloc, path, query,
+                                   parts.fragment))
+        moved = "" if parts.path == path else f", {parts.path} -> {path}"
+        log.append(f"  {'.mcp.json.template':<20} mcpServers.{key}: token "
+                   f"-> {{{{{var}}}}}{moved}")
+    return secrets
+
+
+def _env_values(path: Path) -> dict[str, str]:
+    """`NAME -> value` of a `.env`-shaped file, surrounding quotes dropped."""
+    return _env_text_values(_read_text(path))
+
+
+def _env_text_values(text: str) -> dict[str, str]:
+    values = {}
+    for line in text.splitlines():
+        name, sep, value = line.partition("=")
+        if sep and not name.lstrip().startswith("#"):
+            values[name.strip()] = value.strip().strip("'\"")
+    return values
+
+
 def _plan_setup_scripts(proj: Path, wiring: _Wiring) -> None:
     """Write the two regeneration scripts, or refresh an older revision.
 
@@ -2085,7 +2335,8 @@ def _plan_setup_scripts(proj: Path, wiring: _Wiring) -> None:
     wiring.seeded_setup = not (proj / "mcp-setup.sh").exists()
 
 
-def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
+def _plan_wiring(proj: Path, *, token: str, migrate: bool,
+                 overwrite_invalid: bool = False) -> _Wiring:
     """Plan the MCP wiring for one project. Raises `_Refuse`, writes nothing.
 
     One shape, built where it is missing: the entry with `{{VAR}}`
@@ -2097,13 +2348,20 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
 
     A project without the layer gets it seeded by `_bootstrap_layer`, with the
     template starting as its existing `.mcp.json` so no foreign server is lost.
+    An unusable `.mcp.json` — with the layer or without — is a refusal unless
+    `overwrite_invalid`, which backs it up first.
     """
     wiring = _Wiring()
     prefix = _var_prefix(_VAR_INSTANCE)
     template = proj / ".mcp.json.template"
 
     if not template.exists():
-        _bootstrap_layer(proj, wiring)
+        _bootstrap_layer(proj, wiring, overwrite_invalid=overwrite_invalid)
+    elif (proj / ".mcp.json").is_file():
+        # A build product here, but the setup script would still regenerate
+        # it over whatever only the broken file held.
+        _usable_mcp_json(proj / ".mcp.json", wiring,
+                         overwrite_invalid=overwrite_invalid)
     # Outside the branch above on purpose: the scripts are reviewed on every
     # run, so a fix reaches a project that was adopted long ago — the only
     # kind that can be carrying an old one.
@@ -2124,8 +2382,20 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
     # and nothing in the run that would have mentioned it.
     _refuse_if_tracked(proj, ".mcp.json")
     gitignore = proj / ".gitignore"
-    wiring.add(gitignore, _plan_gitignore(gitignore, wiring.log,
-                                          [".mcp.json", ".mcp.env"]))
+    ignored = [".mcp.json", ".mcp.env"] + ([_BACKUP_IGNORE] if wiring.backup
+                                           else [])
+    ignore_text = _plan_gitignore(gitignore, wiring.log, ignored)
+    if wiring.backup:
+        # Ignore rule, then backup, before anything else: once the template
+        # exists a plain re-run no longer refuses, so a failed backup must
+        # fail before it lands. The backup may hold tokens, hence the rule.
+        backup, original = wiring.backup
+        head = [(gitignore, ignore_text)] if ignore_text is not None else []
+        wiring.writes[:0] = head + [(backup, original)]
+        wiring.log.append(f"  {'backed up':<20} .mcp.json -> {backup.name} "
+                          f"(not usable JSON; rebuilt from the template)")
+    else:
+        wiring.add(gitignore, ignore_text)
 
     example = proj / ".mcp.env.example"
     wiring.add(example, _plan_env(
@@ -2133,6 +2403,7 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
         {"HOST": _api_host(), "PORT": _api_port(), "TOKEN": ""},
         _ENV_EXAMPLE_COMMENT.format(instance=_INSTANCE),
         update=False, migrate=migrate,
+        extra=dict.fromkeys(wiring.template_secrets, ""),
     ))
 
     # `.mcp.env` holds the real values and is git-ignored. It is now written
@@ -2153,9 +2424,11 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
         env, wiring.log, ".mcp.env", prefix,
         {"HOST": _api_host(), "PORT": _api_port(), "TOKEN": token},
         _env_comment(_INSTANCE), migrate=migrate,
+        extra=wiring.template_secrets,
     ))
 
     setup = proj / "mcp-setup.sh"
+    sed_lines = _sed_lines(prefix, wiring.template_secrets)
     if wiring.seeded_setup:
         pass                    # just written by `_bootstrap_layer`, and ours
     elif not setup.exists():
@@ -2163,7 +2436,7 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
             "there is a .mcp.json.template but no mcp-setup.sh, so nothing "
             "regenerates .mcp.json.\n"
             "  Add these lines to whatever does:\n"
-            + "\n".join(f"    {line}" for line in _sed_lines(prefix))
+            + "\n".join(f"    {line}" for line in sed_lines)
         )
     elif _SETUP_MARKER_ANY in _read_text(setup):
         # mnemo's own script, of ANY revision: it discovers its substitutions
@@ -2178,11 +2451,14 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
         )
     else:
         planned = _plan_setup_sh(setup, wiring.log, prefix, wiring.notes,
-                                 migrate=migrate)
+                                 migrate=migrate, lines_wanted=sed_lines)
         # `None` means either "already correct" or "no anchor to insert at",
-        # and only the second needs saying. The placeholder's presence is what
+        # and only the second needs saying. The placeholders' presence is what
         # separates them.
-        if planned is None and f"{{{{{prefix}_TOKEN}}}}" not in _read_text(setup):
+        script = _read_text(setup)
+        if planned is None and any(
+                "{{" + var + "}}" not in script
+                for var in (f"{prefix}_TOKEN", *wiring.template_secrets)):
             wiring.notes.append(
                 "mcp-setup.sh has no recognisable `sed … \"$TEMPLATE\"` "
                 "invocation, so it was left untouched.\n"
@@ -2190,11 +2466,16 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool) -> _Wiring:
                 "script still exits 0\n"
                 "  and writes a .mcp.json whose URL literally says "
                 "{{MNEMO_TOKEN}}, which never connects:\n"
-                + "\n".join(f"    {line}" for line in _sed_lines(prefix))
+                + "\n".join(f"    {line}" for line in sed_lines)
             )
         wiring.add(setup, planned)
 
     return wiring
+
+
+def _platform_setup_script(proj: Path) -> Path:
+    """The setup script this platform runs."""
+    return proj / ("mcp-setup.ps1" if os.name == "nt" else "mcp-setup.sh")
 
 
 def _run_setup_script(proj: Path) -> tuple[bool, list[str], Path | None]:
@@ -2213,8 +2494,8 @@ def _run_setup_script(proj: Path) -> tuple[bool, list[str], Path | None]:
     job, in both the manual and the automatic case, so there is exactly one
     place that turns the template into the real file.
     """
+    script = _platform_setup_script(proj)
     if os.name == "nt":
-        script = proj / "mcp-setup.ps1"
         runner = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
                  "-File", str(script)]
     else:
@@ -2224,7 +2505,6 @@ def _run_setup_script(proj: Path) -> tuple[bool, list[str], Path | None]:
         # person typing `./mcp-setup.sh` would make. The `bash`-on-PATH probe
         # tests use (`usable_bash()`) exists for a Windows-CI quirk (a WSL
         # launcher stub in System32) that does not apply on a real POSIX host.
-        script = proj / "mcp-setup.sh"
         runner = [str(script)]
     if not script.exists():
         return False, [], None
@@ -2255,6 +2535,520 @@ def _run_setup_script(proj: Path) -> tuple[bool, list[str], Path | None]:
     if err:
         lines.extend(f"  {line}" for line in err.splitlines()[:5])
     return False, lines, script
+
+
+# ------------------------------------------------- admin MCP wiring (MN-27)
+#
+# The console's «Admin MCP» settings section wires `/mcp-admin` into a project
+# the user picks, in the form the user picks — the same literal/template
+# switch as a bank's MCP access panel. This entry carries the SERVICE token,
+# the credential that adds and drops every bank on the machine, so the rules
+# are `init`'s and then some: strictly additive (an existing `mnemo-admin` is
+# never rewritten, whatever it holds) and never into a git-tracked file.
+
+_ADMIN_INSTANCE = "mnemo-admin"
+# `MNEMO_ADMIN_TOKEN` beside the shared `MNEMO_HOST`/`MNEMO_PORT`: the split a
+# second bank entry uses (see `_VAR_INSTANCE`), and the name the console's
+# `tokenVar("mnemo-admin")` derives.
+_ADMIN_VAR = _token_var(_ADMIN_INSTANCE)
+_ADMIN_MODES = ("literal", "template")
+_ADMIN_ENV_EXAMPLE_COMMENT = (
+    f"# {_ADMIN_INSTANCE} — the console (`mnemo ui`, Settings) shows the "
+    f"service token"
+)
+
+
+class AdminWiringRefused(Exception):
+    """`wire_admin_mcp` would not write; `preview["reason"]` says why."""
+
+    def __init__(self, preview: dict) -> None:
+        super().__init__(preview["reason"])
+        self.reason: str = preview["reason"]
+        self.preview = preview
+
+
+def _admin_server(token: str) -> dict:
+    return {
+        "type": "http",
+        "url": f"http://{_api_host()}:{_api_port()}/mcp-admin?token={token}",
+    }
+
+
+def _admin_server_template() -> dict:
+    prefix = _var_prefix(_VAR_INSTANCE)
+    return {
+        "type": "http",
+        "url": (f"http://{{{{{prefix}_HOST}}}}:{{{{{prefix}_PORT}}}}"
+                f"/mcp-admin?token={{{{{_ADMIN_VAR}}}}}"),
+    }
+
+
+def _admin_sed_lines() -> list[str]:
+    prefix = _var_prefix(_VAR_INSTANCE)
+    return [_sed_line(prefix, "HOST"), _sed_line(prefix, "PORT"),
+            _sed_line(_var_prefix(_ADMIN_INSTANCE), "TOKEN")]
+
+
+def admin_mcp_snippet(token: str) -> dict:
+    """Everything the console needs to show and copy the admin entry."""
+    host, port = _api_host(), _api_port()
+    entry = _admin_server(token)
+    return {
+        "token": token,
+        "url": entry["url"],
+        "host": host,
+        "port": int(port),
+        "entry_name": _ADMIN_INSTANCE,
+        "snippet": {
+            "literal": {"mcpServers": {_ADMIN_INSTANCE: entry}},
+            "template": {
+                "template_entry": {
+                    "mcpServers": {_ADMIN_INSTANCE: _admin_server_template()}
+                },
+                "env_var": _ADMIN_VAR,
+                "env_line": f"{_ADMIN_VAR}={token}",
+                "env_block": (f"MNEMO_HOST={host}\nMNEMO_PORT={port}\n"
+                              f"{_ADMIN_VAR}={token}"),
+                "sed_line": _admin_sed_lines()[-1].strip().rstrip("\\").strip(),
+            },
+        },
+    }
+
+
+def _admin_entry(path: Path) -> object | None:
+    """The `mnemo-admin` entry `path` holds, or None. Raises `_Refuse`."""
+    servers = _load_json(path).get("mcpServers")
+    if servers is None:
+        return None
+    if not isinstance(servers, dict):
+        raise _Refuse(f"{path}: 'mcpServers' is not an object")
+    return servers.get(_ADMIN_INSTANCE)
+
+
+def _merge_admin_entry(data: dict, entry: dict) -> str:
+    servers = data.get("mcpServers") or {}
+    servers[_ADMIN_INSTANCE] = entry
+    data["mcpServers"] = servers
+    return _dump_json(data)
+
+
+def _plan_admin_literal(proj: Path, token: str) -> _Wiring:
+    wiring = _Wiring()
+    gitignore = proj / ".gitignore"
+    wiring.add(gitignore, _plan_gitignore(gitignore, wiring.log, [".mcp.json"]))
+    mcp_json = proj / ".mcp.json"
+    wiring.add(mcp_json, _merge_admin_entry(_load_json(mcp_json),
+                                            _admin_server(token)))
+    wiring.log.append(f"  {'.mcp.json':<20} +mcpServers.{_ADMIN_INSTANCE}")
+    return wiring
+
+
+def _plan_admin_template(proj: Path, token: str) -> _Wiring:
+    """The template layer, built where missing exactly as `init` builds it.
+
+    A template seeded from an existing `.mcp.json` would carry that file's
+    literal bank token into git, so mnemo's own memory entry is turned into
+    its placeholder form on the way, its token moving to `.mcp.env` — the
+    same end state `init` reaches for that entry.
+    """
+    wiring = _Wiring()
+    template = proj / ".mcp.json.template"
+    prefix = _var_prefix(_VAR_INSTANCE)
+    env_values = {"ADMIN_TOKEN": token}
+    example_values = {"HOST": _api_host(), "PORT": _api_port(),
+                      "ADMIN_TOKEN": ""}
+
+    if template.exists():
+        data = _load_json(template)
+    else:
+        _bootstrap_layer(proj, wiring)
+        data, memory_token = _seed_memory_entry(
+            template, json.loads(json.dumps(wiring.template_base or {})),
+            wiring.log)
+        if memory_token:
+            env_values["TOKEN"] = memory_token
+            example_values["TOKEN"] = ""
+        if wiring.template_secrets.get(_ADMIN_VAR, token) != token:
+            raise _EnvConflict(f"the seed maps another token to {_ADMIN_VAR}")
+    secrets = {var: value for var, value in wiring.template_secrets.items()
+               if var != _ADMIN_VAR}
+    _plan_setup_scripts(proj, wiring)
+    wiring.add(template, _merge_admin_entry(data, _admin_server_template()))
+    wiring.log.append(f"  {'.mcp.json.template':<20} "
+                      f"+mcpServers.{_ADMIN_INSTANCE}")
+
+    gitignore = proj / ".gitignore"
+    wiring.add(gitignore, _plan_gitignore(gitignore, wiring.log,
+                                          [".mcp.json", ".mcp.env"]))
+    example = proj / ".mcp.env.example"
+    wiring.add(example, _plan_env(example, wiring.log, ".mcp.env.example",
+                                  prefix, example_values,
+                                  _ADMIN_ENV_EXAMPLE_COMMENT, update=False,
+                                  extra=dict.fromkeys(secrets, "")))
+    # Host and port only where missing: the project's memory entry shares
+    # them and may deliberately point elsewhere. The tokens are set.
+    env = proj / ".mcp.env"
+    present = _env_values(env)
+    shared = {name: value for name, value in (("HOST", _api_host()),
+                                              ("PORT", _api_port()))
+              if f"{prefix}_{name}" not in present}
+    wiring.add(env, _plan_env(env, wiring.log, ".mcp.env", prefix,
+                              {**shared, **env_values},
+                              _env_comment(_ADMIN_INSTANCE), extra=secrets))
+
+    setup = proj / "mcp-setup.sh"
+    if setup.exists() and _SETUP_MARKER_ANY not in _read_text(setup):
+        sed_lines = _admin_sed_lines() + [_sed_var_line(v) for v in secrets]
+        planned = _plan_setup_sh(setup, wiring.log, prefix, wiring.notes,
+                                 lines_wanted=sed_lines)
+        script = _read_text(setup)
+        if planned is None and any("{{" + var + "}}" not in script
+                                   for var in (_ADMIN_VAR, *secrets)):
+            wiring.notes.append(
+                "mcp-setup.sh has no recognisable `sed ... \"$TEMPLATE\"` "
+                "invocation, so it was left untouched. Add these lines to "
+                "its sed call by hand:\n"
+                + "\n".join(f"    {line}" for line in sed_lines))
+        wiring.add(setup, planned)
+    return wiring
+
+
+def _seed_memory_entry(template: Path, data: dict,
+                       log: list[str]) -> tuple[dict, str | None]:
+    """Put mnemo's own memory entry in a seed into its placeholder form.
+
+    Runs the seed through `init`'s own merge (`_plan_servers`), so the
+    former `mnemo` key is renamed or dropped by exactly the rule `init`
+    applies — a literal token under either key never reaches the template.
+    Returns the seed and the bank token now owed to `.mcp.env`. A shape
+    `init` itself refuses (legacy stdio, unrecognised) raises `_Refuse`.
+    """
+    servers = data.get("mcpServers")
+    if not isinstance(servers, dict):
+        return data, None
+    ours = [servers.get(key) for key in (_INSTANCE, _LEGACY_INSTANCE)]
+    if not any(_is_mnemo_http(e) or _is_legacy_mcp(e) is not None
+               for e in ours):
+        return data, None
+    tokens = [match.group(1) for entry in ours if _is_mnemo_http(entry)
+              for match in [_TOKEN_IN_URL.search(entry["url"])] if match]
+    text = _plan_servers(template, ".mcp.json.template", log,
+                         _mcp_server_template(_VAR_INSTANCE),
+                         migrate=False, base=data)
+    return (json.loads(text) if text else data), (tokens[0] if tokens else None)
+
+
+def admin_mcp_preview(proj: Path, token: str, mode: str | None = None) -> dict:
+    """What `wire_admin_mcp` would do in `proj` for `mode`. Writes nothing.
+
+    `mode` None means the form the project already uses (`suggested_mode`).
+    """
+    preview, _ = _admin_plan(proj.resolve(), token, mode)
+    return preview
+
+
+def _admin_plan(proj: Path, token: str,
+                mode: str | None) -> tuple[dict, _Wiring | None]:
+    template = proj / ".mcp.json.template"
+    mcp_json = proj / ".mcp.json"
+    uses_template = template.is_file()
+    suggested = "template" if uses_template else "literal"
+    mode = mode or suggested
+    if mode not in _ADMIN_MODES:
+        raise ValueError(f"mode must be one of {', '.join(_ADMIN_MODES)}, "
+                         f"not {mode!r}")
+    out: dict = {
+        "project_root": str(proj),
+        "mode": mode,
+        "suggested_mode": suggested,
+        "exists": proj.exists(),
+        "mcp_json_exists": mcp_json.is_file(),
+        "uses_template": uses_template,
+        "target": ".mcp.json.template" if mode == "template" else ".mcp.json",
+        "has_entry": False,
+        "entry_current": False,
+        "tracked": False,
+        "tracked_files": [],
+        "writes": [],
+        "warnings": [],
+        "notes": [],
+        "action": "refused",
+        "reason": None,
+    }
+    if not out["exists"]:
+        out["reason"] = "not_found"
+        return out, None
+    if not proj.is_dir():
+        out["reason"] = "not_a_directory"
+        return out, None
+
+    # Where an existing entry would count: the target, or — for a template
+    # not yet built — the `.mcp.json` it would be seeded from.
+    source = template if mode == "template" and uses_template else mcp_json
+    try:
+        entries = {p: _admin_entry(p) for p in (template, mcp_json)
+                   if p.is_file()}
+    except _Refuse:
+        out["reason"] = "invalid_json"
+        return out, None
+    existing = entries.get(source)
+    wanted = (_admin_server_template() if mode == "template"
+              else _admin_server(token))
+    out["has_entry"] = any(e is not None for e in entries.values())
+    out["entry_current"] = existing == wanted
+    if mode == "literal" and uses_template:
+        out["warnings"].append("template_layer")
+
+    # Either form ends with the literal token in `.mcp.json`: written
+    # straight in, or substituted there from `.mcp.env` by the setup script.
+    unknown = False
+    for name in ([".mcp.json", ".mcp.env"] if mode == "template"
+                 else [".mcp.json"]):
+        state = _git_tracked(proj, name)
+        if state is None:
+            unknown = True
+        elif state:
+            out["tracked_files"].append(name)
+    out["tracked"] = bool(out["tracked_files"])
+
+    if existing is not None:
+        out.update(action="already", reason="present")
+        return out, None
+    if out["tracked"]:
+        out["reason"] = "tracked"
+        return out, None
+    if unknown:
+        out["reason"] = "index_unreadable"
+        return out, None
+
+    try:
+        wiring = (_plan_admin_template(proj, token) if mode == "template"
+                  else _plan_admin_literal(proj, token))
+    except _EnvConflict:
+        out["reason"] = "env_conflict"
+        return out, None
+    except _Refuse:
+        # Only the seeded memory entry can still refuse here: a shape
+        # `init` itself will rewrite only under `--migrate`.
+        out["reason"] = "needs_migrate"
+        return out, None
+    target = proj / out["target"]
+    out["action"] = "add" if target.is_file() else "create"
+    out["writes"] = [p.name for p, _ in wiring.writes]
+    # Promised only when there is a script to run; whether that run then
+    # succeeds is reported by the POST (`regenerated`, `written`).
+    script = _platform_setup_script(proj)
+    if mode == "template" and (script.exists() or any(
+            p == script for p, _ in wiring.writes)):
+        out["writes"].append(".mcp.json")
+    out["notes"] = list(wiring.notes)
+    return out, wiring
+
+
+def wire_admin_mcp(proj: Path, token: str, mode: str | None = None) -> dict:
+    """Add the `mnemo-admin` entry to `proj`. Raises `AdminWiringRefused`.
+
+    Already present is not a refusal: nothing is written and the preview says
+    `already`. Template mode then runs the project's setup script, as `init`
+    does, so `.mcp.json` is regenerated before this returns.
+    """
+    proj = proj.resolve()
+    preview, wiring = _admin_plan(proj, token, mode)
+    result: dict = {"written": [], "log": [], "notes": [],
+                    "regenerated": None}
+    if preview["action"] == "already":
+        return {**result, "preview": preview}
+    if wiring is None:
+        raise AdminWiringRefused(preview)
+
+    for path, text in wiring.writes:
+        _write(path, text)
+        result["written"].append(path.name)
+    for path in wiring.executable:
+        try:
+            path.chmod(path.stat().st_mode | 0o111)
+        except OSError:
+            pass
+    result["log"], result["notes"] = wiring.log, wiring.notes
+    if preview["mode"] == "template":
+        _regenerate_for_admin(proj, result)
+    result["preview"] = admin_mcp_preview(proj, token, preview["mode"])
+    return result
+
+
+def _regenerate_for_admin(proj: Path, result: dict) -> None:
+    ok, lines, script = _run_setup_script(proj)
+    result["regenerated"] = {"script": script.name if script else None,
+                             "ok": ok, "output": lines}
+    if not ok:
+        result["notes"].append(
+            ".mcp.json was not regenerated; run `bash mcp-setup.sh` or "
+            "`powershell -NoProfile -File .\\mcp-setup.ps1` once every value "
+            "in .mcp.env is filled in.")
+        return
+    result["written"].append(".mcp.json")
+    try:
+        entry = _admin_entry(proj / ".mcp.json")
+    except _Refuse:
+        entry = None
+    url = entry.get("url", "") if isinstance(entry, dict) else ""
+    if not url or "{{" in url:
+        result["notes"].append(
+            f"the regenerated .mcp.json does not carry a resolved "
+            f"{_ADMIN_INSTANCE} url — the setup script is missing the "
+            f"{{{{{_ADMIN_VAR}}}}} substitution.")
+
+
+# ------------------------------------------------------ init preview (MN-62)
+#
+# The console's add-bank dialog shows what `init` will do before the bank
+# exists. Built from the same planners `init_project` runs (`_plan_seed`,
+# `_plan_wiring`), with the probe token: nothing is written, no script runs,
+# no bank is registered, and git is only read.
+
+_INIT_FILES = ("mcp-setup.sh", "mcp-setup.ps1", ".mcp.json.template",
+               ".gitignore", ".mcp.env.example", ".mcp.env")
+_PLACEHOLDER = re.compile(r"\{\{([A-Za-z0-9_]+)\}\}")
+_SCRIPTS = ("mcp-setup.sh", "mcp-setup.ps1")
+
+
+def init_preview(proj: Path, *, overwrite_invalid: bool = False) -> dict:
+    """What `init_project` would do in `proj`, as the console renders it."""
+    proj = proj.resolve()
+    out: dict = {
+        "project_root": str(proj),
+        "exists": proj.exists(),
+        "mcp_json_exists": (proj / ".mcp.json").is_file(),
+        "uses_template": (proj / ".mcp.json.template").is_file(),
+        "tracked": False,
+        "tracked_files": [],
+        "files": [],
+        "writes": [],
+        "setup_script": None,
+        "carried_servers": [],
+        "warnings": [],
+        "notes": [],
+        "log": [],
+        "action": "refused",
+        "reason": None,
+        "detail": None,
+        "overwrite_invalid": overwrite_invalid,
+        "overridable": False,
+        "json_error": None,
+    }
+    if out["exists"] and not proj.is_dir():
+        out["reason"] = "not_a_directory"
+        return out
+    out["tracked_files"] = [name for name in (".mcp.json", ".mcp.env")
+                            if _git_tracked(proj, name)]
+    out["tracked"] = bool(out["tracked_files"])
+    try:
+        wiring = _plan_wiring(proj, token=_TOKEN_PROBE, migrate=False,
+                              overwrite_invalid=overwrite_invalid)
+    except _NeedsUntrack:
+        out["reason"] = "tracked"
+        return out
+    except _Refuse as exc:
+        if isinstance(exc, _InvalidMcpJson):
+            out["overridable"] = True
+            out["json_error"] = exc.location
+        out["reason"] = exc.reason
+        out["detail"] = re.sub(r"token=[0-9a-fA-F]{8,}", "token=<token>",
+                               str(exc))
+        return out
+
+    log: list[str] = []
+    planned = dict(_plan_seed(proj / ".claude", log))
+    planned.update(wiring.writes)
+    out["log"] = log + wiring.log
+    out["notes"] = list(wiring.notes)
+    out["carried_servers"] = list(wiring.carried)
+    if wiring.carried:
+        out["warnings"].append("carried_servers")
+    if out["exists"]:
+        ignored = _ignored_memory_note(proj)
+        if ignored:
+            out["notes"].append(ignored)
+            out["warnings"].append("memory_ignored")
+
+    paths = [proj / ".claude" / "memory" / "MEMORY.md",
+             proj / ".claude" / "rules" / "mnemo-memory.md",
+             *(proj / name for name in _INIT_FILES)]
+    if wiring.backup:
+        paths.append(wiring.backup[0])
+    for path in paths:
+        entry = _preview_file(proj, path, path in planned)
+        if entry is not None and wiring.backup and path == wiring.backup[0]:
+            entry["reason"] = "backup"
+        if entry is not None:
+            out["files"].append(entry)
+            if entry["reason"] == "edited":
+                out["warnings"].append(
+                    "rule_edited" if path.name == "mnemo-memory.md"
+                    else "setup_edited")
+    _preview_regeneration(proj, planned, out)
+
+    out["writes"] = [f["path"] for f in out["files"]
+                     if f["action"] != "unchanged"]
+    out["action"] = ("add" if out["mcp_json_exists"] or out["uses_template"]
+                     else "create")
+    out["reason"] = None
+    return out
+
+
+def _preview_file(proj: Path, path: Path, planned: bool) -> dict | None:
+    rel = path.relative_to(proj).as_posix()
+    if not path.is_file():
+        return {"path": rel, "action": "create", "reason": "new"} if planned \
+            else None
+    if path.name == "mnemo-memory.md":
+        state = _rule_state(path)
+    elif path.name in _SCRIPTS:
+        state = _setup_state(path, _SETUP_SH if path.name.endswith(".sh")
+                             else _SETUP_PS1)
+    else:
+        state = "kept" if path.name == "MEMORY.md" else "current"
+    if planned:
+        reason = "refresh" if state == "stale" else "merge"
+        return {"path": rel, "action": "update", "reason": reason}
+    if state not in ("edited", "kept"):
+        state = "current"
+    return {"path": rel, "action": "unchanged", "reason": state}
+
+
+def _preview_regeneration(proj: Path, planned: dict[Path, str],
+                          out: dict) -> None:
+    """`.mcp.json`, as the platform's setup script would write it after init.
+
+    Only mnemo's own script can be read for the outcome: it refuses when a
+    template placeholder has no `.mcp.env` value. A foreign one is assumed to
+    succeed.
+    """
+    script = _platform_setup_script(proj)
+    text = planned.get(script)
+    if text is None and script.is_file():
+        text = _read_text(script)
+    out["setup_script"] = {"name": script.name, "runs": text is not None,
+                           "missing": []}
+    if text is None:
+        return
+    template = proj / ".mcp.json.template"
+    env = proj / ".mcp.env"
+    if _SETUP_MARKER_ANY in text:
+        names = set(_PLACEHOLDER.findall(
+            planned.get(template) or _read_text(template)))
+        have = _env_text_values(planned.get(env) or _read_text(env))
+        out["setup_script"]["missing"] = sorted(names - set(have))
+    target = proj / ".mcp.json"
+    if out["setup_script"]["missing"]:
+        out["warnings"].append("setup_missing_values")
+        if target.is_file():
+            out["files"].append({"path": ".mcp.json", "action": "unchanged",
+                                 "reason": "not_regenerated"})
+        return
+    out["files"].append({"path": ".mcp.json",
+                         "action": "update" if target.is_file() else "create",
+                         "reason": "regenerate"})
 
 
 def _register_bank(bank_root: Path, report: list[str]) -> str:
@@ -2302,7 +3096,7 @@ def _register_bank(bank_root: Path, report: list[str]) -> str:
 
 
 def init_project(root: str | None, *, migrate: bool = False,
-                 yes: bool = False) -> int:
+                 yes: bool = False, overwrite_invalid: bool = False) -> int:
     """Wire mnemo into a project. Returns 0 on success, 1 on refusal
     (in which case NOTHING was written).
 
@@ -2320,6 +3114,7 @@ def init_project(root: str | None, *, migrate: bool = False,
     paths = resolve(root)
     proj = paths.root
     settings_path = proj / ".claude" / "settings.json"
+    plan = {"migrate": migrate, "overwrite_invalid": overwrite_invalid}
 
     # Pass 1 — validation only. Nothing is written and no bank is registered.
     #
@@ -2329,7 +3124,7 @@ def init_project(root: str | None, *, migrate: bool = False,
     # `git rm` that silently fails cannot spin here.
     for _ in range(4):
         try:
-            _plan_wiring(proj, token=_TOKEN_PROBE, migrate=migrate)
+            _plan_wiring(proj, token=_TOKEN_PROBE, **plan)
             _plan_settings(settings_path, [], migrate)
             break
         except _NeedsUntrack as exc:
@@ -2369,7 +3164,7 @@ def init_project(root: str | None, *, migrate: bool = False,
         return 1
 
     # Pass 2 — the same plan, rendered with the real token.
-    wiring = _plan_wiring(proj, token=token, migrate=migrate)
+    wiring = _plan_wiring(proj, token=token, **plan)
     new_settings = _plan_settings(settings_path, wiring.log, migrate)
     for path, text in wiring.writes:
         _write(path, text)

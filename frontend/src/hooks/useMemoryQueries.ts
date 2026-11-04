@@ -8,6 +8,7 @@ import {
   getBanks,
   getFile,
   getFsDirs,
+  getInitPreview,
   getStatus,
   getTree,
   type BankInfo,
@@ -96,5 +97,16 @@ export function useFsDirs(path: string | null, enabled: boolean) {
     queryFn: () => getFsDirs(path),
     enabled,
     staleTime: 0,
+  });
+}
+
+export function useInitPreview(root: string | null, createStructure: boolean, overwriteInvalid: boolean) {
+  return useQuery({
+    queryKey: queryKeys.initPreview.at(root ?? "", createStructure, overwriteInvalid),
+    queryFn: () => getInitPreview(root!, createStructure, overwriteInvalid),
+    enabled: root != null,
+    retry: false,
+    staleTime: 0,
+    refetchOnWindowFocus: false,
   });
 }

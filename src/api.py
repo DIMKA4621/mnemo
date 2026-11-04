@@ -411,6 +411,11 @@ _ERROR_STATUS: dict[str, int] = {
     # launch` — no `.claude/agents/*.md` under the source agent matches
     # `name` (or it could not be read). Same shape as `chat_not_found`.
     "subagent_not_found": 404,
+    # [NEW beyond §9.2, MN-27] `POST /api/admin-mcp/wiring` refused: the file
+    # the service token would land in is tracked by git (or the index cannot
+    # say), or the project's MCP config is not a readable JSON object.
+    "mcp_file_tracked": 409,
+    "mcp_config_invalid": 409,
     "internal": 500,
 }
 
@@ -1356,6 +1361,9 @@ class AddBankRequest(BaseModel):
     # dialog — seeds the bare memory tree at `root` before registration, so
     # a bare folder with no `.claude` yet can become a bank in one step.
     create_structure: bool = False
+    # With `init`: back up an unparsable `.mcp.json` and rebuild it, where
+    # `init` would otherwise refuse (`invalid_json`).
+    overwrite_invalid: bool = False
 
 
 class ReindexRequest(BaseModel):
@@ -1552,7 +1560,7 @@ def _project_root_from_bank(bank_root: Path) -> Path | None:
     return None
 
 
-def _run_init_for_bank(bank: Bank) -> dict:
+def _run_init_for_bank(bank: Bank, *, overwrite_invalid: bool = False) -> dict:
     """Run `mnemo init` for the project this bank's root implies.
 
     Uses the bank's *registered* root, never the client-supplied one —
@@ -1573,7 +1581,8 @@ def _run_init_for_bank(bank: Bank) -> dict:
     buf = io.StringIO()
     with redirect_stdout(buf):
         exit_code = scaffold.init_project(
-            root=str(project_root), yes=False, migrate=False
+            root=str(project_root), yes=False, migrate=False,
+            overwrite_invalid=overwrite_invalid,
         )
     log_lines = [line for line in buf.getvalue().splitlines() if line.strip()]
     return {"ok": exit_code == 0, "log": log_lines}
@@ -1617,8 +1626,36 @@ def api_add_bank(req: AddBankRequest) -> dict:
         # The bank is already registered and must not be undone by an init
         # that fails or is skipped — hence a key on the response, not a
         # raised error.
-        info["init"] = _run_init_for_bank(bank)
+        info["init"] = _run_init_for_bank(
+            bank, overwrite_invalid=req.overwrite_invalid)
     return info
+
+
+@app.get("/api/init-preview", include_in_schema=False)
+def api_init_preview(root: str = "", create_structure: bool = False,
+                     overwrite_invalid: bool = False) -> dict:
+    """What `POST /api/banks {"init": true}` would do to the project, before
+    the bank exists. Writes nothing and registers nothing (MN-62)."""
+    bank_root = _admin_mcp_root(root)
+    project_root = _project_root_from_bank(bank_root)
+    out = {"bank_root": str(bank_root), "create_structure": create_structure,
+           "project_root": str(project_root) if project_root else None}
+    if project_root is None:
+        return {**out, "action": "skipped", "reason": "not_project_shaped",
+                "files": [], "writes": [], "warnings": [], "notes": []}
+    refusal = None
+    if not bank_root.is_dir() and not create_structure:
+        refusal = "root_not_found"
+    elif any(b.id == registry.derive_bank_id(bank_root)
+             for b in registry.load()):
+        refusal = "bank_exists"
+    from . import scaffold
+    preview = {**scaffold.init_preview(
+        project_root, overwrite_invalid=overwrite_invalid), **out}
+    if refusal:
+        preview.update(action="refused", reason=refusal, files=[], writes=[],
+                       overridable=False, json_error=None)
+    return preview
 
 
 @app.get("/api/banks/{bank_id}", include_in_schema=False)
@@ -1718,6 +1755,86 @@ def _mcp_wiring_info(bank: Bank) -> dict:
 def api_bank_mcp_wiring(bank_id: str) -> dict:
     bank = _resolve_bank(bank_id, require_enabled=False)
     return _mcp_wiring_info(bank)
+
+
+# ------------------------------------------------- admin MCP wiring (MN-27)
+#
+# The console's Settings wires `/mcp-admin` into a project the user picks.
+# The token here is the SERVICE token, minted lazily exactly as the face
+# itself does; `scaffold` owns every `.mcp.json` mutation, this only routes.
+
+
+class AdminMcpWiringRequest(BaseModel):
+    root: str
+    # "literal" | "template"; omitted = the form the project already uses.
+    mode: str | None = None
+
+
+def _admin_mcp_root(raw: str) -> Path:
+    root = Path(raw.strip()).expanduser() if raw and raw.strip() else None
+    if root is None or not root.is_absolute():
+        raise ApiError("bad_request", "потрібен абсолютний шлях", root=raw)
+    return root.resolve()
+
+
+def _admin_mcp_mode(mode: str | None) -> str | None:
+    if mode in (None, "", "literal", "template"):
+        return mode or None
+    raise ApiError("bad_request", "mode: literal або template", mode=mode)
+
+
+_ADMIN_REFUSALS = {
+    "not_found": "немає такої теки",
+    "not_a_directory": "це файл, а не тека",
+    "invalid_json": "конфіг MCP у цій теці не читається як JSON-обʼєкт — "
+                    "його не чіпали",
+    "tracked": "файл, куди ліг би сервісний токен, відстежується git — "
+               "спершу `git rm --cached` і .gitignore",
+    "index_unreadable": "індекс git не читається, тож невідомо, чи файл "
+                        "відстежується — відмовлено, а не вгадано",
+    "needs_migrate": "запис памʼяті mnemo у .mcp.json має стару форму — "
+                     "спершу `mnemo init --migrate`",
+    "env_conflict": "токен іншого запису mnemo мав би лягти в змінну "
+                    ".mcp.env, яка вже має інше значення — розвʼяжіть це "
+                    "вручну",
+}
+
+
+@app.get("/api/admin-mcp", include_in_schema=False)
+def api_admin_mcp() -> dict:
+    from . import scaffold
+    return scaffold.admin_mcp_snippet(api_token())
+
+
+@app.get("/api/admin-mcp/wiring", include_in_schema=False)
+def api_admin_mcp_wiring(root: str = "", mode: str | None = None) -> dict:
+    from . import scaffold
+    return scaffold.admin_mcp_preview(_admin_mcp_root(root), api_token(),
+                                      _admin_mcp_mode(mode))
+
+
+@app.post("/api/admin-mcp/wiring", include_in_schema=False)
+def api_admin_mcp_wire(req: AdminMcpWiringRequest) -> dict:
+    from . import scaffold
+    root = _admin_mcp_root(req.root)
+    mode = _admin_mcp_mode(req.mode)
+    try:
+        result = scaffold.wire_admin_mcp(root, api_token(), mode)
+    except scaffold.AdminWiringRefused as exc:
+        code = {"not_found": "root_not_found",
+                "not_a_directory": "root_not_found",
+                "invalid_json": "mcp_config_invalid",
+                "needs_migrate": "mcp_config_invalid",
+                "env_conflict": "mcp_config_invalid"}.get(exc.reason,
+                                                          "mcp_file_tracked")
+        raise ApiError(code, _ADMIN_REFUSALS[exc.reason], root=str(root),
+                       preview=exc.preview) from exc
+    except OSError as exc:
+        raise ApiError("internal", f"cannot write MCP wiring under {root}: "
+                       f"{exc}", root=str(root)) from exc
+    log.info("wired mnemo-admin (%s) into %s (%s)", result["preview"]["mode"],
+             root, ", ".join(result["written"]) or "already present")
+    return result
 
 
 @app.delete("/api/banks/{bank_id}", include_in_schema=False)

@@ -820,6 +820,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "unwire every hook it used to write. Never touches a key mnemo "
              "did not author.",
     )
+    pn.add_argument(
+        "--overwrite-invalid", action="store_true",
+        help="A .mcp.json that is not usable JSON is normally a refusal, "
+             "since the template layer would regenerate it and drop what it "
+             "held. With this, it is copied to .mcp.json.bak (or the first "
+             "free .mcp.json.bak.N) first and rebuilt from the template.",
+    )
 
     pv = sub.add_parser("serve")
     pv.add_argument("--host", default=None, help="Bind address (default: loopback).")
@@ -1008,7 +1015,8 @@ def main(argv: list[str] | None = None) -> int:
     if cmd == "init":
         from .scaffold import init_project
         return init_project(args.root, migrate=args.migrate,
-                            yes=args.yes)
+                            yes=args.yes,
+                            overwrite_invalid=args.overwrite_invalid)
     if cmd == "serve":
         from .api import run
         run(host=args.host, port=args.port)

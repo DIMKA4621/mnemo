@@ -33,6 +33,8 @@ export interface AddBankRequest {
   provider?: string | null;
   init?: boolean;
   create_structure?: boolean;
+  /** With `init`: back up an unparsable `.mcp.json` and rebuild it instead of refusing. */
+  overwrite_invalid?: boolean;
 }
 
 export interface PatchBankRequest {
@@ -202,6 +204,70 @@ export function regenerateBankToken(bankId: string): Promise<BankTokenInfo> {
 
 export function getBankMcpWiring(bankId: string): Promise<BankMcpWiring> {
   return api(`/api/banks/${encodeURIComponent(bankId)}/mcp-wiring`);
+}
+
+export type InitPreviewAction = "create" | "add" | "refused" | "skipped";
+export type InitPreviewReason =
+  | "not_project_shaped"
+  | "root_not_found"
+  | "bank_exists"
+  | "not_a_directory"
+  | "tracked"
+  | "index_unreadable"
+  | "invalid_json"
+  | "needs_migrate"
+  | "unrecognised_entry"
+  | "env_conflict";
+export type InitFileAction = "create" | "update" | "unchanged";
+export type InitFileReason = "new" | "merge" | "refresh" | "regenerate" | "kept" | "current" | "edited" | "not_regenerated" | "backup";
+export type InitPreviewWarning = "carried_servers" | "memory_ignored" | "rule_edited" | "setup_edited" | "setup_missing_values";
+
+export interface InitPreviewFile {
+  path: string;
+  action: InitFileAction;
+  reason: InitFileReason;
+}
+
+/** `GET /api/init-preview` — what `POST /api/banks {init: true}` would do to the project; writes nothing. */
+export interface InitPreview {
+  bank_root: string;
+  create_structure: boolean;
+  project_root: string | null;
+  exists?: boolean;
+  mcp_json_exists?: boolean;
+  uses_template?: boolean;
+  tracked?: boolean;
+  tracked_files?: string[];
+  files: InitPreviewFile[];
+  writes: string[];
+  setup_script?: { name: string; runs: boolean; missing: string[] } | null;
+  carried_servers?: string[];
+  warnings: InitPreviewWarning[];
+  notes: string[];
+  log?: string[];
+  action: InitPreviewAction;
+  reason: InitPreviewReason | null;
+  detail?: string | null;
+  overwrite_invalid?: boolean;
+  /** `invalid_json` that `overwrite_invalid=true` would back up and rebuild. */
+  overridable?: boolean;
+  json_error?: InitJsonError | null;
+}
+
+/** Where `.mcp.json` stops parsing; 1-based. */
+export interface InitJsonError {
+  line: number;
+  column: number;
+  message: string;
+}
+
+export function getInitPreview(root: string, createStructure: boolean, overwriteInvalid: boolean): Promise<InitPreview> {
+  const qs = new URLSearchParams({
+    root,
+    create_structure: String(createStructure),
+    overwrite_invalid: String(overwriteInvalid),
+  });
+  return api(`/api/init-preview?${qs.toString()}`);
 }
 
 export function getFsDirs(path: string | null): Promise<FsDirsResult> {

@@ -1,14 +1,14 @@
 "use client";
 
 import { useState } from "react";
-import { Button, Input, Segmented } from "antd";
+import { Button, Input } from "antd";
 import { useT } from "@/lib/i18n/hooks";
 import { useBankToken, useStatus } from "@/hooks/useMemoryQueries";
 import { useRegenerateToken } from "@/hooks/useMemoryMutations";
 import { ModalShell } from "@/components/common/ModalShell";
+import { McpModeSwitch, McpSnippets, TemplateNotes, TokenRow, tokenShown, type McpMode } from "@/components/common/McpAccess";
 import {
   DEFAULT_INSTANCE,
-  copyText,
   defaultEntryName,
   mcpDocument,
   sanitizeEntryName,
@@ -16,34 +16,6 @@ import {
   tokenVar,
 } from "@/lib/memory/tokenSnippets";
 import type { BankInfo } from "@/lib/api/memory";
-
-function maskToken(value: string): string {
-  return "•".repeat(value.length);
-}
-
-function CopyButton({ getText, title }: { getText: () => string | null; title: string }) {
-  const t = useT();
-  const [label, setLabel] = useState<string | null>(null);
-
-  async function handleClick() {
-    const text = getText();
-    if (text == null) return;
-    const ok = await copyText(text);
-    if (!ok) {
-      setLabel(t("common.token.copyFailed"));
-      setTimeout(() => setLabel(null), 2000);
-      return;
-    }
-    setLabel(t("common.btn.copied"));
-    setTimeout(() => setLabel(null), 1400);
-  }
-
-  return (
-    <Button size="small" title={title} disabled={label === t("common.token.copyFailed")} onClick={handleClick}>
-      {label ?? t("common.btn.copy")}
-    </Button>
-  );
-}
 
 interface BankTokenPanelProps {
   bank: BankInfo | null;
@@ -57,7 +29,7 @@ export function BankTokenPanel({ bank, onClose }: BankTokenPanelProps) {
   // so opening it for a different bank remounts it fresh — these all start
   // at their real initial values instead of needing a reset effect.
   const [revealed, setRevealed] = useState(false);
-  const [scope, setScope] = useState<"literal" | "template">("literal");
+  const [scope, setScope] = useState<McpMode>("literal");
   const [entry, setEntry] = useState(() => (bank ? defaultEntryName(bank.name) : DEFAULT_INSTANCE));
   const [confirming, setConfirming] = useState(false);
   const [note, setNote] = useState<string | null>(null);
@@ -68,7 +40,7 @@ export function BankTokenPanel({ bank, onClose }: BankTokenPanelProps) {
 
   const value = tokenQuery.data?.token ?? null;
   const ready = value != null;
-  const shown = value == null ? "…" : revealed ? value : maskToken(value);
+  const shown = tokenShown(value, revealed);
 
   const host = statusQuery.data?.service.host || (typeof window !== "undefined" ? window.location.hostname : "127.0.0.1");
   const port = statusQuery.data?.service.port ?? (typeof window !== "undefined" ? Number(window.location.port) || 80 : 80);
@@ -87,19 +59,16 @@ export function BankTokenPanel({ bank, onClose }: BankTokenPanelProps) {
       ? [
           {
             caption: t("common.token.caption.literal"),
-            secret: true,
             build: (tok: string) => mcpDocument(entry, `http://${host}:${port}/mcp?token=${tok}`),
           },
         ]
       : [
           {
             caption: t("common.token.caption.template"),
-            secret: false,
             build: () => mcpDocument(entry, `http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp?token={{${varName}}}`),
           },
           {
             caption: t("common.token.caption.env"),
-            secret: true,
             build: (tok: string) => `MNEMO_HOST=${host}\nMNEMO_PORT=${port}\n${varName}=${tok}`,
           },
         ];
@@ -139,35 +108,14 @@ export function BankTokenPanel({ bank, onClose }: BankTokenPanelProps) {
     >
       {bank && (
         <>
-          <label className="fs-label">{t("common.token.bankTokenLabel")}</label>
-          <div className="tok-row">
-            <Input className="tok-value" readOnly value={shown} disabled={!ready} />
-            <Button
-              disabled={!ready}
-              title={revealed ? t("common.token.hideTitle") : t("common.token.showTitle")}
-              aria-pressed={revealed}
-              onClick={() => setRevealed((v) => !v)}
-            >
-              {revealed ? t("common.token.hide") : t("common.token.show")}
-            </Button>
-            <CopyButton getText={() => value} title={t("common.token.copyTokenTitle")} />
-          </div>
+          <TokenRow label={t("common.token.bankTokenLabel")} value={value} revealed={revealed} onRevealedChange={setRevealed} />
           <p className="tok-note">{t("common.token.scopeNote", { name: bank.name })}</p>
 
           <label className="fs-label">{t("common.token.entryLabel")}</label>
           <Input value={entry} spellCheck={false} onChange={(e) => handleEntryChange(e.target.value)} />
           <p className="tok-note">{entryHint}</p>
 
-          <Segmented
-            className="tok-tabs"
-            value={scope}
-            onChange={(v) => setScope(v as "literal" | "template")}
-            options={[
-              { label: t("common.token.scope.literal"), value: "literal" },
-              { label: t("common.token.scope.template"), value: "template" },
-            ]}
-          />
-          <p className="tok-note">{t("common.token.scopeHint")}</p>
+          <McpModeSwitch value={scope} onChange={setScope} />
 
           {scope === "template" && (
             <p className="tok-lead">
@@ -181,31 +129,9 @@ export function BankTokenPanel({ bank, onClose }: BankTokenPanelProps) {
             </p>
           )}
 
-          {snippets.map((spec) => (
-            <div key={spec.caption}>
-              <div className="tok-caption">
-                <span>{spec.caption}</span>
-                <CopyButton
-                  getText={() => (value != null ? spec.build(value) : null)}
-                  title={t("common.token.copyToClipboard")}
-                />
-              </div>
-              <pre className="tok-code">{spec.build(shown)}</pre>
-            </div>
-          ))}
+          <McpSnippets snippets={snippets} token={value} shown={shown} />
 
-          {scope === "template" && (
-            <>
-              <p className="tok-note">{t("common.token.generatedFileNote")}</p>
-              <p className="tok-note">
-                {t("common.token.manualPaste.part1")}
-                <code>sed</code>
-                {t("common.token.manualPaste.part2")}
-                <code>{sedLineText(entry)}</code>
-                {t("common.token.manualPaste.part3")}
-              </p>
-            </>
-          )}
+          {scope === "template" && <TemplateNotes sedLine={sedLineText(entry)} />}
 
           {confirming && (
             <div className="tok-confirm">

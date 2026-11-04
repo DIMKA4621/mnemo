@@ -5,6 +5,9 @@
  * original since the source was already fully available.
  */
 
+/** Literal values straight in `.mcp.json`, or placeholders in `.mcp.json.template` filled from `.mcp.env`. */
+export type McpMode = "literal" | "template";
+
 // What `mnemo init` names the project's own memory entry, and the one name
 // whose variable stays on the bare `MNEMO_` prefix.
 export const DEFAULT_INSTANCE = "mnemo-memory";

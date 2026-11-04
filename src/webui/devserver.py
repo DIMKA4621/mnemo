@@ -147,7 +147,7 @@ FS_HOME = "/home/dev"
 FS_FIXTURE: dict[str, list[str]] = {
     "/": ["home", "srv"],
     "/home": ["dev"],
-    "/home/dev": [".claude", "notes", "projects", "empty-folder"],
+    "/home/dev": [".claude", "notes", "projects", "empty-folder", "mcp-cases"],
     "/home/dev/.claude": ["memory", "skills"],
     "/home/dev/.claude/memory": ["logs"],
     "/home/dev/.claude/memory/logs": [],
@@ -168,6 +168,26 @@ FS_FIXTURE: dict[str, list[str]] = {
     "/home/dev/projects/voice-agent/.claude": ["memory"],
     "/home/dev/projects/voice-agent/.claude/memory": [],
     "/home/dev/empty-folder": [],
+    # Settings' admin MCP wiring: each name carries the word
+    # `admin_mcp_preview` keys its fixture outcome on (MN-27), and the same
+    # words drive the add-bank `init_preview` (MN-62).
+    "/home/dev/mcp-cases": ["busy-project", "template-project", "wired-project",
+                            "tracked-repo", "broken-json", "legacy-entry",
+                            "file-not-folder", "missing-project",
+                            "edited-project", "unset-values", "env-conflict",
+                            "foreign-entry"],
+    "/home/dev/mcp-cases/busy-project": [],
+    "/home/dev/mcp-cases/template-project": [],
+    "/home/dev/mcp-cases/wired-project": [],
+    "/home/dev/mcp-cases/tracked-repo": [],
+    "/home/dev/mcp-cases/broken-json": [],
+    "/home/dev/mcp-cases/legacy-entry": [],
+    "/home/dev/mcp-cases/file-not-folder": [],
+    "/home/dev/mcp-cases/missing-project": [],
+    "/home/dev/mcp-cases/edited-project": [],
+    "/home/dev/mcp-cases/unset-values": [],
+    "/home/dev/mcp-cases/env-conflict": [],
+    "/home/dev/mcp-cases/foreign-entry": [],
     "/srv": [],
 }
 
@@ -1182,6 +1202,230 @@ def regenerate_bank_token(bank_id: str) -> str:
         return token
 
 
+# --------------------------------------------------------------------------
+# admin MCP wiring (MN-27: GET /api/admin-mcp, GET/POST /api/admin-mcp/wiring)
+# --------------------------------------------------------------------------
+#
+# A fixed fake service token, and previews picked by a word in the root path
+# rather than by any filesystem: `missing`, `file`, `broken`, `tracked`,
+# `template` (the project already has the layer), `wired`, `busy`; anything
+# else is an empty folder. `mode` defaults to the suggested one, as for real.
+# A POST that succeeds remembers the root, so its next preview says `already`.
+
+DEV_ADMIN_TOKEN = "ad31" * 12
+ADMIN_WIRED: set[str] = set()
+
+
+def admin_mcp_payload(host: str, port: int) -> dict:
+    url = f"http://{host}:{port}/mcp-admin?token={DEV_ADMIN_TOKEN}"
+    return {
+        "token": DEV_ADMIN_TOKEN,
+        "url": url,
+        "host": host,
+        "port": port,
+        "entry_name": "mnemo-admin",
+        "snippet": {
+            "literal": {"mcpServers": {"mnemo-admin": {"type": "http", "url": url}}},
+            "template": {
+                "template_entry": {"mcpServers": {"mnemo-admin": {
+                    "type": "http",
+                    "url": "http://{{MNEMO_HOST}}:{{MNEMO_PORT}}/mcp-admin"
+                           "?token={{MNEMO_ADMIN_TOKEN}}",
+                }}},
+                "env_var": "MNEMO_ADMIN_TOKEN",
+                "env_line": f"MNEMO_ADMIN_TOKEN={DEV_ADMIN_TOKEN}",
+                "env_block": (f"MNEMO_HOST={host}\nMNEMO_PORT={port}\n"
+                              f"MNEMO_ADMIN_TOKEN={DEV_ADMIN_TOKEN}"),
+                "sed_line": '-e "s|{{MNEMO_ADMIN_TOKEN}}|${MNEMO_ADMIN_TOKEN}|g"',
+            },
+        },
+    }
+
+
+def admin_mcp_preview(root: str, mode: str | None = None) -> dict:
+    word = root.replace("\\", "/").lower()
+    uses_template = "template" in word
+    suggested = "template" if uses_template else "literal"
+    mode = mode or suggested
+    out = {
+        "project_root": root,
+        "mode": mode,
+        "suggested_mode": suggested,
+        "exists": "missing" not in word,
+        "mcp_json_exists": any(w in word for w in ("busy", "wired", "tracked", "broken")),
+        "uses_template": uses_template,
+        "target": ".mcp.json.template" if mode == "template" else ".mcp.json",
+        "has_entry": False,
+        "entry_current": False,
+        "tracked": False,
+        "tracked_files": [],
+        "writes": [],
+        "warnings": ["template_layer"] if mode == "literal" and uses_template else [],
+        "notes": [],
+        "action": "refused",
+        "reason": None,
+    }
+    if not out["exists"]:
+        out.update(mcp_json_exists=False, uses_template=False, warnings=[],
+                   reason="not_found")
+    elif "file" in word:
+        out.update(mcp_json_exists=False, uses_template=False, warnings=[],
+                   reason="not_a_directory")
+    elif "broken" in word:
+        out["reason"] = "invalid_json"
+    elif "wired" in word or root in ADMIN_WIRED:
+        out.update(has_entry=True, entry_current=True, action="already",
+                   reason="present")
+    elif "tracked" in word:
+        files = [".mcp.json", ".mcp.env"] if mode == "template" else [".mcp.json"]
+        out.update(tracked=True, tracked_files=files, reason="tracked")
+    elif mode == "template" and uses_template:
+        out.update(action="add", writes=[".mcp.json.template", ".mcp.env.example",
+                                         ".mcp.env", ".mcp.json"])
+    elif mode == "template":
+        out.update(action="create",
+                   writes=["mcp-setup.sh", "mcp-setup.ps1", ".mcp.json.template",
+                           ".gitignore", ".mcp.env.example", ".mcp.env", ".mcp.json"])
+        if "busy" in word:
+            out["notes"] = ["the existing .mcp.json servers were carried into "
+                            ".mcp.json.template, which IS tracked by git. (fixture)"]
+    elif "busy" in word or uses_template:
+        out.update(action="add", writes=[".mcp.json"])
+    else:
+        out.update(action="create", writes=[".gitignore", ".mcp.json"])
+    return out
+
+
+# --------------------------------------------------------------------------
+# init preview (MN-62: GET /api/init-preview?root=<bank root>&create_structure=)
+# --------------------------------------------------------------------------
+#
+# Keyed by a word in the project path, like the admin previews above, so the
+# add-bank picker reaches every outcome under /home/dev/mcp-cases: `busy`
+# (foreign servers carried into the template), `template` / `wired` (the layer
+# is already there), `tracked` and voice-agent (tracked .mcp.json), `broken`,
+# `legacy`, `file`, `env-conflict`, `foreign` (refusals), `edited` (hand-edited
+# rule + setup script, memory hidden by .gitignore), `unset-values` (a
+# template placeholder with no .mcp.env value); anything else is fresh.
+
+_INIT_FRESH = ["mcp-setup.sh", "mcp-setup.ps1", ".mcp.json.template",
+               ".gitignore", ".mcp.env.example", ".mcp.env"]
+
+
+def _init_file(path: str, action: str, reason: str) -> dict:
+    return {"path": path, "action": action, "reason": reason}
+
+
+def init_preview(root: str, create_structure: bool, *,
+                 after_add: bool = False,
+                 overwrite_invalid: bool = False) -> dict:
+    suffix = "/.claude/memory"
+    head = {"bank_root": root, "create_structure": create_structure}
+    if not root.endswith(suffix):
+        return {**head, "project_root": None, "action": "skipped",
+                "reason": "not_project_shaped", "files": [], "writes": [],
+                "warnings": [], "notes": []}
+    project = root[: -len(suffix)]
+    word = project.lower()
+    template = any(w in word for w in ("template", "wired", "edited",
+                                       "unset-values", "env-conflict"))
+    mcp_json = template or any(w in word for w in ("busy", "tracked", "broken",
+                                                   "legacy", "voice-agent"))
+    out = {**head, "project_root": project, "exists": project in FS_FIXTURE,
+           "mcp_json_exists": mcp_json, "uses_template": template,
+           "tracked": False, "tracked_files": [], "files": [], "writes": [],
+           "setup_script": None, "carried_servers": [], "warnings": [],
+           "notes": [], "log": [], "action": "refused", "reason": None,
+           "detail": None, "overwrite_invalid": overwrite_invalid,
+           "overridable": False, "json_error": None}
+    with _lock:
+        registered = not after_add and any(b["root"].rstrip("/") == root
+                                           for b in BANKS)
+    if root not in FS_FIXTURE and not create_structure:
+        out["reason"] = "root_not_found"
+    elif registered:
+        out["reason"] = "bank_exists"
+    elif "file" in word:
+        out["reason"] = "not_a_directory"
+    elif "broken" in word and not overwrite_invalid:
+        # MN-63: overridable — `overwrite_invalid=true` backs it up and
+        # shows the rebuilt plan below.
+        out.update(reason="invalid_json", overridable=True,
+                   json_error={"line": 4, "column": 5,
+                               "message": "Expecting property name enclosed "
+                                          "in double quotes"},
+                   detail=f"{project}/.mcp.json is not usable JSON at line 4, "
+                          "column 5: Expecting property name enclosed in "
+                          "double quotes. (fixture)")
+    elif "legacy" in word:
+        out.update(reason="needs_migrate",
+                   detail="'mcpServers.mnemo' is the legacy L2 stdio form "
+                          "(left untouched — re-run with `--migrate`) (fixture)")
+    elif "tracked" in word or "voice-agent" in word:
+        out.update(tracked=True, tracked_files=[".mcp.json"], reason="tracked")
+    elif "env-conflict" in word:
+        out.update(reason="env_conflict",
+                   detail=".mcp.env already sets MNEMO_MEMORY_TOKEN to a different "
+                          "value; left untouched (fixture)")
+    elif "foreign" in word:
+        out.update(reason="unrecognised_entry",
+                   detail="'mcpServers.mnemo-memory' was not written by mnemo; "
+                          "left untouched (fixture)")
+    if out["reason"]:
+        return out
+
+    has_memory = root in FS_FIXTURE
+    files = [_init_file(".claude/memory/MEMORY.md",
+                        "unchanged" if has_memory else "create",
+                        "kept" if has_memory else "new"),
+             _init_file(".claude/rules/mnemo-memory.md", "create", "new")]
+    if "edited" in word:
+        files[1] = _init_file(".claude/rules/mnemo-memory.md", "unchanged", "edited")
+        out.update(warnings=["memory_ignored", "rule_edited", "setup_edited"],
+                   notes=["git ignores .claude/memory/MEMORY.md (rule "
+                          "`**/.claude` in .gitignore:3) — the bank will not "
+                          "travel with commits. (fixture)"])
+    if template:
+        edited = "edited" if "edited" in word else "current"
+        files += [_init_file("mcp-setup.sh", "unchanged", edited),
+                  _init_file("mcp-setup.ps1", "unchanged", edited),
+                  _init_file(".mcp.json.template",
+                             "unchanged" if "wired" in word else "update",
+                             "current" if "wired" in word else "merge"),
+                  _init_file(".gitignore", "unchanged", "current"),
+                  _init_file(".mcp.env.example", "unchanged", "current"),
+                  _init_file(".mcp.env", "update", "merge")]
+    else:
+        files += [_init_file(name, "create", "new") for name in _INIT_FRESH]
+        if "broken" in word:
+            files.append(_init_file(".mcp.json.bak", "create", "backup"))
+        if "busy" in word:
+            out.update(carried_servers=["github", "postgres"],
+                       warnings=["carried_servers"],
+                       notes=["the existing .mcp.json servers (github, postgres) "
+                              "were carried into .mcp.json.template, which IS "
+                              "tracked by git. (fixture)"])
+    missing = ["GITHUB_TOKEN"] if "unset-values" in word else []
+    if missing:
+        out["warnings"].append("setup_missing_values")
+        files.append(_init_file(".mcp.json", "unchanged", "not_regenerated"))
+    else:
+        files.append(_init_file(".mcp.json", "update" if mcp_json else "create",
+                                "regenerate"))
+    out.update(files=files,
+               writes=[f["path"] for f in files if f["action"] != "unchanged"],
+               setup_script={"name": "mcp-setup.ps1", "runs": True,
+                             "missing": missing},
+               log=["  (fixture) init plan for " + project],
+               action="add" if mcp_json else "create")
+    return out
+
+
+def _admin_root_ok(root: str) -> bool:
+    return root.startswith("/") or (len(root) > 2 and root[1] == ":"
+                                    and root[2] in "\\/")
+
+
 def _memory_dir_for(target: str) -> str:
     """Mirrors `api._memory_dir_for`: never doubles a `.claude` already
     picked. `target` already has no trailing slash here."""
@@ -1534,7 +1778,7 @@ def bank_info(bank: dict) -> dict:
         return out
 
 
-def _mock_init_result(root: str) -> dict:
+def _mock_init_result(root: str, *, overwrite_invalid: bool = False) -> dict:
     """Fixture-only stand-in for what `POST /api/banks`'s optional `init`
     would report from a real `mnemo init --root <project>` run (contract:
     `{"ok": true, "log": [...]}` or `{"ok": false, "skipped": true,
@@ -1550,6 +1794,14 @@ def _mock_init_result(root: str) -> dict:
         return {"ok": False, "skipped": True,
                 "reason": "bank root is not <project>/.claude/memory"}
     project = root[: -len(suffix)]
+    preview = init_preview(root, True, after_add=True,
+                           overwrite_invalid=overwrite_invalid)
+    if project.startswith("/home/dev/mcp-cases/") and preview["action"] == "refused":
+        # Same outcome the add dialog's preview promised (MN-62).
+        return {"ok": False, "log": [
+            f"mnemo init: refused — {preview['reason']} (fixture)",
+            "mnemo init: NOTHING was written.",
+        ]}
     if project.endswith("voice-agent"):
         return {"ok": True, "log": [
             ".mcp.json уже відстежується git — mnemo не переписує токен "
@@ -1614,6 +1866,32 @@ def mark_indexed(bank_id: str, rel: str) -> int:
 _PENDING: dict[str, set[str]] = {}
 
 
+def _seed_bank_fixtures(bank: dict, project_name: str | None) -> None:
+    """Tree and file fixtures for a bank added at runtime, so `/api/tree`
+    and `/api/file` answer for it. A bank re-added at a fixture root keeps
+    its fixture. With `project_name` the add used `create_structure`, and the
+    one-line `MEMORY.md` anchor `ensure_memory_structure` writes is there.
+    Caller holds `_lock`."""
+    bank_id = bank["id"]
+    files = FILES.setdefault(bank_id, {})
+    if project_name is not None and "MEMORY.md" not in files:
+        text = f"# Memory Index — {project_name}\n"
+        files["MEMORY.md"] = {
+            "path": "MEMORY.md", "size": len(text.encode("utf-8")),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "indexed": False, "text": text, "chunks": [], "bank_id": bank_id}
+    if bank_id in TREES:
+        return
+    children = [{"name": rel, "type": "file", "path": rel,
+                 "size": rec["size"], "indexed": rec["indexed"],
+                 "chunks": len(rec["chunks"]), "headings": []}
+                for rel, rec in sorted(files.items())]
+    TREES[bank_id] = {"bank_id": bank_id, "root": bank["root"],
+                      "files": len(children), "dirs": 0,
+                      "tree": {"name": "", "type": "dir", "path": "",
+                               "children": children}}
+
+
 def _tree_response(bank_id: str) -> dict:
     """`/api/tree`'s fixture, with the live `pending` field merged in.
 
@@ -1621,8 +1899,10 @@ def _tree_response(bank_id: str) -> dict:
     is the one field on it that changes while the server runs, so it is
     computed here rather than mutated onto the shared fixture dict.
     """
-    data = dict(TREES[bank_id])
     with _lock:
+        data = dict(TREES.get(bank_id) or {
+            "bank_id": bank_id, "root": None, "files": 0, "dirs": 0,
+            "tree": {"name": "", "type": "dir", "path": "", "children": []}})
         data["pending"] = sorted(_PENDING.get(bank_id, ()))
     return data
 
@@ -2107,6 +2387,9 @@ class Handler(BaseHTTPRequestHandler):
         if parsed.path == "/api/reindex":
             self.post_reindex(body)
             return
+        if parsed.path == "/api/admin-mcp/wiring":
+            self.post_admin_mcp_wiring(body)
+            return
         if parsed.path == "/api/banks":
             self.post_bank(body)
             return
@@ -2303,6 +2586,39 @@ class Handler(BaseHTTPRequestHandler):
             return
         self.fail(404, "internal", "no route " + parsed.path)
 
+    def post_admin_mcp_wiring(self, body: dict) -> None:
+        root = str(body.get("root") or "").strip()
+        if not _admin_root_ok(root):
+            self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root})
+            return
+        mode = body.get("mode") or None
+        if mode not in (None, "literal", "template"):
+            self.fail(400, "bad_request", "mode: literal або template", {"mode": mode})
+            return
+        preview = admin_mcp_preview(root, mode)
+        if preview["action"] == "refused":
+            code, status = {
+                "not_found": ("root_not_found", 400),
+                "not_a_directory": ("root_not_found", 400),
+                "invalid_json": ("mcp_config_invalid", 409),
+                "needs_migrate": ("mcp_config_invalid", 409),
+                "env_conflict": ("mcp_config_invalid", 409),
+            }.get(preview["reason"], ("mcp_file_tracked", 409))
+            self.fail(status, code, f"refused (fixture): {preview['reason']}",
+                      {"root": root, "preview": preview})
+            return
+        written = [] if preview["action"] == "already" else preview["writes"]
+        with _lock:
+            ADMIN_WIRED.add(root)
+        regenerated = None
+        if preview["mode"] == "template" and written:
+            regenerated = {"script": "mcp-setup.ps1", "ok": True,
+                           "output": ["mcp-setup: wrote .mcp.json (fixture)"]}
+        self.json_out(200, {"written": written, "log": [],
+                            "notes": preview["notes"],
+                            "regenerated": regenerated,
+                            "preview": admin_mcp_preview(root, preview["mode"])})
+
     # -- static ----------------------------------------------------------
 
     def serve_static(self, path: str) -> None:
@@ -2351,6 +2667,35 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/banks":
             self.json_out(200, {"banks": [bank_info(b) for b in BANKS]})
+            return
+
+        if path == "/api/admin-mcp":
+            self.json_out(200, admin_mcp_payload(self.server.server_address[0],
+                                                 self.server.server_port))
+            return
+
+        if path == "/api/admin-mcp/wiring":
+            root = (query.get("root") or [""])[0].strip()
+            if not _admin_root_ok(root):
+                self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root})
+                return
+            mode = (query.get("mode") or [""])[0] or None
+            if mode not in (None, "literal", "template"):
+                self.fail(400, "bad_request", "mode: literal або template", {"mode": mode})
+                return
+            self.json_out(200, admin_mcp_preview(root, mode))
+            return
+
+        if path == "/api/init-preview":
+            root = (query.get("root") or [""])[0].strip().replace("\\", "/").rstrip("/")
+            if not _admin_root_ok(root):
+                self.fail(400, "bad_request", "потрібен абсолютний шлях", {"root": root})
+                return
+            flag = (query.get("create_structure") or [""])[0].lower()
+            overwrite = (query.get("overwrite_invalid") or [""])[0].lower()
+            truthy = ("1", "true", "yes", "on")
+            self.json_out(200, init_preview(root, flag in truthy,
+                                            overwrite_invalid=overwrite in truthy))
             return
 
         if path.startswith("/api/banks/"):
@@ -2575,6 +2920,18 @@ class Handler(BaseHTTPRequestHandler):
         if not root:
             self.fail(400, "bad_request", "root is required", {"root": root})
             return
+        project = root[: -len("/.claude/memory")]
+        if (body.get("create_structure") and root.endswith("/.claude/memory")
+                and project in FS_FIXTURE):
+            # The fixture's `ensure_memory_structure`: the folders appear in
+            # the picker from now on.
+            with _lock:
+                for parent, child in ((project, ".claude"),
+                                      (project + "/.claude", "memory")):
+                    FS_FIXTURE.setdefault(parent, [])
+                    if child not in FS_FIXTURE[parent]:
+                        FS_FIXTURE[parent].append(child)
+                FS_FIXTURE.setdefault(root, [])
         if root not in FS_FIXTURE:
             self.fail(400, "root_not_found", "нема такої теки (фікстура)",
                       {"root": root})
@@ -2608,8 +2965,12 @@ class Handler(BaseHTTPRequestHandler):
             "indexing": False,
             "last_error": None,
         }
+        seeded = (bool(body.get("create_structure"))
+                  and root.endswith("/.claude/memory"))
         with _lock:
             BANKS.append(bank)
+            _seed_bank_fixtures(bank, project.rsplit("/", 1)[-1] if seeded
+                                else None)
         broadcast("bank_added", bank["id"], {"bank": dict(bank)})
         threading.Thread(
             target=simulate_task,
@@ -2619,7 +2980,8 @@ class Handler(BaseHTTPRequestHandler):
         ).start()
         info = bank_info(bank)
         if body.get("init"):
-            info["init"] = _mock_init_result(root)
+            info["init"] = _mock_init_result(
+                root, overwrite_invalid=bool(body.get("overwrite_invalid")))
         self.json_out(201, info)
 
     def post_agent(self, body: dict) -> None:
