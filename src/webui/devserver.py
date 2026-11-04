@@ -1866,6 +1866,32 @@ def mark_indexed(bank_id: str, rel: str) -> int:
 _PENDING: dict[str, set[str]] = {}
 
 
+def _seed_bank_fixtures(bank: dict, project_name: str | None) -> None:
+    """Tree and file fixtures for a bank added at runtime, so `/api/tree`
+    and `/api/file` answer for it. A bank re-added at a fixture root keeps
+    its fixture. With `project_name` the add used `create_structure`, and the
+    one-line `MEMORY.md` anchor `ensure_memory_structure` writes is there.
+    Caller holds `_lock`."""
+    bank_id = bank["id"]
+    files = FILES.setdefault(bank_id, {})
+    if project_name is not None and "MEMORY.md" not in files:
+        text = f"# Memory Index — {project_name}\n"
+        files["MEMORY.md"] = {
+            "path": "MEMORY.md", "size": len(text.encode("utf-8")),
+            "sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "indexed": False, "text": text, "chunks": [], "bank_id": bank_id}
+    if bank_id in TREES:
+        return
+    children = [{"name": rel, "type": "file", "path": rel,
+                 "size": rec["size"], "indexed": rec["indexed"],
+                 "chunks": len(rec["chunks"]), "headings": []}
+                for rel, rec in sorted(files.items())]
+    TREES[bank_id] = {"bank_id": bank_id, "root": bank["root"],
+                      "files": len(children), "dirs": 0,
+                      "tree": {"name": "", "type": "dir", "path": "",
+                               "children": children}}
+
+
 def _tree_response(bank_id: str) -> dict:
     """`/api/tree`'s fixture, with the live `pending` field merged in.
 
@@ -1873,8 +1899,10 @@ def _tree_response(bank_id: str) -> dict:
     is the one field on it that changes while the server runs, so it is
     computed here rather than mutated onto the shared fixture dict.
     """
-    data = dict(TREES[bank_id])
     with _lock:
+        data = dict(TREES.get(bank_id) or {
+            "bank_id": bank_id, "root": None, "files": 0, "dirs": 0,
+            "tree": {"name": "", "type": "dir", "path": "", "children": []}})
         data["pending"] = sorted(_PENDING.get(bank_id, ()))
     return data
 
@@ -2937,8 +2965,12 @@ class Handler(BaseHTTPRequestHandler):
             "indexing": False,
             "last_error": None,
         }
+        seeded = (bool(body.get("create_structure"))
+                  and root.endswith("/.claude/memory"))
         with _lock:
             BANKS.append(bank)
+            _seed_bank_fixtures(bank, project.rsplit("/", 1)[-1] if seeded
+                                else None)
         broadcast("bank_added", bank["id"], {"bank": dict(bank)})
         threading.Thread(
             target=simulate_task,
