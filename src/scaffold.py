@@ -574,8 +574,8 @@ class _Refuse(Exception):
 
 
 class _InvalidMcpJson(_Refuse):
-    """`.mcp.json` cannot be carried into a new template. Overridable with
-    `--overwrite-invalid`, which backs the file up first."""
+    """`.mcp.json` is not usable JSON, and the setup script would regenerate
+    it. Overridable with `--overwrite-invalid`, which backs it up first."""
 
     reason = "invalid_json"
 
@@ -2134,13 +2134,8 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring, *,
     existing = proj / ".mcp.json"
     carried = False
     if existing.is_file():
-        try:
-            doc = _seed_document(existing)
-        except _InvalidMcpJson:
-            if not overwrite_invalid:
-                raise
-            wiring.backup = (_backup_path(existing), existing.read_bytes())
-            doc = None
+        doc = _usable_mcp_json(existing, wiring,
+                               overwrite_invalid=overwrite_invalid)
         if isinstance(doc, dict) and "mcpServers" not in doc:
             wiring.template_base = doc
         if isinstance(doc, dict) and isinstance(doc.get("mcpServers"), dict):
@@ -2169,6 +2164,19 @@ def _bootstrap_layer(proj: Path, wiring: _Wiring, *,
             "  If any of them holds a literal secret, move it to .mcp.env and "
             "leave a {{PLACEHOLDER}} behind."
         )
+
+
+def _usable_mcp_json(path: Path, wiring: _Wiring, *,
+                     overwrite_invalid: bool) -> dict | None:
+    """`path` parsed, or None once a backup of it is planned. Raises
+    `_InvalidMcpJson` when it is unusable and `overwrite_invalid` is off."""
+    try:
+        return _seed_document(path)
+    except _InvalidMcpJson:
+        if not overwrite_invalid:
+            raise
+        wiring.backup = (_backup_path(path), path.read_bytes())
+        return None
 
 
 def _seed_document(path: Path) -> dict:
@@ -2340,8 +2348,8 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool,
 
     A project without the layer gets it seeded by `_bootstrap_layer`, with the
     template starting as its existing `.mcp.json` so no foreign server is lost.
-    An `.mcp.json` that cannot seed it is a refusal unless `overwrite_invalid`,
-    which backs it up first.
+    An unusable `.mcp.json` — with the layer or without — is a refusal unless
+    `overwrite_invalid`, which backs it up first.
     """
     wiring = _Wiring()
     prefix = _var_prefix(_VAR_INSTANCE)
@@ -2349,6 +2357,11 @@ def _plan_wiring(proj: Path, *, token: str, migrate: bool,
 
     if not template.exists():
         _bootstrap_layer(proj, wiring, overwrite_invalid=overwrite_invalid)
+    elif (proj / ".mcp.json").is_file():
+        # A build product here, but the setup script would still regenerate
+        # it over whatever only the broken file held.
+        _usable_mcp_json(proj / ".mcp.json", wiring,
+                         overwrite_invalid=overwrite_invalid)
     # Outside the branch above on purpose: the scripts are reviewed on every
     # run, so a fix reaches a project that was adopted long ago — the only
     # kind that can be carrying an old one.

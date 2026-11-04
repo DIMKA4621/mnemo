@@ -19,3 +19,5 @@ It is now an `_InvalidMcpJson` refusal (`invalid_json`, line/column from the par
 The backup is a planned write in `_Wiring.writes` (bytes, via `_Wiring.backup`), so the preview still derives from init's own plan.
 Reviewer catch: the `.gitignore` edit and the backup go at the **head** of the write order — once the template exists a plain re-run no longer refuses, so a backup that fails after the template landed would let the next run drop the servers.
 `.mcp.json` is decoded `utf-8-sig`, since Windows PowerShell 5.1 writes a BOM.
+Follow-up (2026-11-04): the same refusal/override now holds where `.mcp.json.template` already exists — the setup script regenerates `.mcp.json` there too, dropping whatever only the broken file held (`_usable_mcp_json`, called from `_plan_wiring` with or without the layer).
+Admin MCP needed no change: `_admin_plan` already reads `.mcp.json` through `_load_json` in both modes and refuses `invalid_json`, with no override.

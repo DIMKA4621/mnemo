@@ -1453,15 +1453,16 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 * `warnings`: `carried_servers` (чужі сервери з `.mcp.json` ідуть у трекнутий шаблон як є — `carried_servers` їх називає), `memory_ignored` (git ігнорує засіяну памʼять; текст у `notes`), `rule_edited`, `setup_edited`, `setup_missing_values`.
 * `action` плану: `create` (у проєкті ще нема ні `.mcp.json`, ні шаблону) | `add` | `refused` | `skipped`.
 * `skipped` + `reason: "not_project_shaped"`, `project_root: null` — корінь не закінчується на `.claude/memory`, тож `init` для нього не запуститься (POST поверне `init.skipped`).
-* `reason` для `refused`: `root_not_found` (кореня нема, а `create_structure` вимкнено — POST відмовив би ще до реєстрації), `bank_exists`, `not_a_directory`, `tracked` (`tracked_files` називає `.mcp.json` / `.mcp.env`; без терміналу `init` не виконує `git rm --cached`, а лише відмовляє), `index_unreadable`, `invalid_json` (шаблон, `.mcp.json`, з якого засівався б новий шаблон, чи `mcpServers` — не JSON-обʼєкт), `needs_migrate` (legacy stdio-запис, який `init` переписує лише з `--migrate`), `unrecognised_entry` (`mnemo-memory` у формі, яку mnemo не впізнає), `env_conflict`.
+* `reason` для `refused`: `root_not_found` (кореня нема, а `create_structure` вимкнено — POST відмовив би ще до реєстрації), `bank_exists`, `not_a_directory`, `tracked` (`tracked_files` називає `.mcp.json` / `.mcp.env`; без терміналу `init` не виконує `git rm --cached`, а лише відмовляє), `index_unreadable`, `invalid_json` (шаблон, `.mcp.json` чи `mcpServers` — не JSON-обʼєкт), `needs_migrate` (legacy stdio-запис, який `init` переписує лише з `--migrate`), `unrecognised_entry` (`mnemo-memory` у формі, яку mnemo не впізнає), `env_conflict`.
   `detail` — англійський текст відмови `init` з вирізаними токенами.
-* Непридатний `.mcp.json` **без** шаблону — відмова `invalid_json` **[MN-63]**: інакше шаблон почався б з нуля, а скрипт перезаписав би `.mcp.json`, мовчки викинувши чужі сервери.
+* Непридатний `.mcp.json` — відмова `invalid_json` **[MN-63]**, і з шаблоном, і без: без шаблону той почався б з нуля, а з шаблоном скрипт однаково перегенерує `.mcp.json`, — тож усе, що було лише в зламаному файлі, мовчки зникло б.
+  Так само для звичайного `init`, `--migrate`, `init` з діалогу додавання банку й перегляду.
   Непридатний — це не JSON, не UTF-8, верхній рівень не обʼєкт або `mcpServers` не обʼєкт; порожній чи з самих пробілів файл нічого не тримає й рахується відсутнім.
   Така відмова несе `overridable: true` і `json_error: {"line", "column", "message"}` (1-based, повідомлення парсера); ті самі рядок і колонка є в `detail` і в тексті відмови CLI.
   Решта відмов — `overridable: false`, `json_error: null`.
 * `overwrite_invalid=true` показує план, який виконає `init --overwrite-invalid`: рядок `{"path": ".mcp.json.bak", "action": "create", "reason": "backup"}` (або перший вільний `.mcp.json.bak.N` — наявний бекап не перезаписується ніколи), `.gitignore` з доданим `.mcp.json.bak*` (бекап може тримати токени) і `.mcp.json` як `update` / `regenerate`.
-  Бекап — байт-у-байт копія оригіналу; далі `init` працює так, ніби `.mcp.json` не було.
-  Шар, що вже має шаблон, від прапорця не залежить: там `.mcp.json` — продукт збирання.
+  Бекап — байт-у-байт копія оригіналу; далі `init` працює так, ніби `.mcp.json` не було (з шаблоном — перегенеровує його скриптом).
+  Правило `.gitignore` і бекап пишуться першими, до будь-якого іншого файлу: щойно шаблон на диску, повторний `init` уже не мав би з чого відмовити.
 * Неабсолютний `root` → `400 bad_request`; усе інше — `200`.
   `/api`, `include_in_schema=False`.
 
@@ -1519,7 +1520,7 @@ MCP-клієнт, отримавши 401, починає OAuth-дискавер�
 * `mode` пропущено → `suggested_mode`: `template`, якщо в теці вже є `.mcp.json.template`, інакше `literal`.
   Режим обирає користувач тим самим перемикачем literal/template, що й у панелі банку; підказка лише пропонує.
 * `action`: `create` (цільового файлу ще нема) | `add` (є, без `mnemo-admin`) | `already` (`reason: "present"`) | `refused`.
-* `reason` для `refused`: `not_found`, `not_a_directory`, `invalid_json` (файл чи `mcpServers` — не JSON-обʼєкт), `tracked` (`tracked_files` називає які), `index_unreadable` (індекс git не розбирається — відмова, а не здогадка), `needs_migrate` (`template` без шару, а в `.mcp.json` запис памʼяті mnemo у формі, яку `init` переписує лише з `--migrate`, — legacy stdio чи нерозпізнана), `env_conflict` (`template` без шару, а токен іншого запису mnemo мав би лягти в змінну `.mcp.env`, яка вже має інше значення, — MN-61).
+* `reason` для `refused`: `not_found`, `not_a_directory`, `invalid_json` (файл чи `mcpServers` — не JSON-обʼєкт; зламаний `.mcp.json` відмовляє в обох режимах, і в `template` теж, бо скрипт перегенерував би його; перевизначення тут немає), `tracked` (`tracked_files` називає які), `index_unreadable` (індекс git не розбирається — відмова, а не здогадка), `needs_migrate` (`template` без шару, а в `.mcp.json` запис памʼяті mnemo у формі, яку `init` переписує лише з `--migrate`, — legacy stdio чи нерозпізнана), `env_conflict` (`template` без шару, а токен іншого запису mnemo мав би лягти в змінну `.mcp.env`, яка вже має інше значення, — MN-61).
 * `already` рахується за файлом, куди ліг би запис: `.mcp.json` для `literal`; для `template` — шаблон, а без шару — `.mcp.json`, з якого його було б засіяно.
   `entry_current: false` при `already` = там лежить інший `mnemo-admin` (старий токен, інший порт, чужий сервер); його **не переписують**, лише показують.
 * `has_entry` — `mnemo-admin` є хоч у якому з двох файлів.

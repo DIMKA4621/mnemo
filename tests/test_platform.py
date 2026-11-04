@@ -2049,6 +2049,115 @@ def test_init_refuses_invalid_mcp_json() -> None:
               detail=out)
 
 
+def test_init_refuses_invalid_mcp_json_with_template() -> None:
+    """Where the layer already exists, an unusable `.mcp.json` is refused the
+    same way: the setup script would regenerate it over what only it held
+    (MN-63)."""
+    with tempfile.TemporaryDirectory(prefix="mnemo init-invalid-tpl ") as raw:
+        state = Path(raw) / "state"
+        state.mkdir()
+
+        def run(proj: Path, **kw) -> tuple[int, str]:
+            with patch.object(config, "STATE_DIR", state), \
+                    patch.object(scaffold, "_interactive", return_value=False):
+                return _init_project_offline(proj, yes=False, **kw)
+
+        def layered(name: str) -> Path:
+            proj = Path(raw) / name
+            proj.mkdir()
+            code, out = run(proj)
+            assert code == 0 and (proj / ".mcp.json.template").is_file(), out
+            _write(proj / ".mcp.json", _BROKEN_MCP_JSON)
+            return proj
+
+        proj = layered("refuse")
+        before = _tree_state(proj)
+        preview = scaffold.init_preview(proj)
+        check("[layer] preview refuses invalid_json, overridable, located",
+              preview["action"] == "refused"
+              and preview["reason"] == "invalid_json"
+              and preview["overridable"] is True
+              and preview["json_error"]["line"] == 4
+              and preview["json_error"]["column"] == 5, detail=str(preview))
+        for kw in ({}, {"migrate": True}):
+            code, out = run(proj, **kw)
+            check(f"[layer] init {kw or ''} refuses with line and column",
+                  code == 1 and "line 4, column 5" in out, detail=out)
+            check(f"[layer] init {kw or ''} leaves the tree byte-identical",
+                  _tree_state(proj) == before, detail=str(_tree_state(proj)))
+
+        token = "a" * 48
+        pre = scaffold.admin_mcp_preview(proj, token, "template")
+        check("[layer] Admin MCP template mode refuses invalid_json",
+              pre["action"] == "refused" and pre["reason"] == "invalid_json",
+              detail=str(pre))
+        raised = None
+        try:
+            scaffold.wire_admin_mcp(proj, token, "template")
+        except scaffold.AdminWiringRefused as exc:
+            raised = exc.reason
+        check("[layer] and wiring it writes nothing",
+              raised == "invalid_json" and _tree_state(proj) == before,
+              detail=str(raised))
+
+        bom = layered("bom")
+        (bom / ".mcp.json").write_bytes(b"\xef\xbb\xbf{\"mcpServers\": {}}")
+        check("[layer] a BOM-prefixed .mcp.json is not refused",
+              scaffold.init_preview(bom)["action"] == "add")
+
+        proj = layered("override")
+        _write(proj / ".mcp.json.bak", "an older backup\n")
+        original = (proj / ".mcp.json").read_bytes()
+        before = _tree_state(proj)
+        preview = scaffold.init_preview(proj, overwrite_invalid=True)
+        planned = {f["path"]: f for f in preview["files"]}
+        check("[layer] the overridden preview lists the backup and the rebuild",
+              preview["reason"] is None
+              and planned.get(".mcp.json.bak.1", {}).get("reason") == "backup"
+              and planned[".mcp.json"]["action"] == "update"
+              and _tree_state(proj) == before, detail=str(preview["files"]))
+        code, out = run(proj, overwrite_invalid=True)
+        after = _tree_state(proj)
+        changed = {rel for rel, digest in after.items()
+                   if digest != "<dir>" and before.get(rel) != digest}
+        check("[layer] init with the override succeeds", code == 0, detail=out)
+        # The preview plans for a new bank, so it counts `.mcp.env` as
+        # changed; this bank is already registered and keeps its token.
+        check("[layer] the preview's writes are init's writes",
+              set(preview["writes"]) - {".mcp.env"} == changed,
+              detail=f"preview={sorted(preview['writes'])} "
+                     f"init={sorted(changed)}")
+        check("[layer] the backup holds the original bytes",
+              (proj / ".mcp.json.bak.1").read_bytes() == original
+              and _read(proj / ".mcp.json.bak") == "an older backup\n")
+        check("[layer] .mcp.json is regenerated and backups are ignored",
+              "mnemo-memory" in json.loads(_read(proj / ".mcp.json"))
+              ["mcpServers"]
+              and ".mcp.json.bak*" in _read(proj / ".gitignore").splitlines(),
+              detail=_read(proj / ".mcp.json"))
+
+        locked = layered("locked")
+        before = _tree_state(locked)
+        real_write = scaffold._write
+
+        def failing_write(path: Path, text) -> None:
+            if path.name.startswith(".mcp.json.bak"):
+                raise OSError(28, "No space left on device")
+            real_write(path, text)
+
+        with patch.object(scaffold, "_write", failing_write):
+            try:
+                run(locked, overwrite_invalid=True)
+            except OSError:
+                pass
+        check("[layer] a failed backup leaves only the .gitignore rule",
+              {r: d for r, d in _tree_state(locked).items()
+               if r != ".gitignore"}
+              == {r: d for r, d in before.items() if r != ".gitignore"})
+        code, out = run(locked)
+        check("[layer] and a plain re-run still refuses", code == 1, detail=out)
+
+
 def test_cli_overwrite_invalid_flag() -> None:
     """`mnemo init --overwrite-invalid` reaches `init_project` (MN-63)."""
     from src import cli
@@ -3817,6 +3926,7 @@ def main() -> int:
     test_init_preview_matches_init()
     test_init_preview_reports()
     test_init_refuses_invalid_mcp_json()
+    test_init_refuses_invalid_mcp_json_with_template()
     test_cli_overwrite_invalid_flag()
     test_admin_mcp_snippet()
     test_admin_mcp_literal_wiring()
